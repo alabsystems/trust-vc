@@ -1,0 +1,5 @@
+error: exec function `exec_caller` cannot call spec function `helper`
+  --> tests/compile-fail/exec_calls_spec_cross_module.rs:10:12
+   |
+10 |     pub fn helper(x: i32) -> i32 { x + 1 }
+   |            ^^^^^^

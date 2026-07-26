@@ -1,0 +1,5 @@
+error: exec function `exec_caller` cannot call proof function `proof_helper`
+  --> tests/compile-fail/exec_calls_proof_via_self.rs:13:4
+   |
+13 | fn proof_helper(x: i32) {
+   |    ^^^^^^^^^^^^

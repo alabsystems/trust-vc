@@ -1,0 +1,5 @@
+error: expected `fn`
+  --> tests/compile-fail/external_body_on_non_function.rs:10:1
+   |
+10 | enum NotAFunction {
+   | ^^^^

@@ -1,0 +1,11 @@
+[package]
+name = "spec_def"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+trust-vc-types = { path = "../../../../crates/trust-vc-types" }
+
+[workspace]

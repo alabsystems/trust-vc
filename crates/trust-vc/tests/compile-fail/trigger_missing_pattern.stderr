@@ -1,0 +1,7 @@
+error: #[trust_vc::trigger] requires a trigger pattern expression
+ --> tests/compile-fail/trigger_missing_pattern.rs:8:1
+  |
+8 | #[trust_vc::trigger]
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::trigger` (in Nightly builds, run with -Z macro-backtrace for more info)

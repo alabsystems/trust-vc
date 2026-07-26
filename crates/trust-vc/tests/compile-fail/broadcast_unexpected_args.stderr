@@ -1,0 +1,7 @@
+error: #[trust_vc::broadcast] does not accept arguments — remove the parenthesized content
+ --> tests/compile-fail/broadcast_unexpected_args.rs:7:1
+  |
+7 | #[trust_vc::broadcast(verbose)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::broadcast` (in Nightly builds, run with -Z macro-backtrace for more info)

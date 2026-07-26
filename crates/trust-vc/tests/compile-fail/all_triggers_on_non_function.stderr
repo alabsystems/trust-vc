@@ -1,0 +1,5 @@
+error: expected `fn`
+  --> tests/compile-fail/all_triggers_on_non_function.rs:10:7
+   |
+10 | const CONSTANT: i32 = 42;
+   |       ^^^^^^^^

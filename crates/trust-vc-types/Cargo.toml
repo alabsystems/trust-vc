@@ -1,0 +1,33 @@
+# TrustVc types - Spec-only collections (Seq, Set, Map)
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Spec-only ghost types for Verus-style verification"
+
+[features]
+default = []
+trust_mc = ["trust-vc/trust_mc"]
+
+[dependencies]
+# For formal contracts (requires!/ensures!)
+# Note: This creates a dependency from types -> macros, which is acceptable
+# since trust-vc-types is verification-only code that benefits from contracts
+trust-vc = { path = "../trust-vc" }
+
+[dev-dependencies]
+# ghost_requires!/ghost_ensures! macros expand to trust-vc_core obligation
+# collection calls under #[cfg(test)]. Without this dep, trust-vc-types lib
+# tests fail with E0433 "could not find trust-vc_core". Fixes #2529.
+trust-vc-core = { workspace = true }
+
+[lints]
+workspace = true

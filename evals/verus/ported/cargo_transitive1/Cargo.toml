@@ -1,0 +1,10 @@
+[package]
+name = "transitive1"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+
+[workspace]

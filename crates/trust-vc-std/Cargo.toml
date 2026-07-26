@@ -1,0 +1,27 @@
+# TrustVc standard library - Verified lemma surface for spec collections
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-std"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standard-library lemma surface for TrustVc specifications"
+
+[dependencies]
+trust-vc = { path = "../trust-vc" }
+trust-vc-types = { path = "../trust-vc-types" }
+
+[dev-dependencies]
+# Proc macros expand to trust-vc_core:: references under #[cfg(test)].
+# Without this dep, trust-vc-std test targets fail with E0433. See trust-vc-types
+# for the same pattern (Fixes #2529).
+trust-vc-core = { workspace = true }
+
+[lints]
+workspace = true

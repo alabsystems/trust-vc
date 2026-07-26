@@ -1,0 +1,7 @@
+error: #[trust_vc::all_triggers] does not accept arguments — remove the parenthesized content
+ --> tests/compile-fail/all_triggers_unexpected_args.rs:7:1
+  |
+7 | #[trust_vc::all_triggers(verbose)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::all_triggers` (in Nightly builds, run with -Z macro-backtrace for more info)

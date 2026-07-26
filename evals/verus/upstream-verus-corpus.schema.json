@@ -1,0 +1,514 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Schema for upstream Verus corpus evidence manifests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "description",
+    "upstream",
+    "gate",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        2
+      ],
+      "description": "Canonical replacement evidence manifests must use schema 2 so accepted entries pin TrustVc source hashes and obligation fingerprints."
+    },
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "ref",
+        "test_roots"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "format": "uri"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Pinned upstream Verus commit, tag, or branch."
+        },
+        "test_roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Upstream roots that the evidence gate must enumerate."
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "missing_entry",
+        "failing_classifications"
+      ],
+      "properties": {
+        "missing_entry": {
+          "type": "string",
+          "const": "fail"
+        },
+        "failing_classifications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "unclassified",
+              "unsupported-gap"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "unclassified"
+              }
+            },
+            {
+              "contains": {
+                "const": "unsupported-gap"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/entry"
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstream_path",
+        "classification",
+        "owner_issue",
+        "reason"
+      ],
+      "properties": {
+        "upstream_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/].*"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "unclassified",
+            "unchanged",
+            "ported",
+            "unsupported-gap",
+            "not-applicable"
+          ]
+        },
+        "evidence_kind": {
+          "type": "string",
+          "enum": [
+            "proof_obligation",
+            "cargo_trust_vc_integration_test"
+          ],
+          "default": "proof_obligation",
+          "description": "Accepted-entry evidence policy. Missing values default to proof_obligation for existing entries."
+        },
+        "owner_issue": {
+          "type": "string",
+          "pattern": "^(https://github\\.com/.+/issues/[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+|TBD)$",
+          "description": "Issue URL or repo-local issue reference that owns the entry."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trust_vc_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "trust_vc_source_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "kind",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "directory"
+                ]
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^sha256:[0-9A-Fa-f]{64}$"
+              }
+            }
+          }
+        },
+        "trust_vc_check_args": {
+          "type": "array",
+          "description": "Extra cargo-trust-vc check flags required by this accepted entry. Kept intentionally narrow so manifest evidence cannot become an arbitrary command override.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "--no-cheating"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "expected_cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "case_id",
+              "expected_verdict",
+              "min_obligations"
+            ],
+            "properties": {
+              "case_id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "upstream_case_id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "description": "Pinned upstream Verus harness case covered by this TrustVc case. Defaults to case_id when omitted."
+              },
+              "trust_vc_path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Entry-level trust_vc_paths value that carries this case when an accepted entry is split across multiple TrustVc paths."
+              },
+              "expected_verdict": {
+                "type": "string",
+                "enum": [
+                  "verified",
+                  "counterexample",
+                  "error"
+                ]
+              },
+              "min_obligations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "obligation_fingerprints": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9A-Fa-f]{64}$"
+                },
+                "description": "Schema 2 pins the exact unique observed TrustVc proof-obligation condition-hash set for expected cases with positive obligations. Wrapper integration-test hashes are not valid replacement evidence."
+              },
+              "expected_error_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "expected_rust_diagnostic_pattern_sets": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "description": "Exact rustc error diagnostic pattern multiset for one expected Rust source-error case. Each inner array is the required pattern set for one observed rustc error diagnostic."
+              },
+              "forbidden_diagnostic_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "min_obligations": {
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "min_obligations"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "obligation_fingerprints"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "known_gaps": {
+          "type": "array",
+          "description": "Machine-readable blockers that prevent this entry from counting as full replacement evidence. Accepted executable entries must leave this empty.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "enum": [
+                  "ported",
+                  "unchanged"
+                ]
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "required": [
+              "trust_vc_paths",
+              "trust_vc_source_hashes",
+              "expected_cases"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "expected_cases": {
+                      "minItems": 2
+                    }
+                  },
+                  "required": [
+                    "expected_cases"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "expected_cases": {
+                      "items": {
+                        "required": [
+                          "upstream_case_id"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "trust_vc_paths": {
+                      "minItems": 2
+                    }
+                  },
+                  "required": [
+                    "trust_vc_paths"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "expected_cases": {
+                      "items": {
+                        "required": [
+                          "upstream_case_id"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "not": {
+                        "required": [
+                          "evidence_kind"
+                        ]
+                      }
+                    },
+                    {
+                      "properties": {
+                        "evidence_kind": {
+                          "const": "proof_obligation"
+                        }
+                      },
+                      "required": [
+                        "evidence_kind"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "expected_cases": {
+                      "items": {
+                        "allOf": [
+                          {
+                            "if": {
+                              "properties": {
+                                "expected_verdict": {
+                                  "enum": [
+                                    "verified",
+                                    "counterexample"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "expected_verdict"
+                              ]
+                            },
+                            "then": {
+                              "properties": {
+                                "min_obligations": {
+                                  "minimum": 1
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "not": {
+                    "properties": {
+                      "trust_vc_paths": {
+                        "contains": {
+                          "type": "string",
+                          "pattern": "^crates/cargo-trust-vc/tests/[^/]+\\.rs$"
+                        }
+                      }
+                    },
+                    "required": [
+                      "trust_vc_paths"
+                    ]
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "evidence_kind": {
+                      "const": "cargo_trust_vc_integration_test"
+                    }
+                  },
+                  "required": [
+                    "evidence_kind"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "trust_vc_paths": {
+                      "items": {
+                        "type": "string",
+                        "pattern": "^crates/cargo-trust-vc/tests/[^/]+\\.rs$"
+                      }
+                    },
+                    "expected_cases": {
+                      "items": {
+                        "properties": {
+                          "expected_verdict": {
+                            "const": "verified"
+                          },
+                          "min_obligations": {
+                            "const": 0
+                          }
+                        },
+                        "not": {
+                          "required": [
+                            "obligation_fingerprints"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "enum": [
+                  "unchanged",
+                  "ported",
+                  "unsupported-gap",
+                  "not-applicable"
+                ]
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_issue": {
+                "not": {
+                  "const": "TBD"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

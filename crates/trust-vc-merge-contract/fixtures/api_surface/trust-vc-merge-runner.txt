@@ -1,0 +1,34 @@
+enum trust_vc_merge_runner::error::RunnerError
+field trust_vc_merge_runner::error::RunnerError::Contract::0: trust_vc_merge_contract::MergeBundleError
+field trust_vc_merge_runner::error::RunnerError::Executor::0: String
+field trust_vc_merge_runner::error::RunnerError::Io::0: std::io::Error
+field trust_vc_merge_runner::error::RunnerError::Json::0: serde_json::Error
+field trust_vc_merge_runner::error::RunnerError::SmtParse::0: String
+field trust_vc_merge_runner::error::RunnerError::UnsupportedSort::context: String
+field trust_vc_merge_runner::error::RunnerError::UnsupportedSort::sort_desc: String
+field trust_vc_merge_runner::error::RunnerError::UnsupportedVersion::found: u32
+field trust_vc_merge_runner::error::RunnerError::UnsupportedVersion::min_executable: u32
+fn trust_vc_merge_runner::NormalizedVerdict::engine(self: &Self) -> &str
+fn trust_vc_merge_runner::NormalizedVerdict::fixture_id(self: &Self) -> &str
+fn trust_vc_merge_runner::NormalizedVerdict::model_fingerprint(self: &Self) -> Option<&str>
+fn trust_vc_merge_runner::NormalizedVerdict::new<impl Into<String>, impl Into<String>, impl Into<String>, impl Into<String>, impl Into<String>>(fixture_id: impl Into<String>, engine: impl Into<String>, status: impl Into<String>, obligation_id: impl Into<String>, obligation_name: impl Into<String>) -> Self
+fn trust_vc_merge_runner::NormalizedVerdict::obligation_id(self: &Self) -> &str
+fn trust_vc_merge_runner::NormalizedVerdict::obligation_name(self: &Self) -> &str
+fn trust_vc_merge_runner::NormalizedVerdict::raw_reason(self: &Self) -> Option<&str>
+fn trust_vc_merge_runner::NormalizedVerdict::reason_class(self: &Self) -> Option<&str>
+fn trust_vc_merge_runner::NormalizedVerdict::status(self: &Self) -> &str
+fn trust_vc_merge_runner::NormalizedVerdict::with_model_fingerprint(self: Self, fp: Option<String>) -> Self
+fn trust_vc_merge_runner::NormalizedVerdict::with_reason(self: Self, reason_class: Option<String>, raw_reason: Option<String>) -> Self
+fn trust_vc_merge_runner::run_bundle(bundle: &trust_vc_merge_contract::MergeBundle, obligation_id: &str, engine: &str) -> Result<NormalizedVerdict, crate::error::RunnerError>
+fn trust_vc_merge_runner::run_bundle_path<impl AsRef<Path>>(bundle_path: impl AsRef<std::path::Path>, obligation_id: &str, engine: &str) -> Result<NormalizedVerdict, crate::error::RunnerError>
+module trust_vc_merge_runner::error
+struct trust_vc_merge_runner::NormalizedVerdict
+variant trust_vc_merge_runner::error::RunnerError::Contract
+variant trust_vc_merge_runner::error::RunnerError::Executor
+variant trust_vc_merge_runner::error::RunnerError::Io
+variant trust_vc_merge_runner::error::RunnerError::Json
+variant trust_vc_merge_runner::error::RunnerError::MissingExpressionFormat
+variant trust_vc_merge_runner::error::RunnerError::SmtParse
+variant trust_vc_merge_runner::error::RunnerError::UnsupportedExpressionFormat
+variant trust_vc_merge_runner::error::RunnerError::UnsupportedSort
+variant trust_vc_merge_runner::error::RunnerError::UnsupportedVersion

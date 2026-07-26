@@ -1,0 +1,20 @@
+error: trust_vc::broadcast does not support complex parameter patterns. Use simple named parameters instead of: (a, b) : (i32, i32)
+ --> tests/compile-fail/broadcast_tuple_param_fail_closed.rs:8:1
+  |
+8 | #[trust_vc::broadcast]
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::broadcast` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition name: `trust_mc`
+ --> tests/compile-fail/broadcast_tuple_param_fail_closed.rs:8:1
+  |
+8 | #[trust_vc::broadcast]
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 34 more
+  = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+  = help: try referring to `trust_vc::broadcast` crate for guidance on how handle this unexpected cfg
+  = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+  = note: this warning originates in the attribute macro `trust_vc::broadcast` (in Nightly builds, run with -Z macro-backtrace for more info)

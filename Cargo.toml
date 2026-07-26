@@ -1,0 +1,129 @@
+# TrustVc - Verus-style Rust verifier with ay backend; replacement proof is evidence-gated
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[workspace]
+members = [
+  "crates/cargo-trust-vc",
+  "crates/trust-vc",
+  "crates/trust-vc-core",
+  "crates/trust-vc-driver",
+  "crates/trust-vc-kernel",
+  "crates/trust-vc-merge-contract",
+  "crates/trust-vc-merge-runner",
+  "crates/trust-vc-oracle",
+  "crates/trust-vc-std",
+  "crates/trust-vc-trust-engine",
+  "crates/trust-vc-types",
+]
+exclude = ["fuzz"]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/alabsystems/trust-vc"
+authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
+
+# Centralized dependencies.
+[workspace.dependencies]
+# Owned dependency stack consumed as git deps so trust-vc builds standalone from
+# any location. A single git source per crate avoids duplicate package
+# identities; local sibling checkouts are picked up via an untracked
+# .cargo/config.toml [patch] override when present.
+#
+# The ay solver crates are pinned to an exact rev (not branch=main) so the
+# evidence gate's "common ay pin" + "latest private ay pin" checks can resolve a
+# single GitRev provenance. Bump this rev (all four together) to track latest ay.
+ay-core = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
+ay-dpll = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
+ay-frontend = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
+ay-sys = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
+# ty and trust-ir are rev-pinned (not branch=main) for reproducible standalone
+# builds. ty's internal tla-ir -> trust-ir-build dependencies still name
+# trust-ir's main branch, so Cargo.lock must pin those branch sources to the
+# same trust-ir commit as the direct dependency. Update both sources together.
+tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "7d1d4635dea9f4eb46dc11749fb7a74baf26f569" }
+tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "7d1d4635dea9f4eb46dc11749fb7a74baf26f569" }
+trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "7cccbfcd7d3d5187e040e86fb4adc58a4beb977d", default-features = false }
+
+# BigInt for 128-bit bitvector constants
+num-bigint = "0.4"
+
+# Proc macro support
+syn = { version = "2", features = ["full", "parsing", "visit", "visit-mut", "fold"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+proc-macro-crate = "3"
+
+# Internal crates
+trust-vc-core = { path = "crates/trust-vc-core" }
+trust-vc-merge-contract = { path = "crates/trust-vc-merge-contract" }
+trust-vc-oracle = { path = "crates/trust-vc-oracle" }
+trust-vc-kernel = { path = "crates/trust-vc-kernel" }
+trust-vc-merge-runner = { path = "crates/trust-vc-merge-runner" }
+trust-vc-trust-engine = { path = "crates/trust-vc-trust-engine" }
+trust-vc-types = { path = "crates/trust-vc-types" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rustdoc-json-stable = "0.9.7"
+rustdoc-types = "0.57.3"
+libc = "0.2"
+
+# Logging
+tracing = "0.1"
+stacker = "0.1"
+
+# Error handling
+thiserror = "2"
+
+# CLI UX
+indicatif = "0.17"
+
+# Testing
+trybuild = "1"
+inventory = "0.3"
+proptest = "1"
+
+[workspace.lints.rust]
+# cfg(trust_mc) is used intentionally for verification-only code paths.
+# cfg(trust_vc_driver) is emitted by the contract macros as the rustc-driver
+# surface-bridge marker gate (see trust_vc_core::__driver_markers); the driver's
+# run() injects `--cfg trust_vc_driver`, but the macro-expanded arms carrying it
+# are compiled by every consumer, so the cfg must be registered here too.
+# These warnings are expected and should be silenced.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(trust_mc)", "cfg(trust_vc_driver)"] }
+
+[profile.dev]
+incremental = true
+
+# The ay solver stack runs UNCONDITIONAL soundness self-checks (e.g. the Cooper
+# QE ground-battery equivalence check, ay b8807717-era deep-QE pre-pass) whose
+# cost under an unoptimized dev build turns minutes-long test suites into
+# hours. The solver is the inner loop of every verification — always compile
+# it (and its bignum substrate) optimized, dev profile included.
+[profile.dev.package.ay-core]
+opt-level = 3
+[profile.dev.package.ay-dpll]
+opt-level = 3
+[profile.dev.package.ay-frontend]
+opt-level = 3
+[profile.dev.package.ay-sys]
+opt-level = 3
+[profile.dev.package.num-bigint]
+opt-level = 3
+
+[profile.release]
+strip = "debuginfo"
+
+# Local cross-repo co-development override: sibling [patch] redirects for the git
+# deps above live in an UNTRACKED .cargo/config.toml (not committed here), so
+# trust-vc builds standalone from any location while local sibling checkouts are
+# still picked up when present. Keep each override keyed to the exact git source
+# above so Cargo retains a single package identity per owned crate.

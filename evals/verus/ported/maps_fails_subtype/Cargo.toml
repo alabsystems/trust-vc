@@ -1,0 +1,9 @@
+[package]
+name = "trust-vc-verus-maps-fails-subtype"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc-types = { path = "../../../../crates/trust-vc-types" }
+
+[workspace]

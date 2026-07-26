@@ -1,0 +1,7 @@
+error: old!() only supports simple identifiers (old!(x) or old!(*x)); complex expressions like old!(state.field) are not yet supported — see #1836
+  --> tests/compile-fail/old_standalone_complex.rs:15:5
+   |
+15 |     old!(state.field)
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `old` (in Nightly builds, run with -Z macro-backtrace for more info)

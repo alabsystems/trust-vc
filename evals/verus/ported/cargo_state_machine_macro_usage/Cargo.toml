@@ -1,0 +1,11 @@
+[package]
+name = "state_machine_macro_usage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+verus_state_machines_macros = { path = "verus_state_machines_macros" }
+
+[workspace]

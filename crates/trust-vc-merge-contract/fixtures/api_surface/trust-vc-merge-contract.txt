@@ -1,0 +1,190 @@
+const fn trust_vc_merge_contract::api_surface::ProtectedCrate::new(package_name: &'static str, manifest_rel_path: &'static str, fixture_file_name: &'static str) -> Self
+const fn trust_vc_merge_contract::api_surface::ProtectedCrate::package_name(self: Self) -> &'static str
+const trust_vc_merge_contract::MERGE_BUNDLE_VERSION: u32
+const trust_vc_merge_contract::api_surface::API_SURFACE_FIXTURE_DIR_REL_PATH: &str
+const trust_vc_merge_contract::api_surface::PROTECTED_CRATES: [ProtectedCrate; 6]
+const trust_vc_merge_contract::fixtures::REPRESENTATIVE_COUNTEREXAMPLE_FIXTURE_REL_PATH: &str
+const trust_vc_merge_contract::fixtures::REPRESENTATIVE_FIXTURE_REL_PATH: &str
+const trust_vc_merge_contract::fixtures::REPRESENTATIVE_V4_FIXTURE_REL_PATH: &str
+enum trust_vc_merge_contract::ExpressionFormat
+enum trust_vc_merge_contract::MergeBundleError
+enum trust_vc_merge_contract::SortMeta
+enum trust_vc_merge_contract::api_surface::ApiSurfaceError
+enum trust_vc_merge_contract::fixtures::FixtureError
+field trust_vc_merge_contract::MergeBundleError::Deserialize::0: serde_json::Error
+field trust_vc_merge_contract::MergeBundleError::Serialize::0: serde_json::Error
+field trust_vc_merge_contract::MergeBundleError::UnsupportedBundleVersion::found: u32
+field trust_vc_merge_contract::MergeBundleError::UnsupportedBundleVersion::max_supported: u32
+field trust_vc_merge_contract::SortMeta::Array::element: Box<SortMeta>
+field trust_vc_merge_contract::SortMeta::Array::index: Box<SortMeta>
+field trust_vc_merge_contract::SortMeta::BitVector::signed: bool
+field trust_vc_merge_contract::SortMeta::BitVector::width: u32
+field trust_vc_merge_contract::SortMeta::FloatingPoint::exponent_bits: u32
+field trust_vc_merge_contract::SortMeta::FloatingPoint::significand_bits: u32
+field trust_vc_merge_contract::SortMeta::Map::key: Box<SortMeta>
+field trust_vc_merge_contract::SortMeta::Map::value: Box<SortMeta>
+field trust_vc_merge_contract::SortMeta::Opaque::name: String
+field trust_vc_merge_contract::SortMeta::Seq::elem: Box<SortMeta>
+field trust_vc_merge_contract::SortMeta::Set::elem: Box<SortMeta>
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::Build::0: rustdoc_json_stable::BuildError
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir::path: std::path::PathBuf
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir::source: std::io::Error
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize::path: std::path::PathBuf
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize::source: serde_json::Error
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItem::id: rustdoc_types::Id
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName::context: &'static str
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName::id: rustdoc_types::Id
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile::path: std::path::PathBuf
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile::source: std::io::Error
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind::context: &'static str
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind::id: rustdoc_types::Id
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::WriteFile::path: std::path::PathBuf
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::WriteFile::source: std::io::Error
+field trust_vc_merge_contract::fixtures::FixtureError::Bundle::0: crate::MergeBundleError
+field trust_vc_merge_contract::fixtures::FixtureError::CreateDir::path: std::path::PathBuf
+field trust_vc_merge_contract::fixtures::FixtureError::CreateDir::source: std::io::Error
+field trust_vc_merge_contract::fixtures::FixtureError::ReadFile::path: std::path::PathBuf
+field trust_vc_merge_contract::fixtures::FixtureError::ReadFile::source: std::io::Error
+field trust_vc_merge_contract::fixtures::FixtureError::WriteFile::path: std::path::PathBuf
+field trust_vc_merge_contract::fixtures::FixtureError::WriteFile::source: std::io::Error
+fn trust_vc_merge_contract::BroadcastLemmaMeta::body_expr(self: &Self) -> &TypedExpr
+fn trust_vc_merge_contract::BroadcastLemmaMeta::bound_vars(self: &Self) -> &[VarDecl]
+fn trust_vc_merge_contract::BroadcastLemmaMeta::group(self: &Self) -> Option<&str>
+fn trust_vc_merge_contract::BroadcastLemmaMeta::guard_expr(self: &Self) -> Option<&TypedExpr>
+fn trust_vc_merge_contract::BroadcastLemmaMeta::name(self: &Self) -> &str
+fn trust_vc_merge_contract::BroadcastLemmaMeta::new<impl Into<String>>(name: impl Into<String>, bound_vars: Vec<VarDecl>, body_expr: TypedExpr, trigger_groups: Vec<Vec<TypedExpr>>) -> Self
+fn trust_vc_merge_contract::BroadcastLemmaMeta::trigger_groups(self: &Self) -> &[Vec<TypedExpr>]
+fn trust_vc_merge_contract::BroadcastLemmaMeta::with_group<impl Into<String>>(self: Self, group: impl Into<String>) -> Self
+fn trust_vc_merge_contract::BroadcastLemmaMeta::with_guard_expr(self: Self, guard_expr: TypedExpr) -> Self
+fn trust_vc_merge_contract::DecreasesClause::measures(self: &Self) -> &[TypedExpr]
+fn trust_vc_merge_contract::DecreasesClause::new<impl Into<String>>(obligation_id: impl Into<String>, measures: Vec<TypedExpr>) -> Self
+fn trust_vc_merge_contract::DecreasesClause::obligation_id(self: &Self) -> &str
+fn trust_vc_merge_contract::FuelAxiomMeta::axiom_expr(self: &Self) -> &TypedExpr
+fn trust_vc_merge_contract::FuelAxiomMeta::bound_vars(self: &Self) -> &[VarDecl]
+fn trust_vc_merge_contract::FuelAxiomMeta::function_name(self: &Self) -> &str
+fn trust_vc_merge_contract::FuelAxiomMeta::new<impl Into<String>>(function_name: impl Into<String>, bound_vars: Vec<VarDecl>, axiom_expr: TypedExpr, trigger_pattern: TypedExpr) -> Self
+fn trust_vc_merge_contract::FuelAxiomMeta::trigger_pattern(self: &Self) -> &TypedExpr
+fn trust_vc_merge_contract::FuncDeclMeta::is_recursive(self: &Self) -> bool
+fn trust_vc_merge_contract::FuncDeclMeta::name(self: &Self) -> &str
+fn trust_vc_merge_contract::FuncDeclMeta::new<impl Into<String>>(name: impl Into<String>, param_names: Vec<String>, param_sorts: Vec<SortMeta>, return_sort: SortMeta) -> Self
+fn trust_vc_merge_contract::FuncDeclMeta::param_names(self: &Self) -> &[String]
+fn trust_vc_merge_contract::FuncDeclMeta::param_sorts(self: &Self) -> &[SortMeta]
+fn trust_vc_merge_contract::FuncDeclMeta::return_sort(self: &Self) -> &SortMeta
+fn trust_vc_merge_contract::FuncDeclMeta::with_recursive(self: Self, is_recursive: bool) -> Self
+fn trust_vc_merge_contract::MergeBundle::assertions(self: &Self) -> &[TypedExpr]
+fn trust_vc_merge_contract::MergeBundle::assumptions(self: &Self) -> &[TypedExpr]
+fn trust_vc_merge_contract::MergeBundle::broadcast_lemmas(self: &Self) -> &[BroadcastLemmaMeta]
+fn trust_vc_merge_contract::MergeBundle::bundle_version(self: &Self) -> u32
+fn trust_vc_merge_contract::MergeBundle::decreases(self: &Self) -> &[DecreasesClause]
+fn trust_vc_merge_contract::MergeBundle::enforce_supported_version(self: &Self) -> Result<(), MergeBundleError>
+fn trust_vc_merge_contract::MergeBundle::expression_format(self: &Self) -> Option<ExpressionFormat>
+fn trust_vc_merge_contract::MergeBundle::from_json_str(payload: &str) -> Result<Self, MergeBundleError>
+fn trust_vc_merge_contract::MergeBundle::fuel_axioms(self: &Self) -> &[FuelAxiomMeta]
+fn trust_vc_merge_contract::MergeBundle::func_decls(self: &Self) -> &[FuncDeclMeta]
+fn trust_vc_merge_contract::MergeBundle::insert_metadata<impl Into<String>, impl Into<String>>(self: Self, key: impl Into<String>, value: impl Into<String>) -> Self
+fn trust_vc_merge_contract::MergeBundle::metadata(self: &Self) -> &BTreeMap<String, String>
+fn trust_vc_merge_contract::MergeBundle::new<impl Into<String>>(source_id: impl Into<String>) -> Self
+fn trust_vc_merge_contract::MergeBundle::source_id(self: &Self) -> &str
+fn trust_vc_merge_contract::MergeBundle::to_pretty_json(self: &Self) -> Result<String, MergeBundleError>
+fn trust_vc_merge_contract::MergeBundle::triggers(self: &Self) -> &[TriggerGroup]
+fn trust_vc_merge_contract::MergeBundle::variables(self: &Self) -> &[VarDecl]
+fn trust_vc_merge_contract::MergeBundle::with_assertions(self: Self, assertions: Vec<TypedExpr>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_assumptions(self: Self, assumptions: Vec<TypedExpr>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_broadcast_lemmas(self: Self, lemmas: Vec<BroadcastLemmaMeta>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_bundle_version(self: Self, version: u32) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_decreases(self: Self, decreases: Vec<DecreasesClause>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_expression_format(self: Self, fmt: Option<ExpressionFormat>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_fuel_axioms(self: Self, axioms: Vec<FuelAxiomMeta>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_func_decls(self: Self, decls: Vec<FuncDeclMeta>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_metadata(self: Self, metadata: BTreeMap<String, String>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_triggers(self: Self, triggers: Vec<TriggerGroup>) -> Self
+fn trust_vc_merge_contract::MergeBundle::with_variables(self: Self, variables: Vec<VarDecl>) -> Self
+fn trust_vc_merge_contract::TriggerGroup::new<impl Into<String>>(obligation_id: impl Into<String>, patterns: Vec<TypedExpr>) -> Self
+fn trust_vc_merge_contract::TriggerGroup::obligation_id(self: &Self) -> &str
+fn trust_vc_merge_contract::TriggerGroup::patterns(self: &Self) -> &[TypedExpr]
+fn trust_vc_merge_contract::TypedExpr::expr(self: &Self) -> &str
+fn trust_vc_merge_contract::TypedExpr::new<impl Into<String>>(expr: impl Into<String>, sort: SortMeta) -> Self
+fn trust_vc_merge_contract::TypedExpr::sort(self: &Self) -> &SortMeta
+fn trust_vc_merge_contract::VarDecl::name(self: &Self) -> &str
+fn trust_vc_merge_contract::VarDecl::new<impl Into<String>>(name: impl Into<String>, sort: SortMeta) -> Self
+fn trust_vc_merge_contract::VarDecl::sort(self: &Self) -> &SortMeta
+fn trust_vc_merge_contract::api_surface::ApiSurfaceSnapshot::crate_root(self: &Self) -> &str
+fn trust_vc_merge_contract::api_surface::ApiSurfaceSnapshot::lines(self: &Self) -> &[String]
+fn trust_vc_merge_contract::api_surface::ApiSurfaceSnapshot::package_name(self: &Self) -> &str
+fn trust_vc_merge_contract::api_surface::ApiSurfaceSnapshot::to_text(self: &Self) -> String
+fn trust_vc_merge_contract::api_surface::ProtectedCrate::fixture_path(self: Self) -> PathBuf
+fn trust_vc_merge_contract::api_surface::ProtectedCrate::manifest_path(self: Self) -> PathBuf
+fn trust_vc_merge_contract::api_surface::ProtectedCrate::target_dir(self: Self) -> PathBuf
+fn trust_vc_merge_contract::api_surface::SnapshotDiff::added(self: &Self) -> &[String]
+fn trust_vc_merge_contract::api_surface::SnapshotDiff::is_empty(self: &Self) -> bool
+fn trust_vc_merge_contract::api_surface::SnapshotDiff::removed(self: &Self) -> &[String]
+fn trust_vc_merge_contract::api_surface::SnapshotDiff::render(self: &Self, package_name: &str) -> String
+fn trust_vc_merge_contract::api_surface::checked_in_snapshot_diff(protected: ProtectedCrate) -> Result<SnapshotDiff, ApiSurfaceError>
+fn trust_vc_merge_contract::api_surface::diff_snapshots(expected: &[String], actual: &[String]) -> SnapshotDiff
+fn trust_vc_merge_contract::api_surface::generate_api_surface_snapshot(protected: ProtectedCrate) -> Result<ApiSurfaceSnapshot, ApiSurfaceError>
+fn trust_vc_merge_contract::api_surface::read_checked_in_api_surface_snapshot(protected: ProtectedCrate) -> Result<ApiSurfaceSnapshot, ApiSurfaceError>
+fn trust_vc_merge_contract::api_surface::write_default_api_surface_fixtures() -> Result<Vec<std::path::PathBuf>, ApiSurfaceError>
+fn trust_vc_merge_contract::fixtures::read_checked_in_representative_counterexample_fixture() -> Result<String, FixtureError>
+fn trust_vc_merge_contract::fixtures::read_checked_in_representative_fixture() -> Result<String, FixtureError>
+fn trust_vc_merge_contract::fixtures::read_checked_in_v4_fixture() -> Result<String, FixtureError>
+fn trust_vc_merge_contract::fixtures::representative_bundle() -> crate::MergeBundle
+fn trust_vc_merge_contract::fixtures::representative_counterexample_bundle() -> crate::MergeBundle
+fn trust_vc_merge_contract::fixtures::representative_counterexample_fixture_json() -> Result<String, crate::MergeBundleError>
+fn trust_vc_merge_contract::fixtures::representative_counterexample_fixture_path() -> std::path::PathBuf
+fn trust_vc_merge_contract::fixtures::representative_fixture_json() -> Result<String, crate::MergeBundleError>
+fn trust_vc_merge_contract::fixtures::representative_fixture_path() -> std::path::PathBuf
+fn trust_vc_merge_contract::fixtures::representative_v4_bundle() -> crate::MergeBundle
+fn trust_vc_merge_contract::fixtures::representative_v4_fixture_json() -> Result<String, crate::MergeBundleError>
+fn trust_vc_merge_contract::fixtures::representative_v4_fixture_path() -> std::path::PathBuf
+fn trust_vc_merge_contract::fixtures::write_default_representative_counterexample_fixture() -> Result<std::path::PathBuf, FixtureError>
+fn trust_vc_merge_contract::fixtures::write_default_representative_fixture() -> Result<std::path::PathBuf, FixtureError>
+fn trust_vc_merge_contract::fixtures::write_default_v4_fixture() -> Result<std::path::PathBuf, FixtureError>
+fn trust_vc_merge_contract::fixtures::write_representative_counterexample_fixture<impl AsRef<Path>>(path: impl AsRef<std::path::Path>) -> Result<(), FixtureError>
+fn trust_vc_merge_contract::fixtures::write_representative_fixture<impl AsRef<Path>>(path: impl AsRef<std::path::Path>) -> Result<(), FixtureError>
+module trust_vc_merge_contract::api_surface
+module trust_vc_merge_contract::fixtures
+pub use trust_vc_merge_contract::BroadcastLemmaMeta = types::BroadcastLemmaMeta
+pub use trust_vc_merge_contract::DecreasesClause = types::DecreasesClause
+pub use trust_vc_merge_contract::FuelAxiomMeta = types::FuelAxiomMeta
+pub use trust_vc_merge_contract::FuncDeclMeta = types::FuncDeclMeta
+pub use trust_vc_merge_contract::SortMeta = types::SortMeta
+pub use trust_vc_merge_contract::TriggerGroup = types::TriggerGroup
+pub use trust_vc_merge_contract::TypedExpr = types::TypedExpr
+pub use trust_vc_merge_contract::VarDecl = types::VarDecl
+struct trust_vc_merge_contract::BroadcastLemmaMeta
+struct trust_vc_merge_contract::DecreasesClause
+struct trust_vc_merge_contract::FuelAxiomMeta
+struct trust_vc_merge_contract::FuncDeclMeta
+struct trust_vc_merge_contract::MergeBundle
+struct trust_vc_merge_contract::TriggerGroup
+struct trust_vc_merge_contract::TypedExpr
+struct trust_vc_merge_contract::VarDecl
+struct trust_vc_merge_contract::api_surface::ApiSurfaceSnapshot
+struct trust_vc_merge_contract::api_surface::ProtectedCrate
+struct trust_vc_merge_contract::api_surface::SnapshotDiff
+variant trust_vc_merge_contract::ExpressionFormat::SmtLib2TermV1
+variant trust_vc_merge_contract::MergeBundleError::Deserialize
+variant trust_vc_merge_contract::MergeBundleError::Serialize
+variant trust_vc_merge_contract::MergeBundleError::UnsupportedBundleVersion
+variant trust_vc_merge_contract::SortMeta::Array
+variant trust_vc_merge_contract::SortMeta::BitVector
+variant trust_vc_merge_contract::SortMeta::Bool
+variant trust_vc_merge_contract::SortMeta::FloatingPoint
+variant trust_vc_merge_contract::SortMeta::Map
+variant trust_vc_merge_contract::SortMeta::MathInt
+variant trust_vc_merge_contract::SortMeta::Opaque
+variant trust_vc_merge_contract::SortMeta::Real
+variant trust_vc_merge_contract::SortMeta::Seq
+variant trust_vc_merge_contract::SortMeta::Set
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::Build
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItem
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::WriteFile
+variant trust_vc_merge_contract::fixtures::FixtureError::Bundle
+variant trust_vc_merge_contract::fixtures::FixtureError::CreateDir
+variant trust_vc_merge_contract::fixtures::FixtureError::ReadFile
+variant trust_vc_merge_contract::fixtures::FixtureError::WriteFile

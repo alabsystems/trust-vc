@@ -1,0 +1,5 @@
+error: type of `returns` clause does not match function return type
+ --> tests/compile-fail/returns_wrong_type.rs:7:21
+  |
+7 | #[trust_vc::returns(20u8)]
+  |                     ^^^^

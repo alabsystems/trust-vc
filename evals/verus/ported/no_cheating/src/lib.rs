@@ -1,0 +1,12 @@
+#![allow(dead_code)]
+
+mod test_no_cheating_admit;
+mod test_no_cheating_admit_exec_allows_no_decreases_clause;
+mod test_no_cheating_admit_proof_block;
+mod test_no_cheating_assume;
+mod test_no_cheating_assume_proof_block;
+mod test_no_cheating_assume_spec;
+mod test_no_cheating_external_body;
+mod test_no_cheating_external_body_trait;
+mod test_no_cheating_external_body_trait_impl;
+mod test_no_cheating_via_fn;

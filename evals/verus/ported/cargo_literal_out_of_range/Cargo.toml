@@ -1,0 +1,23 @@
+# Cargo fixture for upstream overflow.rs::test_literal_out_of_range (#2778).
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+#
+# This fixture exists to reproduce a genuine RUSTC const-eval diagnostic that
+# trust-vc (a verifier, not a rustc fork) cannot synthesize. When the corpus
+# runner compiles this crate, real rustc rejects `const C: u8 = 256 - 1;` with
+# E0080 "attempt to compute `0_u8 - 1_u8`, which would overflow" — exactly the
+# string upstream's `assert_rust_error_msg` expects. The trust-vc path deps make
+# this a standard trust-vc fixture root (so its Cargo.lock carries the same ay
+# provenance the evidence gate checks across fixtures).
+[package]
+name = "literal_out_of_range"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+trust-vc-types = { path = "../../../../crates/trust-vc-types" }
+
+[workspace]

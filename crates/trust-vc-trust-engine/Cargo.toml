@@ -1,0 +1,29 @@
+# trust-vc-trust-engine - programmatic adapter boundary for tRust concepts
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-trust-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Programmatic TrustVc adapter boundary for tRust verifier concepts"
+
+[dependencies]
+trust-vc-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+trust-ir = { workspace = true, features = ["serde"] }
+
+[features]
+default = []
+proof-certificates = ["trust-vc-core/proof-certificates"]
+
+[lints]
+workspace = true

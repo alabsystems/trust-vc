@@ -1,0 +1,15 @@
+# TrustVc Rust Toolchain Configuration
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[toolchain]
+# trust-vc is a Trust-native verifier — it builds with the Trust toolchain
+# (the self-hosted stage2 Trust build, registered via
+# scripts/rustup-link-trust.sh), not a stock rust release. The Trust toolchain
+# is a rustc fork, so it builds the stable library crates AND provides the
+# rustc_private internals the trust-vc-driver rustc-driver needs (rustc-dev /
+# rust-src are part of the stage2 sysroot). Stock nightlies are wrong here:
+# their rustc internals (e.g. Rvalue::NullaryOp arity) differ from the fork's.
+channel = "trust"

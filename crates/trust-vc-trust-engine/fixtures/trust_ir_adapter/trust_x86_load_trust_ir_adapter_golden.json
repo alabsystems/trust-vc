@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "source_id": "tRust::trust-integration-tests::binary_decompile_convert_llvm2_production_positive_golden",
+  "proof_policy": "evidence_only",
+  "metadata": {
+    "trust.fixture.path": "crates/trust-integration-tests/tests/binary_decompile_convert_llvm2_production_positive_golden.json",
+    "trust.fixture_family": "binary-to-trust_ir-production-positive",
+    "trust.fixture.symbol": "trust_fixture_x86_load",
+    "trust.trust_ir.output_kind": "trust_ir_json",
+    "trust.trust_ir.output_content_sha256": "sha256:dbd30d3b634f45a82b2453ef67a7ba279f32be9fddefcb0afb8e6d94dff144b5",
+    "trust.trust_ir.root_artifact_sha256": "sha256:251757e36749c41d81a42feb4764e9ed80c354990f9de66858a498e549524000",
+    "trust.trust_ir.memory_facts": "2",
+    "trust.trust_ir.unsupported": "4",
+    "trust.cache.trust_ir_body_hash": "sha256:dbd30d3b634f45a82b2453ef67a7ba279f32be9fddefcb0afb8e6d94dff144b5",
+    "trust.cache.layout_hash": "sha256:251757e36749c41d81a42feb4764e9ed80c354990f9de66858a498e549524000"
+  },
+  "units": [
+    {
+      "unit_id": "trust_fixture_x86_load",
+      "display_name": "trust_fixture_x86_load @ 0x400000",
+      "native_context": {
+        "function_signature": {
+          "name": "trust_fixture_x86_load",
+          "params": [
+            {
+              "name": "ptr_live",
+              "sort": {
+                "kind": "bool"
+              }
+            },
+            {
+              "name": "load_value",
+              "sort": {
+                "kind": "bit_vector",
+                "width": 64,
+                "signed": false
+              }
+            }
+          ],
+          "return_sort": {
+            "kind": "bit_vector",
+            "width": 64,
+            "signed": false
+          }
+        },
+        "ownership": {
+          "places": [
+            {
+              "place": "arg0",
+              "sort": {
+                "kind": "opaque",
+                "name": "ptr<u64>"
+              }
+            }
+          ],
+          "borrows": [
+            {
+              "region": "r_arg0",
+              "place": "arg0",
+              "kind": "shared"
+            }
+          ],
+          "lifetimes": [
+            {
+              "region": "r_arg0",
+              "outlives": [
+                "entry"
+              ]
+            }
+          ],
+          "alias_facts": [
+            {
+              "left": "arg0",
+              "right": "loaded_addr",
+              "kind": "no_alias"
+            }
+          ],
+          "provenance_facts": [
+            {
+              "pointer": "arg0",
+              "provenance_id": "x86_64:0x400000:rdi",
+              "origin": "function_argument"
+            }
+          ]
+        }
+      },
+      "obligations": [
+        {
+          "id": "trust_ir.memory.no_alias.arg0",
+          "kind": "memory_no_alias",
+          "predicate": {
+            "kind": "expr",
+            "expr": {
+              "kind": "compare",
+              "op": "eq",
+              "left": {
+                "kind": "variable",
+                "name": "ptr_live",
+                "sort": {
+                  "kind": "bool"
+                }
+              },
+              "right": {
+                "kind": "variable",
+                "name": "ptr_live",
+                "sort": {
+                  "kind": "bool"
+                }
+              }
+            }
+          },
+          "lineage": {
+            "source": "trust_ir_ownership",
+            "producer": "tRust trust-lift/trust_ir decompile",
+            "stage": "trust_ir-ownership",
+            "rule": "x86_64 load memory_facts=2 no-alias",
+            "input_digest": "sha256:dbd30d3b634f45a82b2453ef67a7ba279f32be9fddefcb0afb8e6d94dff144b5"
+          },
+          "span": {
+            "file": "binary:0x400000",
+            "line_start": 1,
+            "column_start": 1,
+            "line_end": 1,
+            "column_end": 3
+          }
+        },
+        {
+          "id": "trust_ir.provenance.arg0",
+          "kind": "borrow_provenance",
+          "predicate": {
+            "kind": "expr",
+            "expr": {
+              "kind": "compare",
+              "op": "eq",
+              "left": {
+                "kind": "variable",
+                "name": "load_value",
+                "sort": {
+                  "kind": "bit_vector",
+                  "width": 64,
+                  "signed": false
+                }
+              },
+              "right": {
+                "kind": "variable",
+                "name": "load_value",
+                "sort": {
+                  "kind": "bit_vector",
+                  "width": 64,
+                  "signed": false
+                }
+              }
+            }
+          },
+          "lineage": {
+            "source": "trust_ir_provenance",
+            "producer": "tRust trust-lift/trust_ir decompile",
+            "stage": "trust_ir-provenance",
+            "rule": "x86_64 argument pointer provenance",
+            "input_digest": "sha256:251757e36749c41d81a42feb4764e9ed80c354990f9de66858a498e549524000"
+          },
+          "span": {
+            "file": "binary:0x400000",
+            "line_start": 1,
+            "column_start": 1,
+            "line_end": 1,
+            "column_end": 3
+          }
+        },
+        {
+          "id": "trust_ir.translation.return",
+          "kind": "translation_validation",
+          "predicate": {
+            "kind": "expr",
+            "expr": {
+              "kind": "bool_literal",
+              "value": true
+            }
+          },
+          "lineage": {
+            "source": "trust_ir_lowering",
+            "producer": "tRust decompile --to trust_ir",
+            "stage": "trust_ir-lowering",
+            "rule": "x86_64 mov-ret canonical TrustIr block",
+            "input_digest": "sha256:dbd30d3b634f45a82b2453ef67a7ba279f32be9fddefcb0afb8e6d94dff144b5"
+          },
+          "span": {
+            "file": "binary:0x400003",
+            "line_start": 1,
+            "column_start": 4,
+            "line_end": 1,
+            "column_end": 4
+          }
+        }
+      ]
+    }
+  ]
+}

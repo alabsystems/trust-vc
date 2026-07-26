@@ -1,0 +1,7 @@
+error: #[trust_vc::decreases] requires at least one measure expression
+ --> tests/compile-fail/decreases_missing_measure.rs:7:1
+  |
+7 | #[trust_vc::decreases]
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::decreases` (in Nightly builds, run with -Z macro-backtrace for more info)

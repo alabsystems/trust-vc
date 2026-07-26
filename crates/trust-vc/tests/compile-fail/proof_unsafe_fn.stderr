@@ -1,0 +1,5 @@
+error: 'unsafe' only makes sense on exec-mode functions
+ --> tests/compile-fail/proof_unsafe_fn.rs:2:1
+  |
+2 | unsafe fn unsafe_proof_fn_fail() {}
+  | ^^^^^^

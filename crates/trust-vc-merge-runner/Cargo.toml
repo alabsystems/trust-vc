@@ -1,0 +1,23 @@
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-merge-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Executable MergeBundle runner using the ay SMT solver"
+
+[dependencies]
+trust-vc-merge-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ay-dpll = { workspace = true }
+ay-frontend = { workspace = true }
+
+[lints]
+workspace = true

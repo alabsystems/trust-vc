@@ -1,0 +1,56 @@
+# trust-vc-driver-parity-fixture — real-macro driver-vs-syn parity fixture
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+#
+# A minimal in-workspace crate carrying a couple of REAL
+# `#[trust_vc::contract(...)]` scalar functions that sit squarely inside the
+# rustc-driver front end's supported fragment (scalar Hoare). It is the fixed,
+# committed input for the driver-vs-syn parity witness:
+#
+#   * the trusted **syn** path (`cargo trust-vc check`) scans this source and
+#     produces the authoritative per-function verdicts;
+#   * the nightly **rustc-driver** bin (`scripts/build-trust-vc-driver.sh bin`)
+#     compiles the very same source (real macros → `--cfg trust_vc_driver`
+#     bare-marker surface) and produces a parallel, NON-authoritative verdict;
+#   * `scripts/driver-real-macro-parity.sh` runs both and asserts they AGREE
+#     (driver == syn) with the driver never proving more than syn.
+#
+# `inc` VERIFIES on both paths; `inc_bad` (a deliberately FALSE postcondition) is
+# REFUTED on both — the non-degeneracy guard proving the driver lowered the real
+# body relation, not a vacuous constant.
+#
+# Deps are the in-workspace `trust-vc` / `trust-vc-core` crates (Trust-toolchain
+# built), NOT an isolated crates.io consumer, so no heavy from-scratch dep
+# rebuild is needed to run the witness.
+[package]
+name = "trust-vc-driver-parity-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Real-macro fixture for the trust-vc-driver-vs-syn parity witness"
+publish = false
+
+[dependencies]
+trust-vc = { path = "../trust-vc" }
+trust-vc-core = { path = "../trust-vc-core" }
+
+# Its OWN one-package workspace (like the established `cross_crate_opaque`
+# consumer): the fixture is deliberately NOT a member of the root trust-vc
+# workspace, so `targo build`/`targo test` never compile it and the default
+# build is byte-unchanged. Nothing ever builds this crate via `cargo` anyway —
+# the syn path scans its source and the driver bin compiles `src/lib.rs`
+# directly against the workspace's already-built (Trust-toolchain) rlibs — so the
+# path deps above never trigger a from-scratch dependency rebuild.
+[workspace]
+
+[lints.rust]
+# The fixture functions are never called (they exist only to be *verified*), and
+# under the default cfg the contract macros expand to runtime `assert!`s, so the
+# bindings/params look unused. Silence that so the crate builds clean under the
+# workspace's warning settings without perturbing behavior.
+dead_code = "allow"
+unused_variables = "allow"

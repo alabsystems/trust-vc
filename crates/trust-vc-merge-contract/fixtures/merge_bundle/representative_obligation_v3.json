@@ -1,0 +1,74 @@
+{
+  "bundle_version": 3,
+  "expression_format": "smt_lib2_term_v1",
+  "source_id": "trust_vc::examples::arith::lemma_sum_nonneg",
+  "variables": [
+    {
+      "name": "n",
+      "sort": {
+        "kind": "bit_vector",
+        "width": 32,
+        "signed": false
+      }
+    },
+    {
+      "name": "sum_n",
+      "sort": {
+        "kind": "bit_vector",
+        "width": 64,
+        "signed": false
+      }
+    }
+  ],
+  "assumptions": [
+    {
+      "expr": "(= sum_n ((_ zero_extend 32) n))",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "expr": "(bvuge sum_n ((_ zero_extend 32) n))",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "decreases": [
+    {
+      "obligation_id": "lemma_sum_nonneg",
+      "measures": [
+        {
+          "expr": "n",
+          "sort": {
+            "kind": "bit_vector",
+            "width": 32,
+            "signed": false
+          }
+        }
+      ]
+    }
+  ],
+  "triggers": [
+    {
+      "obligation_id": "lemma_sum_nonneg",
+      "patterns": [
+        {
+          "expr": "(sum n)",
+          "sort": {
+            "kind": "bit_vector",
+            "width": 64,
+            "signed": false
+          }
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "capabilities": "decreases,triggers",
+    "source_backend": "ay",
+    "source_repo": "trust_vc"
+  }
+}

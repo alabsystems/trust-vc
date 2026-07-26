@@ -1,0 +1,11 @@
+[package]
+name = "consume_vstd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+vstd_macro_usage = { path = "vstd_macro_usage_support" }
+
+[workspace]

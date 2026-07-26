@@ -1,0 +1,5 @@
+error: empty #[trust_vc::proof] bodies cannot use #[trust_vc::contract(requires(...))] without ensures(...); add an ensures(...) clause or a proof assertion
+ --> tests/compile-fail/contract_combined_with_proof.rs:9:1
+  |
+9 | #[trust_vc::proof]
+  | ^^^^^^^^^^^^^^^^^^

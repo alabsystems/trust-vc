@@ -1,0 +1,18 @@
+schema_version: 1
+manifest_id: upstream-verus-corpus
+description: Evidence manifest for upstream Verus tests used by TrustVc parity gates.
+upstream:
+  repo: https://github.com/verus-lang/verus
+  ref: PIN_UPSTREAM_VERUS_COMMIT
+  test_roots:
+    - source/rust_verify_test/tests
+gate:
+  missing_entry: fail
+  failing_classifications:
+    - unclassified
+    - unsupported-gap
+entries:
+  - upstream_path: source/rust_verify_test/tests/UNCLASSIFIED_UPSTREAM_TEST.rs
+    classification: unclassified
+    owner_issue: TBD
+    reason: Seed entry that demonstrates the default evidence gate failure state.

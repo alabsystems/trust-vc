@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `no_such_fn` in this scope
+ --> tests/compile-fail/assert_by_bit_vector_requires_typecheck.rs:9:18
+  |
+9 |         requires no_such_fn(x)
+  |                  ^^^^^^^^^^ not found in this scope

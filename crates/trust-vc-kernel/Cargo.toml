@@ -1,0 +1,26 @@
+# TrustVc kernel - proof certificate wire format and verification kernel
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Proof certificate wire format and propositional resolution checker for trust-vc"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+lean-validate = []
+
+[lints]
+workspace = true

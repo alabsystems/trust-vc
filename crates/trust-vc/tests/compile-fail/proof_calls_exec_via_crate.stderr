@@ -1,0 +1,5 @@
+error: proof function cannot call exec function `touch`
+  --> tests/compile-fail/proof_calls_exec_via_crate.rs:13:21
+   |
+13 |     crate::runtime::touch(x);
+   |                     ^^^^^

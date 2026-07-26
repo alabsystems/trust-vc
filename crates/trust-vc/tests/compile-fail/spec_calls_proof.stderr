@@ -1,0 +1,18 @@
+error: spec function cannot call proof function `proof_helper`
+  --> tests/compile-fail/spec_calls_proof.rs:14:5
+   |
+14 |     proof_helper(x);
+   |     ^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `trust_mc`
+ --> tests/compile-fail/spec_calls_proof.rs:7:1
+  |
+7 | #[trust_vc::proof]
+  | ^^^^^^^^^^^^^^^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 34 more
+  = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+  = help: try referring to `trust_vc::proof` crate for guidance on how handle this unexpected cfg
+  = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+  = note: this warning originates in the attribute macro `trust_vc::proof` (in Nightly builds, run with -Z macro-backtrace for more info)

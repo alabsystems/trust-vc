@@ -1,0 +1,87 @@
+# trust-vc-driver — rustc-driver front end for trust-vc
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+#
+# This crate hosts the *typed* front end for trust-vc: a path from rustc's
+# fully type-checked program (THIR + TyCtxt) into trust-vc-core's existing
+# `TrustVcExpr`/`VerificationContext` IR and the ay backend. trust-vc is a
+# submodule of Trust (the rustc fork); its role is Trust's proof-calculus + SMT
+# backend on the pure-Rust ay solver. This crate provides the shared `lower`
+# seam, the Verus-compat standalone driver (the parity benchmark/gate), and the
+# ay-certificate capability. North star: design-trust-proof-backend.md.
+# See also README.md and design-rustc-driver-frontend.md.
+#
+# Two layers, deliberately split by buildability:
+#   * `lower` (default features, STABLE): the driver-independent IR bridge that
+#     turns a fully-typed `DriverFn` into a `VerificationContext` and verifies it
+#     with the real encoder + ay. Builds and tests on the pinned stable toolchain.
+#   * `driver` (feature = "rustc-driver", NIGHTLY + rustc-dev): the real
+#     `rustc_driver::Callbacks` that obtains `TyCtxt`, walks THIR, and feeds
+#     `lower`. Compiled only when the `rustc-driver` feature is on, which requires
+#     the nightly toolchain pinned in this crate's rust-toolchain.toml.
+
+[package]
+name = "trust-vc-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rustc-driver (THIR) front end lowering Rust into trust-vc-core's typed IR"
+
+[features]
+default = []
+# Enable the real rustc_driver front end. Requires a nightly toolchain with the
+# `rustc-dev` and `llvm-tools` components (see rust-toolchain.toml) and
+# `RUSTC_BOOTSTRAP=1`. NOT part of the default workspace build; the stable
+# `lower` layer carries the load-bearing, testable logic.
+rustc-driver = []
+# Emit ay UNSAT proof certificates (re-checked by trust-vc-kernel) from the
+# `lower` seam — trust-vc's soundness edge over Verus's black-box Z3. Builds on
+# stable; pulls trust-vc-kernel via trust-vc-core's `proof-certificates`.
+certificates = ["trust-vc-core/proof-certificates"]
+# --- Superiority capabilities (design-trust-proof-backend.md §5a) ---
+# Each is an additive, feature-gated module so the default build and the
+# evidence gate stay undisturbed; each leverages an ay or trust-ir feature
+# Verus's Rust-surface + black-box-Z3 stack cannot match.
+#
+# #3 Certified cross-crate proof cache: cache kernel-checked certificates keyed
+#    by a content hash of the IR; re-check the cached cert instead of re-proving.
+cache = ["certificates"]
+# #4 Native collection decision procedures: Seq/Set/Map/Multiset reasoning
+#    (membership, length, permutation, disjointness, bag-count) via ay's native
+#    theories — no Z3 quantifier/MBQI fragility.
+collections = []
+# #5 Exact string/byte proofs: String/str + Seq + BV reasoning.
+strings = []
+# #6 Bit-precise unsafe/layout contracts: size/align/niche + BV facts.
+layout = []
+# #7 Solver-specialization hook: record VC-shape -> solver strategy (the
+#    trust-vc-side counterpart to ay's self-hosted JIT specialization).
+tactics = []
+# #2 Compiler-fact frame/alias VCs: consume Trust's compiler IR (trust-ir)
+#    resolved borrow/ownership facts and prove frame conditions from them.
+trust-integration = ["dep:trust-ir"]
+# Umbrella: every capability at once (for integration tests / CI).
+all-capabilities = [
+  "certificates", "cache", "collections", "strings", "layout", "tactics",
+  "trust-integration",
+]
+
+[dependencies]
+trust-vc-core = { workspace = true }
+# Trust's compiler IR — consumed by the `trust-integration` capability to lower
+# resolved compiler facts (NativeCompilerFactRef) into frame/alias VCs.
+trust-ir = { workspace = true, optional = true }
+
+# The nightly rustc-driver verification binary. It links the fork toolchain's
+# `rustc_private` libraries (via the `rustc-driver` feature + `driver` module),
+# so it builds ONLY through `scripts/build-trust-vc-driver.sh bin`, never a bare
+# `cargo build`. `required-features` keeps it out of the default (stable)
+# workspace build, so `targo build`/`targo test` are undisturbed.
+[[bin]]
+name = "trust-vc-driver"
+path = "src/bin/trust-vc-driver.rs"
+required-features = ["rustc-driver"]

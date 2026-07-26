@@ -1,0 +1,5 @@
+error: old!() in ensures! currently supports only `old!(ident)` and `old!(*ident)`; complex expressions are not yet supported
+  --> tests/compile-fail/old_field_access.rs:15:33
+   |
+15 |     ensures!(state.field == old!(state.field));
+   |                                 ^^^^^^^^^^^^^

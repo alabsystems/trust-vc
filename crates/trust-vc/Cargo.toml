@@ -1,0 +1,117 @@
+# TrustVc proc macros
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Proc macros for Verus-style verification with ay backend"
+
+[lib]
+proc-macro = true
+
+[features]
+default = []
+trust_mc = ["trust-vc-core/trust_mc"]
+ty = ["trust-vc-core/ty"]
+named-assertions = ["trust-vc-core/named-assertions"]
+expensive-tests = []  # Gate slow solver-bound integration tests (#2658)
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+trust-vc-core = { workspace = true }
+
+[dev-dependencies]
+trybuild = { workspace = true }
+serde_json = { workspace = true }
+trust-vc-types = { workspace = true }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "mode_exec_calls_exec"
+path = "tests/compile-pass/mode/exec_calls_exec.rs"
+harness = false
+
+[[test]]
+name = "mode_proof_calls_proof"
+path = "tests/compile-pass/mode/proof_calls_proof.rs"
+harness = false
+
+[[test]]
+name = "mode_proof_calls_later_proof"
+path = "tests/compile-pass/mode/proof_calls_later_proof.rs"
+harness = false
+
+[[test]]
+name = "mode_proof_calls_spec"
+path = "tests/compile-pass/mode/proof_calls_spec.rs"
+harness = false
+
+[[test]]
+name = "mode_proof_calls_later_spec"
+path = "tests/compile-pass/mode/proof_calls_later_spec.rs"
+harness = false
+
+[[test]]
+name = "mode_spec_calls_spec"
+path = "tests/compile-pass/mode/spec_calls_spec.rs"
+harness = false
+
+[[test]]
+name = "mode_spec_calls_later_spec"
+path = "tests/compile-pass/mode/spec_calls_later_spec.rs"
+harness = false
+
+[[test]]
+name = "mode_spec_mode_calls_later_spec"
+path = "tests/compile-pass/mode/spec_mode_calls_later_spec.rs"
+harness = false
+
+[[test]]
+name = "mode_proof_calls_spec_via_crate"
+path = "tests/compile-pass/mode/proof_calls_spec_via_crate.rs"
+harness = false
+
+[[test]]
+name = "mode_exec_calls_exec_cross_module"
+path = "tests/compile-pass/mode/exec_calls_exec_cross_module.rs"
+harness = false
+
+[[test]]
+name = "contract_basic_requires_ensures"
+path = "tests/compile-pass/contract/basic_requires_ensures.rs"
+harness = false
+
+[[test]]
+name = "contract_multiple_clauses"
+path = "tests/compile-pass/contract/multiple_clauses.rs"
+harness = false
+
+[[test]]
+name = "contract_old_in_ensures"
+path = "tests/compile-pass/contract/old_in_ensures.rs"
+harness = false
+
+[[test]]
+name = "contract_combined_with_proof"
+path = "tests/contract_combined_with_proof.rs"
+
+[[test]]
+name = "contract_full"
+path = "tests/compile-pass/contract/full_contract.rs"
+harness = false
+
+[[test]]
+name = "external_impl_debug"
+path = "tests/compile-pass/external_impl_debug.rs"
+harness = false

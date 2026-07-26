@@ -1,0 +1,11 @@
+error: trust_vc mode checker cannot uniquely locate `outer` in its source module; ambiguous same-name functions across inline modules prevent order-independent mode validation
+  --> tests/compile-fail/ambiguous_module_mode_scan.rs:21:8
+   |
+21 |     fn outer() {
+   |        ^^^^^
+
+error: trust_vc mode checker cannot uniquely locate `inner` in its source module; ambiguous same-name functions across inline modules prevent order-independent mode validation
+  --> tests/compile-fail/ambiguous_module_mode_scan.rs:26:8
+   |
+26 |     fn inner() {}
+   |        ^^^^^

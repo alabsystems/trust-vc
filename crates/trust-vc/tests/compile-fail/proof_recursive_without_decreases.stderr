@@ -1,0 +1,5 @@
+error: recursive #[trust_vc::proof] functions require #[trust_vc::decreases(...)]
+ --> tests/compile-fail/proof_recursive_without_decreases.rs:8:4
+  |
+8 | fn bad_lemma(n: u64) {
+  |    ^^^^^^^^^

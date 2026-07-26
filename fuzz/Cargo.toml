@@ -1,0 +1,46 @@
+[package]
+name = "trust-vc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+trust-vc-core = { path = "../crates/trust-vc-core" }
+libfuzzer-sys = "0.4"
+syn = { version = "2", features = ["full"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ensures_false"
+path = "fuzz_targets/ensures_false.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "strict_inequality"
+path = "fuzz_targets/strict_inequality.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mode_crossing"
+path = "fuzz_targets/mode_crossing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collections_contradiction"
+path = "fuzz_targets/collections_contradiction.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

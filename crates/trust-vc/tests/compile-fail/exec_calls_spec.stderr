@@ -1,0 +1,5 @@
+error: exec function `exec_caller` cannot call spec function `spec_helper`
+  --> tests/compile-fail/exec_calls_spec.rs:12:4
+   |
+12 | fn spec_helper(x: i32) -> i32 {
+   |    ^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: old!() in ensures! currently supports only `old!(ident)` and `old!(*ident)`; complex expressions are not yet supported
+  --> tests/compile-fail/old_arithmetic_expression.rs:11:18
+   |
+11 |     ensures!(old!(a + b) == a + b);
+   |                  ^^^^^^^

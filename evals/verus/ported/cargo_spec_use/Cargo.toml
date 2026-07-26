@@ -1,0 +1,13 @@
+[package]
+name = "spec_use"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+trust-vc-types = { path = "../../../../crates/trust-vc-types" }
+spec_def = { path = "../cargo_spec_def" }
+spec_def2 = { path = "../cargo_spec_def2", package = "spec_def" }
+
+[workspace]

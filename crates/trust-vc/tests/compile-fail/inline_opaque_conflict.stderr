@@ -1,0 +1,7 @@
+error: #[trust_vc::inline] and #[trust_vc::opaque] are mutually exclusive
+ --> tests/compile-fail/inline_opaque_conflict.rs:7:1
+  |
+7 | #[trust_vc::spec]
+  | ^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::spec` (in Nightly builds, run with -Z macro-backtrace for more info)

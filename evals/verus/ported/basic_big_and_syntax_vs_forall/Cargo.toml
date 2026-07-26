@@ -1,0 +1,10 @@
+[package]
+name = "trust-vc-verus-basic-big-and-syntax-vs-forall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-types = { path = "../../../../crates/trust-vc-types" }
+
+[workspace]

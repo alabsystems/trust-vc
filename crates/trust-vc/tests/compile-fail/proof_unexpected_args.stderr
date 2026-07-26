@@ -1,0 +1,7 @@
+error: #[trust_vc::proof] does not accept arguments — remove the parenthesized content
+ --> tests/compile-fail/proof_unexpected_args.rs:7:1
+  |
+7 | #[trust_vc::proof(verbose)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::proof` (in Nightly builds, run with -Z macro-backtrace for more info)

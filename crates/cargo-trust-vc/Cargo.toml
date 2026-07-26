@@ -1,0 +1,42 @@
+# cargo-trust-vc — CLI wrapper for trust-vc verification
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "cargo-trust-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI entry point for trust-vc standalone verification"
+
+[features]
+default = []
+named-assertions = ["trust-vc-core/named-assertions"]
+proof-certificates = ["trust-vc-core/proof-certificates"]
+
+[[bin]]
+name = "cargo-trust-vc"
+path = "src/main.rs"
+
+[dependencies]
+trust-vc-core = { workspace = true }
+trust-vc-oracle = { workspace = true }
+ay-dpll = { workspace = true }
+ay-frontend = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+indicatif = { workspace = true }
+libc = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

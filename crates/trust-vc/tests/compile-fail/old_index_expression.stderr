@@ -1,0 +1,5 @@
+error: old!() in ensures! currently supports only `old!(ident)` and `old!(*ident)`; complex expressions are not yet supported
+  --> tests/compile-fail/old_index_expression.rs:11:28
+   |
+11 |     ensures!(arr[i] == old!(arr[i]));
+   |                            ^^^^^^^^

@@ -1,0 +1,7 @@
+error: decreases_to! requires equal number of LHS and RHS expressions (got 2 and 1)
+ --> tests/compile-fail/decreases_to_count_mismatch.rs:8:5
+  |
+8 |     trust_vc::decreases_to!(1, 2 => 3);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `trust_vc::decreases_to` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "source_id": "tRust::trust-integration-tests::binary_unresolved_indirect_branch_golden",
+  "proof_policy": "evidence_only",
+  "metadata": {
+    "trust.fixture.path": "crates/trust-integration-tests/tests/binary_unresolved_indirect_branch_golden.json",
+    "trust.fixture_family": "binary-to-trust_ir-fail-closed",
+    "trust.fixture.symbol": "trust_fixture_unresolved",
+    "trust.expected_verification_status": "unsupported",
+    "trust.expected_verify_binary_status": "rejected",
+    "trust.expected_trust_level": "partial"
+  },
+  "units": [
+    {
+      "unit_id": "trust_fixture_unresolved",
+      "display_name": "trust_fixture_unresolved unresolved indirect branch",
+      "native_context": {
+        "function_signature": {
+          "name": "trust_fixture_unresolved",
+          "params": [
+            {
+              "name": "cfg_edge_resolved",
+              "sort": {
+                "kind": "bool"
+              }
+            }
+          ],
+          "return_sort": {
+            "kind": "bool"
+          }
+        }
+      },
+      "obligations": [
+        {
+          "id": "trust_ir.cfg.indirect_branch",
+          "kind": "translation_validation",
+          "predicate": {
+            "kind": "unsupported",
+            "construct": {
+              "feature": "CFG proof mode",
+              "diagnostic": "tRust binary_unresolved_indirect_branch_golden reports an unresolved indirect branch; TrustVc must fail closed until tRust emits typed CFG proof evidence"
+            }
+          },
+          "lineage": {
+            "source": "trust_ir_lowering",
+            "producer": "tRust trust-lift/trust_ir decompile",
+            "stage": "trust_ir-lowering",
+            "rule": "reject unresolved indirect branch without typed CFG proof mode"
+          },
+          "span": {
+            "file": "binary:trust_fixture_unresolved",
+            "line_start": 1,
+            "column_start": 1,
+            "line_end": 1,
+            "column_end": 1
+          }
+        }
+      ]
+    }
+  ]
+}

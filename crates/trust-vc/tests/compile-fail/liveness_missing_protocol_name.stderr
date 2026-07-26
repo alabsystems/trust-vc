@@ -1,0 +1,7 @@
+error: #[trust_vc::liveness] requires a protocol name argument, e.g. #[trust_vc::liveness(MyProtocol, fairness = "weak")]
+ --> tests/compile-fail/liveness_missing_protocol_name.rs:8:1
+  |
+8 | #[trust_vc::liveness(fairness = "weak")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::liveness` (in Nightly builds, run with -Z macro-backtrace for more info)

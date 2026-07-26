@@ -1,0 +1,13 @@
+error: `return` inside a macro invocation is not supported by #[trust_vc::returns(expr)]; write the return expression directly so TrustVc can capture it before checking the postcondition
+  --> tests/compile-fail/returns_macro_return.rs:15:12
+   |
+15 |     early!(return 20u8);
+   |            ^^^^^^
+
+warning: unused macro definition: `early`
+ --> tests/compile-fail/returns_macro_return.rs:7:14
+  |
+7 | macro_rules! early {
+  |              ^^^^^
+  |
+  = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default

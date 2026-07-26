@@ -1,0 +1,7 @@
+error: #[trust_vc::via_fn] does not accept arguments — remove the parenthesized content
+ --> tests/compile-fail/via_fn_unexpected_args.rs:7:1
+  |
+7 | #[trust_vc::via_fn(verbose)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::via_fn` (in Nightly builds, run with -Z macro-backtrace for more info)

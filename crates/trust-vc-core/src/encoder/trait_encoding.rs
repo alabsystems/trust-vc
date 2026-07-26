@@ -1,0 +1,499 @@
+//! Trait method UF registration and contract axioms.
+//!
+//! Copyright 2026 Andrew Yates
+//! SPDX-License-Identifier: Apache-2.0
+//! Author: Andrew Yates <andrewyates.name@gmail.com>
+//!
+//! Slice 2 of trait verification registers one uninterpreted function per
+//! trait method over a Poly-typed receiver and emits quantified postcondition
+//! axioms guarded by the trait method preconditions.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::collections::HashMap;
+
+use ay_dpll::api::FuncDecl;
+
+use super::types::sort_for_type;
+use super::AYEncoder;
+use crate::error::{TrustVcError, TrustVcResult};
+use crate::ir::{TraitDecl, TraitImplDecl, TraitMethodDecl, TrustVcType};
+
+#[path = "trait_encoding_axioms.rs"]
+mod axioms;
+
+use axioms::{sanitize_symbol, trait_encoding_error, trait_method_symbol};
+
+const TRAIT_ENCODING_CONTEXT: &str = "register trait";
+const TRAIT_RECEIVER_NAME: &str = "self";
+const TRAIT_RESULT_NAME: &str = "result";
+const TRAIT_RECEIVER_TYPE_NAME: &str = "Poly";
+
+#[derive(Debug, Clone)]
+pub(crate) struct TraitEncoding {
+    pub(crate) name: String,
+    pub(crate) method_fns: HashMap<String, FuncDecl>,
+    /// Default body text for methods that have default implementations.
+    /// Keyed by method name. Used by `register_trait_impl` to emit
+    /// per-impl body axioms for inherited (non-overridden) defaults.
+    /// Part of #2442.
+    default_bodies: HashMap<String, String>,
+    /// Method declarations from the TraitDecl, needed by `register_trait_impl`
+    /// to build TypeEnv for default body lowering. Part of #2442.
+    methods: Vec<TraitMethodDecl>,
+    /// Ordered type-parameter names of a parameterized trait; zipped against an
+    /// impl's `trait_type_args` to instantiate bare-TypeParam signature slots.
+    generics: Vec<String>,
+}
+
+impl AYEncoder {
+    /// Returns the cached trait encoding, if the trait has been registered.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn trait_encoding(&self, trait_name: &str) -> Option<&TraitEncoding> {
+        self.registries.trait_encodings.get(trait_name)
+    }
+
+    /// Declares trait method UFs and emits quantified postcondition axioms.
+    ///
+    /// Idempotent: repeated registration of the same trait name reuses the
+    /// cached encoding without re-declaring UFs or re-asserting axioms.
+    pub(crate) fn register_trait(&mut self, decl: &TraitDecl) -> TrustVcResult<TraitEncoding> {
+        if let Some(existing) = self.registries.trait_encodings.get(&decl.name) {
+            // Idempotent ONLY for an equal re-registration. Two DIFFERENT
+            // traits colliding on one name would silently share one UF set and
+            // one axiom set (a name-collapse false-verify vector) — fail the
+            // file closed instead.
+            if existing.methods == decl.methods && existing.generics == decl.generics {
+                return Ok(existing.clone());
+            }
+            return Err(trait_encoding_error(format!(
+                "trait name collision: '{}' is already registered with a different declaration",
+                decl.name
+            )));
+        }
+
+        let mut method_fns = HashMap::with_capacity(decl.methods.len());
+        for method in &decl.methods {
+            let symbol = trait_method_symbol(&decl.name, &method.name);
+            let func_decl = self.declare_trait_method(&symbol, method)?;
+            method_fns.insert(method.name.clone(), func_decl);
+        }
+
+        let mut default_bodies = HashMap::new();
+        for method in &decl.methods {
+            if let Some(ref body_text) = method.default_body {
+                default_bodies.insert(method.name.clone(), body_text.clone());
+            }
+        }
+
+        let encoding = TraitEncoding {
+            name: decl.name.clone(),
+            method_fns,
+            default_bodies,
+            methods: decl.methods.clone(),
+            generics: decl.generics.clone(),
+        };
+
+        for method in &decl.methods {
+            self.assert_trait_postconditions(decl, method, &encoding)?;
+        }
+
+        self.registries
+            .trait_encodings
+            .insert(decl.name.clone(), encoding.clone());
+        Ok(encoding)
+    }
+
+    /// Emits per-impl linking axioms for a `TraitImplDecl`.
+    ///
+    /// For each method binding `(trait_method, concrete_fn)`:
+    /// ```text
+    /// ∀args. {Trait__method(Box_T(self), ...)}
+    ///   Trait__method(Box_T(self), ...) == [Box_T(]concrete_fn(self, ...)[)]
+    /// ```
+    ///
+    /// Requires: trait already registered via `register_trait`.
+    /// Requires: concrete impl functions already registered via
+    ///           `register_function_context`.
+    pub(crate) fn register_trait_impl(&mut self, impl_decl: &TraitImplDecl) -> TrustVcResult<()> {
+        let encoding = self
+            .registries
+            .trait_encodings
+            .get(&impl_decl.trait_name)
+            .ok_or_else(|| {
+                trait_encoding_error(format!(
+                    "Cannot register impl for unregistered trait '{}'",
+                    impl_decl.trait_name
+                ))
+            })?
+            .clone();
+
+        let (box_fn, unbox_fn) = self
+            .registries
+            .poly_context
+            .ensure_box_unbox(&mut self.solver, &impl_decl.concrete_type)?;
+
+        // Expose the `Box_T` bridge under its name so caller-side expression
+        // encoding (`encode_fn_call`) can resolve the explicit box wrapper that
+        // concrete-receiver trait-method calls emit (`Trait__method(Box_S(s),…)`,
+        // Slice 1 of #33). Without this the box call is an "Undefined function"
+        // (box decls live in `PolyContext`, not `fn_ctx.functions`). Inserting
+        // the SAME cached `FuncDecl` keeps the caller's box symbol identical to
+        // the one this impl's linking axiom triggers on.
+        self.fn_ctx
+            .functions
+            .entry(box_fn.name().to_string())
+            .or_insert_with(|| box_fn.clone());
+
+        for (trait_method_name, concrete_fn_name) in &impl_decl.method_bindings {
+            // A parameterized signature (bare-TypeParam slots) links only when
+            // the impl's trait type args instantiate it soundly; every other
+            // TypeParam-bearing shape (blanket impl, nested position, unbound
+            // param, requires-bearing) is skipped PER-METHOD, fail-closed.
+            // Before this gate, such signatures reached term construction with
+            // a Poly-sorted bound var applied to a concrete fn — the resulting
+            // Err sank the WHOLE file (`setup.rs` propagates registration
+            // errors), rejecting every unrelated function alongside.
+            let method_decl = encoding
+                .methods
+                .iter()
+                .find(|method| method.name == *trait_method_name);
+            // A method whose return the shared per-trait UF cannot carry gets NO
+            // linking axiom — it is resolved instead through the impl method's own
+            // definitional body axiom (the with-`self` non-primitive/assoc-return
+            // branch of `apply_inherent_impl_methods`). Two shapes:
+            //   * `-> Self::Out` (assoc-type projection the impl binds concretely):
+            //     the UF keeps the DECLARED abstract sort → "sort mismatch in eq".
+            //   * `-> Self` (a `Poly` return): boxing the Poly result into the
+            //     concrete fn's sort fails "Box wrapping of result ... got Poly".
+            // Both would, being non-generic, sink the whole file. Skip per-method,
+            // fail-safe — mirrors the value-side guard in
+            // `instantiate_trait_method_sig`. (A `-> W` struct return is a bare
+            // `TypeParam` and is already skipped via `declared_generic` below.)
+            if method_decl.is_some_and(|method| {
+                impl_decl.resolve_assoc_projections(&method.return_type) != method.return_type
+                    || matches!(method.return_type, crate::ir::TrustVcType::Poly)
+            }) {
+                continue;
+            }
+            let declared_generic = method_decl.is_some_and(|method| {
+                method.return_type.contains_type_param()
+                    || method
+                        .params
+                        .iter()
+                        .any(|(_, param_ty)| param_ty.contains_type_param())
+            });
+            let inst_sig = if declared_generic {
+                match method_decl.and_then(|method| {
+                    crate::trait_instantiation::instantiate_trait_method_sig(
+                        &encoding.generics,
+                        impl_decl,
+                        method,
+                    )
+                }) {
+                    Some(sig) => Some(sig),
+                    None => continue,
+                }
+            } else {
+                None
+            };
+
+            let result = self.emit_impl_linking_axiom(
+                impl_decl,
+                trait_method_name,
+                concrete_fn_name,
+                inst_sig.as_ref(),
+                &box_fn,
+                &unbox_fn,
+            );
+            if let Err(err) = result {
+                if declared_generic {
+                    // Bridged path: an unexpected divergence between the impl
+                    // signature and the instantiated trait signature must not
+                    // re-open the file-sink — the method simply stays without
+                    // a linking axiom (callers get no value; fail-closed).
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+
+        // For default methods not overridden by this impl, emit a per-impl
+        // body axiom that defines the trait method UF in terms of the default
+        // body expression. Part of #2442.
+        let overridden: std::collections::HashSet<&str> = impl_decl
+            .method_bindings
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        for (method_name, body_text) in &encoding.default_bodies {
+            if overridden.contains(method_name.as_str()) {
+                continue;
+            }
+            let method = encoding
+                .methods
+                .iter()
+                .find(|m| m.name == *method_name)
+                .ok_or_else(|| {
+                    trait_encoding_error(format!(
+                        "Default method '{}' not found in trait '{}'",
+                        method_name, impl_decl.trait_name
+                    ))
+                })?;
+
+            // A default body over a TypeParam-bearing signature would define
+            // the UF at Poly-erased slots without an instantiation-aware
+            // conformance check — skip fail-closed (defensive; the parser does
+            // not currently produce such defaults on registrable paths).
+            if method.return_type.contains_type_param()
+                || method
+                    .params
+                    .iter()
+                    .any(|(_, param_ty)| param_ty.contains_type_param())
+            {
+                continue;
+            }
+
+            // A default body whose SHAPE the axiom fragment cannot express —
+            // proof-macro statements (`trust_vc::assert!` is "macro in block"
+            // to the spec lowering) or constructs the minimal trait-contract
+            // env has no metadata for (a user struct literal) — used to sink
+            // the WHOLE file: `setup.rs` propagates registration errors, so
+            // every unrelated function in the file was rejected alongside
+            // (the same file-sink pattern the A2-generic gate closed for
+            // generic signatures). Skip THIS method's definitional axiom
+            // instead, fail-closed: the trait UF stays underconstrained, so
+            // callers get NO value from the default body — omitting an
+            // assumption can only shrink provability, never manufacture a
+            // false-Verified. Parse/lowering errors are exactly the
+            // deterministic shape-unsupported class; encoding/solver failures
+            // still propagate and fail the file, per the fail-closed
+            // discipline (design-unknown-as-failure.md).
+            if let Err(err) =
+                self.assert_default_body_axiom(&encoding, impl_decl, method, body_text)
+            {
+                match err {
+                    TrustVcError::Parse {
+                        context: "parse default body",
+                        ..
+                    }
+                    | TrustVcError::Lowering {
+                        context: "lower default body",
+                        ..
+                    } => continue,
+                    other => return Err(other),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Builds and asserts ONE per-impl linking axiom
+    /// `∀vars. {Trait__m(self_poly, …)} Trait__m(self_poly, …) == concrete_fn(…)`.
+    ///
+    /// `inst_sig` is `Some` exactly for a parameterized-trait method whose
+    /// signature the impl's trait type args instantiate (trait-side
+    /// A2-generic): each bare-TypeParam position binds a CONCRETE-sorted
+    /// variable that crosses a `Box_{inst}` bridge on the UF side and passes
+    /// raw to the concrete fn; a bridged return wraps the concrete result in
+    /// `Box_{inst}`. The bridge terms sit INSIDE the trigger, so E-matching
+    /// fires only for this instantiation's ground terms — the axiom-scoping
+    /// that keeps distinct instantiations and impls apart.
+    fn emit_impl_linking_axiom(
+        &mut self,
+        impl_decl: &TraitImplDecl,
+        trait_method_name: &str,
+        concrete_fn_name: &str,
+        inst_sig: Option<&crate::trait_instantiation::InstantiatedTraitMethodSig>,
+        box_fn: &FuncDecl,
+        unbox_fn: &FuncDecl,
+    ) -> TrustVcResult<()> {
+        let trait_method_fn = self
+            .registries
+            .trait_encodings
+            .get(&impl_decl.trait_name)
+            .and_then(|encoding| encoding.method_fns.get(trait_method_name))
+            .cloned()
+            .ok_or_else(|| {
+                trait_encoding_error(format!(
+                    "Trait '{}' has no method '{}' (impl for {})",
+                    impl_decl.trait_name,
+                    trait_method_name,
+                    impl_decl.concrete_type.to_type_string()
+                ))
+            })?;
+
+        let concrete_fn = self
+            .fn_ctx
+            .functions
+            .get(concrete_fn_name)
+            .cloned()
+            .ok_or_else(|| {
+                trait_encoding_error(format!(
+                    "Concrete function '{}' not registered (impl {}::{})",
+                    concrete_fn_name, impl_decl.trait_name, trait_method_name
+                ))
+            })?;
+
+        // Look up the trait method's parameter types (Poly self + extra params)
+        let trait_uf_name = trait_method_symbol(&impl_decl.trait_name, trait_method_name);
+        let trait_method_params = self
+            .fn_ctx
+            .param_types
+            .get(&trait_uf_name)
+            .ok_or_else(|| {
+                trait_encoding_error(format!(
+                    "Missing param types for trait method '{trait_uf_name}'"
+                ))
+            })?
+            .clone();
+
+        let trait_method_return_type = self
+            .fn_ctx
+            .return_types
+            .get(&trait_uf_name)
+            .ok_or_else(|| {
+                trait_encoding_error(format!(
+                    "Missing return type for trait method '{trait_uf_name}'"
+                ))
+            })?
+            .clone();
+
+        let poly_sort = sort_for_type(&TrustVcType::Poly);
+
+        // Use Poly-sorted bound variable for self — ay-dpll E-matching
+        // only fires triggers containing uninterpreted-sort variables,
+        // not Bool-sorted ones. We use Unbox_T to recover the concrete
+        // value for the concrete function call.
+        let self_poly = self.solver.fresh_var(
+            &format!(
+                "__impl_{}_{}_self",
+                sanitize_symbol(&impl_decl.trait_name),
+                sanitize_symbol(trait_method_name)
+            ),
+            poly_sort,
+        );
+
+        let mut bound_vars = vec![self_poly];
+        // UF-side (possibly Box-bridged) and concrete-fn-side (always raw)
+        // argument terms, aligned per non-self position.
+        let mut trait_side_args = Vec::new();
+        let mut concrete_side_args = Vec::new();
+
+        // trait_method_params[0] is Poly (self), rest are extra params
+        for (i, param_ty) in trait_method_params.iter().skip(1).enumerate() {
+            let bridge = inst_sig
+                .and_then(|sig| sig.params.get(i))
+                .and_then(|(_, bridge)| bridge.clone());
+            if let Some(inst_ty) = bridge {
+                // Bridged position: the UF slot is Poly-sorted, the value is
+                // concrete. Quantify over the CONCRETE sort and box it on the
+                // UF side only — the caller's ground term carries the same
+                // `Box_{inst}(arg)` shape (the #2053 call-site bridging), so
+                // the trigger unifies exactly per instantiation.
+                let param_var = self.solver.fresh_var(
+                    &format!(
+                        "__impl_{}_{}_{i}",
+                        sanitize_symbol(&impl_decl.trait_name),
+                        sanitize_symbol(trait_method_name),
+                    ),
+                    sort_for_type(&inst_ty),
+                );
+                let (arg_box_fn, _arg_unbox_fn) = self
+                    .registries
+                    .poly_context
+                    .ensure_box_unbox(&mut self.solver, &inst_ty)?;
+                let boxed = self
+                    .solver
+                    .try_apply(&arg_box_fn, &[param_var])
+                    .map_err(|e| {
+                        trait_encoding_error(format!("Bridged param boxing failed: {e}"))
+                    })?;
+                bound_vars.push(param_var);
+                trait_side_args.push(boxed);
+                concrete_side_args.push(param_var);
+            } else {
+                let param_var = self.solver.fresh_var(
+                    &format!(
+                        "__impl_{}_{}_{i}",
+                        sanitize_symbol(&impl_decl.trait_name),
+                        sanitize_symbol(trait_method_name),
+                    ),
+                    sort_for_type(param_ty),
+                );
+                bound_vars.push(param_var);
+                trait_side_args.push(param_var);
+                concrete_side_args.push(param_var);
+            }
+        }
+
+        // LHS: Trait__method(self_poly, trait_side_args...)
+        let mut trait_args = vec![self_poly];
+        trait_args.extend(trait_side_args.iter().copied());
+
+        let lhs = self
+            .solver
+            .try_apply(&trait_method_fn, &trait_args)
+            .map_err(|e| trait_encoding_error(format!("Trait method application failed: {e}")))?;
+
+        // RHS: concrete_fn(Unbox_T(self_poly), concrete_side_args...)
+        let unboxed_self = self
+            .solver
+            .try_apply(unbox_fn, &[self_poly])
+            .map_err(|e| trait_encoding_error(format!("Unbox application failed: {e}")))?;
+
+        let mut concrete_args = vec![unboxed_self];
+        concrete_args.extend(concrete_side_args.iter().copied());
+
+        let concrete_result = self
+            .solver
+            .try_apply(&concrete_fn, &concrete_args)
+            .map_err(|e| {
+                trait_encoding_error(format!("Concrete function application failed: {e}"))
+            })?;
+
+        // A Poly (Self) return wraps with the impl's own Box_T; a bridged
+        // TypeParam return wraps with the instantiation's Box_{inst} so the
+        // equality stays Poly-sorted against the UF.
+        let rhs = if trait_method_return_type == TrustVcType::Poly {
+            self.solver
+                .try_apply(box_fn, &[concrete_result])
+                .map_err(|e| trait_encoding_error(format!("Box wrapping of result failed: {e}")))?
+        } else if let Some(inst_ty) = inst_sig.and_then(|sig| sig.return_bridge.clone()) {
+            let (ret_box_fn, _ret_unbox_fn) = self
+                .registries
+                .poly_context
+                .ensure_box_unbox(&mut self.solver, &inst_ty)?;
+            self.solver
+                .try_apply(&ret_box_fn, &[concrete_result])
+                .map_err(|e| trait_encoding_error(format!("Bridged result boxing failed: {e}")))?
+        } else {
+            concrete_result
+        };
+
+        // Assert: ∀(p:Poly, params). {Trait__method(p, ...)} lhs == rhs
+        let eq = self
+            .solver
+            .try_eq(lhs, rhs)
+            .map_err(|e| trait_encoding_error(format!("Equality failed: {e}")))?;
+
+        let axiom = self
+            .solver
+            .try_forall_with_triggers(&bound_vars, eq, &[&[lhs]])
+            .map_err(|e| {
+                trait_encoding_error(format!(
+                    "Quantified linking axiom failed for '{}::{}': {e}",
+                    impl_decl.trait_name, trait_method_name
+                ))
+            })?;
+
+        self.solver.try_assert_term(axiom).map_err(|e| {
+            trait_encoding_error(format!(
+                "Failed to assert linking axiom for '{}::{}': {e}",
+                impl_decl.trait_name, trait_method_name
+            ))
+        })?;
+        Ok(())
+    }
+}

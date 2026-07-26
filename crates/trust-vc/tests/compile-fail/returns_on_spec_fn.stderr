@@ -1,0 +1,5 @@
+error: spec functions cannot have `returns` clause
+ --> tests/compile-fail/returns_on_spec_fn.rs:8:1
+  |
+8 | #[trust_vc::spec]
+  | ^^^^^^^^^^^^^^^^^

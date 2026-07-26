@@ -1,0 +1,5 @@
+error: proof function cannot call exec function `exec_helper`
+  --> tests/compile-fail/proof_calls_exec.rs:13:13
+   |
+13 |     let _ = exec_helper(x);
+   |             ^^^^^^^^^^^

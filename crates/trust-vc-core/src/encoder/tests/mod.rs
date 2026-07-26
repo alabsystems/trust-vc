@@ -1,0 +1,1398 @@
+// Copyright 2026 Andrew Yates
+// Author: Andrew Yates <andrewyates.name@gmail.com>
+// Licensed under the Apache License, Version 2.0
+
+//! Encoder test suite — split by domain for maintainability.
+//!
+//! Test placement policy:
+//! - Put issue-specific regressions in the closest domain module
+//!   (for example, quantifier bugs in `advanced/` and IR soundness bugs in
+//!   `ir_soundness_regressions/`).
+//! - Put new feature tests in the domain module matching the production file.
+//! - When a test module grows beyond 500 lines, split it by dominant test
+//!   prefix or issue cluster.
+//!
+//! Copyright 2026 Andrew Yates
+//! SPDX-License-Identifier: Apache-2.0
+//! Author: Andrew Yates <andrewyates.name@gmail.com>
+
+use super::*;
+use crate::vc::ProofObligation;
+use ay_dpll::api::SolveResult;
+
+/// The CONFORMANCE verdict of a prepared context, produced exactly the way
+/// `cargo trust-vc check` produces it: ENUMERATE every trait-impl conformance
+/// obligation, then verify each one BY NAME, returning the first non-`Verified`
+/// result.
+///
+/// Conformance is an obligation of the IMPL, not of whatever function happened to
+/// be verified alongside it (ATTRIBUTION — see
+/// the internal conformance-attribution design note), so a test asking
+/// "was this bad impl CAUGHT?" must ask the impl's own obligation rather than an
+/// unrelated function's verdict. What changed is only the BLAST RADIUS: a bad
+/// impl no longer sinks unrelated work. What did NOT change is that a bad impl is
+/// REJECTED, never false-`Verified`.
+pub(crate) fn conformance_verdict(
+    prepared: &crate::prepared_context::PreparedVerificationContext,
+) -> VerifyResult {
+    let names = AYEncoder::list_conformance_obligations(prepared)
+        .expect("conformance obligations should enumerate");
+    for name in names {
+        let result = AYEncoder::verify_conformance_obligation(prepared, &name);
+        if !result.is_verified() {
+            return result;
+        }
+    }
+    VerifyResult::Verified
+}
+
+/// [`conformance_verdict`] for a context that has not been prepared yet.
+pub(crate) fn context_conformance_verdict(ctx: &crate::vc::VerificationContext) -> VerifyResult {
+    let prepared =
+        crate::prepared_context::prepare_context(ctx).expect("conformance context should prepare");
+    conformance_verdict(&prepared)
+}
+
+fn check_sat_with_bv_watchdog(encoder: &mut AYEncoder) -> ay_dpll::api::VerifiedSolveResult {
+    use crate::encoder::verification::timeout::{reserve_solver_thread_slot, BV_HARD_TIMEOUT};
+
+    let _guard = reserve_solver_thread_slot();
+    let interrupt = encoder.interrupt_handle();
+    let watchdog_interrupt = interrupt.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if matches!(
+            done_rx.recv_timeout(BV_HARD_TIMEOUT),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            watchdog_interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    let result = encoder
+        .solver
+        .try_check_sat()
+        .expect("solver query should complete for watchdog-protected encoder tests");
+    let _ = done_tx.send(());
+    let _ = watchdog.join();
+    interrupt.store(false, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+mod advanced;
+mod algorithm_audit;
+mod arithmetic_normalization;
+mod assertion_outcome_conversion;
+mod basic;
+#[cfg(feature = "expensive-tests")]
+mod bench_proof_certificate_overhead;
+mod bitwise_and_overflow;
+mod blocks;
+mod bool_eq_soundness;
+mod boolean_logic;
+mod bv_diff_bitwidth_requires;
+mod bv_signedness_reinterpret_cast;
+mod cast_int_coverage;
+mod choose;
+#[cfg(feature = "expensive-tests")]
+mod collections;
+mod collections_encoder_direct;
+mod confirmation_check;
+mod connective_roundtrip;
+mod const_fold_overflow;
+mod counterexample_source_names;
+mod datatype;
+mod datatype_setup;
+mod default_trait_integer;
+mod diagnostics_demotion;
+mod differential;
+mod empty_model_demotion;
+mod encoder_pipeline_integration;
+mod error_expansion;
+mod euclidean_div_rem;
+mod eval_audit_p584;
+mod eval_compute;
+mod exists_trigger_witness;
+mod expressions;
+mod extended_timeout_retry;
+#[cfg(feature = "expensive-tests")]
+mod function_body_axioms;
+mod ghost_collection_scope_resolution;
+mod ground_seeding;
+mod implies_overflow_guard;
+mod incremental_reuse;
+mod inductive_step_broadcasts;
+mod inductive_step_coverage;
+mod inline_spec;
+mod int_fallback_retry;
+mod int_lia_arith;
+mod int_mode_arith_overflow;
+mod int_mode_bitwise;
+mod int_mode_div_rem_overflow;
+mod invariant_open_close;
+mod invariant_scaling;
+mod ir_expr_methods;
+mod ir_parity_advanced;
+mod ir_soundness_2100;
+mod ir_soundness_regressions;
+mod let_term_widths;
+mod literal_out_of_range_parity;
+mod local_binding_scope;
+mod match_arm_binding;
+mod match_datatype;
+mod match_overflow_guard;
+mod mixed_unsigned_comparisons;
+mod nat_lia_arith;
+#[cfg(feature = "native-strings")]
+mod native_strings;
+mod neg_overflow;
+mod nia_zero_bound_products;
+mod overflow_behavior;
+mod overflow_guard_failures;
+mod overflow_scaling;
+mod overflow_spec_add;
+mod parallel_batch;
+mod parallel_verify_gate;
+mod parser_state_coverage;
+#[cfg(feature = "expensive-tests")]
+mod performance_declare_variable;
+#[cfg(feature = "expensive-tests")]
+mod performance_function_context;
+#[cfg(feature = "expensive-tests")]
+mod performance_hot_paths;
+#[cfg(feature = "expensive-tests")]
+mod performance_normalize_scaling;
+#[cfg(feature = "expensive-tests")]
+mod performance_parallel_speedup;
+#[cfg(feature = "expensive-tests")]
+mod performance_prepare_context;
+#[cfg(feature = "expensive-tests")]
+mod performance_proof_audit;
+#[cfg(feature = "expensive-tests")]
+mod performance_scaling;
+mod place_encoding;
+mod point_interval_len_fold;
+mod polymorphism;
+mod prepared_context_activation;
+mod prophecy;
+mod proptest_encoder;
+mod proptest_roundtrip;
+mod quantifier_collection_metadata;
+mod raii_guards;
+mod real_arithmetic;
+mod recommends;
+mod regression_corpus;
+mod result_oracles;
+mod reveal_hide;
+mod rewrite;
+mod rewrite_variant_coverage;
+mod rlimit;
+mod saturating_clamp_coverage;
+mod saturating_missing_bounds;
+mod seq_from_fn;
+mod shift_soundness;
+mod signedness_and_coercion;
+mod strategic_audit_p482;
+mod strategic_soundness_audit;
+mod struct_invariant;
+mod term_memory_limit;
+mod trait_encoding;
+mod trigger_inference_inline;
+mod types;
+mod unit;
+#[cfg(feature = "expensive-tests")]
+mod unsigned_arith_signedness;
+mod unsigned_overflow_behavior;
+mod vacuous_truth;
+mod verification_hard_paths;
+mod verification_orchestration;
+mod verify_legacy_branches;
+mod verus_builtin_wrapping_arith;
+mod width_boundary_audit;
+mod wrapping_and_checked;
+
+mod fuzz_soundness;
+mod proptest_normalization;
+mod regression_absolute_value;
+mod regression_absorption_laws;
+mod regression_access_control_properties;
+mod regression_accumulator_pattern;
+mod regression_acoustic_emission_sensor_properties;
+mod regression_active_filter_properties;
+mod regression_active_harmonic_filter_properties;
+mod regression_adc_converter_properties;
+mod regression_adc_sampling_properties;
+mod regression_aes_encryption_properties;
+mod regression_alignment_padding;
+mod regression_alu_operations;
+mod regression_amqp_protocol_properties;
+mod regression_arc_flash_relay_properties;
+mod regression_arinc429_avionics_properties;
+mod regression_arithmetic_progression;
+mod regression_array_bounds_checking;
+mod regression_array_indexing;
+mod regression_as_interface_fieldbus_properties;
+mod regression_asi_safety_bus_properties;
+mod regression_associativity;
+mod regression_audio_amplifier_properties;
+mod regression_audio_codec_properties;
+mod regression_audio_dsp_effect_properties;
+mod regression_audio_sample_properties;
+mod regression_avl_tree_properties;
+mod regression_b_tree_properties;
+mod regression_bacnet_building_properties;
+mod regression_bacnet_mstp_properties;
+mod regression_barrier_synchronization_properties;
+mod regression_base_conversion;
+mod regression_battery_management_properties;
+mod regression_binary_search_properties;
+mod regression_biss_c_encoder_interface_properties;
+mod regression_bit_counting;
+mod regression_bit_manipulation_advanced;
+mod regression_bit_packing;
+mod regression_bit_rotation;
+mod regression_bitfield_extraction;
+mod regression_bitstream_properties;
+mod regression_bitwise_complement;
+mod regression_bitwise_laws;
+mod regression_bldc_motor_properties;
+mod regression_bldc_sensorless_properties;
+mod regression_ble_protocol_properties;
+mod regression_bloom_filter_properties;
+mod regression_bool_ite;
+mod regression_boolean_arithmetic;
+mod regression_boolean_laws;
+mod regression_boolean_satisfiability;
+mod regression_bootloader_properties;
+mod regression_boundary;
+mod regression_bounded_arithmetic;
+mod regression_branch_predictor_properties;
+mod regression_brushed_dc_motor_properties;
+mod regression_brushless_gimbal_properties;
+mod regression_btree_index_properties;
+mod regression_buck_boost_regulator_properties;
+mod regression_buddy_allocator_properties;
+mod regression_bus_arbiter_properties;
+mod regression_cable_fault_locator_properties;
+mod regression_cache_controller_properties;
+mod regression_cache_replacement;
+mod regression_caching_strategy_properties;
+mod regression_can_bus_properties;
+mod regression_can_fd_extended_properties;
+mod regression_can_fd_properties;
+mod regression_canopen_protocol_properties;
+mod regression_capacitive_humidity_transmitter_properties;
+mod regression_capacitive_level_sensor_properties;
+mod regression_capacitive_proximity_sensor_properties;
+mod regression_capacitive_touch_properties;
+mod regression_carry_propagation;
+mod regression_cast_coercion;
+mod regression_cathodic_protection_controller_properties;
+mod regression_cc_link_ie_properties;
+mod regression_channel_properties;
+mod regression_charge_pump_properties;
+mod regression_checksum_properties;
+mod regression_chlorine_analyzer_properties;
+mod regression_circular_buffer;
+mod regression_class_d_amplifier_properties;
+mod regression_clock_synchronization_properties;
+mod regression_clock_tree_properties;
+mod regression_coap_protocol_properties;
+mod regression_color_space_properties;
+mod regression_communication_bus_properties;
+mod regression_comparison_chains;
+mod regression_compression_properties;
+mod regression_compression_ratio_properties;
+mod regression_conditional_arithmetic;
+mod regression_conditional_chains;
+mod regression_connection_pool_properties;
+mod regression_consensus_properties;
+mod regression_consistent_hashing_properties;
+mod regression_constant_folding;
+mod regression_container_orchestration_properties;
+mod regression_coordinate_geometry;
+mod regression_copy_on_write_properties;
+mod regression_coriolis_flow_meter_properties;
+mod regression_counter_arithmetic;
+mod regression_counter_modular;
+mod regression_cpu_cache_properties;
+mod regression_crc_polynomial_properties;
+mod regression_crypto_engine_properties;
+mod regression_crypto_hash_properties;
+mod regression_current_transformer_properties;
+mod regression_dac_output_properties;
+mod regression_dali_lighting_protocol_properties;
+mod regression_database_btree_properties;
+mod regression_database_join_properties;
+mod regression_dc_contactor_properties;
+mod regression_dcdc_converter_properties;
+mod regression_ddr_memory_properties;
+mod regression_de_morgan_laws;
+mod regression_debug_info_properties;
+mod regression_devicenet_fieldbus_properties;
+mod regression_dhcp_protocol_properties;
+mod regression_diaphragm_pump_controller_properties;
+mod regression_digital_isolator_properties;
+mod regression_digital_potentiometer_properties;
+mod regression_digital_twin_simulation_properties;
+mod regression_disk_storage_properties;
+mod regression_display_controller_properties;
+mod regression_dissolved_gas_analyzer_properties;
+mod regression_dissolved_hydrogen_monitor_properties;
+mod regression_dissolved_oxygen_sensor_properties;
+mod regression_distributive_laws;
+mod regression_division;
+mod regression_dma_controller_properties;
+mod regression_dmx512_lighting_properties;
+mod regression_dnp3_protocol_properties;
+mod regression_dns_resolution_properties;
+mod regression_dns_resolver_properties;
+mod regression_dsp_pipeline_properties;
+mod regression_ecc_memory_properties;
+mod regression_eddy_current_sensor_properties;
+mod regression_eis_spectroscopy_properties;
+mod regression_election_algorithm_properties;
+mod regression_electrochemical_impedance_analyzer_properties;
+mod regression_electromagnetic_flow_meter_properties;
+mod regression_electrostatic_precipitator_controller_properties;
+mod regression_elf_loader_properties;
+mod regression_encoding_decoding;
+mod regression_endianness_conversion;
+mod regression_equality_transitivity;
+mod regression_error_correction;
+mod regression_ethercat_protocol_properties;
+mod regression_ethernet_frame_properties;
+mod regression_ethernet_ip_protocol_properties;
+mod regression_ethernet_mac_properties;
+mod regression_ethernet_phy_properties;
+mod regression_ethernet_powerlink_properties;
+mod regression_ethernet_switch_properties;
+mod regression_euclidean_properties;
+mod regression_event_sourcing_properties;
+mod regression_ff_h1_protocol_properties;
+mod regression_fiber_bragg_grating_properties;
+mod regression_fiber_optic_gyroscope_properties;
+mod regression_fibonacci_like;
+mod regression_file_system_properties;
+mod regression_filesystem_journal_properties;
+mod regression_filesystem_permission_properties;
+mod regression_finite_automaton;
+mod regression_firewall_rule_properties;
+mod regression_fixed_point_arithmetic;
+mod regression_flag_register;
+mod regression_flash_adc_properties;
+mod regression_flash_memory_properties;
+mod regression_floating_point_properties;
+mod regression_floor_ceiling;
+mod regression_flow_meter_properties;
+mod regression_flyback_converter_properties;
+mod regression_fpga_clock_management_properties;
+mod regression_fpga_configuration_properties;
+mod regression_fuel_cell_system_properties;
+mod regression_function_composition;
+mod regression_galvanic_isolation_barrier_properties;
+mod regression_gan_fet_driver_properties;
+mod regression_garbage_collection_properties;
+mod regression_garbage_collector_concurrent;
+mod regression_garbage_collector_mark_sweep;
+mod regression_gas_sensor_properties;
+mod regression_gcd_lcm_properties;
+mod regression_gnss_rtk_receiver_properties;
+mod regression_gossip_protocol_properties;
+mod regression_gpio_controller_properties;
+mod regression_gps_receiver_properties;
+mod regression_gpu_compute_properties;
+mod regression_graph_properties;
+mod regression_h_bridge_driver_properties;
+mod regression_hall_effect_current_sensor_properties;
+mod regression_hamming_code_properties;
+mod regression_hardware_watchdog_properties;
+mod regression_hart_protocol_properties;
+mod regression_hash_properties;
+mod regression_hash_table_operations;
+mod regression_hdmi_interface_properties;
+mod regression_heap_management_properties;
+mod regression_heap_properties;
+mod regression_hsm_properties;
+mod regression_humidity_sensor_properties;
+mod regression_hydraulic_servo_valve_properties;
+mod regression_i2c_protocol_properties;
+mod regression_i2s_audio_interface_properties;
+mod regression_idempotent_operations;
+mod regression_identity_operations;
+mod regression_iec60870_5_104_properties;
+mod regression_iec61850_goose_properties;
+mod regression_iec62443_cybersecurity_properties;
+mod regression_igbt_module_properties;
+mod regression_igbt_power_module_properties;
+mod regression_implication;
+mod regression_imu_sensor_properties;
+mod regression_inclinometer_sensor_properties;
+mod regression_inductive_proximity_properties;
+mod regression_industrial_ups_properties;
+mod regression_industrial_weighing_scale_properties;
+mod regression_inertial_navigation_properties;
+mod regression_instruction_pipeline_properties;
+mod regression_interpolation;
+mod regression_interrupt_controller_properties;
+mod regression_interval_arithmetic;
+mod regression_interval_overlap;
+mod regression_invariant_maintenance;
+mod regression_io_link_master_properties;
+mod regression_io_scheduler_properties;
+mod regression_iolink_protocol_properties;
+mod regression_ipc_mechanism_properties;
+mod regression_isa_properties;
+mod regression_isolated_gate_driver_properties;
+mod regression_iterator_patterns;
+mod regression_jtag_debug_properties;
+mod regression_knx_building_automation_properties;
+mod regression_laser_diode_driver_properties;
+mod regression_laser_distance_meter_properties;
+mod regression_lcd_panel_properties;
+mod regression_let_binding_chains;
+mod regression_let_scope;
+mod regression_lin_bus_properties;
+mod regression_linear_combination;
+mod regression_linked_list_ops;
+mod regression_linker_script_properties;
+mod regression_lithium_battery_charger_properties;
+mod regression_load_balancer_properties;
+mod regression_load_cell_properties;
+mod regression_lock_free_properties;
+mod regression_log_structured_merge_tree;
+mod regression_logical_connectives;
+mod regression_lookup_table;
+mod regression_lora_protocol_properties;
+mod regression_lru_cache_properties;
+mod regression_lvds_interface_properties;
+mod regression_lvdt_displacement_transducer_properties;
+mod regression_lvdt_sensor_properties;
+mod regression_magnetic_encoder_properties;
+mod regression_magnetic_flow_switch_properties;
+mod regression_magnetic_levitation_properties;
+mod regression_magnetometer_sensor_properties;
+mod regression_magnetostrictive_level_transmitter_properties;
+mod regression_magnetron_sputtering_controller_properties;
+mod regression_mass_flow_controller_properties;
+mod regression_mass_spectrometer_detector_properties;
+mod regression_math_int;
+mod regression_matrix_operations;
+mod regression_mbus_metering_protocol_properties;
+mod regression_median_properties;
+mod regression_memory_allocator_properties;
+mod regression_memory_barrier_properties;
+mod regression_memory_layout_properties;
+mod regression_memory_mapped_io_properties;
+mod regression_memory_ordering_properties;
+mod regression_memory_pool;
+mod regression_mems_accelerometer_properties;
+mod regression_mems_gyroscope_properties;
+mod regression_message_queue_properties;
+mod regression_min_max_reasoning;
+mod regression_mipi_dsi_properties;
+mod regression_mixed_widths;
+mod regression_mmu_properties;
+mod regression_modbus_ascii_properties;
+mod regression_modbus_protocol_properties;
+mod regression_modbus_tcp_properties;
+mod regression_modular_arithmetic;
+mod regression_monotonic_sequences;
+mod regression_motor_control_properties;
+mod regression_mpu_properties;
+mod regression_mqtt_protocol_properties;
+mod regression_multi_type_interaction;
+mod regression_multiple_constraints;
+mod regression_nand_flash_controller_properties;
+mod regression_nand_flash_properties;
+mod regression_negation;
+mod regression_network_flow_properties;
+mod regression_network_packet_properties;
+mod regression_nmea0183_marine_properties;
+mod regression_nmea2000_marine_properties;
+mod regression_nuclear_radiation_detector_properties;
+mod regression_number_theory;
+mod regression_nvme_properties;
+mod regression_oled_display_properties;
+mod regression_opc_da_classic_protocol_properties;
+mod regression_opc_da_protocol_properties;
+mod regression_opcua_industrial_properties;
+mod regression_opcua_pubsub_properties;
+mod regression_optical_encoder_interpolation_properties;
+mod regression_optical_power_meter_properties;
+mod regression_optical_sensor_properties;
+mod regression_opto_coupler_properties;
+mod regression_ordering;
+mod regression_overflow;
+mod regression_overflow_boundary;
+mod regression_overflow_detection;
+mod regression_ozone_generator_controller_properties;
+mod regression_page_replacement_properties;
+mod regression_page_table_operations;
+mod regression_parity;
+mod regression_partial_discharge_monitor_properties;
+mod regression_paxos_properties;
+mod regression_pcie_properties;
+mod regression_peristaltic_pump_controller_properties;
+mod regression_permutation_properties;
+mod regression_ph_sensor_properties;
+mod regression_photodiode_amplifier_properties;
+mod regression_photoionization_detector_properties;
+mod regression_photoionization_mass_spectrometer_properties;
+mod regression_pid_temperature_controller_properties;
+mod regression_piecewise_functions;
+mod regression_piezo_energy_harvester_properties;
+mod regression_piezoelectric_energy_harvester_properties;
+mod regression_piezoelectric_sensor_properties;
+mod regression_pipeline_stage_properties;
+mod regression_platinum_resistance_thermometer_properties;
+mod regression_plc_io_module_properties;
+mod regression_plc_ladder_properties;
+mod regression_pll_clock_properties;
+mod regression_pll_synthesizer_properties;
+mod regression_pneumatic_actuator_properties;
+mod regression_pneumatic_valve_positioner_properties;
+mod regression_power_factor_correction_properties;
+mod regression_power_management_properties;
+mod regression_power_mosfet_properties;
+mod regression_power_of_two;
+mod regression_power_supply_properties;
+mod regression_powerlink_ethernet_properties;
+mod regression_predicate_logic;
+mod regression_prefix_sum;
+mod regression_pressure_sensor_properties;
+mod regression_priority_queue;
+mod regression_process_scheduling_properties;
+mod regression_producer_consumer_properties;
+mod regression_profibus_dp_properties;
+mod regression_profibus_pa_properties;
+mod regression_profinet_protocol_properties;
+mod regression_protocol_state;
+mod regression_proximity_switch_properties;
+mod regression_pwm_controller_properties;
+mod regression_pyrometer_thermometer_properties;
+mod regression_quadrature_encoder_properties;
+mod regression_quantifier;
+mod regression_queue_operations;
+mod regression_quorum_system_properties;
+mod regression_radar_level_sensor_properties;
+mod regression_radar_level_transmitter_properties;
+mod regression_raft_log_properties;
+mod regression_raid_properties;
+mod regression_range_constraints;
+mod regression_rate_limiter_properties;
+mod regression_real_arithmetic;
+mod regression_real_time_clock_properties;
+mod regression_red_black_tree_properties;
+mod regression_reed_solomon_properties;
+mod regression_reference_counting;
+mod regression_register_file_properties;
+mod regression_relay_driver_properties;
+mod regression_resolver_absolute_position_properties;
+mod regression_resonant_llc_converter_properties;
+mod regression_resource_allocation;
+mod regression_retry_logic_properties;
+mod regression_rfid_nfc_properties;
+mod regression_rgb_led_driver_properties;
+mod regression_ring_buffer;
+mod regression_rotary_encoder_properties;
+mod regression_routing_table_properties;
+mod regression_rs232_serial_properties;
+mod regression_rs485_serial_properties;
+mod regression_rtd_sensor_properties;
+mod regression_rtos_scheduler_properties;
+mod regression_rtos_scheduling_properties;
+mod regression_sae_j1939_vehicle_bus_properties;
+mod regression_safetynet_p_protocol_properties;
+mod regression_sata_storage_properties;
+mod regression_scara_robot_kinematics_properties;
+mod regression_scheduler_properties;
+mod regression_scheduling;
+mod regression_screw_compressor_controller_properties;
+mod regression_scsi_command_properties;
+mod regression_sd_card_properties;
+mod regression_sdn_openflow_properties;
+mod regression_sdram_controller_properties;
+mod regression_semaphore_operations;
+mod regression_sensor_calibration_properties;
+mod regression_sensor_fusion_properties;
+mod regression_sercos_iii_protocol_properties;
+mod regression_serial_eeprom_properties;
+mod regression_servo_control_properties;
+mod regression_servo_drive_properties;
+mod regression_set_theory;
+mod regression_shift_operations;
+mod regression_sigma_delta_adc_properties;
+mod regression_sign_extension;
+mod regression_signal_processing_properties;
+mod regression_signed_comparison;
+mod regression_signed_overflow;
+mod regression_sil_safety_system_properties;
+mod regression_silicon_carbide_device_properties;
+mod regression_silicon_carbide_mosfet_driver_properties;
+mod regression_simd_vector_properties;
+mod regression_skip_list_properties;
+mod regression_slab_allocator_properties;
+mod regression_sliding_window_protocol;
+mod regression_smoke_detector_properties;
+mod regression_smps_properties;
+mod regression_snapshot_isolation_properties;
+mod regression_solar_charge_properties;
+mod regression_solenoid_valve_properties;
+mod regression_solid_state_relay_properties;
+mod regression_sonar_acoustic_sensor_properties;
+mod regression_sorting_invariants;
+mod regression_spi_flash_properties;
+mod regression_spi_protocol_properties;
+mod regression_spi_slave_properties;
+mod regression_square_properties;
+mod regression_stack_operations;
+mod regression_state_machine;
+mod regression_stepper_closed_loop_properties;
+mod regression_stepper_driver_ic_properties;
+mod regression_stepper_motor_indexer_properties;
+mod regression_stepper_motor_properties;
+mod regression_strain_gauge_load_cell_properties;
+mod regression_strain_gauge_properties;
+mod regression_string_encoding;
+mod regression_supercapacitor_energy_storage_properties;
+mod regression_swap_pattern;
+mod regression_switch_fabric_properties;
+mod regression_switched_capacitor_filter_properties;
+mod regression_symmetric_operations;
+mod regression_synchronous_buck_converter_properties;
+mod regression_synchronous_reluctance_motor_properties;
+mod regression_task_scheduler_properties;
+mod regression_tcp_congestion_properties;
+mod regression_tcp_ip_stack_properties;
+mod regression_thermal_imaging_camera_properties;
+mod regression_thermal_management_properties;
+mod regression_thermocouple_properties;
+mod regression_thermoelectric_cooler_controller_properties;
+mod regression_thermoelectric_cooler_properties;
+mod regression_thermoelectric_generator_properties;
+mod regression_thermostat_control_properties;
+mod regression_three_way_comparison;
+mod regression_thyristor_power_controller_properties;
+mod regression_timer_counter_properties;
+mod regression_tlb_properties;
+mod regression_tls_handshake_properties;
+mod regression_token_bucket_algorithm;
+mod regression_token_ring_properties;
+mod regression_transaction_properties;
+mod regression_tree_properties;
+mod regression_triangular_numbers;
+mod regression_tsn_networking_properties;
+mod regression_turbidity_sensor_properties;
+mod regression_turbomolecular_pump_controller_properties;
+mod regression_two_complement;
+mod regression_two_pointer_technique;
+mod regression_two_variable_algebra;
+mod regression_type_tag_properties;
+mod regression_u64_arithmetic;
+mod regression_uart_protocol_properties;
+mod regression_ultrasonic_distance_sensor_properties;
+mod regression_ultrasonic_sensor_properties;
+mod regression_ultrasonic_welding_controller_properties;
+mod regression_ultrasound_imaging_properties;
+mod regression_unsigned_wrapping;
+mod regression_usb_endpoint_properties;
+mod regression_usb_host_properties;
+mod regression_utf8_encoding_properties;
+mod regression_vacuum_gauge_controller_properties;
+mod regression_value_clamping;
+mod regression_varan_ethernet_properties;
+mod regression_variable_frequency_drive_properties;
+mod regression_variable_swapping;
+mod regression_vector_clock_properties;
+mod regression_versioning_properties;
+mod regression_vibrating_wire_sensor_properties;
+mod regression_vibration_analysis_properties;
+mod regression_virtio_properties;
+mod regression_virtual_memory_properties;
+mod regression_voltage_regulator_properties;
+mod regression_vortex_flow_meter_properties;
+mod regression_wal_properties;
+mod regression_watchdog_timer_properties;
+mod regression_water_quality_multiparameter_properties;
+mod regression_weighbridge_controller_properties;
+mod regression_wifi_protocol_properties;
+mod regression_window_sliding;
+mod regression_wirelesshart_protocol_properties;
+mod regression_write_ahead_log_internals;
+mod regression_xenon_flash_lamp_controller_properties;
+mod regression_zener_diode_voltage_reference_properties;
+mod regression_zigbee_protocol_properties;
+
+mod regression_accelerator_mass_spectrometer_properties;
+mod regression_acoustic_doppler_profiler_properties;
+mod regression_acoustic_emission_monitor_properties;
+mod regression_air_handling_unit_controller_properties;
+mod regression_airlift_pump_controller_properties;
+mod regression_ambient_ionization_mass_spectrometer_properties;
+mod regression_ambient_pressure_photoionization_mass_spectrometer_properties;
+mod regression_ammonia_compressor_controller_properties;
+mod regression_angle_resolved_photoemission_spectrometer_properties;
+mod regression_archimedes_screw_pump_controller_properties;
+mod regression_atmospheric_flow_tube_mass_spectrometer_properties;
+mod regression_atmospheric_pressure_photoionization_mass_spectrometer_properties;
+mod regression_atmospheric_solids_analysis_mass_spectrometer_properties;
+mod regression_atomic_absorption_spectrometer_properties;
+mod regression_atomic_emission_spectrometer_properties;
+mod regression_auger_electron_spectrometer_properties;
+mod regression_axial_compressor_controller_properties;
+mod regression_axial_fan_controller_properties;
+mod regression_axial_flow_pump_controller_properties;
+mod regression_axial_piston_pump_controller_properties;
+mod regression_baghouse_filter_controller_properties;
+mod regression_bellows_compressor_controller_properties;
+mod regression_bellows_pump_controller_properties;
+mod regression_belt_filter_press_controller_properties;
+mod regression_belt_scale_properties;
+mod regression_bent_axis_pump_controller_properties;
+mod regression_canned_motor_pump_controller_properties;
+mod regression_canopen_safety_protocol_properties;
+mod regression_capacitance_level_sensor_properties;
+mod regression_capillary_electrophoresis_spectrometer_properties;
+mod regression_cathodoluminescence_spectrometer_properties;
+mod regression_cavity_ringdown_spectrometer_properties;
+mod regression_cement_kiln_controller_properties;
+mod regression_centrifugal_chiller_compressor_controller_properties;
+mod regression_centrifugal_compressor_controller_properties;
+mod regression_centrifugal_fan_controller_properties;
+mod regression_centrifugal_pump_controller_properties;
+mod regression_centrifugal_refrigeration_compressor_controller_properties;
+mod regression_chemical_ionization_mass_spectrometer_properties;
+mod regression_color_spectrophotometer_properties;
+mod regression_confocal_laser_scanner_properties;
+mod regression_confocal_xrf_spectrometer_properties;
+mod regression_coriolis_mass_flow_meter_properties;
+mod regression_cross_flow_fan_controller_properties;
+mod regression_cryogenic_compressor_controller_properties;
+mod regression_cryopump_controller_properties;
+mod regression_desorption_electrospray_ionization_mass_spectrometer_properties;
+mod regression_diaphragm_compressor_controller_properties;
+mod regression_diaphragm_metering_pump_controller_properties;
+mod regression_dielectric_strength_tester_properties;
+mod regression_differential_scanning_calorimeter_properties;
+mod regression_diffusion_pump_controller_properties;
+mod regression_digital_inclinometer_properties;
+mod regression_digital_load_cell_indicator_properties;
+mod regression_digital_multimeter_calibrator_properties;
+mod regression_digital_potentiometer_controller_properties;
+mod regression_digital_surface_roughness_tester_properties;
+mod regression_digital_torque_wrench_properties;
+mod regression_direct_analysis_real_time_mass_spectrometer_properties;
+mod regression_dissolved_oxygen_analyzer_properties;
+mod regression_double_diaphragm_pump_controller_properties;
+mod regression_dry_screw_compressor_controller_properties;
+mod regression_dynamic_light_scattering_analyzer_properties;
+mod regression_eccentric_disc_pump_controller_properties;
+mod regression_eddy_current_conductivity_meter_properties;
+mod regression_eddy_current_testing_instrument_properties;
+mod regression_electric_arc_furnace_controller_properties;
+mod regression_electrochemical_compressor_controller_properties;
+mod regression_electrochemical_workstation_properties;
+mod regression_electrolysis_cell_controller_properties;
+mod regression_electromagnetic_flowmeter_properties;
+mod regression_electron_beam_welder_properties;
+mod regression_electron_energy_loss_spectrometer_properties;
+mod regression_electron_paramagnetic_resonance_spectrometer_properties;
+mod regression_electron_probe_microanalyzer_properties;
+mod regression_electroplating_rectifier_controller_properties;
+mod regression_electrospray_ionization_mass_spectrometer_properties;
+mod regression_energy_dispersive_xrf_spectrometer_properties;
+mod regression_ethernet_powerlink_protocol_properties;
+mod regression_excimer_laser_controller_properties;
+mod regression_external_gear_pump_controller_properties;
+mod regression_extractive_electrospray_ionization_mass_spectrometer_properties;
+mod regression_faims_mass_spectrometer_properties;
+mod regression_fast_atom_bombardment_mass_spectrometer_properties;
+mod regression_fiber_bragg_grating_interrogator_properties;
+mod regression_field_asymmetric_ion_mobility_spectrometer_properties;
+mod regression_field_desorption_mass_spectrometer_properties;
+mod regression_field_flow_fractionation_spectrometer_properties;
+mod regression_flexible_impeller_pump_controller_properties;
+mod regression_flowing_afterglow_mass_spectrometer_properties;
+mod regression_fluidized_bed_reactor_properties;
+mod regression_fluorescence_microscope_controller_properties;
+mod regression_fourier_transform_infrared_spectrometer_properties;
+mod regression_fourier_transform_ion_cyclotron_resonance_spectrometer_properties;
+mod regression_fourier_transform_ir_spectrometer_properties;
+mod regression_free_piston_compressor_controller_properties;
+mod regression_gas_booster_compressor_controller_properties;
+mod regression_gas_chromatograph_controller_properties;
+mod regression_gas_chromatograph_properties;
+mod regression_gas_chromatography_mass_spectrometer_properties;
+mod regression_gas_detection_panel_properties;
+mod regression_gas_turbine_exhaust_analyzer_properties;
+mod regression_gear_pump_controller_properties;
+mod regression_gel_permeation_chromatograph_properties;
+mod regression_geophone_seismic_sensor_properties;
+mod regression_gerotor_pump_controller_properties;
+mod regression_glow_discharge_mass_spectrometer_properties;
+mod regression_glow_discharge_spectrometer_properties;
+mod regression_hall_effect_gaussmeter_properties;
+mod regression_hermetic_compressor_controller_properties;
+mod regression_hermetic_reciprocating_compressor_controller_properties;
+mod regression_hermetic_scroll_compressor_controller_properties;
+mod regression_hose_pump_controller_properties;
+mod regression_hydraulic_power_unit_controller_properties;
+mod regression_hydraulic_ram_pump_controller_properties;
+mod regression_induction_heating_controller_properties;
+mod regression_inductive_hardness_tester_properties;
+mod regression_inductive_loop_detector_properties;
+mod regression_inductively_coupled_plasma_mass_spectrometer_properties;
+mod regression_inductively_coupled_plasma_optical_emission_spectrometer_properties;
+mod regression_inductively_coupled_plasma_spectrometer_properties;
+mod regression_industrial_agitated_filter_dryer_properties;
+mod regression_industrial_agitated_nutsche_dryer_properties;
+mod regression_industrial_agitated_thin_film_dryer_properties;
+mod regression_industrial_agitator_controller_properties;
+mod regression_industrial_autoclave_controller_properties;
+mod regression_industrial_ball_valve_actuator_properties;
+mod regression_industrial_band_dryer_properties;
+mod regression_industrial_basket_centrifuge_controller_properties;
+mod regression_industrial_belt_conveyor_dryer_properties;
+mod regression_industrial_belt_filter_press_properties;
+mod regression_industrial_butterfly_valve_controller_properties;
+mod regression_industrial_capsule_filler_properties;
+mod regression_industrial_cascade_impingement_dryer_properties;
+mod regression_industrial_centrifugal_dryer_properties;
+mod regression_industrial_centrifuge_controller_properties;
+mod regression_industrial_chiller_controller_properties;
+mod regression_industrial_coating_pan_properties;
+mod regression_industrial_conical_screw_dryer_properties;
+mod regression_industrial_conical_screw_mixer_properties;
+mod regression_industrial_contact_belt_dryer_properties;
+mod regression_industrial_contact_drum_dryer_properties;
+mod regression_industrial_contact_dryer_properties;
+mod regression_industrial_continuous_band_dryer_properties;
+mod regression_industrial_continuous_tray_dryer_properties;
+mod regression_industrial_conveyor_scale_properties;
+mod regression_industrial_crystallizer_controller_properties;
+mod regression_industrial_decanter_centrifuge_properties;
+mod regression_industrial_densitometer_properties;
+mod regression_industrial_desiccant_dryer_properties;
+mod regression_industrial_disc_stack_separator_properties;
+mod regression_industrial_double_cone_dryer_properties;
+mod regression_industrial_drum_coater_properties;
+mod regression_industrial_drum_dryer_controller_properties;
+mod regression_industrial_drum_dryer_properties;
+mod regression_industrial_electrohydrodynamic_dryer_properties;
+mod regression_industrial_electrokinetic_dewatering_properties;
+mod regression_industrial_ethernet_switch_properties;
+mod regression_industrial_fan_controller_properties;
+mod regression_industrial_flash_dryer_controller_properties;
+mod regression_industrial_flash_dryer_properties;
+mod regression_industrial_fluid_bed_granulator_properties;
+mod regression_industrial_fluidized_bed_coating_dryer_properties;
+mod regression_industrial_fluidized_bed_combustor_properties;
+mod regression_industrial_fluidized_bed_dryer_properties;
+mod regression_industrial_fluidized_granulation_dryer_properties;
+mod regression_industrial_foam_mat_dryer_properties;
+mod regression_industrial_freeze_dryer_controller_properties;
+mod regression_industrial_freeze_granulator_properties;
+mod regression_industrial_gas_turbine_controller_properties;
+mod regression_industrial_granulation_dryer_properties;
+mod regression_industrial_granulator_controller_properties;
+mod regression_industrial_heat_pump_dryer_properties;
+mod regression_industrial_high_shear_granulator_properties;
+mod regression_industrial_hollow_paddle_dryer_properties;
+mod regression_industrial_homogenizer_controller_properties;
+mod regression_industrial_horizontal_decanter_centrifuge_properties;
+mod regression_industrial_humidifier_controller_properties;
+mod regression_industrial_impingement_belt_dryer_properties;
+mod regression_industrial_impingement_dryer_properties;
+mod regression_industrial_impingement_jet_dryer_properties;
+mod regression_industrial_infrared_conveyor_dryer_properties;
+mod regression_industrial_infrared_dryer_properties;
+mod regression_industrial_ink_jet_controller_properties;
+mod regression_industrial_jet_impingement_dryer_properties;
+mod regression_industrial_lyophilizer_dryer_properties;
+mod regression_industrial_mechanically_agitated_dryer_properties;
+mod regression_industrial_microfluidic_evaporator_properties;
+mod regression_industrial_microwave_dryer_properties;
+mod regression_industrial_microwave_vacuum_dryer_properties;
+mod regression_industrial_nauta_mixer_dryer_properties;
+mod regression_industrial_osmotic_dryer_properties;
+mod regression_industrial_oven_controller_properties;
+mod regression_industrial_ozone_monitor_properties;
+mod regression_industrial_paddle_dryer_controller_properties;
+mod regression_industrial_paddle_dryer_properties;
+mod regression_industrial_paddle_mixer_dryer_properties;
+mod regression_industrial_pan_granulator_controller_properties;
+mod regression_industrial_pan_granulator_properties;
+mod regression_industrial_pelletizer_controller_properties;
+mod regression_industrial_planetary_mixer_properties;
+mod regression_industrial_plate_heat_exchanger_properties;
+mod regression_industrial_pneumatic_conveying_dryer_properties;
+mod regression_industrial_pneumatic_flash_dryer_properties;
+mod regression_industrial_pulsation_dryer_properties;
+mod regression_industrial_pulse_combustion_dryer_properties;
+mod regression_industrial_pulsed_fluid_bed_dryer_properties;
+mod regression_industrial_pusher_centrifuge_properties;
+mod regression_industrial_radiant_heat_dryer_properties;
+mod regression_industrial_radiant_panel_dryer_properties;
+mod regression_industrial_refractance_window_dryer_properties;
+mod regression_industrial_ribbon_blender_dryer_properties;
+mod regression_industrial_ribbon_blender_properties;
+mod regression_industrial_ribbon_mixer_properties;
+mod regression_industrial_robot_controller_properties;
+mod regression_industrial_roller_compactor_properties;
+mod regression_industrial_roller_mill_properties;
+mod regression_industrial_rotary_drum_dryer_properties;
+mod regression_industrial_rotary_kiln_controller_properties;
+mod regression_industrial_rotary_kiln_properties;
+mod regression_industrial_rotary_vacuum_dryer_properties;
+mod regression_industrial_screw_conveyor_dryer_properties;
+mod regression_industrial_solar_dryer_properties;
+mod regression_industrial_solar_kiln_dryer_properties;
+mod regression_industrial_spin_flash_dryer_properties;
+mod regression_industrial_spray_dryer_controller_properties;
+mod regression_industrial_spray_dryer_properties;
+mod regression_industrial_steam_tube_dryer_properties;
+mod regression_industrial_supercritical_co2_dryer_properties;
+mod regression_industrial_superheated_steam_dryer_properties;
+mod regression_industrial_tablet_press_properties;
+mod regression_industrial_thin_film_dryer_properties;
+mod regression_industrial_through_circulation_dryer_properties;
+mod regression_industrial_tray_dryer_controller_properties;
+mod regression_industrial_tray_dryer_oven_properties;
+mod regression_industrial_tube_mill_controller_properties;
+mod regression_industrial_tubular_bowl_centrifuge_properties;
+mod regression_industrial_tunnel_dryer_properties;
+mod regression_industrial_tunnel_kiln_dryer_properties;
+mod regression_industrial_twin_screw_extruder_properties;
+mod regression_industrial_vacuum_arc_dryer_properties;
+mod regression_industrial_vacuum_belt_dryer_properties;
+mod regression_industrial_vacuum_degasser_properties;
+mod regression_industrial_vacuum_dryer_properties;
+mod regression_industrial_vacuum_freeze_dryer_properties;
+mod regression_industrial_vacuum_mixer_controller_properties;
+mod regression_industrial_vacuum_paddle_dryer_properties;
+mod regression_industrial_vacuum_shelf_dryer_properties;
+mod regression_industrial_vacuum_tray_dryer_properties;
+mod regression_industrial_vibrating_fluidized_bed_dryer_properties;
+mod regression_industrial_vibratory_fluidized_bed_dryer_properties;
+mod regression_industrial_vibratory_fluidized_dryer_properties;
+mod regression_industrial_water_softener_properties;
+mod regression_industrial_wurster_coater_properties;
+mod regression_injection_molding_controller_properties;
+mod regression_internal_gear_pump_controller_properties;
+mod regression_ion_chromatograph_controller_properties;
+mod regression_ion_chromatograph_properties;
+mod regression_ion_chromatography_spectrometer_properties;
+mod regression_ion_mobility_spectrometer_properties;
+mod regression_ion_pump_controller_properties;
+mod regression_ion_trap_mass_spectrometer_properties;
+mod regression_ionic_liquid_compressor_controller_properties;
+mod regression_isotope_ratio_mass_spectrometer_properties;
+mod regression_jet_pump_controller_properties;
+mod regression_karl_fischer_titrator_properties;
+mod regression_labyrinth_seal_compressor_controller_properties;
+mod regression_laser_ablation_icp_spectrometer_properties;
+mod regression_laser_ablation_mass_spectrometer_properties;
+mod regression_laser_ablation_spectrometer_properties;
+mod regression_laser_diffraction_particle_sizer_properties;
+mod regression_laser_distance_sensor_properties;
+mod regression_laser_induced_breakdown_spectrometer_properties;
+mod regression_laser_interferometer_properties;
+mod regression_laser_microprobe_mass_spectrometer_properties;
+mod regression_laser_particle_counter_properties;
+mod regression_laser_particle_size_analyzer_properties;
+mod regression_libs_spectrometer_properties;
+mod regression_lightning_protection_controller_properties;
+mod regression_linear_motor_compressor_controller_properties;
+mod regression_linear_variable_displacement_transducer_properties;
+mod regression_liquid_chromatograph_controller_properties;
+mod regression_liquid_chromatography_mass_spectrometer_properties;
+mod regression_liquid_piston_compressor_controller_properties;
+mod regression_liquid_ring_compressor_controller_properties;
+mod regression_liquid_ring_vacuum_compressor_controller_properties;
+mod regression_liquid_secondary_ion_mass_spectrometer_properties;
+mod regression_load_moment_indicator_properties;
+mod regression_lobe_pump_controller_properties;
+mod regression_mag_drive_sealless_pump_controller_properties;
+mod regression_magnetic_bearing_compressor_controller_properties;
+mod regression_magnetic_bearing_controller_properties;
+mod regression_magnetic_drive_pump_controller_properties;
+mod regression_magnetic_particle_inspector_properties;
+mod regression_magnetic_sector_mass_spectrometer_properties;
+mod regression_marine_autopilot_controller_properties;
+mod regression_mass_spectrometer_controller_properties;
+mod regression_matrix_assisted_laser_desorption_mass_spectrometer_properties;
+mod regression_mems_pressure_transducer_properties;
+mod regression_micro_xrf_spectrometer_properties;
+mod regression_microwave_moisture_meter_properties;
+mod regression_microwave_plasma_emission_spectrometer_properties;
+mod regression_mixed_flow_fan_controller_properties;
+mod regression_mixed_flow_pump_controller_properties;
+mod regression_mossbauer_spectrometer_properties;
+mod regression_multistage_blower_controller_properties;
+mod regression_multistage_centrifugal_pump_controller_properties;
+mod regression_nano_electrospray_ionization_mass_spectrometer_properties;
+mod regression_near_infrared_spectrometer_properties;
+mod regression_neutron_activation_spectrometer_properties;
+mod regression_neutron_moisture_gauge_properties;
+mod regression_non_evaporable_getter_pump_controller_properties;
+mod regression_nuclear_magnetic_resonance_spectrometer_properties;
+mod regression_nutating_disc_compressor_controller_properties;
+mod regression_oil_flooded_screw_compressor_controller_properties;
+mod regression_oil_free_scroll_compressor_controller_properties;
+mod regression_oil_injected_rotary_vane_compressor_controller_properties;
+mod regression_optical_emission_spectrometer_properties;
+mod regression_optical_time_domain_reflectometer_properties;
+mod regression_orbiting_scroll_pump_controller_properties;
+mod regression_orbitrap_mass_spectrometer_properties;
+mod regression_paper_moisture_analyzer_properties;
+mod regression_paper_spray_mass_spectrometer_properties;
+mod regression_pelton_turbine_controller_properties;
+mod regression_penning_ionization_mass_spectrometer_properties;
+mod regression_peristaltic_compressor_controller_properties;
+mod regression_photoacoustic_spectrometer_properties;
+mod regression_photoelectric_colorimeter_properties;
+mod regression_piezo_valve_controller_properties;
+mod regression_piezoelectric_force_sensor_properties;
+mod regression_piston_pump_controller_properties;
+mod regression_pixe_spectrometer_properties;
+mod regression_plasma_desorption_mass_spectrometer_properties;
+mod regression_plasma_nitriding_controller_properties;
+mod regression_plunger_pump_controller_properties;
+mod regression_pneumatic_conveying_controller_properties;
+mod regression_pneumatic_diaphragm_pump_controller_properties;
+mod regression_pneumatic_positioner_properties;
+mod regression_portable_xrf_spectrometer_properties;
+mod regression_precision_arbitrary_waveform_generator_properties;
+mod regression_precision_balance_controller_properties;
+mod regression_precision_battery_impedance_tester_properties;
+mod regression_precision_bit_error_rate_tester_properties;
+mod regression_precision_bus_analyzer_properties;
+mod regression_precision_cable_fault_locator_properties;
+mod regression_precision_capacitance_bridge_properties;
+mod regression_precision_circuit_breaker_analyzer_properties;
+mod regression_precision_compliance_analyzer_properties;
+mod regression_precision_contact_resistance_tester_properties;
+mod regression_precision_crosstalk_analyzer_properties;
+mod regression_precision_current_shunt_calibrator_properties;
+mod regression_precision_current_source_properties;
+mod regression_precision_decade_inductor_properties;
+mod regression_precision_dielectric_strength_tester_properties;
+mod regression_precision_digital_anemometer_properties;
+mod regression_precision_digital_bridge_properties;
+mod regression_precision_digital_manometer_properties;
+mod regression_precision_digital_multimeter_properties;
+mod regression_precision_digital_phosphor_oscilloscope_properties;
+mod regression_precision_earth_resistance_tester_properties;
+mod regression_precision_eddy_current_conductivity_meter_properties;
+mod regression_precision_electrometer_properties;
+mod regression_precision_ellipsometer_properties;
+mod regression_precision_eye_diagram_analyzer_properties;
+mod regression_precision_four_point_probe_meter_properties;
+mod regression_precision_frequency_counter_properties;
+mod regression_precision_frequency_response_analyzer_properties;
+mod regression_precision_gain_phase_analyzer_properties;
+mod regression_precision_ground_resistance_tester_properties;
+mod regression_precision_harmonic_distortion_analyzer_properties;
+mod regression_precision_hipot_tester_properties;
+mod regression_precision_impedance_analyzer_properties;
+mod regression_precision_impedance_spectroscopy_analyzer_properties;
+mod regression_precision_inductance_bridge_properties;
+mod regression_precision_inductance_meter_properties;
+mod regression_precision_insulation_resistance_tester_properties;
+mod regression_precision_jitter_analyzer_properties;
+mod regression_precision_kelvin_bridge_properties;
+mod regression_precision_kelvin_probe_meter_properties;
+mod regression_precision_laser_doppler_vibrometer_properties;
+mod regression_precision_lcr_bridge_properties;
+mod regression_precision_lcr_meter_properties;
+mod regression_precision_lightning_impulse_tester_properties;
+mod regression_precision_lock_in_amplifier_properties;
+mod regression_precision_logic_state_analyzer_properties;
+mod regression_precision_magnetic_field_meter_properties;
+mod regression_precision_micro_raman_spectrometer_properties;
+mod regression_precision_milliohm_meter_properties;
+mod regression_precision_modulation_analyzer_properties;
+mod regression_precision_motor_winding_resistance_tester_properties;
+mod regression_precision_nanoindentation_tester_properties;
+mod regression_precision_nanovoltmeter_properties;
+mod regression_precision_network_analyzer_properties;
+mod regression_precision_noise_figure_meter_properties;
+mod regression_precision_optical_power_meter_properties;
+mod regression_precision_optical_pyrometer_properties;
+mod regression_precision_oscilloscope_properties;
+mod regression_precision_partial_discharge_analyzer_properties;
+mod regression_precision_partial_discharge_detector_properties;
+mod regression_precision_phase_angle_meter_properties;
+mod regression_precision_phase_meter_properties;
+mod regression_precision_phase_noise_analyzer_properties;
+mod regression_precision_phase_rotation_meter_properties;
+mod regression_precision_picoammeter_properties;
+mod regression_precision_power_factor_meter_properties;
+mod regression_precision_power_integrity_analyzer_properties;
+mod regression_precision_power_quality_analyzer_properties;
+mod regression_precision_power_spectrum_analyzer_properties;
+mod regression_precision_programmable_power_supply_properties;
+mod regression_precision_protocol_analyzer_properties;
+mod regression_precision_relay_test_system_properties;
+mod regression_precision_resistance_decade_box_properties;
+mod regression_precision_rf_power_sensor_properties;
+mod regression_precision_rms_voltmeter_properties;
+mod regression_precision_scanning_acoustic_microscope_properties;
+mod regression_precision_signal_generator_properties;
+mod regression_precision_signal_integrity_analyzer_properties;
+mod regression_precision_signal_source_analyzer_properties;
+mod regression_precision_spectrum_analyzer_properties;
+mod regression_precision_strain_gauge_calibrator_properties;
+mod regression_precision_surface_roughness_tester_properties;
+mod regression_precision_surge_arrester_tester_properties;
+mod regression_precision_surge_generator_tester_properties;
+mod regression_precision_sweep_frequency_response_analyzer_properties;
+mod regression_precision_tan_delta_tester_properties;
+mod regression_precision_thermal_imaging_analyzer_properties;
+mod regression_precision_thermistor_meter_properties;
+mod regression_precision_thermocouple_calibrator_properties;
+mod regression_precision_time_interval_analyzer_properties;
+mod regression_precision_transformer_turns_ratio_tester_properties;
+mod regression_precision_transformer_winding_analyzer_properties;
+mod regression_precision_transient_recorder_properties;
+mod regression_precision_vector_voltmeter_properties;
+mod regression_precision_vibration_analyzer_properties;
+mod regression_precision_voltage_divider_calibrator_properties;
+mod regression_precision_voltage_reference_properties;
+mod regression_precision_waveform_digitizer_properties;
+mod regression_precision_waveform_monitor_properties;
+mod regression_precision_wheatstone_bridge_properties;
+mod regression_precision_white_light_interferometer_properties;
+mod regression_precision_winding_resistance_tester_properties;
+mod regression_precision_winding_temperature_tester_properties;
+mod regression_progressing_cavity_pump_controller_properties;
+mod regression_progressive_cavity_pump_controller_properties;
+mod regression_progressive_displacement_pump_controller_properties;
+mod regression_proton_transfer_reaction_mass_spectrometer_properties;
+mod regression_pyrometer_properties;
+mod regression_quadrupole_mass_spectrometer_properties;
+mod regression_quintuplex_pump_controller_properties;
+mod regression_radar_speed_sensor_properties;
+mod regression_radial_compressor_controller_properties;
+mod regression_radial_piston_pump_controller_properties;
+mod regression_raman_spectrometer_controller_properties;
+mod regression_raman_spectrometer_properties;
+mod regression_reciprocating_gas_compressor_controller_properties;
+mod regression_reflow_oven_controller_properties;
+mod regression_regenerative_blower_controller_properties;
+mod regression_regenerative_turbine_pump_controller_properties;
+mod regression_resistance_spot_welder_properties;
+mod regression_resonance_ionization_mass_spectrometer_properties;
+mod regression_rolling_piston_compressor_controller_properties;
+mod regression_roots_blower_pump_controller_properties;
+mod regression_rotary_airlock_valve_controller_properties;
+mod regression_rotary_encoder_interface_properties;
+mod regression_rotary_kiln_controller_properties;
+mod regression_rotary_lobe_compressor_controller_properties;
+mod regression_rotary_lobe_pump_controller_properties;
+mod regression_rotary_tooth_compressor_controller_properties;
+mod regression_rotary_valve_actuator_properties;
+mod regression_rotary_vane_pump_controller_properties;
+mod regression_rtd_transmitter_properties;
+mod regression_sag_mill_controller_properties;
+mod regression_scanning_electron_microscope_controller_properties;
+mod regression_screw_feeder_controller_properties;
+mod regression_screw_press_dewatering_controller_properties;
+mod regression_screw_pump_controller_properties;
+mod regression_scroll_air_compressor_controller_properties;
+mod regression_scroll_orbital_compressor_controller_properties;
+mod regression_scroll_vacuum_pump_controller_properties;
+mod regression_secondary_electrospray_ionization_mass_spectrometer_properties;
+mod regression_secondary_ion_mass_spectrometer_properties;
+mod regression_secondary_neutral_mass_spectrometer_properties;
+mod regression_servo_hydraulic_press_controller_properties;
+mod regression_side_channel_pump_controller_properties;
+mod regression_single_screw_compressor_controller_properties;
+mod regression_size_exclusion_chromatography_spectrometer_properties;
+mod regression_sliding_vane_compressor_controller_properties;
+mod regression_smoke_detector_controller_properties;
+mod regression_solar_charge_controller_properties;
+mod regression_sonic_spray_mass_spectrometer_properties;
+mod regression_spark_emission_spectrometer_properties;
+mod regression_spark_ignition_controller_properties;
+mod regression_spark_source_mass_spectrometer_properties;
+mod regression_spi_bus_analyzer_properties;
+mod regression_spray_dryer_controller_properties;
+mod regression_stepper_motor_driver_properties;
+mod regression_strain_gauge_amplifier_properties;
+mod regression_submersible_pump_controller_properties;
+mod regression_supercritical_fluid_chromatography_spectrometer_properties;
+mod regression_surface_area_analyzer_properties;
+mod regression_surface_roughness_tester_properties;
+mod regression_swash_plate_pump_controller_properties;
+mod regression_swing_compressor_controller_properties;
+mod regression_synchrotron_xrf_spectrometer_properties;
+mod regression_tandem_mass_spectrometer_properties;
+mod regression_terahertz_spectrometer_properties;
+mod regression_textile_tension_controller_properties;
+mod regression_thermal_conductivity_analyzer_properties;
+mod regression_thermal_gravimetric_analyzer_properties;
+mod regression_thermal_ionization_mass_spectrometer_properties;
+mod regression_thermal_mass_flow_sensor_properties;
+mod regression_thermal_oxidizer_controller_properties;
+mod regression_thermal_spray_coating_controller_properties;
+mod regression_thermogravimetric_mass_spectrometer_properties;
+mod regression_thermomechanical_analyzer_properties;
+mod regression_thermospray_mass_spectrometer_properties;
+mod regression_time_of_flight_mass_spectrometer_properties;
+mod regression_time_of_flight_sims_properties;
+mod regression_titanium_sublimation_pump_controller_properties;
+mod regression_total_organic_carbon_analyzer_properties;
+mod regression_total_reflection_xrf_spectrometer_properties;
+mod regression_triplex_plunger_pump_controller_properties;
+mod regression_triplex_pump_controller_properties;
+mod regression_trochoidal_compressor_controller_properties;
+mod regression_tube_pump_controller_properties;
+mod regression_turbidity_meter_properties;
+mod regression_turbine_flow_meter_controller_properties;
+mod regression_turbine_pump_controller_properties;
+mod regression_turbo_expander_compressor_controller_properties;
+mod regression_turbo_expander_controller_properties;
+mod regression_turbo_molecular_pump_controller_properties;
+mod regression_twin_screw_compressor_controller_properties;
+mod regression_ultrasonic_flow_meter_properties;
+mod regression_ultrasonic_thickness_gauge_properties;
+mod regression_uv_visible_spectrophotometer_properties;
+mod regression_vacuum_induction_furnace_properties;
+mod regression_vane_motor_controller_properties;
+mod regression_vane_pump_controller_properties;
+mod regression_vertical_turbine_pump_controller_properties;
+mod regression_vibrating_wire_strain_gauge_properties;
+mod regression_vibration_analyzer_properties;
+mod regression_wave_soldering_controller_properties;
+mod regression_wavelength_dispersive_xrf_spectrometer_properties;
+mod regression_wet_scrubber_controller_properties;
+mod regression_wind_turbine_pitch_controller_properties;
+mod regression_wire_drawing_controller_properties;
+mod regression_wobble_piston_compressor_controller_properties;
+mod regression_wobble_plate_compressor_controller_properties;
+mod regression_wobble_pump_controller_properties;
+mod regression_x_ray_fluorescence_analyzer_properties;
+mod regression_x_ray_fluorescence_spectrometer_properties;
+mod regression_x_ray_photoelectron_spectrometer_properties;
+mod regression_xrf_analyzer_properties;
+mod regression_xrf_coating_thickness_gauge_properties;
+mod regression_zeta_potential_analyzer_properties;
+
+pub(crate) use result_oracles::{
+    expect_counterexample, expect_encodes_without_error, expect_error, expect_error_containing,
+    expect_fail_closed, expect_incompleteness_modelless_failure, expect_not_verified,
+    expect_unknown, expect_unknown_containing, expect_verified, expect_verified_or_unknown,
+};
+
+// Shared type helpers — eliminates duplication across test sub-modules.
+// Part of #1573 fixture deduplication audit.
+
+pub(crate) fn i32_ty() -> crate::ir::TrustVcType {
+    crate::ir::TrustVcType::Int { width: 32 }
+}
+
+#[allow(dead_code)]
+pub(crate) fn u8_ty() -> crate::ir::TrustVcType {
+    crate::ir::TrustVcType::Uint { width: 8 }
+}
+
+#[allow(dead_code)]
+pub(crate) fn u32_ty() -> crate::ir::TrustVcType {
+    crate::ir::TrustVcType::Uint { width: 32 }
+}
+
+pub(crate) fn u64_ty() -> crate::ir::TrustVcType {
+    crate::ir::TrustVcType::Uint { width: 64 }
+}
+
+/// Create a `TrustVcExpr::Var` with `i32` type.
+#[allow(dead_code)]
+pub(crate) fn var(name: &str) -> crate::ir::TrustVcExpr {
+    crate::ir::TrustVcExpr::Var {
+        name: name.to_string(),
+        ty: i32_ty(),
+    }
+}
+
+/// Create a `TrustVcExpr::IntLit` with `i32` type.
+#[allow(dead_code)]
+pub(crate) fn int_lit(v: i128) -> crate::ir::TrustVcExpr {
+    crate::ir::TrustVcExpr::IntLit {
+        value: v,
+        ty: i32_ty(),
+    }
+}
+
+/// Create a list of `VariableDecl` with `i32` type from name slices.
+#[allow(dead_code)]
+pub(crate) fn make_vars(names: &[&str]) -> Vec<crate::vc::VariableDecl> {
+    names
+        .iter()
+        .map(|n| crate::vc::VariableDecl {
+            bounded_len: false,
+            name: n.to_string(),
+            ty: i32_ty(),
+        })
+        .collect()
+}
+
+/// RAII guard for thread-local `Cell<bool>` test hooks.
+///
+/// Sets the flag to `true` on construction, resets to `false` on drop
+/// (including during unwind). Used by deterministic assertion-path hooks such
+/// as `FORCE_CONFIRMATION_DISAGREE`, `FORCE_BV_TIMEOUT`,
+/// `FORCE_EXTENDED_RETRY_SUCCESS`, `FORCE_OVERFLOW_PRECHECK_DEMOTION`,
+/// `FORCE_EMPTY_MODEL`, `FORCE_ENCODE_CONDITION_PANIC`, and
+/// `FORCE_TRUST_VC_EXPR_ENCODE_PANIC`.
+pub(super) struct ForcedFlagGuard(&'static std::thread::LocalKey<std::cell::Cell<bool>>);
+
+impl ForcedFlagGuard {
+    pub(super) fn new(flag: &'static std::thread::LocalKey<std::cell::Cell<bool>>) -> Self {
+        flag.with(|cell| cell.set(true));
+        Self(flag)
+    }
+}
+
+impl Drop for ForcedFlagGuard {
+    fn drop(&mut self) {
+        self.0.with(|cell| cell.set(false));
+    }
+}
+
+/// Serialization mutex for timing ratio measurements. Prevents CPU contention
+/// from skewing ratios when multiple `measure_median` tests run in parallel.
+/// Only timing tests acquire this — solver-backed and other tests remain
+/// fully parallel (#2645).
+static TIMING_SERIALIZE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run a timing function multiple times and return the median.
+///
+/// Uses `catch_unwind` to tolerate panics from inner correctness assertions.
+/// Failed trials are excluded from the median; only if ALL trials fail does
+/// this propagate the failure.
+///
+/// Acquires `TIMING_SERIALIZE_MUTEX` for the full warmup+trial window so that
+/// concurrent performance tests do not skew each other's timing ratios (#2645).
+fn measure_median<F: Fn() -> u128>(f: F, trials: usize) -> u128 {
+    let _timing_guard = TIMING_SERIALIZE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert!(trials > 0);
+    // Warmup trial — excluded from measurement.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&f));
+    let mut timings: Vec<u128> = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        if let Ok(t) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&f)) {
+            timings.push(t);
+        }
+    }
+    assert!(
+        !timings.is_empty(),
+        "All {} trials panicked — verification failed in every run (see #2544).",
+        trials,
+    );
+    timings.sort_unstable();
+    timings[timings.len() / 2]
+}

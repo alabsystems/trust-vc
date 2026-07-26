@@ -1,0 +1,20 @@
+error: trust_vc::proof does not support self parameters. Use a free function with an explicit parameter instead.
+  --> tests/compile-fail/proof_self_param_fail_closed.rs:11:5
+   |
+11 |     #[trust_vc::proof]
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `trust_vc::proof` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition name: `trust_mc`
+  --> tests/compile-fail/proof_self_param_fail_closed.rs:11:5
+   |
+11 |     #[trust_vc::proof]
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 34 more
+   = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `trust_vc::proof` crate for guidance on how handle this unexpected cfg
+   = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+   = note: this warning originates in the attribute macro `trust_vc::proof` (in Nightly builds, run with -Z macro-backtrace for more info)

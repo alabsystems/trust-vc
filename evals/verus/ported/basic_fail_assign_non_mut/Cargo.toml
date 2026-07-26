@@ -1,0 +1,6 @@
+[package]
+name = "trust-vc-verus-basic-fail-assign-non-mut"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

@@ -1,0 +1,50 @@
+# TrustVc core - VC generation for proof features
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Verification condition generation for Verus-style proofs"
+
+[features]
+default = []
+trust_mc = []
+ty = ["dep:tla-core", "dep:tla-check"]
+proof-certificates = ["dep:trust-vc-kernel"]  # Opt-in UNSAT proof extraction (#2654)
+named-assertions = []    # Opt-in UNSAT core attribution via named assertions (#2706)
+expensive-tests = []  # Gate slow solver-bound test modules (#2644)
+native-seq = []       # Use ay's native Seq(T) sort instead of Array(BV,T) (#2680 Slice 2)
+native-strings = []  # Use ay's native String sort for direct string reasoning (#2680 Slice 3)
+
+[dependencies]
+ay-core = { workspace = true }
+ay-dpll = { workspace = true }
+ay-sys = { workspace = true }
+num-bigint = { workspace = true }
+thiserror = { workspace = true }
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+proc-macro-crate = { workspace = true }
+tracing = { workspace = true }
+stacker = { workspace = true }
+sha2 = { workspace = true }
+tla-core = { workspace = true, optional = true }
+tla-check = { workspace = true, optional = true }
+trust-vc-kernel = { workspace = true, optional = true }
+inventory = { workspace = true }
+trust-vc-merge-contract = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+trybuild = { workspace = true }
+trust-vc-merge-runner = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

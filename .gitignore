@@ -1,0 +1,43 @@
+# Rust
+target/
+# Stock-toolchain harness build dir (scripts/stock-harness.sh) — keeps stock
+# artifacts out of the Trust-toolchain cache in target/.
+target-stock/
+**/*.rs.bk
+
+# Cargo-trust-vc evidence output
+reports/evidence/*.json
+reports/evidence/*.md
+.trust_vc/evidence/
+.trust-vc/evidence/
+
+# Fuzzing
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+
+# Claude scheduler artifacts (autonomous-loop cron)
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+
+# OS / editor
+.DS_Store
+__pycache__/
+*.pyc
+*~
+\#*\#
+.#*
+
+# Credentials
+.env
+.env.*
+*.key
+*.pem
+credentials.json
+secrets.json
+
+# Claude Code local agent worktrees / session scratch
+.claude/
+
+# Publish tool work area (export tree, guard reports, staging clone)
+publish/.out/

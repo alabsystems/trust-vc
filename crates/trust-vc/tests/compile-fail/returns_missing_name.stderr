@@ -1,0 +1,7 @@
+error: #[trust_vc::returns] requires a name for the return value
+ --> tests/compile-fail/returns_missing_name.rs:7:1
+  |
+7 | #[trust_vc::returns]
+  | ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `trust_vc::returns` (in Nightly builds, run with -Z macro-backtrace for more info)

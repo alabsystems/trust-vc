@@ -1,0 +1,204 @@
+const fn trust_vc_types::Map::empty() -> Self
+const fn trust_vc_types::Map::is_empty(self: &Self) -> bool
+const fn trust_vc_types::Map::len(self: &Self) -> usize
+const fn trust_vc_types::Map::new() -> Self
+const fn trust_vc_types::Multiset::empty() -> Self
+const fn trust_vc_types::Multiset::is_empty(self: &Self) -> bool
+const fn trust_vc_types::Multiset::len(self: &Self) -> usize
+const fn trust_vc_types::Seq::empty() -> Self
+const fn trust_vc_types::Seq::is_empty(self: &Self) -> bool
+const fn trust_vc_types::Seq::len(self: &Self) -> usize
+const fn trust_vc_types::Seq::new() -> Self
+const fn trust_vc_types::Set::empty() -> Self
+const fn trust_vc_types::Set::finite(self: &Self) -> bool
+const fn trust_vc_types::Set::is_empty(self: &Self) -> bool
+const fn trust_vc_types::Set::len(self: &Self) -> usize
+const fn trust_vc_types::Set::new() -> Self
+const fn trust_vc_types::compat::trust_wp::Seq::empty() -> Self
+const fn trust_vc_types::compat::trust_wp::Seq::is_empty(self: &Self) -> bool
+const fn trust_vc_types::compat::trust_wp::Seq::len(self: &Self) -> usize
+const fn trust_vc_types::compat::trust_wp::Seq::new() -> Self
+enum trust_vc_types::List<T>
+enum trust_vc_types::Tree<T>
+field trust_vc_types::List::Cons::0: T
+field trust_vc_types::List::Cons::1: Box<List<T>>
+field trust_vc_types::Tree::Branch::0: Box<Tree<T>>
+field trust_vc_types::Tree::Branch::1: Box<Tree<T>>
+field trust_vc_types::Tree::Leaf::0: T
+fn trust_vc_types::Ghost::new(value: T) -> Self
+fn trust_vc_types::InvariantPredicate::inv(k: K, v: V) -> bool
+fn trust_vc_types::List::head(self: &Self) -> &T
+fn trust_vc_types::List::is_cons(self: &Self) -> bool
+fn trust_vc_types::List::is_empty(self: &Self) -> bool
+fn trust_vc_types::List::is_nil(self: &Self) -> bool
+fn trust_vc_types::List::len(self: &Self) -> usize
+fn trust_vc_types::List::tail(self: &Self) -> &List<T>
+fn trust_vc_types::LocalInvariant::constant(self: &Self) -> K
+fn trust_vc_types::LocalInvariant::namespace(self: &Self) -> i64
+fn trust_vc_types::LocalInvariant::new(_k: K, _v: V) -> Self
+fn trust_vc_types::Map::contains(self: &Self, key: K) -> bool
+fn trust_vc_types::Map::contains_key(self: &Self, _key: K) -> bool
+fn trust_vc_types::Map::contains_value(self: &Self, _value: V) -> bool
+fn trust_vc_types::Map::dom(self: &Self) -> Set<K>
+fn trust_vc_types::Map::filter_keys(self: Self, _pred: SpecFn<K, bool>) -> Self
+fn trust_vc_types::Map::get(self: &Self, _key: K) -> V
+fn trust_vc_types::Map::index(self: &Self, key: K) -> V
+fn trust_vc_types::Map::insert(self: Self, _key: K, _value: V) -> Self
+fn trust_vc_types::Map::lookup(self: &Self, key: K) -> V
+fn trust_vc_types::Map::map_entries<U>(self: Self, _f: SpecFn<(K, V), U>) -> Map<K, U>
+fn trust_vc_types::Map::map_values<U>(self: Self, _f: SpecFn<V, U>) -> Map<K, U>
+fn trust_vc_types::Map::remove(self: Self, _key: K) -> Self
+fn trust_vc_types::Multiset::add(self: Self, other: Self) -> Self
+fn trust_vc_types::Multiset::choose(self: &Self) -> T
+fn trust_vc_types::Multiset::contains(self: &Self, _value: T) -> bool
+fn trust_vc_types::Multiset::count(self: &Self, _value: T) -> usize
+fn trust_vc_types::Multiset::difference(self: Self, other: Self) -> Self
+fn trust_vc_types::Multiset::insert(self: Self, _value: T) -> Self
+fn trust_vc_types::Multiset::intersect(self: Self, _other: Self) -> Self
+fn trust_vc_types::Multiset::is_subset(self: Self, other: Self) -> bool
+fn trust_vc_types::Multiset::remove(self: Self, _value: T) -> Self
+fn trust_vc_types::Multiset::singleton(_value: T) -> Self
+fn trust_vc_types::Multiset::sub(self: Self, _other: Self) -> Self
+fn trust_vc_types::Multiset::subset(self: Self, other: Self) -> bool
+fn trust_vc_types::Multiset::subset_of(self: Self, _other: Self) -> bool
+fn trust_vc_types::Multiset::union(self: Self, _other: Self) -> Self
+fn trust_vc_types::Proph::new() -> Self
+fn trust_vc_types::Proph::resolve(self: Self, value: T)
+fn trust_vc_types::Proph::view(self: &Self) -> T
+fn trust_vc_types::Seq::add(self: Self, _other: Self) -> Self
+fn trust_vc_types::Seq::concat(self: Self, _other: Self) -> Self
+fn trust_vc_types::Seq::contains(self: &Self, _value: T) -> bool
+fn trust_vc_types::Seq::drop_first(self: Self) -> Self
+fn trust_vc_types::Seq::drop_last(self: Self) -> Self
+fn trust_vc_types::Seq::filter(self: Self, _pred: SpecFn<T, bool>) -> Self
+fn trust_vc_types::Seq::first(self: &Self) -> T
+fn trust_vc_types::Seq::flat_map<U>(self: Self, _f: SpecFn<T, Seq<U>>) -> Seq<U>
+fn trust_vc_types::Seq::fold_left<U>(self: Self, init: U, _f: SpecFn<(U, T), U>) -> U
+fn trust_vc_types::Seq::fold_right<U>(self: Self, init: U, _f: SpecFn<(T, U), U>) -> U
+fn trust_vc_types::Seq::from_fn(_len: usize, _f: SpecFn<usize, T>) -> Self
+fn trust_vc_types::Seq::get(self: &Self, i: usize) -> T
+fn trust_vc_types::Seq::index(self: &Self, _i: usize) -> T
+fn trust_vc_types::Seq::last(self: &Self) -> T
+fn trust_vc_types::Seq::map<U>(self: Self, _f: SpecFn<(usize, T), U>) -> Seq<U>
+fn trust_vc_types::Seq::map_values<U>(self: Self, _f: SpecFn<T, U>) -> Seq<U>
+fn trust_vc_types::Seq::no_duplicates(self: &Self) -> bool
+fn trust_vc_types::Seq::pop_back(self: Self) -> Self
+fn trust_vc_types::Seq::push(self: Self, _value: T) -> Self
+fn trust_vc_types::Seq::push_back(self: Self, value: T) -> Self
+fn trust_vc_types::Seq::reverse(self: Self) -> Self
+fn trust_vc_types::Seq::set(self: Self, index: usize, value: T) -> Self
+fn trust_vc_types::Seq::skip(self: Self, _n: usize) -> Self
+fn trust_vc_types::Seq::subrange(self: Self, _start: usize, _end: usize) -> Self
+fn trust_vc_types::Seq::subsequence(self: Self, start: usize, end: usize) -> Self
+fn trust_vc_types::Seq::take(self: Self, _n: usize) -> Self
+fn trust_vc_types::Seq::to_multiset(self: &Self) -> crate::Multiset<T>
+fn trust_vc_types::Seq::to_set(self: &Self) -> crate::Set<T>
+fn trust_vc_types::Seq::update(self: Self, _i: usize, _value: T) -> Self
+fn trust_vc_types::Set::choose(self: &Self) -> T
+fn trust_vc_types::Set::contains(self: &Self, _value: T) -> bool
+fn trust_vc_types::Set::difference(self: Self, _other: Self) -> Self
+fn trust_vc_types::Set::filter(self: Self, _pred: SpecFn<T, bool>) -> Self
+fn trust_vc_types::Set::fold<U>(self: Self, init: U, _f: SpecFn<(U, T), U>) -> U
+fn trust_vc_types::Set::insert(self: Self, _value: T) -> Self
+fn trust_vc_types::Set::intersect(self: Self, _other: Self) -> Self
+fn trust_vc_types::Set::intersection(self: Self, other: Self) -> Self
+fn trust_vc_types::Set::is_subset(self: Self, other: Self) -> bool
+fn trust_vc_types::Set::is_superset(self: Self, other: Self) -> bool
+fn trust_vc_types::Set::map<U>(self: Self, _f: SpecFn<T, U>) -> Set<U>
+fn trust_vc_types::Set::mk_map<V>(self: Self, _f: SpecFn<T, V>) -> Map<T, V>
+fn trust_vc_types::Set::remove(self: Self, _value: T) -> Self
+fn trust_vc_types::Set::subset(self: &Self, _other: &Self) -> bool
+fn trust_vc_types::Set::superset(self: &Self, _other: &Self) -> bool
+fn trust_vc_types::Set::union(self: Self, _other: Self) -> Self
+fn trust_vc_types::Snapshot::capture(_value: &T) -> Self
+fn trust_vc_types::SpecFn::new<F>(_f: F) -> Self
+fn trust_vc_types::Tracked::get(self: Self) -> T
+fn trust_vc_types::Tracked::new(value: T) -> Self
+fn trust_vc_types::Tree::depth(self: &Self) -> usize
+fn trust_vc_types::Tree::is_branch(self: &Self) -> bool
+fn trust_vc_types::Tree::is_leaf(self: &Self) -> bool
+fn trust_vc_types::Tree::left(self: &Self) -> &Tree<T>
+fn trust_vc_types::Tree::right(self: &Self) -> &Tree<T>
+fn trust_vc_types::Tree::value(self: &Self) -> &T
+fn trust_vc_types::View::view(self: &Self) -> Self::ViewTy
+fn trust_vc_types::compat::trust_wp::Ghost::new(value: T) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::add(self: Self, _other: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::concat(self: Self, _other: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::contains(self: &Self, _value: T) -> bool
+fn trust_vc_types::compat::trust_wp::Seq::drop_first(self: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::drop_last(self: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::filter(self: Self, _pred: SpecFn<T, bool>) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::first(self: &Self) -> T
+fn trust_vc_types::compat::trust_wp::Seq::flat_map<U>(self: Self, _f: SpecFn<T, Seq<U>>) -> Seq<U>
+fn trust_vc_types::compat::trust_wp::Seq::fold_left<U>(self: Self, init: U, _f: SpecFn<(U, T), U>) -> U
+fn trust_vc_types::compat::trust_wp::Seq::fold_right<U>(self: Self, init: U, _f: SpecFn<(T, U), U>) -> U
+fn trust_vc_types::compat::trust_wp::Seq::from_fn(_len: usize, _f: SpecFn<usize, T>) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::get(self: &Self, i: usize) -> T
+fn trust_vc_types::compat::trust_wp::Seq::index(self: &Self, _i: usize) -> T
+fn trust_vc_types::compat::trust_wp::Seq::last(self: &Self) -> T
+fn trust_vc_types::compat::trust_wp::Seq::map<U>(self: Self, _f: SpecFn<(usize, T), U>) -> Seq<U>
+fn trust_vc_types::compat::trust_wp::Seq::map_values<U>(self: Self, _f: SpecFn<T, U>) -> Seq<U>
+fn trust_vc_types::compat::trust_wp::Seq::no_duplicates(self: &Self) -> bool
+fn trust_vc_types::compat::trust_wp::Seq::pop_back(self: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::push(self: Self, _value: T) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::push_back(self: Self, value: T) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::reverse(self: Self) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::set(self: Self, index: usize, value: T) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::skip(self: Self, _n: usize) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::subrange(self: Self, _start: usize, _end: usize) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::subsequence(self: Self, start: usize, end: usize) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::take(self: Self, _n: usize) -> Self
+fn trust_vc_types::compat::trust_wp::Seq::to_multiset(self: &Self) -> crate::Multiset<T>
+fn trust_vc_types::compat::trust_wp::Seq::to_set(self: &Self) -> crate::Set<T>
+fn trust_vc_types::compat::trust_wp::Seq::update(self: Self, _i: usize, _value: T) -> Self
+fn trust_vc_types::compat::trust_wp::Snapshot::capture(_value: &T) -> Self
+fn trust_vc_types::compat::trust_wp::View::view(self: &Self) -> Self::ViewTy
+macro trust_vc_types::map
+macro trust_vc_types::seq
+macro trust_vc_types::set
+module trust_vc_types::compat
+module trust_vc_types::compat::trust_wp
+pub use trust_vc_types::Ghost = ghost::Ghost
+pub use trust_vc_types::InvariantPredicate = invariant::InvariantPredicate
+pub use trust_vc_types::List = list::List
+pub use trust_vc_types::LocalInvariant = invariant::LocalInvariant
+pub use trust_vc_types::Map = map::Map
+pub use trust_vc_types::Multiset = multiset::Multiset
+pub use trust_vc_types::Proph = proph::Proph
+pub use trust_vc_types::Seq = seq::Seq
+pub use trust_vc_types::Set = set::Set
+pub use trust_vc_types::Snapshot = snapshot::Snapshot
+pub use trust_vc_types::SpecFn = spec_fn::SpecFn
+pub use trust_vc_types::Tracked = tracked::Tracked
+pub use trust_vc_types::Tree = tree::Tree
+pub use trust_vc_types::View = view::View
+pub use trust_vc_types::compat::trust_wp::Ghost = crate::Ghost
+pub use trust_vc_types::compat::trust_wp::Seq = crate::Seq
+pub use trust_vc_types::compat::trust_wp::Snapshot = crate::Snapshot
+pub use trust_vc_types::compat::trust_wp::View = crate::View
+struct trust_vc_types::Ghost<T>
+struct trust_vc_types::LocalInvariant<K, V, Pred>
+struct trust_vc_types::Map<K, V>
+struct trust_vc_types::Multiset<T>
+struct trust_vc_types::Proph<T>
+struct trust_vc_types::Seq<T>
+struct trust_vc_types::Set<T>
+struct trust_vc_types::Snapshot<T>
+struct trust_vc_types::SpecFn<Args, Ret>
+struct trust_vc_types::Tracked<T>
+struct trust_vc_types::compat::trust_wp::Ghost<T>
+struct trust_vc_types::compat::trust_wp::Seq<T>
+struct trust_vc_types::compat::trust_wp::Snapshot<T>
+trait trust_vc_types::InvariantPredicate<K, V>
+trait trust_vc_types::View
+trait trust_vc_types::compat::trust_wp::View
+type trust_vc_types::View::ViewTy
+type trust_vc_types::compat::trust_wp::FMap<K, V> = crate::Map<K, V>
+type trust_vc_types::compat::trust_wp::FSet<T> = crate::Set<T>
+type trust_vc_types::compat::trust_wp::View::ViewTy
+type trust_vc_types::int = i128
+type trust_vc_types::nat = u128
+variant trust_vc_types::List::Cons
+variant trust_vc_types::List::Nil
+variant trust_vc_types::Tree::Branch
+variant trust_vc_types::Tree::Leaf

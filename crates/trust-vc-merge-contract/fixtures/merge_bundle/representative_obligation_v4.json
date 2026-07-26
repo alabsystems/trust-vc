@@ -1,0 +1,174 @@
+{
+  "bundle_version": 4,
+  "expression_format": "smt_lib2_term_v1",
+  "source_id": "trust_vc::examples::arith::factorial_with_broadcast",
+  "variables": [
+    {
+      "name": "n",
+      "sort": {
+        "kind": "bit_vector",
+        "width": 64,
+        "signed": false
+      }
+    },
+    {
+      "name": "weight",
+      "sort": {
+        "kind": "floating_point",
+        "exponent_bits": 8,
+        "significand_bits": 24
+      }
+    },
+    {
+      "name": "items",
+      "sort": {
+        "kind": "seq",
+        "elem": {
+          "kind": "math_int"
+        }
+      }
+    },
+    {
+      "name": "buf",
+      "sort": {
+        "kind": "array",
+        "index": {
+          "kind": "bit_vector",
+          "width": 64,
+          "signed": false
+        },
+        "element": {
+          "kind": "bit_vector",
+          "width": 32,
+          "signed": false
+        }
+      }
+    }
+  ],
+  "assumptions": [
+    {
+      "expr": "(bvule n (_ bv20 64))",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "expr": "(bvugt (factorial n) (_ bv0 64))",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "decreases": [
+    {
+      "obligation_id": "factorial",
+      "measures": [
+        {
+          "expr": "n",
+          "sort": {
+            "kind": "bit_vector",
+            "width": 64,
+            "signed": false
+          }
+        }
+      ]
+    }
+  ],
+  "triggers": [],
+  "metadata": {
+    "capabilities": "decreases,triggers,func_decls,fuel_axioms,broadcast_lemmas",
+    "source_backend": "ay",
+    "source_repo": "trust_vc"
+  },
+  "func_decls": [
+    {
+      "name": "factorial",
+      "param_names": [
+        "n"
+      ],
+      "param_sorts": [
+        {
+          "kind": "bit_vector",
+          "width": 64,
+          "signed": false
+        }
+      ],
+      "return_sort": {
+        "kind": "bit_vector",
+        "width": 64,
+        "signed": false
+      },
+      "is_recursive": true
+    }
+  ],
+  "fuel_axioms": [
+    {
+      "function_name": "factorial",
+      "bound_vars": [
+        {
+          "name": "n",
+          "sort": {
+            "kind": "bit_vector",
+            "width": 64,
+            "signed": false
+          }
+        }
+      ],
+      "axiom_expr": {
+        "expr": "(= (factorial n) (ite (= n (_ bv0 64)) (_ bv1 64) (bvmul n (factorial (bvsub n (_ bv1 64))))))",
+        "sort": {
+          "kind": "bool"
+        }
+      },
+      "trigger_pattern": {
+        "expr": "(factorial n)",
+        "sort": {
+          "kind": "bit_vector",
+          "width": 64,
+          "signed": false
+        }
+      }
+    }
+  ],
+  "broadcast_lemmas": [
+    {
+      "name": "broadcast_factorial_positive",
+      "bound_vars": [
+        {
+          "name": "n",
+          "sort": {
+            "kind": "bit_vector",
+            "width": 64,
+            "signed": false
+          }
+        }
+      ],
+      "body_expr": {
+        "expr": "(bvugt (factorial n) (_ bv0 64))",
+        "sort": {
+          "kind": "bool"
+        }
+      },
+      "guard_expr": {
+        "expr": "(bvule n (_ bv20 64))",
+        "sort": {
+          "kind": "bool"
+        }
+      },
+      "trigger_groups": [
+        [
+          {
+            "expr": "(factorial n)",
+            "sort": {
+              "kind": "bit_vector",
+              "width": 64,
+              "signed": false
+            }
+          }
+        ]
+      ]
+    }
+  ]
+}

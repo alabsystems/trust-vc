@@ -1,0 +1,60 @@
+{
+  "bundle_version": 3,
+  "expression_format": "smt_lib2_term_v1",
+  "source_id": "trust_vc::examples::arith::lemma_sum_counterexample",
+  "variables": [
+    {
+      "name": "x",
+      "sort": {
+        "kind": "math_int"
+      }
+    }
+  ],
+  "assumptions": [
+    {
+      "expr": "(= x 7)",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "expr": "(> x 100)",
+      "sort": {
+        "kind": "bool"
+      }
+    }
+  ],
+  "decreases": [
+    {
+      "obligation_id": "lemma_sum_counterexample",
+      "measures": [
+        {
+          "expr": "x",
+          "sort": {
+            "kind": "math_int"
+          }
+        }
+      ]
+    }
+  ],
+  "triggers": [
+    {
+      "obligation_id": "lemma_sum_counterexample",
+      "patterns": [
+        {
+          "expr": "x",
+          "sort": {
+            "kind": "math_int"
+          }
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "capabilities": "decreases,triggers",
+    "source_backend": "ay",
+    "source_repo": "trust_vc"
+  }
+}

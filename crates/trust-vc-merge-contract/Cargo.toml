@@ -1,0 +1,24 @@
+# TrustVc merge contract - stable cross-repo bundle schema
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+
+[package]
+name = "trust-vc-merge-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Versioned merge boundary contract between trust-vc and trust_mc"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rustdoc-json-stable = { workspace = true }
+rustdoc-types = { workspace = true }
+
+[lints]
+workspace = true

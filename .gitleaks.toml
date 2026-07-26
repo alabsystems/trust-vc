@@ -1,0 +1,24 @@
+# .gitleaks.toml
+# Gitleaks secret scanning configuration
+# See: https://github.com/gitleaks/gitleaks
+#
+# Copyright 2026 Andrew Yates
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+# Licensed under the Apache License, Version 2.0
+#
+# Publication policy: NO allowlists. The publication engine's gitleaks guard
+# (`check_gitleaks_config` in publication/bin/pub) rejects any repository-wide
+# `[allowlist]`, per-rule allowlist, `disabledRules`, external `[extend]`
+# path/url, or `regexTarget = "line"` — a repository config may not suppress
+# its own secret scan. Findings must be fixed at the source, not muted here.
+#
+# The former `[allowlist]` block (fixture/vendor path skips plus
+# EXAMPLE_/TEST_/PLACEHOLDER_/sk-test-/pk-test- regexes) was removed
+# 2026-07-25; a full default-rule scan of the export tree reports zero
+# findings without it, so nothing was relying on the suppression.
+
+title = "trust-vc gitleaks config"
+
+[extend]
+# Use default gitleaks rules
+useDefault = true

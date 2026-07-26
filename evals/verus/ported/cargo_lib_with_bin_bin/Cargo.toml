@@ -1,0 +1,11 @@
+[package]
+name = "lib_with_bin_bin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trust-vc = { path = "../../../../crates/trust-vc" }
+trust-vc-core = { path = "../../../../crates/trust-vc-core" }
+lib_with_bin = { path = "../cargo_lib_with_bin_lib" }
+
+[workspace]

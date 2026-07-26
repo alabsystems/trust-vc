@@ -1,0 +1,35 @@
+{
+  "corpus_version": 1,
+  "fixtures": [
+    {
+      "fixture_id": "representative_verified",
+      "parity_manifest": "parity/representative_verified.json",
+      "bundle_path": "crates/trust-vc-merge-contract/fixtures/merge_bundle/representative_obligation_v3.json",
+      "obligation_id": "lemma_sum_nonneg",
+      "expected_status": "verified",
+      "expected_classes": ["assert", "decreases", "trigger"],
+      "allow_unknown": false,
+      "require_counterexample_model": false,
+      "required_metadata": {
+        "source_repo": "trust_vc",
+        "source_backend": "ay",
+        "capabilities": "decreases,triggers"
+      }
+    },
+    {
+      "fixture_id": "representative_counterexample",
+      "parity_manifest": "parity/representative_counterexample.json",
+      "bundle_path": "crates/trust-vc-merge-contract/fixtures/merge_bundle/representative_counterexample_v3.json",
+      "obligation_id": "lemma_sum_counterexample",
+      "expected_status": "counterexample",
+      "expected_classes": ["assert", "decreases", "trigger"],
+      "allow_unknown": false,
+      "require_counterexample_model": true,
+      "required_metadata": {
+        "source_repo": "trust_vc",
+        "source_backend": "ay",
+        "capabilities": "decreases,triggers"
+      }
+    }
+  ]
+}
