@@ -2087,7 +2087,7 @@ checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
 
 [[package]]
 name = "targo-trust-vc"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ay-dpll",
  "ay-frontend",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-core"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ay-core",
  "ay-dpll",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-driver"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "trust-ir",
  "trust-vc-core",
@@ -2808,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-kernel"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-merge-contract"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "rustdoc-json-stable",
  "rustdoc-types",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-merge-runner"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ay-dpll",
  "ay-frontend",
@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-oracle"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-std"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "trust-vc",
  "trust-vc-core",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-trust-engine"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "trust-vc-types"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "trust-vc",
  "trust-vc-core",
