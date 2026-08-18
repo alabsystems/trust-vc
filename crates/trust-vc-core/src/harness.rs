@@ -297,6 +297,7 @@ impl VerificationContext {
         match failures.len() {
             0 => HarnessOutcome::AllVerified { assertions },
             1 => HarnessOutcome::OneFailed {
+                // quality-audit: allow-expect — this match arm pins failures.len() == 1
                 failure: failures.pop().expect("invariant: exactly one failure"),
                 assertions,
             },

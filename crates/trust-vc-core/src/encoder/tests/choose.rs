@@ -321,8 +321,11 @@ fn test_choose_with_explicit_witness_constrains_predicate() {
 }
 
 /// A conjunction in the choose predicate must be preserved in the guarded
-/// Skolem axiom: after establishing `exists x. 0 <= x < 10`, the chosen value
-/// must satisfy both `w >= 0` and `w < 10`.
+/// Skolem axiom. The current certified lane intentionally does not authorize
+/// this quantified-BV Hilbert proof: the triggerless guarded quantifier has no
+/// complete handler. Pin the exact typed reason/origin so this remains a
+/// fail-closed capability boundary rather than silently becoming a
+/// proof-authority bypass.
 #[test]
 fn test_choose_with_explicit_witness_preserves_conjunction_bounds() {
     let mut env = ChooseTestEnv::new();
@@ -426,9 +429,22 @@ fn test_choose_with_explicit_witness_preserves_conjunction_bounds() {
     env.solver.try_assert_term(not_chosen_bounds).unwrap();
     let result = env.solver.check_sat();
     assert!(
-        result.is_unsat(),
-        "choose with explicit witness should preserve both conjunction bounds; got {:?}",
-        result
+        result.is_unknown(),
+        "quantified-BV choose must fail closed until its guarded quantifier has a complete handler; got {result:?}",
+    );
+    let reason = env
+        .solver
+        .unknown_reason()
+        .expect("Unknown choose result must carry a typed reason");
+    assert_eq!(
+        reason,
+        ay_dpll::UnknownReason::QuantifierUnhandled,
+        "the capability boundary must be the unhandled guarded quantifier, not an unrelated solver failure",
+    );
+    assert_eq!(
+        reason.origin(),
+        ay_dpll::UnknownOrigin::UnhandledQuantifier,
+        "typed Unknown reason must authenticate its production origin",
     );
 }
 

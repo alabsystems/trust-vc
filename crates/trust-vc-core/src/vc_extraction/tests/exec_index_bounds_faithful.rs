@@ -801,23 +801,21 @@ fn impure_side_effecting_index_compound_write_fails_closed() {
 }
 
 #[test]
-fn bounded_deref_aliasing_side_effecting_index_compound_write_verifies() {
+fn bounded_deref_aliasing_side_effecting_index_compound_write_fails_closed() {
     // SCOPE BOUNDARY (#83): a side effect that writes THROUGH A DEREFERENCE
     // (`*a_ref = …`, the mut-ref aliasing-evaluation-order case) keeps the
-    // conservative skip — the aliased `a` is reverted by the throwaway scoped
-    // evaluation, so trust-vc does not pin a synthetic obligation for it (closing
-    // the residual OOB for an UNOBSERVED deref-aliased index needs a faithful
-    // aliasing model, tracked separately). NO OVER-REJECTION: when the folded
-    // index is the in-bounds literal `0` and the element cannot overflow, the
-    // write still `Verified` — `x[0]` lands on `0 + 1 == 1`. SLICE-C
-    // REMEDIATION UPDATE: the reverted write's root `a` is now HAVOCKED (and
+    // conservative boundary: faithful aliasing for a deref write inside the
+    // throwaway scoped evaluation is tracked separately from #83. The extractor
+    // now rejects this shape explicitly instead of silently reverting the write
+    // and reasoning from stale state. Even though the folded index is the
+    // in-bounds literal `0`, unsupported mutable aliasing must fail closed.
+    // SLICE-C REMEDIATION UPDATE: the reverted write's root `a` is HAVOCKED (and
     // its aliases invalidated) at the region exit, so the OBSERVED variants
     // fail closed for BOTH spellings — reading `a` after was already
     // "unresolved", and reading `*a_ref` after (previously false-`Verified`
     // against the reverted pre-write value — probed firsthand on 2fdd181) is
     // now fail-closed too (see the sibling test below).
-    assert_verified(
-        r#"
+    let code = r#"
         #[trust_vc::ensures(true)]
         fn f() {
             let mut a: u64 = 0u64;
@@ -829,9 +827,16 @@ fn bounded_deref_aliasing_side_effecting_index_compound_write_verifies() {
             }] += 1u64;
             trust_vc::assert!(x[0usize] == 1u64);
         }
-        "#,
-        "f",
-        "x[{ *a_ref = 1; 0 }] += 1; assert x[0]==1 (bounded deref-aliasing index)",
+        "#;
+    let file = parse_file(code).expect("fixture should parse");
+    let func = find_function(&file, "f").expect("fixture should define fn f");
+    let err = extract_verification_conditions(func)
+        .expect_err("deref-aliasing index evaluation must fail closed at extraction");
+    let message = err.to_string();
+    assert!(
+        message.contains("assignment through a dereferenced reference is unsupported")
+            && message.contains("* a_ref"),
+        "unexpected fail-closed diagnostic: {message}"
     );
 }
 

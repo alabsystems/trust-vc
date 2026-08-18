@@ -13,11 +13,11 @@
 /// hit (SIGBUS / stack overflow). The proc-macro inline path rejects recursive
 /// inline functions at compile time (`spec_expand.rs`), but the demand-inline
 /// retry (#2655) *promotes* an ordinary recursive body axiom to inline at
-/// runtime, bypassing that gate — see `build_body_catalog`'s recursion filter,
-/// which is the primary defense. This bound is the belt-and-braces backstop so
+/// runtime, bypassing that gate — `build_body_catalog` filters direct recursion,
+/// while termination-proven mutual recursion may be expanded for a fully ground
+/// branch. This bound is the belt-and-braces backstop so
 /// the encoder can NEVER crash even if a recursive body reaches this function
-/// (e.g. a mutual `a -> b -> a` inline cycle, the open finding in
-/// `eval_audit_p584.rs`).
+/// (e.g. a symbolic mutual `a -> b -> a` inline cycle).
 ///
 /// The counter only increments on an actual body expansion, never on structural
 /// descent into sub-expressions, so legitimate non-recursive inline chains
@@ -51,18 +51,22 @@ pub(in crate::encoder) fn substitute_inline_calls(
     expr: &crate::ir::TrustVcExpr,
     inline_bodies: &InlineBodyMap,
 ) -> crate::ir::TrustVcExpr {
-    substitute_inline_calls_bounded(expr, inline_bodies, 0)
+    substitute_inline_calls_bounded(expr, inline_bodies, 0, &[])
 }
 
-/// Depth-bounded core of [`substitute_inline_calls`]. `expansion_depth` counts
+/// Recursion-bounded core of [`substitute_inline_calls`]. `expansion_depth` counts
 /// the inline body expansions performed on the path from the original call down
 /// to `expr`; it is incremented ONLY when a body is expanded (never on
 /// structural descent), and capped by [`MAX_INLINE_EXPANSION_DEPTH`] to
-/// guarantee termination on (mutually) recursive inline bodies.
+/// guarantee termination on (mutually) recursive inline bodies. `active_calls`
+/// also stops an exact repeated `(function, arguments)` state immediately; this
+/// avoids constructing a deep conditional spine for `a(x) -> b(x) -> a(x)`
+/// while preserving finite ground recursion whose arguments genuinely change.
 fn substitute_inline_calls_bounded(
     expr: &crate::ir::TrustVcExpr,
     inline_bodies: &InlineBodyMap,
     expansion_depth: usize,
+    active_calls: &[(String, Vec<crate::ir::TrustVcExpr>)],
 ) -> crate::ir::TrustVcExpr {
     use crate::ir::TrustVcExpr;
 
@@ -71,10 +75,14 @@ fn substitute_inline_calls_bounded(
     let rec_vec = |exprs: &[TrustVcExpr]| -> Vec<TrustVcExpr> {
         exprs
             .iter()
-            .map(|e| substitute_inline_calls_bounded(e, inline_bodies, expansion_depth))
+            .map(|e| {
+                substitute_inline_calls_bounded(e, inline_bodies, expansion_depth, active_calls)
+            })
             .collect()
     };
-    let rec = |e: &TrustVcExpr| substitute_inline_calls_bounded(e, inline_bodies, expansion_depth);
+    let rec = |e: &TrustVcExpr| {
+        substitute_inline_calls_bounded(e, inline_bodies, expansion_depth, active_calls)
+    };
 
     match expr {
         TrustVcExpr::FnCall {
@@ -89,6 +97,9 @@ fn substitute_inline_calls_bounded(
                 // (recursive) inline body and overflow the stack.
                 if expansion_depth < MAX_INLINE_EXPANSION_DEPTH
                     && param_names.len() == expanded_args.len()
+                    && !active_calls.iter().any(|(active_name, active_args)| {
+                        active_name == name && active_args == &expanded_args
+                    })
                 {
                     // Monomorphize the (possibly generic) inline body to the
                     // concrete instantiation implied by the call-site argument
@@ -128,10 +139,13 @@ fn substitute_inline_calls_bounded(
                         .map(|(p, a)| (p.as_str(), a))
                         .collect();
                     let substituted = super::vars::substitute_vars_in_expr(body, &subst);
+                    let mut nested_calls = active_calls.to_vec();
+                    nested_calls.push((name.clone(), expanded_args.clone()));
                     return substitute_inline_calls_bounded(
                         &substituted,
                         inline_bodies,
                         expansion_depth + 1,
+                        &nested_calls,
                     );
                 }
             }
@@ -199,12 +213,29 @@ fn substitute_inline_calls_bounded(
             then_branch,
             else_branch,
             ty,
-        } => TrustVcExpr::Ite {
-            cond: Box::new(rec(cond)),
-            then_branch: Box::new(rec(then_branch)),
-            else_branch: Box::new(rec(else_branch)),
-            ty: ty.clone(),
-        },
+        } => {
+            let expanded_cond = rec(cond);
+            // Inline recursive definitions lazily across a statically decided
+            // branch.  Expanding BOTH arms of `if 0 == 0 { 0 } else { f(..) }`
+            // follows an unreachable recursive call until the robustness cap,
+            // leaving a residual UF even though the selected expression is the
+            // exact ground value `0`.  Choosing an arm is exact only when the
+            // condition is decided structurally below; symbolic conditions keep
+            // the old eager, bounded behavior and therefore remain fail-closed.
+            if let Some(value) = statically_decided_inline_condition(&expanded_cond) {
+                return if value {
+                    rec(then_branch)
+                } else {
+                    rec(else_branch)
+                };
+            }
+            TrustVcExpr::Ite {
+                cond: Box::new(expanded_cond),
+                then_branch: Box::new(rec(then_branch)),
+                else_branch: Box::new(rec(else_branch)),
+                ty: ty.clone(),
+            }
+        }
         TrustVcExpr::Let {
             name,
             ty,
@@ -335,6 +366,44 @@ fn substitute_inline_calls_bounded(
             name: name.clone(),
             value: Box::new(rec(value)),
         },
+    }
+}
+
+/// Returns a Boolean only when the IR itself proves the condition's value.
+///
+/// This deliberately is not a general arithmetic simplifier.  In particular,
+/// two syntactically different integer literals may still carry context-sized
+/// default types, so comparing their host values here could choose the wrong
+/// fixed-width branch. Reflexive equality/disequality is used only for the
+/// explicitly classified non-floating scalar sorts below: IEEE NaN makes
+/// `x == x` false, so Float must never take this shortcut. Boolean
+/// literals/negation preserve exactness.
+fn statically_decided_inline_condition(expr: &crate::ir::TrustVcExpr) -> Option<bool> {
+    use crate::ir::{CompareOp, TrustVcExpr};
+
+    match expr {
+        TrustVcExpr::BoolLit(value) => Some(*value),
+        TrustVcExpr::Not(inner) => statically_decided_inline_condition(inner).map(|v| !v),
+        TrustVcExpr::Compare { op, left, right }
+            if left == right
+                && matches!(
+                    crate::ir_lowering::infer_expr_type(left),
+                    crate::ir::TrustVcType::Unit
+                        | crate::ir::TrustVcType::Bool
+                        | crate::ir::TrustVcType::Int { .. }
+                        | crate::ir::TrustVcType::Uint { .. }
+                        | crate::ir::TrustVcType::MathInt
+                        | crate::ir::TrustVcType::Nat
+                        | crate::ir::TrustVcType::Char
+                ) =>
+        {
+            match op {
+                CompareOp::Eq => Some(true),
+                CompareOp::Ne => Some(false),
+                CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -670,7 +739,7 @@ impl crate::ir_expr_traversal::TrustVcExprFolder for InlineBodyTypeMonomorphizer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ArithOp, TrustVcExpr, TrustVcType};
+    use crate::ir::{ArithOp, CompareOp, TrustVcExpr, TrustVcType};
     use std::collections::HashMap;
 
     fn int_ty() -> TrustVcType {
@@ -708,6 +777,19 @@ mod tests {
         }
     }
 
+    fn zero_guarded_recursive_call(partner: &str) -> TrustVcExpr {
+        TrustVcExpr::Ite {
+            cond: Box::new(TrustVcExpr::Compare {
+                op: CompareOp::Eq,
+                left: Box::new(var("x")),
+                right: Box::new(int_lit(0)),
+            }),
+            then_branch: Box::new(int_lit(0)),
+            else_branch: Box::new(add(int_lit(1), call(partner, vec![var("x")]))),
+            ty: int_ty(),
+        }
+    }
+
     /// Counts how many `FnCall` nodes naming `name` survive in `expr`.
     fn count_calls(expr: &TrustVcExpr, name: &str) -> usize {
         match expr {
@@ -720,6 +802,27 @@ mod tests {
             }
             _ => 0,
         }
+    }
+
+    fn count_all_calls(expr: &TrustVcExpr, names: &[&str]) -> usize {
+        use crate::ir_expr_traversal::{walk_expr, TrustVcExprVisitor};
+
+        struct Counter<'a> {
+            names: &'a [&'a str],
+            count: usize,
+        }
+        impl TrustVcExprVisitor for Counter<'_> {
+            fn visit_expr(&mut self, expr: &TrustVcExpr) {
+                if let TrustVcExpr::FnCall { name, .. } = expr {
+                    self.count += usize::from(self.names.contains(&name.as_str()));
+                }
+                walk_expr(self, expr);
+            }
+        }
+
+        let mut counter = Counter { names, count: 0 };
+        counter.visit_expr(expr);
+        counter.count
     }
 
     /// A SELF-recursive inline body `f(x) == f(x) + 1` must not drive
@@ -781,6 +884,79 @@ mod tests {
             residual, 1,
             "expected a single residual mutual-call after the expansion bound, got: {result:?}"
         );
+    }
+
+    /// A ground base-case call through a mutually-recursive body is an exact
+    /// finite expansion: the false recursive arm is unreachable and must not be
+    /// traversed merely because substitution walks the expression tree.
+    #[test]
+    fn mutually_recursive_ground_base_case_prunes_unreachable_arm() {
+        let mut bodies: InlineBodyMap = HashMap::new();
+        bodies.insert(
+            "a".to_string(),
+            (
+                vec!["x".to_string()],
+                vec![int_ty()],
+                zero_guarded_recursive_call("b"),
+            ),
+        );
+        bodies.insert(
+            "b".to_string(),
+            (
+                vec!["x".to_string()],
+                vec![int_ty()],
+                zero_guarded_recursive_call("a"),
+            ),
+        );
+
+        let result = substitute_inline_calls(&call("b", vec![int_lit(0)]), &bodies);
+
+        assert_eq!(result, int_lit(0));
+    }
+
+    /// A symbolic guard is not guessed. Both branches retain their meaning and
+    /// recursive expansion remains capped with a residual call (fail-closed).
+    #[test]
+    fn mutually_recursive_symbolic_guard_is_not_pruned() {
+        let mut bodies: InlineBodyMap = HashMap::new();
+        bodies.insert(
+            "a".to_string(),
+            (
+                vec!["x".to_string()],
+                vec![int_ty()],
+                zero_guarded_recursive_call("b"),
+            ),
+        );
+        bodies.insert(
+            "b".to_string(),
+            (
+                vec!["x".to_string()],
+                vec![int_ty()],
+                zero_guarded_recursive_call("a"),
+            ),
+        );
+
+        let result = substitute_inline_calls(&call("b", vec![var("n")]), &bodies);
+        let residual = count_all_calls(&result, &["a", "b"]);
+
+        assert!(residual > 0, "symbolic recursion must remain fail-closed");
+    }
+
+    /// IEEE equality is not reflexive at NaN, so syntactic identity alone must
+    /// never decide a floating-point branch.
+    #[test]
+    fn identical_float_operands_do_not_prune_branch() {
+        let float = TrustVcExpr::Var {
+            name: "f".to_string(),
+            ty: TrustVcType::Float { width: 64 },
+        };
+        let condition = TrustVcExpr::Compare {
+            op: CompareOp::Eq,
+            left: Box::new(float.clone()),
+            right: Box::new(float),
+        };
+
+        assert_eq!(statically_decided_inline_condition(&condition), None);
     }
 
     /// A non-recursive inline chain shorter than the bound is fully expanded:

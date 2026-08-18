@@ -168,7 +168,7 @@ fn main() {
 
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let output = Command::new(rustc)
-        .arg("-Zno-trust-verify")
+        .arg("-Ztrust-verify=off")
         .arg(&source)
         .arg("-o")
         .arg(&binary)

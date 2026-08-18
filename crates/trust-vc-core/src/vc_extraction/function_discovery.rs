@@ -128,10 +128,9 @@ pub(super) fn enclosing_inline_module_path(
 
     let mut candidates = Vec::new();
     collect_enclosing_module_candidates(&file.items, func, &mut Vec::new(), &mut candidates);
-    if candidates.len() == 1 {
-        EnclosingModuleResolution::Unique(candidates.pop().expect("one candidate"))
-    } else {
-        EnclosingModuleResolution::Ambiguous
+    match candidates.pop() {
+        Some(candidate) if candidates.is_empty() => EnclosingModuleResolution::Unique(candidate),
+        _ => EnclosingModuleResolution::Ambiguous,
     }
 }
 

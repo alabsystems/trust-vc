@@ -108,6 +108,9 @@ pub(crate) struct PreparedVerificationContext {
     /// (vir set_fuel `hidden` list). Session (proc-macro) path only; the file
     /// path keeps failing closed on `hide!` in `vc_extraction`.
     pub hidden_fns: HashSet<String>,
+    /// Source definitions whose body axioms were admitted and published by the
+    /// catalog, including termination-proven recursive SCC members.
+    pub source_catalog_admitted_definitions: HashSet<String>,
     /// Typed helper function contexts for multi-function proofs.
     /// Each entry is a FunctionContext that should be registered as a ay UF
     /// in addition to the primary `function_context`. Part of #2431.
@@ -754,6 +757,7 @@ pub(crate) fn prepare_context(
         ),
         revealed_fns,
         hidden_fns,
+        source_catalog_admitted_definitions: ctx.source_catalog_admitted_definitions.clone(),
         helper_function_contexts,
         obligations,
         variables: ctx.variables.clone(),

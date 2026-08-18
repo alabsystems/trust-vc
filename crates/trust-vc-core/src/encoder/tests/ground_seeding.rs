@@ -137,6 +137,12 @@ fn test_2391_typed_setup_asserts_collection_seed_binding_without_goal_selects() 
 #[test]
 fn test_2390_symbolic_array_sortedness_verifies_with_ground_seeds() {
     let mut ctx = VerificationContext::new();
+    // This is a completeness smoke test whose contract already admits a
+    // fail-closed `Unknown`. Keep it from consuming the default timeout retry
+    // cascade when AY cannot close the quantified array/BV interaction.
+    ctx.set_rlimit(1_000);
+    ctx.set_skip_retry_cascade(true);
+    ctx.set_demand_inline_enabled(false);
     ctx.declare_var_typed("s", crate::ir::TrustVcType::parse_or_opaque("Seq<i64>"));
     ctx.declare_var_typed("n", crate::ir::TrustVcType::parse_or_opaque("u64"));
     ctx.declare_var_typed("j", crate::ir::TrustVcType::parse_or_opaque("u64"));

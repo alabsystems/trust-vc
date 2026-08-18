@@ -58,3 +58,8 @@ pub(crate) use env::{
 };
 pub use error::LoweringError;
 pub(crate) use types::infer_expr_type;
+
+/// Synthetic call inserted only into source-catalog body axioms whose declared
+/// result is mathematical `int`. Lowering accepts it only with the matching
+/// crate-private obligation capability; authored source cannot opt itself in.
+pub(crate) const SOURCE_CATALOG_MATH_INT_MARKER: &str = "__trust_vc_math_int_expr";

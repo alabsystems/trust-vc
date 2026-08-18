@@ -653,6 +653,10 @@ impl fmt::Display for TrustVcSourceHashKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CorpusTriageReport {
     pub schema_version: u32,
+    /// Schema version of the parsed corpus manifest itself. This is distinct
+    /// from `schema_version`, which versions this triage-report envelope.
+    #[serde(default)]
+    pub manifest_schema_version: u32,
     pub manifest_path: String,
     pub upstream_repo: Option<String>,
     pub upstream_ref: Option<String>,
@@ -677,6 +681,10 @@ impl CorpusTriageReport {
         let mut out = String::new();
         out.push_str("# Verus Corpus Triage Report\n\n");
         out.push_str(&format!("- Manifest: `{}`\n", self.manifest_path));
+        out.push_str(&format!(
+            "- Manifest schema version: `{}`\n",
+            self.manifest_schema_version
+        ));
         out.push_str(&format!("- Entries: `{}`\n", self.entry_count));
         out.push_str(&format!(
             "- Duplicate entries: `{}`\n",
@@ -1215,17 +1223,17 @@ const CORPUS_BLOCKER_SUMMARY_LIMIT: usize = 5;
 /// otherwise-hermetic evidence command environment must carry so corpus/gate
 /// `cargo`/`rustc` invocations resolve to the SAME toolchain the interactive
 /// dev/CI environment uses — the one that accepts Trust's nightly
-/// `-Zno-trust-verify` flag.
+/// `-Ztrust-verify=off` flag.
 ///
 /// The base `SANITIZED_PATH` deliberately excludes the rustup shim directory
 /// (`~/.cargo/bin`) and does not propagate `RUSTUP_TOOLCHAIN`, so without this
 /// injection a bare `cargo`/`rustc` resolves to whatever non-rustup compiler
 /// sits on the sanitized system PATH (e.g. a Homebrew stable `rustc`), which
-/// rejects `-Zno-trust-verify` and produces spurious corpus failures. The
+/// rejects `-Ztrust-verify=off` and produces spurious corpus failures. The
 /// injection also exports `RUSTC` (the active toolchain's rustup `rustc` shim)
 /// for tooling that resolves the compiler from the sibling of `$CARGO` rather
 /// than from PATH — the cargo-trust-vc integration-test witnesses compile a
-/// helper with `rustc -Zno-trust-verify` and take the sibling of the isolated
+/// helper with `rustc -Ztrust-verify=off` and take the sibling of the isolated
 /// stable `$CARGO`, which the PATH prepend alone cannot redirect. Both
 /// fields are detected DYNAMICALLY from the ambient environment (never
 /// hardcoded); when a field cannot be resolved it is left `None` and the
@@ -1432,7 +1440,7 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
     // Detect the active rustup toolchain once, up front, from the still-ambient
     // process environment, so every subsequent sanitized command resolves
     // `cargo`/`rustc` to the toolchain the interactive dev/CI shell uses (the
-    // one that accepts Trust's `-Zno-trust-verify`). Must precede any command
+    // one that accepts Trust's `-Ztrust-verify=off`). Must precede any command
     // that runs `cargo`/`rustc`.
     init_sanitized_toolchain_env(&args.crate_root);
 
@@ -3416,7 +3424,7 @@ fn sanitized_command_env_with(
         // compiler from PATH; they do NOT cover tooling that resolves `rustc`
         // from the sibling of `$CARGO`. The cargo-trust-vc integration-test
         // witnesses (owner #2780) do exactly that — they compile a fake-cargo
-        // recorder with `rustc -Zno-trust-verify`, and their `rustc_command()`
+        // recorder with `rustc -Ztrust-verify=off`, and their `rustc_command()`
         // takes the sibling of the isolated stable `$CARGO` (e.g. Homebrew's),
         // which rejects the Trust-only flag and spuriously fails the witness.
         // Exporting RUSTC makes that CARGO-sibling resolution land on the Trust
@@ -3537,6 +3545,24 @@ fn evidence_environment_blocking_reasons(
         "CARGO_ENCODED_RUSTFLAGS",
         "DYLD_INSERT_LIBRARIES",
         "LD_PRELOAD",
+        // SOUNDNESS: this variable carries dependency semantic facts, and a fact
+        // imported through it installs each callee `ensures` as an ASSUME in the
+        // caller — flipping a dependency's postconditions from BLOCKED to
+        // trusted. The env carrier is strictly weaker than the file carrier:
+        // `dependency_semantic_artifacts_from_env` is a plain
+        // `serde_json::from_str`, and its `DependencySemanticArtifact` has no
+        // rmeta binding (no metadata path/len/sha256) at all. Nothing in it is a
+        // receipt that a verifier ever ran.
+        //
+        // The clause-equality check downstream means a forger cannot INVENT a
+        // postcondition, only assert that the dependency's real declared clauses
+        // were proven — so this is bounded, not unbounded. It is still a
+        // false-verify whenever the dependency's body does not satisfy its own
+        // `ensures`.
+        //
+        // Blocking it here does not fix the channel; it stops a run that used
+        // the channel from being reported as clean replacement evidence.
+        TRUST_VC_DEPENDENCY_FACTS_ENV,
     ] {
         if std::env::var_os(key).is_some() {
             reasons.push(format!("replacement evidence requires `{key}` to be unset"));
@@ -3875,6 +3901,7 @@ fn load_corpus_triage_report(
 
     Ok(CorpusTriageReport {
         schema_version: 1,
+        manifest_schema_version: manifest.schema_version,
         manifest_path: report_path_string(manifest_path, crate_root),
         upstream_repo: manifest.upstream_repo,
         upstream_ref: manifest.upstream_ref,
@@ -11924,12 +11951,40 @@ fn ls_remote_head(url: &str) -> Option<String> {
             DEFAULT_GIT_COMMAND,
             &["ls-remote", &candidate, "refs/heads/main"],
         )
-        .and_then(|stdout| stdout.split_whitespace().next().map(str::to_string))
+        .and_then(|stdout| parse_explicit_main_ref(&stdout))
         {
             return Some(head);
         }
     }
     None
+}
+
+/// Parse the exact output contract of `git ls-remote <url> refs/heads/main`.
+///
+/// The latest-pin gate is an authority boundary, so it must not accept a
+/// warning, a symbolic `HEAD` row, a different ref, or the first row of a
+/// multiline response as a commit.  A valid response is exactly one non-empty
+/// `<40 lowercase hex> refs/heads/main` row and nothing else.
+fn parse_explicit_main_ref(stdout: &str) -> Option<String> {
+    let mut rows = stdout.lines().filter(|line| !line.trim().is_empty());
+    let row = rows.next()?;
+    if rows.next().is_some() {
+        return None;
+    }
+
+    let mut fields = row.split_whitespace();
+    let revision = fields.next()?;
+    let reference = fields.next()?;
+    if fields.next().is_some()
+        || reference != "refs/heads/main"
+        || revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    Some(revision.to_string())
 }
 
 fn ls_remote_candidate_urls(url: &str) -> Vec<String> {
@@ -13491,7 +13546,7 @@ pub const FOO_RS_EXPECTED_CASES: &[FooExpectedCase] = &[
         .expect("fake cargo bin dir should be created");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 case "$1" in
   fetch|check|test|generate-lockfile)
     exit 0
@@ -14160,7 +14215,7 @@ fn identity() {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 cmd="$1"
 manifest=""
 while [ "$#" -gt 0 ]; do
@@ -14248,7 +14303,7 @@ edition = "2021"
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 echo "direct-source typecheck should not run for cargo fixtures" >&2
 exit 88
 "#,
@@ -14294,6 +14349,33 @@ exit 88
     fn parse_rev_field_extracts_git_revision() {
         let line = r#"ay-core = { git = "https://github.com/alabsystems/ay", rev = "abc123" }"#;
         assert_eq!(parse_rev_field(line).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn explicit_main_ref_parser_requires_one_exact_lowercase_sha_row() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            parse_explicit_main_ref(&format!("{revision}\trefs/heads/main\n")).as_deref(),
+            Some(revision)
+        );
+
+        for malformed in [
+            "",
+            "0123456789abcdef0123456789abcdef01234567\tHEAD\n",
+            "0123456789abcdef0123456789abcdef01234567\trefs/heads/other\n",
+            "0123456789abcdef0123456789abcdef0123456\trefs/heads/main\n",
+            "0123456789ABCDEF0123456789ABCDEF01234567\trefs/heads/main\n",
+            "ref: refs/heads/main\tHEAD\n",
+            "warning: redirected\n0123456789abcdef0123456789abcdef01234567\trefs/heads/main\n",
+            "0123456789abcdef0123456789abcdef01234567\trefs/heads/main\n89abcdef0123456789abcdef0123456789abcdef\trefs/heads/main\n",
+            "0123456789abcdef0123456789abcdef01234567\trefs/heads/main\textra\n",
+        ] {
+            assert_eq!(
+                parse_explicit_main_ref(malformed),
+                None,
+                "malformed ls-remote response must fail closed: {malformed:?}"
+            );
+        }
     }
 
     #[test]
@@ -15477,6 +15559,8 @@ entries:
         let report = load_corpus_triage_report(&manifest_path, &temp_dir)
             .expect("triage report should load");
 
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.manifest_schema_version, 1);
         assert_eq!(report.manifest_path, "evals/verus/verus-tests.json");
         assert_eq!(report.entry_count, 6);
         assert_eq!(report.classification_counts["ported"], 2);
@@ -19640,7 +19724,7 @@ fn extra_local_regression() {}
         let record_path = temp_dir.join("cargo-test-cases.txt");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "test" ] || [ "$2" != "--locked" ] || [ "$3" != "--offline" ] || [ "$4" != "-p" ] || [ "$5" != "cargo-trust-vc" ] || [ "$6" != "--test" ] || [ "$7" != "late_args_integration" ] || [ "$8" != "--" ] || [ "$9" != "--exact" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -19833,7 +19917,7 @@ fn z_flag_with_space_is_accepted() {}
         let record_path = temp_dir.join("cargo-test-cases.txt");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "test" ] || [ "$2" != "--locked" ] || [ "$3" != "--offline" ] || [ "$4" != "-p" ] || [ "$5" != "cargo-trust-vc" ] || [ "$6" != "--test" ] || [ "$7" != "late_args_integration" ] || [ "$8" != "--" ] || [ "$9" != "--exact" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -20932,7 +21016,7 @@ pub fn test_regression_70() {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -21055,7 +21139,7 @@ fn fixture_ok(x: i32) -> i32 {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -21071,7 +21155,7 @@ exit 0
         let fake_binary = temp_dir.join("fake-cargo-trust-vc");
         write_executable(
             &fake_binary,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--json" ] || [ "$3" != "--emit-certificate" ] || [ "$4" != "." ]; then
   echo "unexpected args: $*" >&2
   exit 64
@@ -21367,7 +21451,7 @@ pub fn double(x: u16) -> i128 { x as i128 + x as i128 }
         write_executable(
             path,
             &format!(
-                r#"#!/bin/sh
+                r#"#!/usr/bin/env bash
 printf '%s|%s\n' "$(basename "$PWD")" "$*" >> "{}"
 if [ "$1" = "check" ] && [ "$2" = "--message-format=json" ] && [ "$3" = "--all-targets" ] && [ "$4" = "--locked" ] && [ "$5" = "--offline" ]; then
   mkdir -p "$CARGO_TARGET_DIR/debug/deps"
@@ -21538,7 +21622,7 @@ exit 64
         write_executable(
             path,
             &format!(
-                r#"#!/bin/sh
+                r#"#!/usr/bin/env bash
 touch "{}"
 if [ "$1" != "check" ] || [ "$2" != "--json" ] || [ "$3" != "--emit-certificate" ] || [ "$4" != "." ]; then
   echo "unexpected cargo-trust-vc args: $*" >&2
@@ -21659,7 +21743,7 @@ pub fn direct_body_call(x: u16) -> u16 {
         write_executable(
             path,
             &format!(
-                r#"#!/bin/sh
+                r#"#!/usr/bin/env bash
 touch "{}"
 if [ "$1" != "check" ] || [ "$2" != "--json" ] || [ "$3" != "--emit-certificate" ] || [ "$4" != "." ]; then
   echo "unexpected cargo-trust-vc args: $*" >&2
@@ -21974,7 +22058,7 @@ fn fixture_hidden(x: i32) -> i32 {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -21990,7 +22074,7 @@ exit 0
         let fake_binary = temp_dir.join("fake-cargo-trust-vc");
         write_executable(
             &fake_binary,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 mkdir -p .trust_vc
 cat > .trust_vc/proof-certificate.json <<'JSON'
 {
@@ -22136,7 +22220,7 @@ edition = "2021"
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -22285,7 +22369,7 @@ edition = "2021"
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 printf '%s|%s\n' "$(pwd)" "$*" >> "$FETCH_LOG"
 if [ "$1" != "fetch" ] || [ "$2" != "--locked" ]; then
   echo "unexpected cargo args: $*" >&2
@@ -22656,7 +22740,7 @@ edition = "2021"
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 echo "cargo should not run without a fixture lockfile" >&2
 exit 70
 "#,
@@ -22719,7 +22803,7 @@ fn fixture_ok() {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -22734,7 +22818,7 @@ exit 101
         let fake_binary = temp_dir.join("fake-cargo-trust-vc");
         write_executable(
             &fake_binary,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 touch ../../trust-vc-ran
 echo "cargo-trust-vc should not run after rustc rejection" >&2
 exit 70
@@ -22871,7 +22955,7 @@ fn test_no_cheating_assume() {
         let fake_binary = temp_dir.join("fake-cargo-trust-vc");
         write_executable(
             &fake_binary,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--json" ] || [ "$3" != "--emit-certificate" ] || [ "$4" != "--no-cheating" ] || [ "$5" != "." ]; then
   echo "unexpected cargo-trust-vc args: $*" >&2
   exit 64
@@ -23063,7 +23147,7 @@ edition = "2021"
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23079,7 +23163,7 @@ exit 0
         let fake_binary = temp_dir.join("fake-cargo-trust-vc");
         write_executable(
             &fake_binary,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--json" ] || [ "$3" != "--emit-certificate" ] || [ "$4" != "." ]; then
   echo "unexpected args: $*" >&2
   exit 64
@@ -23213,7 +23297,7 @@ JSON
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23287,7 +23371,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23342,7 +23426,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23392,7 +23476,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23445,7 +23529,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23557,7 +23641,7 @@ pub fn harness_invalid_rust() {
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23605,7 +23689,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23652,7 +23736,7 @@ exit 0
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23699,7 +23783,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23756,7 +23840,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23805,7 +23889,7 @@ exit 101
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -23853,7 +23937,7 @@ exit 64
         let fake_cargo = temp_dir.join("fake-cargo");
         write_executable(
             &fake_cargo,
-            r#"#!/bin/sh
+            r#"#!/usr/bin/env bash
 if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
@@ -24719,12 +24803,12 @@ paths = ["../../../../fake-ay"]
         // Regression: when the resolved default cargo lives outside the rustup
         // shim dir (e.g. Homebrew's `/opt/homebrew/bin/cargo`), the detected
         // rustup shim dir must be prepended AHEAD of it so the trust shim
-        // `rustc` (which accepts `-Zno-trust-verify`) wins over the non-rustup
+        // `rustc` (which accepts `-Ztrust-verify=off`) wins over the non-rustup
         // stable `rustc` sitting on the sanitized system PATH.
-        let path = cargo_gate_path_with("/opt/homebrew/bin/cargo", Some("/home/dev/.cargo/bin"));
+        let path = cargo_gate_path_with("/opt/homebrew/bin/cargo", Some("/home/user/.cargo/bin"));
         assert_eq!(
             path,
-            format!("/home/dev/.cargo/bin:/opt/homebrew/bin:{SANITIZED_PATH}")
+            format!("/home/user/.cargo/bin:/opt/homebrew/bin:{SANITIZED_PATH}")
         );
 
         // Without a detected shim dir the behaviour is exactly the pre-existing
@@ -24737,8 +24821,8 @@ paths = ["../../../../fake-ay"]
         // When the cargo already lives in the shim dir, no duplicate leading
         // component is produced.
         assert_eq!(
-            cargo_gate_path_with("/home/dev/.cargo/bin/cargo", Some("/home/dev/.cargo/bin")),
-            format!("/home/dev/.cargo/bin:{SANITIZED_PATH}")
+            cargo_gate_path_with("/home/user/.cargo/bin/cargo", Some("/home/user/.cargo/bin")),
+            format!("/home/user/.cargo/bin:{SANITIZED_PATH}")
         );
     }
 
@@ -24748,13 +24832,13 @@ paths = ["../../../../fake-ay"]
         // is exported so the shims resolve to that toolchain in cwds without a
         // rust-toolchain.toml (corpus fixtures run in isolated directories).
         let toolchain = SanitizedToolchainEnv {
-            rustup_bin_dir: Some("/home/dev/.cargo/bin".to_string()),
+            rustup_bin_dir: Some("/home/user/.cargo/bin".to_string()),
             active_toolchain: Some("trust".to_string()),
         };
         let env = sanitized_command_env_with(Some(&toolchain));
         assert_eq!(
             env.get("PATH").map(String::as_str),
-            Some(format!("/home/dev/.cargo/bin:{SANITIZED_PATH}").as_str()),
+            Some(format!("/home/user/.cargo/bin:{SANITIZED_PATH}").as_str()),
             "detected rustup shim dir must lead the sanitized PATH"
         );
         assert_eq!(
@@ -24764,7 +24848,7 @@ paths = ["../../../../fake-ay"]
         );
         assert_eq!(
             env.get("RUSTC").map(String::as_str),
-            Some("/home/dev/.cargo/bin/rustc"),
+            Some("/home/user/.cargo/bin/rustc"),
             "RUSTC must be pinned at the active toolchain's rustup shim so tooling \
              that resolves rustc from the $CARGO sibling (not PATH) still gets Trust"
         );

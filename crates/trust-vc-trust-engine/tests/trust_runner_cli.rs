@@ -219,16 +219,24 @@ impl Drop for TempCase {
 }
 
 fn runner_bin() -> PathBuf {
+    // The bin target is `trust_vc-trust-runner` — underscore after `trust`,
+    // hyphens after. Cargo mangles that to CARGO_BIN_EXE_trust_vc_trust_runner,
+    // but the on-disk name keeps the original spelling. Both the env keys and
+    // the filename fallback below must use the REAL name; they carried a
+    // trust-vc-* spelling left over from the repo rename, which is why every
+    // test in this file failed with "binary not found" rather than on its own
+    // assertions.
     for key in [
-        "CARGO_BIN_EXE_trust-vc-trust-runner",
+        "CARGO_BIN_EXE_trust_vc-trust-runner",
         "CARGO_BIN_EXE_trust_vc_trust_runner",
+        "CARGO_BIN_EXE_trust-vc-trust-runner",
     ] {
         if let Ok(path) = std::env::var(key) {
             return PathBuf::from(path);
         }
     }
 
-    let binary_name = format!("trust-vc-trust-runner{}", std::env::consts::EXE_SUFFIX);
+    let binary_name = format!("trust_vc-trust-runner{}", std::env::consts::EXE_SUFFIX);
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let candidate = PathBuf::from(target_dir).join("debug").join(&binary_name);
         if candidate.exists() {
@@ -243,7 +251,10 @@ fn runner_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("trust-vc-trust-runner binary not found; run `cargo build -p trust-vc-trust-engine --bin trust-vc-trust-runner` first");
+    panic!(
+        "trust_vc-trust-runner binary not found; run \
+         `targo build -p trust-vc-trust-engine --bins` first"
+    );
 }
 
 fn fixture_path(rel_path: &str) -> PathBuf {
@@ -360,13 +371,18 @@ fn runner_auto_detects_and_consumes_native_trust_ir_bundle_fixture() {
     assert_eq!(json["module_name"], "trust_native_request_bundle");
     assert_eq!(json["requests"][0]["request_id"], 0);
     assert_eq!(json["requests"][0]["mode"], "import_proof_certificates");
+    // Both track the corpus fixture re-copied at 53ea6234: obligation 0 carries
+    // an smtlib2 formula, and its certificate is a kernel-recheckable CleanCic
+    // term — which the report now names as such instead of flattening it to
+    // `trusted`. If either drifts, check whether the corpus moved or the runner
+    // stopped carrying the field, before editing the literal.
     assert_eq!(
         json["requests"][0]["proof_evidence"][0]["formula_schema"],
-        "trust-types.Formula@1"
+        "smtlib2"
     );
     assert_eq!(
         json["requests"][0]["proof_evidence"][0]["evidence_kind"],
-        "lean_proof"
+        "clean_cic"
     );
     assert_eq!(
         json["requests"][0]["proof_evidence"][0]["replay_metadata"]["source"],
@@ -384,7 +400,7 @@ fn runner_auto_detects_and_consumes_native_trust_ir_bundle_fixture() {
         json["requests"][0]["proof_evidence"][0]["replay_metadata"]["transcript_digest"]
             .as_str()
             .expect("native TrustIr report should include replay transcript digest")
-            .starts_with("trust_ir-stable-v1:")
+            .starts_with("sha256:")
     );
     assert_eq!(json["requests"][0]["proof_evidence"][0]["trusted"], false);
 }

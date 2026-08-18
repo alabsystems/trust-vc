@@ -18,23 +18,23 @@ crates/
 ```bash
 git clone <repo>
 cd trust-vc
-targo build
-targo test
+targo --unverified build
+targo --unverified test
 ```
 
 ## Running Tests
 ```bash
 # Full test suite
-targo test
+targo --unverified test
 
 # Single crate
-targo test -p trust-vc-core
+targo --unverified test -p trust-vc-core
 
 # Specific test
-targo test -p trust-vc-core boundary_i32
+targo --unverified test -p trust-vc-core boundary_i32
 
 # With expensive tests
-targo test --features expensive-tests
+targo --unverified test --features expensive-tests
 ```
 
 ## Writing Tests
@@ -82,13 +82,13 @@ See README.md and VISION.md for the current pipeline overview.
 1. Choose the right module (seq.rs, set.rs, map.rs, arithmetic.rs)
 2. Add a pub fn with a doc comment describing the property
 3. Use stub body: `let _ = (args,);`
-4. Ensure targo check --tests passes
+4. Ensure `targo --unverified check --tests` passes
 
 ## Adding a New Test
 1. Choose the right test module (regression_*.rs for regression tests)
 2. Follow the existing pattern
 3. Use result oracles (expect_verified, etc.)
-4. Run targo test to verify
+4. Run `targo --unverified test` to verify
 
 ## Questions?
 Open an issue or contact Andrew Yates <andrewyates.name@gmail.com>.

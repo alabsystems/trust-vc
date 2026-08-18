@@ -106,6 +106,31 @@ fn forall_exists_nat_ge_still_verifies() {
 }
 
 #[test]
+fn forall_exists_nat_le_still_verifies() {
+    assert_verified("forall |i: nat| exists |j: nat| (j as int) >= (i as int)");
+}
+
+#[test]
+fn strict_order_is_not_treated_as_reflexive() {
+    // The constructive non-strict-order route must not instantiate `j := i`
+    // for `<`; that candidate is false.
+    assert_not_verified("forall |i: nat| exists |j: nat| (j as int) < (i as int)");
+}
+
+#[test]
+fn bounded_endpoint_false_case_is_not_verified() {
+    // A finite carrier has a maximum, so `j > i` is false at the endpoint.
+    assert_not_verified("forall |i: u8| exists |j: u8| j > i");
+}
+
+#[test]
+fn mismatched_candidate_type_does_not_use_reflexive_witness() {
+    // The existential binder and the outer candidate have different types;
+    // the constructive witness gate must fall back to the quantified path.
+    assert_not_verified("forall |i: int| exists |j: nat| (j as int) <= (i as int)");
+}
+
+#[test]
 fn simple_exists_still_verifies() {
     assert_verified("exists |j: int| j == 0");
 }

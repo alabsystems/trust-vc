@@ -42,10 +42,14 @@ fn assert_verified(code: &str, name: &str) {
 }
 
 /// A false `Verified` here would be the cardinal soundness failure. Fail-closed
-/// (Counterexample or Unknown) is acceptable; `Verified` is NOT.
+/// (Counterexample, model-less NotProved, or Unknown) is acceptable;
+/// `Verified` is NOT. `NotProved` is the fail-closed incompleteness verdict,
+/// not a fabricated counterexample.
 fn assert_not_verified(code: &str, name: &str) {
     match verdict(code, name) {
-        VerifyResult::Counterexample { .. } | VerifyResult::Unknown { .. } => {}
+        VerifyResult::Counterexample { .. }
+        | VerifyResult::NotProved { .. }
+        | VerifyResult::Unknown { .. } => {}
         VerifyResult::Verified => {
             panic!("fn {name} must NOT verify (unequal seqs) — a false Verified is unsound")
         }

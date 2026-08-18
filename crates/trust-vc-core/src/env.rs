@@ -11,7 +11,7 @@
 //! Trust toolchain's deny-by-default `env_mutation` lint therefore forbids
 //! calling them directly; every mutation in this workspace routes through this
 //! module, which
-//! (a) funnels every raw call through the single [`write_env`] primitive, the
+//! (a) funnels every raw call through the single `write_env` primitive, the
 //!     ONE `env_mutation`-blessed site in the crate, and
 //! (b) serializes mutation behind one process-wide lock and restores the
 //!     previous value on scope exit, even on panic.
@@ -21,13 +21,18 @@
 //! leaf below core and keeps its own equivalent lock-scoped choke point.
 //!
 //! Patterns:
-//! - whole-scope fixed values: [`with_serialized_env_vars`] /
-//!   [`with_serialized_env_vars_removed`]
-//! - set/remove sequences probing a knob's parser: [`with_env_edits`]
-//! - guard style inside an existing serialization scope: [`lock_env`] +
-//!   [`ScopedEnvVar::set`] / [`ScopedEnvVar::unset`]
+//! - whole-scope fixed values:
+//!   [`with_serialized_env_vars`](crate::env::with_serialized_env_vars) /
+//!   [`with_serialized_env_vars_removed`](crate::env::with_serialized_env_vars_removed)
+//! - set/remove sequences probing a knob's parser:
+//!   [`with_env_edits`](crate::env::with_env_edits)
+//! - guard style inside an existing serialization scope:
+//!   [`lock_env`](crate::env::lock_env) +
+//!   [`ScopedEnvVar::set`](crate::env::ScopedEnvVar::set) /
+//!   [`ScopedEnvVar::unset`](crate::env::ScopedEnvVar::unset)
 //! - single-`#[test]` harnesses that must LEAVE a var set for a later child
-//!   process: [`set_persistent_env_var`]
+//!   process:
+//!   [`set_persistent_env_var`](crate::env::set_persistent_env_var)
 
 use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard, OnceLock};

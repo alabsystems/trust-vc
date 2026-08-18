@@ -4,11 +4,54 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
-use ay_dpll::api::Term;
+use ay_dpll::api::{Solver, SolverError, Sort, Term};
 
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
 use crate::ir::{ArithOp, TrustVcExpr, TrustVcType};
+
+/// Exact two's-complement safety predicate for signed subtraction.
+///
+/// Signed `left - right` overflows exactly when the operands have different
+/// sign bits and the wrapped result's sign differs from `left`.  Encoding that
+/// criterion directly is equivalent to ay's separate `no_overflow` and
+/// `no_underflow` predicates, but avoids expanding subtraction through
+/// `left + (-right)`.  The expanded form makes wide source-certificate replay
+/// needlessly enormous even when an operand-sign premise decides the query.
+fn compact_signed_bvsub_no_overflow(
+    solver: &mut Solver,
+    left: Term,
+    right: Term,
+) -> Result<Term, SolverError> {
+    // `try_bvsub` authenticates both handles and requires equal BV widths;
+    // deriving the width from its result keeps casts/coercions exact rather
+    // than trusting the IR's pre-coercion type metadata.
+    let result = solver.try_bvsub(left, right)?;
+    let width = match solver.term_sort(result) {
+        Sort::BitVec(sort) => sort.width,
+        other => {
+            return Err(SolverError::SortMismatch {
+                operation: "signed_bvsub_no_overflow",
+                expected: "BitVec",
+                got: vec![other],
+            });
+        }
+    };
+    if width == 0 {
+        return Err(SolverError::InvalidArgument {
+            operation: "signed_bvsub_no_overflow",
+            message: "bitvector width (0) must be > 0".to_string(),
+        });
+    }
+
+    let sign_bit = width - 1;
+    let left_sign = solver.try_bvextract(left, sign_bit, sign_bit)?;
+    let right_sign = solver.try_bvextract(right, sign_bit, sign_bit)?;
+    let result_sign = solver.try_bvextract(result, sign_bit, sign_bit)?;
+    let operands_have_same_sign = solver.try_eq(left_sign, right_sign)?;
+    let result_keeps_left_sign = solver.try_eq(result_sign, left_sign)?;
+    solver.try_or(operands_have_same_sign, result_keeps_left_sign)
+}
 
 impl<'a> AstExpressionParser<'a> {
     /// Try to discharge an arithmetic-overflow obligation by constant folding.
@@ -129,17 +172,8 @@ impl<'a> AstExpressionParser<'a> {
                     .try_bvsub_no_underflow(left, right, false)
                     .map_err(|e| format!("Failed to create {} underflow check: {}", label, e))?
             } else {
-                let no_of = self
-                    .solver
-                    .try_bvsub_no_overflow(left, right)
-                    .map_err(|e| format!("Failed to create {} overflow check: {}", label, e))?;
-                let no_uf = self
-                    .solver
-                    .try_bvsub_no_underflow(left, right, true)
-                    .map_err(|e| format!("Failed to create {} underflow check: {}", label, e))?;
-                self.solver
-                    .try_and(no_of, no_uf)
-                    .map_err(|e| e.to_string())?
+                compact_signed_bvsub_no_overflow(self.solver, left, right)
+                    .map_err(|e| format!("Failed to create {label} overflow check: {e}"))?
             }
         };
         self.overflow_checks
@@ -174,5 +208,48 @@ impl<'a> AstExpressionParser<'a> {
         self.overflow_checks
             .push(("multiplication overflow".into(), no_overflow));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ay_dpll::api::Logic;
+
+    #[test]
+    fn compact_signed_subtraction_predicate_matches_ay_builtins() {
+        const WIDTH: u32 = 4;
+        let mut solver = Solver::new(Logic::QfBv);
+        solver.set_timeout(Some(std::time::Duration::from_secs(5)));
+        solver.set_produce_unsat_cores(true);
+        let left = solver.declare_const("compact_sub_left", Sort::bitvec(WIDTH));
+        let right = solver.declare_const("compact_sub_right", Sort::bitvec(WIDTH));
+
+        let compact = compact_signed_bvsub_no_overflow(&mut solver, left, right)
+            .expect("compact signed-subtraction predicate should encode");
+        let no_overflow = solver
+            .try_bvsub_no_overflow(left, right)
+            .expect("ay signed overflow predicate should encode");
+        let no_underflow = solver
+            .try_bvsub_no_underflow(left, right, true)
+            .expect("ay signed underflow predicate should encode");
+        let expanded = solver
+            .try_and(no_overflow, no_underflow)
+            .expect("combine ay signed-subtraction predicates");
+        let equivalent = solver
+            .try_eq(compact, expanded)
+            .expect("compare compact and expanded predicates");
+        let counterexample = solver
+            .try_not(equivalent)
+            .expect("negate predicate equivalence");
+        solver
+            .try_assert_named(counterexample, "compact_sub_equivalence_counterexample")
+            .expect("assert predicate-equivalence counterexample");
+
+        let result = solver.check_sat();
+        assert!(
+            result.is_unsat(),
+            "the compact criterion must match ay for every BV4 input, got {result:?}"
+        );
     }
 }

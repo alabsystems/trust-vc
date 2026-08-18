@@ -562,3 +562,38 @@ fn no_ascription_tuple_destructure_of_multi_binder_choose_contradiction_not_veri
         verify_src(code, "test")
     );
 }
+
+/// SOUNDNESS: bounded ground Hilbert instances are implications, not fabricated
+/// witnesses. An empty predicate therefore cannot make its own result true.
+#[test]
+fn multi_binder_choose_empty_arithmetic_predicate_not_verified() {
+    let code = r#"
+        fn test() {
+            let (x, y): (int, int) = choose!(|i: int, j: int| i < i && j < j);
+            assert!(x < x && y < y);
+        }
+    "#;
+    let result = verify_src(code, "test");
+    assert!(
+        !matches!(result, VerifyResult::Verified),
+        "an empty choose predicate must not fabricate a witness, got {result:?}",
+    );
+}
+
+/// SOUNDNESS: the finite completeness basis does not restrict the Hilbert
+/// choice domain. A singleton witness outside {-1, 0, 1} must not let a claim
+/// about an unrelated in-basis value verify.
+#[test]
+fn multi_binder_choose_out_of_basis_witness_does_not_pin_small_value() {
+    let code = r#"
+        fn test() {
+            let (x, y): (int, int) = choose!(|i: int, j: int| i == 10 && j == 20);
+            assert!(x == 0 && y == 1);
+        }
+    "#;
+    let result = verify_src(code, "test");
+    assert!(
+        !matches!(result, VerifyResult::Verified),
+        "an out-of-basis witness must not be replaced by a small value, got {result:?}",
+    );
+}

@@ -382,7 +382,7 @@ impl VerificationContext {
     /// Declares a variable with a fully-typed TrustVc type.
     ///
     /// The declared variable's length is left UNBOUNDED (spec-`Seq` default). Use
-    /// [`Self::declare_var_typed_bounded`] for an exec `Vec`/slice/array whose
+    /// `Self::declare_var_typed_bounded` for an exec `Vec`/slice/array whose
     /// length is `usize`-bounded.
     pub fn declare_var_typed(&mut self, name: &str, ty: crate::ir::TrustVcType) {
         self.declare_var_typed_bounded(name, ty, false);

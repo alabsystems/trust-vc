@@ -334,6 +334,15 @@ fn test_from_unknown_reason_all_known_variants_classified() {
             UnknownCategory::Incompleteness,
         ),
         (UnknownReason::InternalError, UnknownCategory::SolverUnknown),
+        // ay 0.6 removed `ProofTrusted` (ay 66538b006); ay 0.7 restored it at
+        // its original spelling, so both gates are named again. Both sit in
+        // `from_unknown_reason`'s SolverUnknown arm — an uncertified verdict
+        // and a withheld unsat are not proofs, but neither is a theory gap, so
+        // both stay a non-failure Unknown.
+        (
+            UnknownReason::SelfCheckRejected,
+            UnknownCategory::SolverUnknown,
+        ),
         (UnknownReason::ProofTrusted, UnknownCategory::SolverUnknown),
         (UnknownReason::Unknown, UnknownCategory::SolverUnknown),
     ];

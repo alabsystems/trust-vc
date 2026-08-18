@@ -576,6 +576,229 @@ impl AYEncoder {
         Ok(())
     }
 
+    /// Propagates a trait method's `ensures` to concrete-receiver callers as a
+    /// postcondition axiom about the PER-IMPL CONCRETE function, with the
+    /// method's associated-type projections resolved to this impl's bindings so
+    /// the axiom is CONCRETELY SORTED:
+    /// ```text
+    ///   ∀ self:S, params. {impl_fn(self, params)}
+    ///     trait_ensures[result := impl_fn(self, params)]
+    /// ```
+    /// This is the associated-spec-fn (Phase A3) client seam. The shared per-trait
+    /// method UF (`Trait__m`) is declared ONCE from the DECLARED signature, so its
+    /// return slot for an `Self::Assoc`-typed method is the erased `Poly`/`Int`
+    /// sort; a clause like `result == 7` over that slot fails to encode (sort
+    /// mismatch), which is exactly why the shared-UF postcondition axiom
+    /// (`assert_trait_postconditions`) and the impl-ensures axiom
+    /// (`assert_impl_postcondition_axioms`) both silently drop associated-type
+    /// methods. Binding `result` to the impl's OWN concrete function
+    /// (`impl_fn : S -> ConcreteAssoc`) instead lets the projected type land in
+    /// its concrete sort, so a caller of `s.produce()` can consume the trait
+    /// contract.
+    ///
+    /// SOUNDNESS — the cardinal trait invariant: this axiom is a FORGED FACT
+    /// unless the impl body actually discharges the trait `ensures`. It is
+    /// justified ENTIRELY by the per-impl conformance pass
+    /// (`verify_trait_conformance_obligation`), which checks `body ⊨ trait_ensures`
+    /// with EXACTLY these resolved-concrete sorts (the baseline probe shows a
+    /// `3u64` body against `result == 7` Counterexampling on
+    /// `__trust_vc_impl_result`). A non-conforming impl is refuted on its own
+    /// first-class conformance obligation, so the file cannot verify — precisely
+    /// as the trait postcondition axiom is justified by the same pass. Emitted
+    /// only for a NON-external impl method whose signature this impl resolves
+    /// FULLY CONCRETE and whose `ensures` lowers cleanly; every other shape leaves
+    /// the caller WITHOUT the strengthened postcondition (fail-closed — never an
+    /// unjustified fact). Restricted to associated-type-bearing signatures so the
+    /// working shared-UF path for ordinary methods is untouched.
+    pub(crate) fn assert_impl_trait_ensures_concrete_axioms(
+        &mut self,
+        trait_decl: &TraitDecl,
+        impl_decl: &TraitImplDecl,
+    ) -> TrustVcResult<()> {
+        // External impls are TRUSTED, not conformance-checked (their bodies may
+        // deliberately diverge). Emitting this axiom would be an unjustified fact.
+        if impl_decl.is_external {
+            return Ok(());
+        }
+
+        // Instantiate a parameterized trait's type params at the impl's trait
+        // type args, mirroring `synthesize_impl_method_contexts` so the concrete
+        // fn's DECLARED sorts and this axiom's argument sorts agree.
+        let generic_bindings: Vec<(String, TrustVcType)> = if !trait_decl.generics.is_empty()
+            && trait_decl.generics.len() == impl_decl.trait_type_args.len()
+            && impl_decl
+                .trait_type_args
+                .iter()
+                .all(crate::trait_instantiation::is_fully_concrete)
+        {
+            trait_decl
+                .generics
+                .iter()
+                .cloned()
+                .zip(impl_decl.trait_type_args.iter().cloned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let bind_ty = |ty: &TrustVcType| {
+            crate::ir_lowering::substitute_type_params(
+                &impl_decl.resolve_assoc_projections(ty),
+                &generic_bindings,
+            )
+        };
+
+        for (trait_method_name, concrete_fn_name) in &impl_decl.method_bindings {
+            let Some(method) = trait_decl
+                .methods
+                .iter()
+                .find(|method| method.name == *trait_method_name)
+            else {
+                continue;
+            };
+            // Nothing to propagate, or a requires-bearing method (the caller-side
+            // requires-discharge map skips these — never publish a contract whose
+            // precondition nothing establishes).
+            if method.ensures.is_empty() || !method.requires.is_empty() {
+                continue;
+            }
+
+            // SCOPE GATE: only signatures whose associated-type projections THIS
+            // impl actually resolves. An ordinary method keeps the existing
+            // shared-UF postcondition path untouched (this axiom would be
+            // redundant there, and narrowing keeps the blast radius minimal).
+            let signature_has_resolved_projection = method
+                .params
+                .iter()
+                .map(|(_, ty)| ty)
+                .chain(std::iter::once(&method.return_type))
+                .any(|ty| impl_decl.resolve_assoc_projections(ty) != *ty);
+            if !signature_has_resolved_projection {
+                continue;
+            }
+
+            let return_ty = bind_ty(&method.return_type);
+            let param_tys: Vec<(String, TrustVcType)> = method
+                .params
+                .iter()
+                .map(|(name, ty)| (name.clone(), bind_ty(ty)))
+                .collect();
+            // Fail closed unless every position resolved to a concrete, boxable
+            // sort — an unresolved projection stays Opaque, a bare param stays
+            // TypeParam; either would sort-diverge from the concrete fn.
+            if !crate::trait_instantiation::is_fully_concrete(&return_ty)
+                || param_tys
+                    .iter()
+                    .any(|(_, ty)| !crate::trait_instantiation::is_fully_concrete(ty))
+            {
+                continue;
+            }
+
+            // The per-impl concrete function, declared by
+            // `synthesize_impl_method_contexts` with exactly these resolved sorts.
+            let Some(impl_fn) = self.fn_ctx.functions.get(concrete_fn_name).cloned() else {
+                continue;
+            };
+
+            let mut bound_terms: Vec<Term> = Vec::with_capacity(param_tys.len() + 1);
+            let mut app_args: Vec<Term> = Vec::with_capacity(param_tys.len() + 1);
+            let mut local_bindings: Vec<(&str, Term)> = Vec::with_capacity(param_tys.len() + 2);
+            let mut local_types: Vec<(String, TrustVcType)> =
+                Vec::with_capacity(param_tys.len() + 2);
+
+            let self_var = self.solver.fresh_var(
+                &format!(
+                    "__assocpost_{}_{}_self",
+                    sanitize_symbol(&impl_decl.trait_name),
+                    sanitize_symbol(trait_method_name),
+                ),
+                sort_for_type(&impl_decl.concrete_type),
+            );
+            bound_terms.push(self_var);
+            app_args.push(self_var);
+            local_bindings.push((TRAIT_RECEIVER_NAME, self_var));
+            local_types.push((
+                TRAIT_RECEIVER_NAME.to_string(),
+                impl_decl.concrete_type.clone(),
+            ));
+
+            for (param_name, param_ty) in &param_tys {
+                let param_var = self.solver.fresh_var(
+                    &format!(
+                        "__assocpost_{}_{}_{}",
+                        sanitize_symbol(&impl_decl.trait_name),
+                        sanitize_symbol(trait_method_name),
+                        sanitize_symbol(param_name),
+                    ),
+                    sort_for_type(param_ty),
+                );
+                bound_terms.push(param_var);
+                app_args.push(param_var);
+                local_bindings.push((param_name.as_str(), param_var));
+                local_types.push((param_name.clone(), param_ty.clone()));
+            }
+
+            // Apply the CONCRETE fn. `try_apply` sort-checks against its declared
+            // domain, so any residual sort divergence fails closed here.
+            let app = match self.solver.try_apply(&impl_fn, &app_args) {
+                Ok(term) => term,
+                Err(_) => continue,
+            };
+            local_bindings.push((TRAIT_RESULT_NAME, app));
+            local_types.push((TRAIT_RESULT_NAME.to_string(), return_ty.clone()));
+
+            // Minimal env: self/result/params at their CONCRETE types. No trait
+            // metadata, so an `ensures` clause invoking `self.m()` fails to lower
+            // and is skipped fail-closed (conformance still checks it).
+            let mut env = TypeEnv::new();
+            env.insert(
+                TRAIT_RECEIVER_NAME.to_string(),
+                impl_decl.concrete_type.clone(),
+            );
+            env.insert(TRAIT_RESULT_NAME.to_string(), return_ty.clone());
+            for (param_name, param_ty) in &param_tys {
+                env.insert(param_name.clone(), param_ty.clone());
+            }
+
+            let mut lowered_clauses = Vec::with_capacity(method.ensures.len());
+            let mut lowering_ok = true;
+            for clause in &method.ensures {
+                let Ok(parsed) = syn::parse_str::<syn::Expr>(clause) else {
+                    lowering_ok = false;
+                    break;
+                };
+                match lower_syn_expr(&parsed, &env) {
+                    Ok(expr) => lowered_clauses.push(expr),
+                    Err(_) => {
+                        lowering_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !lowering_ok {
+                continue;
+            }
+            let Some(ensured) = conjunction(lowered_clauses) else {
+                continue;
+            };
+
+            let body =
+                match self.encode_trait_expr_with_bindings(&ensured, &local_bindings, &local_types)
+                {
+                    Ok(term) => term,
+                    Err(_) => continue,
+                };
+            let axiom = match self
+                .solver
+                .try_forall_with_triggers(&bound_terms, body, &[&[app]])
+            {
+                Ok(term) => term,
+                Err(_) => continue,
+            };
+            let _ = self.solver.try_assert_term(axiom);
+        }
+        Ok(())
+    }
+
     fn encode_trait_expr_with_bindings(
         &mut self,
         expr: &TrustVcExpr,

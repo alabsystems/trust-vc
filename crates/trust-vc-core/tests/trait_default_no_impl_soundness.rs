@@ -641,6 +641,39 @@ fn default_body_calling_free_spec_fn_with_literal_args_violating_does_not_verify
     );
 }
 
+/// The refutation above must be a REAL one, not merely "some model came back".
+///
+/// This is the shape that used to degrade to `NotProved/Incompleteness`: the
+/// spec fn's definitional axiom `forall a b. add(a,b) == a + b` survived to ay's
+/// fail-closed quantified-model gate with no interpretation for `add`, so the
+/// gate deferred and the verdict downgraded to `unknown (incomplete)`. Asserting
+/// only `Counterexample` would pass again the moment ay handed back a model that
+/// named no value for the call — which is exactly the failure mode the gate
+/// exists to catch. So pin the WITNESS: the counterexample must report the
+/// result as 7, the value `add(2, 5)` actually has, which is what falsifies
+/// `ensures(result == 8)`. A witness carrying 8 would satisfy the postcondition
+/// and refute nothing.
+#[test]
+fn free_spec_fn_literal_args_counterexample_witness_actually_falsifies_the_ensures() {
+    let result = conformance_verdict(
+        "free_spec_args_bad_witness",
+        FREE_SPEC_VIOLATE_ARGS,
+        "fsav_caller",
+    );
+    let VerifyResult::Counterexample { ref model, .. } = result else {
+        panic!("expected a genuine refutation with a model; got: {result:?}");
+    };
+    let model = model
+        .as_ref()
+        .unwrap_or_else(|| panic!("refutation carries no model at all; got: {result:?}"));
+    assert!(
+        model.contains("\"__trust_vc_impl_result\": (7, 32)"),
+        "the witness must name the value add(2, 5) really has (7), which FALSIFIES \
+         ensures(result == 8); a witness of 8 would satisfy it and refute nothing. \
+         model: {model}"
+    );
+}
+
 // NO OVER-REJECTION — transitive free SPEC deps: f() == g() == 7,
 // ensures(result == 7). The transitive callee g must also be registered.
 const FREE_SPEC_TRANSITIVE: &str = r#"

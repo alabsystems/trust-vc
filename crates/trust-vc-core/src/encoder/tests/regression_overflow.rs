@@ -52,15 +52,28 @@ fn overflow_i32_mul_small_safe() {
     ctx.push_obligation(ProofObligation::assume("bounded_a2", "a <= 100"));
     ctx.push_obligation(ProofObligation::assume("bounded_b", "b >= -100"));
     ctx.push_obligation(ProofObligation::assume("bounded_b2", "b <= 100"));
-    ctx.push_obligation(ProofObligation::assert(
-        "bounded_product",
-        "a * b >= -10000",
-    ));
-    // NIA multiplication needs more than the default 10s BV_HARD_TIMEOUT.
-    // Grant 30s so the solver can complete the nonlinear reasoning.
-    ctx.set_rlimit(30_000);
+    // The input bounds imply a product in -10000..=10000, which is wholly
+    // inside i32. It is therefore sound to select the mathematical-integer
+    // tactic explicitly instead of asking bit-blasting to certify this NIA
+    // fact through a very large propositional proof.
+    ctx.push_obligation(
+        ProofObligation::assert("bounded_product", "a * b >= -10000")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "small product should be in range");
+
+    ctx.push_obligation(ProofObligation::assume("a_at_upper_endpoint", "a == 100"));
+    ctx.push_obligation(ProofObligation::assume("b_at_upper_endpoint", "b == 100"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_product_bound", "a * b < 10000")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a strict bound on 100 * 100",
+    );
 }
 
 #[test]

@@ -380,6 +380,54 @@ fn test_prepare_context_lowers_trait_bound_method_call() {
     }
 }
 
+/// Phase A3 client seam: a concrete-receiver call to an associated-type-returning
+/// trait method resolves against the PER-IMPL concrete function (the generic-bridge
+/// instantiator fail-closes on the projection), with `Self::V` resolved to the
+/// impl's `type V = u64` binding and no shared-UF boxing. This is what lets a
+/// caller `w.produce()` lower to a well-sorted `Widget__produce(w) : u64`.
+#[test]
+fn test_build_type_env_registers_assoc_method_against_concrete_fn() {
+    let mut ctx = VerificationContext::new();
+    ctx.register_struct_type(crate::ir::StructDef::new(
+        "Widget",
+        vec![("x".to_string(), TrustVcType::Uint { width: 64 })],
+    ));
+    ctx.register_trait_decl(TraitDecl {
+        name: "AssocView".to_string(),
+        methods: vec![TraitMethodDecl {
+            name: "produce".to_string(),
+            params: vec![],
+            return_type: TrustVcType::Opaque("Self::V".to_string()),
+            requires: vec![],
+            ensures: vec!["result == 7".to_string()],
+            has_default: false,
+            default_body: None,
+            default_ensures: Vec::new(),
+        }],
+        supertraits: Vec::new(),
+        generics: Vec::new(),
+    });
+    ctx.register_trait_impl(
+        crate::ir::TraitImplDecl::new(
+            "AssocView",
+            TrustVcType::Opaque("Widget".to_string()),
+            vec![("produce".to_string(), "Widget__produce".to_string())],
+        )
+        .with_assoc_type_bindings(vec![("V".to_string(), TrustVcType::Uint { width: 64 })]),
+    );
+
+    let env = build_type_env(&ctx).expect("type env should build");
+    let meta = env
+        .lookup_method("Widget", "produce")
+        .expect("assoc-returning concrete-impl method must resolve client-side");
+    assert_eq!(meta.uf_name, "Widget__produce");
+    // Bound to the per-impl concrete function directly — NOT boxed through the
+    // shared trait UF (whose Poly return slot cannot carry the projected sort).
+    assert_eq!(meta.box_receiver, None);
+    // `Self::V` resolved to the impl's concrete binding.
+    assert_eq!(meta.return_type, TrustVcType::Uint { width: 64 });
+}
+
 #[test]
 fn test_prepare_context_lowers_helper_trait_bound_body_axiom() {
     let mut ctx = VerificationContext::new();

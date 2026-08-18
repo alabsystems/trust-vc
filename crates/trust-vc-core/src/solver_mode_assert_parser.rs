@@ -90,19 +90,18 @@ impl Parse for SolverModeAssertClause {
 /// unambiguous; `;`s inside a proof block are inside a brace group and never
 /// split.
 fn split_top_level_segments(tokens: TokenStream) -> Vec<TokenStream> {
-    let mut segments = vec![TokenStream::new()];
+    let mut segments = Vec::new();
+    let mut current = TokenStream::new();
     for tt in tokens {
         if let TokenTree::Punct(punct) = &tt {
             if punct.as_char() == ';' {
-                segments.push(TokenStream::new());
+                segments.push(std::mem::replace(&mut current, TokenStream::new()));
                 continue;
             }
         }
-        segments
-            .last_mut()
-            .expect("segments is never empty")
-            .extend(std::iter::once(tt));
+        current.extend(std::iter::once(tt));
     }
+    segments.push(current);
     segments
 }
 

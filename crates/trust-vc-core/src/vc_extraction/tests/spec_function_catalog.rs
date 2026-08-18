@@ -42,6 +42,26 @@ fn verified_body_assert_forwarded_to_existential_postcondition() {
     );
 }
 
+/// SOUNDNESS: constructive equality-witness discharge must still prove the
+/// complete instantiated body. The equality fixes `n := x`, but `x == 4` does
+/// not satisfy `n >= 5`, so the existential is genuinely false.
+#[test]
+fn equality_witness_existential_rejects_false_instantiated_body() {
+    let false_witness = r#"
+        #[trust_vc::ensures(exists(|n: int| #[trigger] n + 0 == x && n >= 5))]
+        #[trust_vc::requires(x == 4)]
+        fn target(x: int) {}
+    "#;
+    let path = write_fixture("equality_witness_false_body.rs", false_witness);
+    let result = crate::verify_function_from_file(path.to_str().unwrap(), "target")
+        .expect("verification should run");
+    assert!(
+        matches!(result, VerifyResult::Counterexample { .. }),
+        "an equality candidate that fails the rest of the existential body must \
+         remain a counterexample, got {result:?}"
+    );
+}
+
 /// SOUNDNESS: a branch-local assert that is FALSE under its own guard must still
 /// fail closed. trust-vc now checks a branch-local body assert under the branch
 /// path condition (`guard ==> assert`, Verus-faithful; #2779), so a fact that the
@@ -149,6 +169,62 @@ fn source_catalog_registers_trust_vc_spec_helper_and_body_axiom() {
         "body axiom should use the source definition with alpha-renamed params: {}",
         axiom.condition
     );
+    assert!(
+        axiom
+            .condition
+            .contains(crate::ir_lowering::SOURCE_CATALOG_MATH_INT_MARKER),
+        "math-int result axioms should carry the internal lowering marker: {}",
+        axiom.condition
+    );
+    assert!(
+        axiom.source_catalog_math_int_context,
+        "the exact source-catalog math-int body axiom should carry authenticated provenance"
+    );
+}
+
+#[test]
+fn source_catalog_math_int_context_is_bound_to_math_int_result_axiom_only() {
+    let code = r#"
+        #[trust_vc::spec]
+        fn double(x: int) -> int {
+            x + x
+        }
+
+        #[trust_vc::spec]
+        fn nonnegative(x: int) -> bool {
+            x >= 0
+        }
+
+        #[ensures(result == double(x))]
+        #[ensures(nonnegative(result))]
+        fn concrete_a(x: int) -> int {
+            x + x
+        }
+    "#;
+
+    let file = parse_file(code).unwrap();
+    let func = find_function(&file, "concrete_a").unwrap();
+    let vc = extract_verification_conditions_with_file_context(&file, func).unwrap();
+
+    let math_int_axiom = vc
+        .obligations
+        .iter()
+        .find(|obligation| obligation.name() == "__body_axiom_double_source_catalog")
+        .expect("math-int source spec should add a body axiom");
+    let bool_axiom = vc
+        .obligations
+        .iter()
+        .find(|obligation| obligation.name() == "__body_axiom_nonnegative_source_catalog")
+        .expect("bool source spec should add a body axiom");
+
+    assert!(math_int_axiom.source_catalog_math_int_context);
+    assert!(math_int_axiom
+        .condition
+        .contains(crate::ir_lowering::SOURCE_CATALOG_MATH_INT_MARKER));
+    assert!(!bool_axiom.source_catalog_math_int_context);
+    assert!(!bool_axiom
+        .condition
+        .contains(crate::ir_lowering::SOURCE_CATALOG_MATH_INT_MARKER));
 }
 
 #[test]
@@ -466,6 +542,43 @@ fn source_catalog_open_spec_u16_body_uses_math_int_arithmetic() {
         matches!(result, VerifyResult::Verified),
         "u16 spec arithmetic should be mathematical, not wrapping, got {result:?}"
     );
+}
+
+#[test]
+fn source_catalog_rejects_authored_math_int_marker_tampering() {
+    let path = write_fixture(
+        "authored_math_int_marker.rs",
+        r#"
+        pub open spec fn forged(x: u16) -> (z: int) {
+            __trust_vc_math_int_expr(x + x)
+        }
+
+        #[ensures(forged(x) >= 0)]
+        fn concrete_a(x: u16) -> u16 { x }
+    "#,
+    );
+
+    let err = verify_function_from_file(path.to_str().unwrap(), "concrete_a")
+        .expect_err("authored source-catalog marker use must be rejected");
+    assert!(err.to_string().contains("reserved internal marker"));
+}
+
+#[test]
+fn ordinary_contract_cannot_forge_math_int_marker_capability() {
+    let path = write_fixture(
+        "contract_math_int_marker.rs",
+        r#"
+        #[ensures(__trust_vc_math_int_expr(x + x) >= 0)]
+        fn concrete_a(x: u16) -> u16 { x }
+    "#,
+    );
+
+    let result = verify_function_from_file(path.to_str().unwrap(), "concrete_a")
+        .expect("verification orchestration should run");
+    let VerifyResult::Error { message } = result else {
+        panic!("ordinary conditions must fail closed before solver submission, got {result:?}");
+    };
+    assert!(message.contains("reserved source-catalog math-int marker"));
 }
 
 #[test]
@@ -1537,7 +1650,40 @@ fn source_catalog_emits_mutual_recursion_defining_axioms_when_decreases_guards_c
                 .any(|obligation| obligation.name() == axiom_name),
             "termination-guarded cycle member {member} should emit its defining body axiom"
         );
+        assert!(
+            vc.source_catalog_admitted_definitions.contains(member),
+            "published recursive definition {member} must carry checked source-catalog provenance"
+        );
     }
+    assert!(vc.source_catalog_termination_failure.is_none());
+}
+
+/// SOUNDNESS: the isolated termination query models entry parameters, not
+/// arbitrary local scopes. A local binding that shadows the declared measure
+/// parameter must therefore fail closed before any recursive body axiom can be
+/// published; otherwise the rendered guard/call argument could be mistaken for
+/// the entry parameter and admit an unproved recursive definition.
+#[test]
+fn source_catalog_shadowed_recursive_parameter_fails_closed() {
+    let code = r#"
+        #[trust_vc::decreases(n)]
+        #[trust_vc::spec]
+        fn shadowed(n: nat) -> nat {
+            let n: int = -1;
+            if n == 0 { 0 } else { 1 + shadowed((n - 1) as nat) }
+        }
+
+        #[ensures(shadowed(0) == 0)]
+        fn target() {}
+    "#;
+    let file = parse_file(code).expect("shadowing fixture should parse");
+    let func = find_function(&file, "target").expect("target function should exist");
+    let error = extract_verification_conditions_with_file_context(&file, func)
+        .expect_err("shadow-ambiguous recursive source must fail closed");
+    assert!(
+        error.to_string().contains("shadows parameter(s) n"),
+        "the rejection should identify the scope ambiguity, got: {error}"
+    );
 }
 
 /// B5 keystone, end-to-end: the defining axioms emitted for the well-formed
@@ -1646,6 +1792,10 @@ fn source_catalog_suppresses_mutual_recursion_axioms_without_decreases() {
                 .iter()
                 .any(|obligation| obligation.name() == axiom_name),
             "undecreasing mutual cycle member {member} must NOT emit a defining axiom (soundness)"
+        );
+        assert!(
+            !vc.source_catalog_admitted_definitions.contains(member),
+            "a suppressed recursive definition must not retain admission authority"
         );
     }
     assert!(

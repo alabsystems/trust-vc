@@ -1,11 +1,16 @@
-# cargo-trust-vc — CLI wrapper for trust-vc verification
+# targo-trust-vc — CLI wrapper for trust-vc verification
+#
+# Invoked as `targo trust-vc <cmd>` (Trust-native, via the targo-trust-vc bin).
+# The `cargo-trust-vc` bin below is a back-compat alias so `cargo trust-vc <cmd>`
+# discovery and existing scripts/docs keep working; both are thin argv shims
+# over the same `cargo_trust_vc` library.
 #
 # Copyright 2026 Andrew Yates
 # SPDX-License-Identifier: Apache-2.0
 # Author: Andrew Yates <andrewyates.name@gmail.com>
 
 [package]
-name = "cargo-trust-vc"
+name = "targo-trust-vc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,9 +23,32 @@ default = []
 named-assertions = ["trust-vc-core/named-assertions"]
 proof-certificates = ["trust-vc-core/proof-certificates"]
 
+# The CLI itself. Both bins below are thin argv shims over this one library, so
+# there is exactly one parser, one flag set and one verification path.
+[lib]
+name = "cargo_trust_vc"
+path = "src/lib.rs"
+
+# Trust-native primary subcommand: `targo trust-vc check <PATH>`.
+[[bin]]
+name = "targo-trust-vc"
+path = "src/main.rs"
+
+# Back-compat alias bin: `cargo trust-vc check <PATH>`, unchanged. Shares
+# src/main.rs (a thin shim over the library) with targo-trust-vc so no existing
+# script, doc, or `cargo trust-vc` invocation breaks.
 [[bin]]
 name = "cargo-trust-vc"
 path = "src/main.rs"
+
+# The one-word command: `trust-vc <FILE.rs>` / `trust-vc example`. Same engine,
+# friendlier front door. `test = false` because its own unit tests live in the
+# library (src/one_word.rs); without it cargo would build a second, empty test
+# harness for a 14-line file.
+[[bin]]
+name = "trust-vc"
+path = "src/bin/trust-vc.rs"
+test = false
 
 [dependencies]
 trust-vc-core = { workspace = true }

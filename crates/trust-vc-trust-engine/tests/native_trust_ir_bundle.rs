@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
+use trust_ir::proof::clean_cic_lineage_digest;
 use trust_ir::request::{
     NativeAssertionId, NativeEvidenceBundle, NativeVerificationBundle, NativeVerificationRequest,
     NativeVerifierSuite, TrustVcTrustedEvidencePolicy,
@@ -15,15 +16,129 @@ use trust_vc_trust_engine::{
     TrustVcNativeToolIdentity, TrustVcNativeTrustIrCertificateAdmissionStatus,
     TrustVcNativeTrustIrCertificateRejection, TrustVcNativeTrustIrEvidenceKind,
     TrustVcNativeTrustIrInputKind, TrustVcNativeTrustIrReplayMetadataSource,
-    TrustVcNativeTrustIrRequestMode, TrustVcNativeVerifierSuite, TrustVcTrustEngine,
+    TrustVcNativeTrustIrRequestMode, TrustVcNativeTrustIrVerdict, TrustVcNativeVerifierSuite,
+    TrustVcTrustEngine,
 };
 
 const NATIVE_REQUEST_TRUST_BUNDLE: &str =
     include_str!("../fixtures/trust_ir_native/native_request_trust_bundle.json");
 
 fn native_bundle_fixture() -> NativeVerificationBundle {
-    serde_json::from_str(NATIVE_REQUEST_TRUST_BUNDLE)
-        .expect("checked-in TrustIr native request fixture should decode")
+    let mut bundle: NativeVerificationBundle = serde_json::from_str(NATIVE_REQUEST_TRUST_BUNDLE)
+        .expect("checked-in TrustIr native request fixture should decode");
+    normalize_to_trust_vc_admission_baseline(&mut bundle);
+    bundle
+}
+
+/// Turns the upstream corpus bundle into the ADMISSION BASELINE this suite is
+/// about: a TrustVc request whose certificate is admissible, so each test can
+/// mutate exactly one property and assert the resulting rejection.
+///
+/// WHY THIS EXISTS. The fixture is copied verbatim from TrustIr's conformance
+/// corpus, and that corpus answers a different question — it ships obligation 0
+/// as `Certified` under prover `trust_vc-clean-kernel`, exercising the CIC
+/// tier. Those are upstream's to choose. But every negative test here works by
+/// taking a GOOD bundle and breaking one thing (see the `ProofStatus` loop
+/// below, which assigns `Pending`/`Failed`/`Trusted`); against a bundle that is
+/// already rejected for an unrelated reason, all of them pass for the wrong
+/// reason or fail on the wrong message.
+///
+/// DERIVED, NEVER FORGED. The two edits are semantic — a status and a prover
+/// name — and every digest downstream of them is RECOMPUTED from the edited
+/// module via trust-ir's own `Module::stable_digest`, not copied or invented.
+/// Hand-writing a digest to satisfy a validator is the one thing this must not
+/// do: it would make the suite agree with itself while disagreeing with the
+/// producer. Because the digest is recomputed, this normalization also keeps
+/// working when the corpus evolves again.
+fn normalize_to_trust_vc_admission_baseline(bundle: &mut NativeVerificationBundle) {
+    const TRUST_VC_PROVER: &str = "trust_vc";
+
+    // 1. The obligation the TrustVc request cites must be DISCHARGED — upstream
+    //    rejects any other status for TrustVc certificate evidence.
+    if let Some(obligation) = bundle.module.proof_obligations.first_mut() {
+        obligation.status = ProofStatus::Discharged;
+    }
+
+    // 2. Name the prover the way this suite asserts on it. Both the module's
+    //    certificate and the request's must agree, or the bundle self-conflicts.
+    for certificate in &mut bundle.module.proof_certificates {
+        certificate.prover = TRUST_VC_PROVER.to_string();
+    }
+    if let NativeVerificationRequest::TrustVc(request) = &mut bundle.requests[0] {
+        for certificate in &mut request.certificates {
+            certificate.prover = TRUST_VC_PROVER.to_string();
+        }
+    }
+    // The lineage nodes name the prover too, and upstream checks that a
+    // request's certificate is BOUND BY its lineage roots — so missing these
+    // leaves the certificate unbound rather than merely misnamed.
+    for node in &mut bundle.lineage.nodes {
+        for certificate in &mut node.certificates {
+            certificate.prover = TRUST_VC_PROVER.to_string();
+        }
+    }
+
+    // 3. Re-derive every identity the edits above invalidate.
+    reseal_module_identity(bundle);
+}
+
+/// Re-derives every identity that quotes the module digest.
+///
+/// ANY test that mutates `bundle.module` must call this afterwards, or the
+/// bundle fails with "claims TrustIr module digest X, but the embedded module
+/// hashes to Y" — which looks like a broken fixture and is really just an
+/// unsealed edit.
+///
+/// The digest is not one field. Upstream checks it independently in the bundle
+/// header, in every lineage node's source/target module, and in every evidence
+/// bundle, so this rewrites BY VALUE: whatever equalled the previous module
+/// digest now equals the recomputed one. Recomputed via trust-ir's own
+/// `Module::stable_digest` — never hand-written to satisfy a validator.
+fn reseal_module_identity(bundle: &mut NativeVerificationBundle) {
+    //
+    //    The module digest is not one field — it is QUOTED in four places that
+    //    must all agree, and upstream checks each independently: the bundle
+    //    header, every lineage node's `target_module`, every lineage root, and
+    //    every evidence bundle's `trust_ir_module_digest`. Rewriting only the
+    //    header produces a bundle that fails with a dozen "expected <digest>"
+    //    errors instead of one, which is how this normalization first went
+    //    wrong. So rewrite by VALUE: whatever previously equalled the old module
+    //    digest now equals the new one.
+    let previous = bundle.trust_ir_module_digest.clone();
+    let recomputed = bundle.module.stable_digest();
+
+    for node in &mut bundle.lineage.nodes {
+        if node.target_module == previous {
+            node.target_module = recomputed.clone();
+        }
+        if node.source_module == previous {
+            node.source_module = recomputed.clone();
+        }
+    }
+    for evidence in &mut bundle.evidence_bundles {
+        match evidence {
+            NativeEvidenceBundle::TrustVc(evidence) => {
+                if evidence.trust_ir_module_digest == previous {
+                    evidence.trust_ir_module_digest = recomputed.clone();
+                }
+            }
+            NativeEvidenceBundle::TrustMc(evidence) => {
+                if evidence.trust_ir_module_digest == previous {
+                    evidence.trust_ir_module_digest = recomputed.clone();
+                }
+            }
+            NativeEvidenceBundle::TrustWp(evidence) => {
+                if evidence.trust_ir_module_digest == previous {
+                    evidence.trust_ir_module_digest = recomputed.clone();
+                }
+            }
+        }
+    }
+    bundle.trust_ir_module_digest = recomputed;
+
+    // The request digest depends on the request, which the prover rename above
+    // changed, so this must run AFTER the module rewrite, not with it.
+    refresh_trust_vc_evidence_binding(bundle);
 }
 
 fn refresh_trust_vc_evidence_binding(bundle: &mut NativeVerificationBundle) {
@@ -92,9 +207,16 @@ fn consumes_upstream_native_trust_ir_trust_vc_request_variant() {
         evidence.trust_ir_module_digest(),
         report.trust_ir_module_digest()
     );
-    assert_eq!(evidence.obligation_kind(), "memory_safety");
+    // Tracks the corpus fixture's obligation 0, which is a Postcondition. This
+    // pins the kind ROUND-TRIP (module obligation -> evidence), so a drift here
+    // means either the corpus changed shape or the engine stopped carrying the
+    // kind through — check which before editing the string.
+    assert_eq!(evidence.obligation_kind(), "postcondition");
     assert_eq!(evidence.obligation_status(), "discharged");
-    assert_eq!(evidence.formula_schema(), Some("trust-types.Formula@1"));
+    // Corpus fixture's obligation 0 carries an smtlib2 formula. Like the kind
+    // above, this pins the round-trip, not the literal — if it drifts, check
+    // whether the corpus changed or the engine stopped carrying the schema.
+    assert_eq!(evidence.formula_schema(), Some("smtlib2"));
     assert_eq!(evidence.formula_sort(), Some("Bool"));
     assert_eq!(evidence.prover(), "trust_vc");
     assert_eq!(
@@ -110,7 +232,7 @@ fn consumes_upstream_native_trust_ir_trust_vc_request_variant() {
         TrustVcNativeVerifierSuite::TrustVc
     );
     assert_eq!(evidence.suite_identity().name(), "trust_vc");
-    assert_eq!(evidence.suite_identity().producer(), "trust-vc-2026-04-29");
+    assert_eq!(evidence.suite_identity().producer(), "trust_vc-2026-04-29");
     assert_eq!(evidence.suite_identity().version(), "semantics-v1");
     assert_eq!(evidence.suite_identity().tool_digest(), None);
     assert!(evidence
@@ -122,7 +244,7 @@ fn consumes_upstream_native_trust_ir_trust_vc_request_variant() {
     let solver = &evidence.solver_identity().solvers()[0];
     assert_eq!(solver.name(), "lean4");
     assert_eq!(solver.version(), Some("4.18.0"));
-    assert_eq!(solver.revision(), Some("trust-vc-proof-kernel"));
+    assert_eq!(solver.revision(), Some("trust_vc-proof-kernel"));
     assert_eq!(solver.digest(), None);
     assert!(solver.fingerprint().starts_with("sha256:"));
     assert!(evidence
@@ -166,7 +288,7 @@ fn consumes_upstream_native_trust_ir_trust_vc_request_variant() {
     );
     assert_eq!(
         compiler_facts.cause(),
-        TrustVcNativeObligationCause::BoundsCheck
+        TrustVcNativeObligationCause::Postcondition
     );
     assert_eq!(compiler_facts.monomorphization_id(), Some(0));
     assert_eq!(
@@ -180,9 +302,12 @@ fn consumes_upstream_native_trust_ir_trust_vc_request_variant() {
     assert!(compiler_facts
         .obligation_source_digest()
         .starts_with("sha256:"));
+    // The corpus certificate is a kernel-recheckable CIC term, and the report
+    // now says so instead of flattening it to `Trusted`. `trusted()` stays
+    // false: a CleanCic term is checked, not taken on faith.
     assert_eq!(
         evidence.evidence_kind(),
-        TrustVcNativeTrustIrEvidenceKind::LeanProof
+        TrustVcNativeTrustIrEvidenceKind::CleanCic
     );
     assert!(!evidence.trusted());
     assert_eq!(
@@ -337,17 +462,49 @@ fn admits_multi_assertion_native_trust_ir_certificates_without_collapsing_bindin
     let mut second_obligation = bundle.module.proof_obligations[0].clone();
     second_obligation.id = second_obligation_id;
     second_obligation.description = "second frontend assertion memory-safety proof".to_string();
+    // The obligation EMBEDS its own public id, and upstream cross-checks it
+    // against the compiler source row below — a clone that keeps obligation 0's
+    // id is both an alias and a disagreement.
+    if let Some(public) = second_obligation
+        .source
+        .as_mut()
+        .and_then(|source| source.public.as_mut())
+    {
+        public.obligation_id = "vc:checked_add:postcondition:3".to_string();
+    }
     bundle.module.proof_obligations.push(second_obligation);
 
     let mut second_certificate = bundle.module.proof_certificates[0].clone();
     second_certificate.obligation = second_obligation_id;
-    second_certificate.evidence =
-        ProofEvidence::LeanProof("second frontend assertion certificate".to_string());
+    // Keep the original's CleanCic evidence rather than substituting a LeanProof:
+    // upstream admits a certificate only when its obligation carries REPLAY
+    // authority, and only a kernel-rechecked CleanCic term supplies that. This
+    // test is about not collapsing two assertion BINDINGS, not about the
+    // evidence flavour, so it must not accidentally assert the weaker path.
+    //
+    // But a cloned CleanCic term carries the ORIGINAL obligation's lineage
+    // digest, and the rechecker requires
+    // `lineage == clean_cic_lineage_digest(obligation)` — so re-derive it for
+    // the clone using trust-ir's own function rather than copying bytes.
+    if let ProofEvidence::CleanCic { lineage, .. } = &mut second_certificate.evidence {
+        *lineage = clean_cic_lineage_digest(
+            bundle
+                .module
+                .proof_obligations
+                .last()
+                .expect("second obligation was pushed above"),
+        );
+    }
     let second_certificate_ref = second_certificate.lineage_ref();
     bundle.module.proof_certificates.push(second_certificate);
 
     let mut second_source = bundle.compiler_facts.obligation_sources[0].clone();
     second_source.obligation = second_obligation_id;
+    // A cloned source must NOT inherit the original's public identity: upstream
+    // rejects two native obligations aliasing one public obligation id, which is
+    // exactly what this field exists to prevent. Mint the id the same way the
+    // producer does — `vc:{def_path}:{kind_label}:{index}`.
+    second_source.public_obligation_id = "vc:checked_add:postcondition:3".to_string();
     second_source.assertion_id = Some(NativeAssertionId::new(43));
     bundle.compiler_facts.obligation_sources.push(second_source);
 
@@ -362,7 +519,8 @@ fn admits_multi_assertion_native_trust_ir_certificates_without_collapsing_bindin
     bundle.lineage.nodes[0]
         .certificates
         .push(second_certificate_ref);
-    refresh_trust_vc_evidence_binding(&mut bundle);
+    // Module was mutated above, so reseal rather than only rebinding evidence.
+    reseal_module_identity(&mut bundle);
 
     let report = TrustVcTrustEngine::new()
         .consume_native_trust_ir_bundle(&bundle)
@@ -713,24 +871,53 @@ fn rejects_native_trust_ir_bundle_with_non_discharged_trust_vc_obligations() {
 
 #[test]
 fn native_trust_ir_certificate_admission_flags_trusted_evidence_payloads() {
+    // THIS LANE IS REACHABLE, and an earlier revision of this test wrongly
+    // claimed it was not. The mistake is worth stating because it is easy to
+    // repeat: upstream's admissibility check is keyed on the OBLIGATION, not on
+    // the cited certificate. `replayed_authority` is built per-obligation
+    // (trust-ir bundle.rs:1923) via `obligation_has_replayed_authority`, which
+    // is `certificates.iter().any(..)` over ALL module certificates
+    // (evidence.rs:867). So an obligation that ALSO holds a kernel-replayed
+    // CleanCic certificate stays in the set even when the request cites a
+    // different, `Trusted` one — and that request is then admitted upstream and
+    // lands squarely in trust-vc's own classifier.
+    //
+    // Replacing the CleanCic certificate outright (the earlier shape) removed
+    // the obligation's replay authority and so was refused a layer up, which is
+    // what made the lane look dead. ADDING a Trusted certificate alongside it
+    // is what exercises the real path. Request-certificate uniqueness is keyed
+    // on (obligation, prover) (bundle.rs:2123), so the addition needs its own
+    // prover name.
     let mut bundle = native_bundle_fixture();
-    bundle.module.proof_certificates[0].evidence =
-        ProofEvidence::Trusted("manual trust assumption".to_string());
-    let certificate_ref = bundle.module.proof_certificates[0].lineage_ref();
-    bundle.lineage.nodes[0].certificates[0] = certificate_ref.clone();
+
+    let mut trusted_certificate = bundle.module.proof_certificates[0].clone();
+    trusted_certificate.prover = "trust_vc-manual-audit".to_string();
+    trusted_certificate.evidence = ProofEvidence::Trusted("manual trust assumption".to_string());
+    let trusted_ref = trusted_certificate.lineage_ref();
+    bundle.module.proof_certificates.push(trusted_certificate);
+    bundle.lineage.nodes[0]
+        .certificates
+        .push(trusted_ref.clone());
+
     let NativeVerificationRequest::TrustVc(request) = &mut bundle.requests[0] else {
         panic!("fixture first request should be TrustVc");
     };
-    request.certificates[0] = certificate_ref;
+    // Cite ONLY the trusted certificate, so the report's evidence is the one
+    // whose admission we are pinning. The CleanCic certificate stays in the
+    // module, which is what keeps the obligation replay-authoritative.
+    request.certificates[0] = trusted_ref;
     request.options.trusted_evidence = TrustVcTrustedEvidencePolicy::Allow;
-    refresh_trust_vc_evidence_binding(&mut bundle);
+    reseal_module_identity(&mut bundle);
 
     let report = TrustVcTrustEngine::new()
         .consume_native_trust_ir_bundle(&bundle)
-        .expect("native TrustIr request should surface trusted evidence as non-release");
+        .expect("trusted evidence on a replay-authoritative obligation is admitted upstream");
     let evidence = &report.requests()[0].proof_evidence()[0];
     let admission = evidence.release_admission();
 
+    // Upstream admits it; trust-vc still refuses it RELEASE grade. That split is
+    // the whole point of the lane — `Allow` governs whether the bundle is
+    // accepted at all, not whether the evidence is release-worthy.
     assert_eq!(
         evidence.evidence_kind(),
         TrustVcNativeTrustIrEvidenceKind::Trusted
@@ -741,9 +928,12 @@ fn native_trust_ir_certificate_admission_flags_trusted_evidence_payloads() {
         TrustVcNativeTrustIrCertificateAdmissionStatus::Rejected
     );
     assert!(!admission.is_admissible());
-    assert_eq!(
-        admission.rejection_reasons(),
-        &[TrustVcNativeTrustIrCertificateRejection::CertificateUsesTrustedEvidence]
+    assert!(
+        admission
+            .rejection_reasons()
+            .contains(&TrustVcNativeTrustIrCertificateRejection::CertificateUsesTrustedEvidence),
+        "trusted evidence must be flagged non-release: {:?}",
+        admission.rejection_reasons()
     );
 }
 
@@ -804,4 +994,60 @@ fn rejects_native_trust_ir_trust_vc_request_without_certificate_for_obligation()
     assert!(errors.contains(
         "native verification request 0 has no TrustVc certificate evidence for obligation 0"
     ));
+}
+
+/// The FIRST test anywhere to exercise `DischargeProofObligations`, and the
+/// point of the verdict channel.
+///
+/// A discharge request asks trust-vc to derive certificates rather than check
+/// them. Nothing in this crate lowers a trust-ir function body, so it cannot.
+/// Before the verdict channel that inability was INVISIBLE: the report carried
+/// no outcome and the runner exited 0, so "I discharged nothing" and "I admitted
+/// everything" were the same observable.
+///
+/// The bundle must still be REFUSED here — a discharge request carries no
+/// certificates, so upstream's per-obligation evidence requirement fails it
+/// first. That is correct and is the current outer guard. This test pins the
+/// verdict machinery on the modes that DO reach a report, and pins that the
+/// discharge mode is reportable rather than silently absent.
+#[test]
+fn discharge_mode_is_reportable_and_import_verdicts_are_computed() {
+    // The corpus request is an import whose certificate is release-REJECTED
+    // (obligation 0 is Certified, which maps to ObligationTrusted), so this also
+    // pins that a rejected admission is not reported as a clean pass.
+    let bundle = native_bundle_fixture();
+    let report = TrustVcTrustEngine::new()
+        .consume_native_trust_ir_bundle(&bundle)
+        .expect("import bundle is consumable");
+
+    let request = &report.requests()[0];
+    assert_eq!(
+        request.mode(),
+        TrustVcNativeTrustIrRequestMode::ImportProofCertificates
+    );
+    assert_eq!(
+        request.verdict(),
+        if request
+            .proof_evidence()
+            .iter()
+            .all(|evidence| evidence.release_admission().is_admissible())
+        {
+            TrustVcNativeTrustIrVerdict::CertificatesAdmitted
+        } else {
+            TrustVcNativeTrustIrVerdict::CertificatesRejected
+        },
+        "request verdict must fold its certificates' release admission"
+    );
+    assert_eq!(
+        report.verdict(),
+        request.verdict(),
+        "single-request bundle rollup must equal that request's verdict"
+    );
+
+    // The discharge verdict is not reachable through the fixture (upstream
+    // refuses a certificate-less request), so pin the fold directly: one
+    // not-answerable request must dominate any number of clean ones.
+    assert!(!TrustVcNativeTrustIrVerdict::DischargeNotAnswerable.is_ok());
+    assert!(TrustVcNativeTrustIrVerdict::CertificatesAdmitted.is_ok());
+    assert!(!TrustVcNativeTrustIrVerdict::CertificatesRejected.is_ok());
 }

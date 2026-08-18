@@ -172,7 +172,11 @@ pub(super) fn referenced_function_names(expr: &TrustVcExpr) -> HashSet<String> {
 }
 
 /// Builds a body-axiom catalog from broadcast obligations. Maps function name
-/// to the extracted body axiom for all VISIBLE, non-recursive body axioms.
+/// to the extracted body axiom for all visible bodies except direct
+/// self-recursion. Mutually recursive bodies may enter so a termination-proven,
+/// fully ground call can take an exact finite branch; Counterexample adoption is
+/// separately guarded by [`selected_recursive_cycles_are_admitted`] and a
+/// no-residual-call check in `assertion.rs`.
 /// Used by demand-inline retry to find inlining candidates. Part of #2655.
 ///
 /// Visibility is the user-controlled abstraction boundary and MUST agree with
@@ -183,8 +187,8 @@ pub(super) fn referenced_function_names(expr: &TrustVcExpr) -> HashSet<String> {
 /// prove (or refute) a goal from a body Verus keeps strictly uninterpreted,
 /// the cardinal proves-more-than-Verus leak. A REVEALED body is inlinable:
 /// `reveal!` makes the definitional equality available to the query, and
-/// inlining a total non-recursive definition is an exact transformation of
-/// that same fact. On the proc-macro path revealed-opaque axioms still carry
+/// inlining an admitted definition is exact when expansion completes. On the
+/// proc-macro path revealed-opaque axioms still carry
 /// `is_opaque == true` (the reveal is query-level, not obligation-level), so
 /// the reveal set must be consulted here rather than the flag alone.
 #[must_use]
@@ -315,6 +319,66 @@ pub(super) fn select_demand_inline_candidates(
         functions: selected,
         depth_used,
     }
+}
+
+/// Checks the proof provenance needed to drop recursive defining axioms during
+/// a demand-inline counterexample retry.
+///
+/// Acyclic candidates are exact macro expansion and need no extra authority.
+/// Every member of a selected recursive SCC, however, must have been published
+/// by the source catalog after its isolated termination proof succeeded.  The
+/// set is carried as crate-private context metadata rather than inferred from an
+/// obligation name, so an authored `__body_axiom_*` broadcast cannot forge it.
+#[must_use]
+pub(super) fn selected_recursive_cycles_are_admitted(
+    catalog: &std::collections::HashMap<String, ExtractedBodyAxiom>,
+    selected: &[String],
+    admitted: &HashSet<String>,
+) -> bool {
+    let selected: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    for name in &selected {
+        let forward = catalog_reachable_from(name, catalog);
+        if !forward.contains(*name) {
+            continue;
+        }
+        // Require authority for the whole SCC, not merely the goal-facing
+        // member. A single unadmitted partner can make the global equation
+        // system inconsistent even when the ground call chooses a base arm.
+        for member in &forward {
+            if catalog_reachable_from(member, catalog).contains(*name) && !admitted.contains(member)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn catalog_reachable_from(
+    start: &str,
+    catalog: &std::collections::HashMap<String, ExtractedBodyAxiom>,
+) -> HashSet<String> {
+    let mut reached = HashSet::new();
+    let Some(root) = catalog.get(start) else {
+        return reached;
+    };
+    let mut pending: Vec<String> = referenced_function_names(&root.body)
+        .into_iter()
+        .filter(|name| catalog.contains_key(name))
+        .collect();
+    while let Some(name) = pending.pop() {
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        if let Some(body) = catalog.get(&name) {
+            pending.extend(
+                referenced_function_names(&body.body)
+                    .into_iter()
+                    .filter(|callee| catalog.contains_key(callee)),
+            );
+        }
+    }
+    reached
 }
 
 fn extract_body_axiom(expr: &TrustVcExpr) -> Option<ExtractedBodyAxiom> {

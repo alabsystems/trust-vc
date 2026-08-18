@@ -72,10 +72,15 @@ Check the current surface against the checked-in baselines:
 bash scripts/api_surface_check.sh
 ```
 
-Refresh the checked-in baselines after an intentional, reviewed API change:
+The script uses the pinned stock Rust 1.97.1 rustup toolchain so rustdoc JSON
+generation is reproducible and does not inherit the workspace's Trust compiler
+verification lane.
+
+Refresh the checked-in baselines after an intentional, reviewed API change,
+then immediately check the refreshed surface:
 
 ```bash
-targo run -p trust-vc-merge-contract --bin generate_api_surface_fixtures
+bash scripts/api_surface_check.sh --refresh
 ```
 
 Refreshes are part of the review surface, not generated noise. Only update the

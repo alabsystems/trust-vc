@@ -38,17 +38,17 @@ authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 # The ay solver crates are pinned to an exact rev (not branch=main) so the
 # evidence gate's "common ay pin" + "latest private ay pin" checks can resolve a
 # single GitRev provenance. Bump this rev (all four together) to track latest ay.
-ay-core = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
-ay-dpll = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
-ay-frontend = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
-ay-sys = { version = "0.3.0", git = "https://github.com/alabsystems/ay.git", rev = "34f8d577ea8ec02eaaac46b65462e71fb0ac2801" }
+ay-core = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
+ay-dpll = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
+ay-frontend = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
+ay-sys = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
 # ty and trust-ir are rev-pinned (not branch=main) for reproducible standalone
 # builds. ty's internal tla-ir -> trust-ir-build dependencies still name
 # trust-ir's main branch, so Cargo.lock must pin those branch sources to the
 # same trust-ir commit as the direct dependency. Update both sources together.
-tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "7d1d4635dea9f4eb46dc11749fb7a74baf26f569" }
-tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "7d1d4635dea9f4eb46dc11749fb7a74baf26f569" }
-trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "7cccbfcd7d3d5187e040e86fb4adc58a4beb977d", default-features = false }
+tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "21a31de828a2b99f40fdff0ac0f0569244182609" }
+tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "21a31de828a2b99f40fdff0ac0f0569244182609" }
+trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "32a2c54b555c884a40020093f5910cbb5e2050ab", default-features = false, features = ["clean-expr"] }
 
 # BigInt for 128-bit bitvector constants
 num-bigint = "0.4"
@@ -127,3 +127,29 @@ strip = "debuginfo"
 # trust-vc builds standalone from any location while local sibling checkouts are
 # still picked up when present. Keep each override keyed to the exact git source
 # above so Cargo retains a single package identity per owned crate.
+
+[workspace.metadata.atpkg]
+# The user-facing commands here, both produced by crate cargo-trust-vc and both
+# runnable with NOTHING installed — they parse sources with syn and discharge
+# the proof obligations on `ay` in-process, with no cargo, rustc, sysroot or
+# external solver involved at runtime:
+#
+#   * `trust-vc` — the one-word verifier. `trust-vc <FILE.rs>` or
+#     `trust-vc <CRATE-DIR>` verifies immediately; `trust-vc example > demo.rs`
+#     writes a sample it can verify, so a first run needs no setup at all.
+#   * `cargo-trust-vc` — the same CLI as a cargo subcommand: shimmed onto PATH
+#     it runs directly as `cargo-trust-vc check <crate>`, and cargo also
+#     discovers the same shim as `cargo trust-vc check`.
+#
+# Nothing else in this workspace is a command: `trust-vc-driver` is a rustc
+# driver linking rustc_private (its required-features already keep it out of a
+# release build — never add it here); `trust_vc-trust-runner` and
+# `trust-vc-merge-runner` are JSON request/bundle endpoints for Trust ingest and
+# the merge parity gate; `generate_fixtures` / `generate_api_surface_fixtures`
+# write this checkout's own test fixtures.
+expose = ["cargo-trust-vc", "trust-vc"]
+# Build only the CLI and its dependency closure; a bare `cargo build --release`
+# would also compile the ghost-type/std/oracle/merge crates for bins we do not
+# ship. `-p cargo-trust-vc` produces BOTH exposed bins — they are two targets of
+# that one package.
+build-args = ["-p", "targo-trust-vc"]

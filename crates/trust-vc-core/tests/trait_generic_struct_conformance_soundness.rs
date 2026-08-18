@@ -231,15 +231,81 @@ impl<P> Tr for W<P> {
 fn param_bad_caller<T: Tr>(t: T, y: u32) -> u32 { t.p(y) }
 "#;
 
+/// WAS KNOWN RED — now GREEN via an ENCODING fix, and the analysis that made it
+/// red is retained because it is the justification for the fix.
+///
+/// It used to report `NotProved { category: Incompleteness }`: the conformance
+/// query carried `register_trait`'s postcondition axiom
+/// `forall s: Poly, x: BV32. bvult x (Tr__p s x)` alongside the body definition.
+/// Over `u32` that axiom is UNSATISFIABLE — at `x = 0xFFFFFFFF` nothing is
+/// `bvult`-above it (confirmed standalone: `forall v: BV4. bvult v (f v)`
+/// answers `unsat`), so no interpretation of `Tr__p` exists at all and ay
+/// correctly deferred rather than fabricate one. Making ay complete on that
+/// shape would have made things strictly WORSE: the query would decide UNSAT and
+/// trust-vc reads UNSAT as "conformance proved", so the violating impl would have
+/// VERIFIED from an inconsistent premise. Only ay's BV-quantifier incompleteness
+/// stood between this fixture and a false verify.
+///
+/// The defect was in the ENCODING: the conformance check asserted the very trait
+/// postcondition it was trying to discharge. `build_implless_default_conformance_
+/// context` now strips the method-under-check's own `ensures` from the trait it
+/// registers (`trait_decl_without_own_postcondition`), leaving exactly
+/// `body_definition ∧ ¬ensures`, which is SAT with a real witness. Sibling method
+/// axioms are kept (each is discharged by its own conformance obligation) and
+/// every method UF is still declared.
+///
+/// The assertion below pins the WITNESS, not just the verdict: the model must
+/// bind `__trust_vc_impl_result` and `__trust_vc_impl_param_x_0` to EQUAL values
+/// (currently `0xFFFFFFFF` for both), because `result == x` is precisely what
+/// makes `ensures(result > x)` false for the body `p(&self, x) { x }`. A
+/// "counterexample" whose model did not falsify the obligation would fail here.
 #[test]
 fn generic_struct_param_override_violating_ensures_does_not_verify() {
     let result = conformance_verdict("param_bad", PARAM_OVERRIDE_VIOLATE, "param_bad_caller");
-    assert!(
-        matches!(result, VerifyResult::Counterexample { .. }),
-        "the param-bearing override `p(&self, x) {{ x }}` cannot establish \
-         ensures(result > x); the positional param restore must keep the obligation \
-         genuinely false; got: {result:?}"
+    let VerifyResult::Counterexample { ref model, .. } = result else {
+        panic!(
+            "the param-bearing override `p(&self, x) {{ x }}` cannot establish \
+             ensures(result > x); the positional param restore must keep the obligation \
+             genuinely false; got: {result:?}"
+        );
+    };
+    let model = model
+        .as_ref()
+        .unwrap_or_else(|| panic!("refutation must carry a model; got: {result:?}"));
+
+    let witness_result = bv_witness(model, "__trust_vc_impl_result")
+        .unwrap_or_else(|| panic!("model must bind the impl result; model: {model}"));
+    let witness_x = bv_witness(model, "__trust_vc_impl_param_x_0")
+        .unwrap_or_else(|| panic!("model must bind the impl param `x`; model: {model}"));
+
+    // (1) The witness must be CONSISTENT WITH THE BODY. `p(&self, x) { x }`
+    //     returns its argument, so any model of the body has result == x.
+    assert_eq!(
+        witness_result, witness_x,
+        "the witness must satisfy the impl BODY: `{{ x }}` forces result == x. \
+         Got result={witness_result}, x={witness_x}; model: {model}"
     );
+    // (2) The witness must ACTUALLY FALSIFY the ensures. Evaluate the clause
+    //     `result > x` at the witness values and demand it comes out FALSE —
+    //     this is the check that a "counterexample" which refutes nothing
+    //     cannot pass. At the values the solver currently returns
+    //     (result = x = 4294967295 = u32::MAX) the clause reads
+    //     `4294967295 > 4294967295`, which is false.
+    assert!(
+        !(witness_result > witness_x),
+        "the counterexample must FALSIFY ensures(result > x), but evaluating the \
+         clause at the witness gives {witness_result} > {witness_x} = TRUE, i.e. the \
+         model satisfies the postcondition and refutes nothing; model: {model}"
+    );
+}
+
+/// Reads a bitvector witness value out of the rendered counterexample model,
+/// which prints as `"<name>": (<value>, <width>)`.
+fn bv_witness(model: &str, name: &str) -> Option<u128> {
+    let needle = format!("\"{name}\": (");
+    let rest = &model[model.find(&needle)? + needle.len()..];
+    let digits = rest.split(',').next()?.trim();
+    digits.parse().ok()
 }
 
 // SOUNDNESS — multiple methods: a conforming `good` must not mask a violating

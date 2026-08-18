@@ -9,6 +9,7 @@ mod cache;
 mod demand_inline;
 mod frame_state;
 mod invariants;
+mod overflow_logic;
 mod quantifier_order_soundness;
 mod timeout;
 mod typed;

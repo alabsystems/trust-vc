@@ -336,3 +336,48 @@ fn traits_rs_conflicting_impl_contract_fails_closed_from_file() {
         expect_fail_closed(path, case, upstream_case, expected_fragments);
     }
 }
+
+/// Regression for the returns-on-both + own-`requires` false-verify (adversary
+/// `attack6`/`attack7`). A `returns`-on-both impl is conformance-EXEMPT; adding
+/// an own `requires` strips the attrs `impl_method_matches_item_fn` compares, so
+/// net A's strict token match fails and its returns-conflict error never fired —
+/// leaving NOTHING to check `body ⊨ trait ensures`, and a client of the trait
+/// ensures verified over a body that returns the wrong value (the file reported
+/// all-verified). The name-based fallback in `inherited_trait_method_contracts`
+/// now fails the impl method closed with the same error the plain returns-on-both
+/// case emits, so the file can no longer be gamed to all-green. This pins that
+/// the `requires` no longer defeats the returns-conflict fail-closed.
+#[test]
+fn returns_on_both_with_requires_fails_closed() {
+    let source = r#"#![allow(dead_code, unused_imports, unused_variables)]
+
+#[trust_vc::trait_spec]
+trait ReturnsOnBothWithRequires {
+    #[trust_vc::returns(7u64)]
+    fn produce(&self) -> u64;
+}
+
+struct ForgeBad;
+
+#[trust_vc::trait_impl]
+impl ReturnsOnBothWithRequires for ForgeBad {
+    #[trust_vc::requires(true)]
+    #[trust_vc::returns(3u64)]
+    fn produce(&self) -> u64 {
+        3u64
+    }
+}
+"#;
+    let path = std::env::temp_dir().join("trust_vc_returns_on_both_with_requires_regression.rs");
+    std::fs::write(&path, source).expect("write temp regression source");
+    let path_str = path.to_str().expect("temp path should be UTF-8");
+
+    expect_fail_closed(
+        path_str,
+        "produce",
+        "returns_on_both_with_requires",
+        &["a `returns` clause cannot be declared on both a trait method impl and its declaration"],
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

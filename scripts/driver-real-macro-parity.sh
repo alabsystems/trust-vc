@@ -15,7 +15,7 @@
 #   (a driver soundness bug — the driver proving more than syn). This is a
 #   distinct evidence record, NEVER a manifest flip or a promotion.
 #
-# WHY THIS PATH (and not `cargo trust-vc check --frontend=driver`)
+# WHY THIS PATH (and not `targo trust-vc check --frontend=driver`)
 #   The cargo `--frontend=driver` wiring (fb16545) drives the same comparison,
 #   but its cargo-verus forwarding rebuilds the fixture's whole dependency graph
 #   under a distinct `verus` lib-metadata (ay included) — a from-scratch build
@@ -74,14 +74,23 @@ else
 fi
 [ -x "$DRIVER_BIN" ] || die "driver bin not found/executable: ${DRIVER_BIN:-<empty>}"
 
-# --- 2. cargo-trust-vc bin (the trusted syn path) ----------------------------
-CARGO_TRUST_VC="${CARGO_TRUST_VC_BIN:-$REPO_ROOT/target/debug/cargo-trust-vc}"
-if [ ! -x "$CARGO_TRUST_VC" ]; then
-  echo "==> cargo-trust-vc bin missing; building it ..."
-  cargo build -p cargo-trust-vc >/dev/null 2>&1 \
-    || die "failed to build cargo-trust-vc (needed for the authoritative syn path)"
+# --- 2. targo-trust-vc bin (the trusted syn path) ----------------------------
+# The package is `targo-trust-vc`; it ships the Trust-native `targo-trust-vc`
+# bin and a back-compat `cargo-trust-vc` alias bin (same shim). Prefer the
+# native bin, fall back to the alias, honor the override.
+if [ -n "${CARGO_TRUST_VC_BIN:-}" ]; then
+  CARGO_TRUST_VC="$CARGO_TRUST_VC_BIN"
+elif [ -x "$REPO_ROOT/target/debug/targo-trust-vc" ]; then
+  CARGO_TRUST_VC="$REPO_ROOT/target/debug/targo-trust-vc"
+else
+  CARGO_TRUST_VC="$REPO_ROOT/target/debug/cargo-trust-vc"
 fi
-[ -x "$CARGO_TRUST_VC" ] || die "cargo-trust-vc bin not found: $CARGO_TRUST_VC"
+if [ ! -x "$CARGO_TRUST_VC" ]; then
+  echo "==> targo-trust-vc bin missing; building it ..."
+  cargo build -p targo-trust-vc >/dev/null 2>&1 \
+    || die "failed to build targo-trust-vc (needed for the authoritative syn path)"
+fi
+[ -x "$CARGO_TRUST_VC" ] || die "targo-trust-vc bin not found: $CARGO_TRUST_VC"
 
 # --- 3. Real-macro externs from the already-built workspace artifacts ---------
 # The driver bin compiles the fixture's REAL macros, so it needs the `trust_vc`
@@ -126,13 +135,13 @@ if ! grep -q '^TRUST_VC_DRIVER_RESULT' "$DRIVER_TSV"; then
 fi
 
 # --- 5. Authoritative syn verdicts (source scan; no dep rebuild) -------------
-echo "==> running the trusted syn path (cargo trust-vc check) on the fixture ..."
+echo "==> running the trusted syn path (targo trust-vc check) on the fixture ..."
 # `check` exits non-zero when a target is refuted (inc_bad is intentionally so),
 # which is expected here — we consume the JSON verdicts, not the exit status.
 ( cd "$FIXTURE_DIR" && "$CARGO_TRUST_VC" check --json . ) >"$SYN_JSON" 2>"$WORK/syn.stderr" || true
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$SYN_JSON" 2>/dev/null \
   || { echo "---- syn stderr ----" >&2; sed 's/^/    /' "$WORK/syn.stderr" >&2 || true; \
-       die "cargo trust-vc check did not emit valid JSON"; }
+       die "targo trust-vc check did not emit valid JSON"; }
 
 # --- 6. Compare + emit the witness (same wire format as --frontend=driver) ---
 python3 - "$DRIVER_TSV" "$SYN_JSON" <<'PY'

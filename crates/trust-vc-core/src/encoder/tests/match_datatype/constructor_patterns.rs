@@ -194,12 +194,39 @@ fn test_constructor_match_some_branch_uses_selector_binding() {
     );
 }
 
+/// Registers `Option<u8>` as a native datatype.
+///
+/// REQUIRED BEFORE any function is declared over its carrier sort. `sort_for_type`
+/// maps a datatype to `Sort::Uninterpreted(name)`, and `try_declare_fun` makes ay
+/// declare that sort on the spot. ay 0.4.0 then refuses the later datatype
+/// declaration:
+///
+///   sort 'Option<u8>' is already declared; re-declaring it as a datatype would
+///   conflate existing symbols over the old sort with the new datatype's members
+///
+/// That guard is correct — the old sort's symbols are NOT the datatype's members —
+/// and under 0.3.0 the conflation was silent. Production does not hit it: setup
+/// registers datatypes from the prepared context (including trait/helper return
+/// types) before variable declaration and `register_trait`. These tests build a
+/// context by hand, so they must follow the same order.
+fn register_option_u8_datatype(encoder: &mut AYEncoder, option_ty: &TrustVcType) {
+    if let TrustVcType::Datatype { name, variants } = option_ty {
+        encoder
+            .register_datatype(name, variants)
+            .expect("Option<u8> datatype registration should succeed");
+    } else {
+        panic!("Option<u8> should parse as a Datatype, got {option_ty:?}");
+    }
+}
+
 #[test]
 fn test_constructor_match_associated_trait_option_scrutinee_uses_actual_sort() {
     let mut encoder = AYEncoder::new();
     let option_ty = TrustVcType::from_str("Option<u8>").expect("Option<u8> should parse");
     let seq_ty = TrustVcType::from_str("Seq<u8>").expect("Seq<u8> should parse");
     let u8_ty = TrustVcType::Uint { width: 8 };
+
+    register_option_u8_datatype(&mut encoder, &option_ty);
 
     encoder
         .declare_variable(&VariableDecl {
@@ -292,6 +319,8 @@ fn test_quantified_associated_trait_seq_arg_matches_helper_signature() {
     let mut encoder = AYEncoder::new();
     let option_ty = TrustVcType::from_str("Option<u8>").expect("Option<u8> should parse");
     let seq_ty = TrustVcType::from_str("Seq<u8>").expect("Seq<u8> should parse");
+
+    register_option_u8_datatype(&mut encoder, &option_ty);
 
     // Mirrors evals/verus/ported/recommends_trait_surface_blocker: a quantified
     // Seq<u8> is passed as a whole value into the qualified associated trait

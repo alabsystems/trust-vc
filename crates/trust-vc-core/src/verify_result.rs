@@ -99,7 +99,7 @@ pub enum VerifyResult {
     /// ([`UnknownCategory::is_incompleteness`]). A RESOURCE/timeout/cancellation
     /// unknown can never reach this variant — it stays [`Self::Unknown`],
     /// because a timeout does not mean the fact is false. That split is checked
-    /// at the single construction point in [`VerifyResult::unknown`].
+    /// at the single construction point in `VerifyResult::unknown`.
     NotProved {
         /// Why the obligation could not be discharged. Carries the obligation
         /// name and location as rendered by the producer.

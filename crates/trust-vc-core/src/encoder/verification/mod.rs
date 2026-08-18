@@ -41,6 +41,7 @@ pub(in crate::encoder) mod model_render;
 pub(super) mod nonlinear_real;
 pub(crate) mod outcome;
 pub(super) mod overflow;
+pub(super) mod overflow_logic;
 pub(super) mod panic;
 pub(in crate::encoder) mod pruning;
 pub(super) mod rewrite;

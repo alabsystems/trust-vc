@@ -15,24 +15,24 @@ returns(..))]` and let trust_vc extract and discharge the proof obligations. Eac
 contracted function is verified from source via `verify_function_from_file`.
 
 ```bash
-targo run --example proof_macro_quickstart
+targo --unverified run --example proof_macro_quickstart
 ```
 
 ### path_a_migration_guide.rs
 Shows how to convert from the broken Path B (macro) approach to the working Path A (explicit API) approach. Includes examples of assertions, preconditions, postconditions, and termination.
 
 ```bash
-targo run --example path_a_migration_guide
+targo --unverified run --example path_a_migration_guide
 ```
 
 ### path_a_verification.rs / basics_path_a.rs / binary_search_path_a.rs / termination_path_a.rs
 Demonstrate verification through ay using the `VerificationContext` API directly.
 
 ```bash
-targo run --example path_a_verification
-targo run --example basics_path_a
-targo run --example binary_search_path_a
-targo run --example termination_path_a
+targo --unverified run --example path_a_verification
+targo --unverified run --example basics_path_a
+targo --unverified run --example binary_search_path_a
+targo --unverified run --example termination_path_a
 ```
 
 ## Integer model note (important)
@@ -65,14 +65,14 @@ Path A requires:
 
 ```bash
 # Run migration guide
-targo run --example path_a_migration_guide
+targo --unverified run --example path_a_migration_guide
 
 # Run verification demo
-targo run --example path_a_verification
+targo --unverified run --example path_a_verification
 
 # Check compilation
-targo check --examples
+targo --unverified check --examples
 
 # Run tests
-targo test --examples
+targo --unverified test --examples
 ```

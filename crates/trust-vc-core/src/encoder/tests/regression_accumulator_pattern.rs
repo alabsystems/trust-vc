@@ -248,7 +248,25 @@ fn fold_max_of_abs() {
         "m3_def",
         "m3 == if abs3 > m2 { abs3 } else { m2 }",
     ));
-    ctx.push_obligation(ProofObligation::assert("max_abs_is_5", "m3 == 5"));
+    // This explicit arithmetic tactic uses mathematical integers. Every input
+    // is pinned to a small literal and every negation/max intermediate is in
+    // 0..=5, so that interpretation is equivalent to i32 execution here.
+    ctx.push_obligation(
+        ProofObligation::assert("max_abs_is_5", "m3 == 5")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "max of abs values in [3,-5,2,-1] = 5");
+
+    // Keep the tactic honest: the same fully pinned execution must refute a
+    // strictly smaller maximum rather than accepting every arithmetic goal.
+    ctx.push_obligation(
+        ProofObligation::assert("max_abs_is_below_5", "m3 < 5")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a false maximum for [3,-5,2,-1]",
+    );
 }

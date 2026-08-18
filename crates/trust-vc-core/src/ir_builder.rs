@@ -92,6 +92,7 @@ fn encode_symbol_component(input: &str) -> String {
     let mut encoded = String::with_capacity(1 + input.len() * 2);
     encoded.push('x');
     for byte in input.as_bytes() {
+        // quality-audit: allow-expect — fmt::Write to a String is infallible
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     encoded
@@ -103,8 +104,10 @@ fn framed_type_key(tag: &str, components: &[String]) -> String {
     use std::fmt::Write;
 
     let mut key = String::new();
+    // quality-audit: allow-expect — fmt::Write to a String is infallible
     write!(&mut key, "{tag}@{};", components.len()).expect("writing to String cannot fail");
     for component in components {
+        // quality-audit: allow-expect — fmt::Write to a String is infallible
         write!(&mut key, "{}:", component.len()).expect("writing to String cannot fail");
         key.push_str(component);
     }

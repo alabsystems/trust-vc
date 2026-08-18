@@ -372,7 +372,16 @@ impl PreparedObligation {
                         ),
                     })?;
 
-                lower_syn_expr(&syn_expr, env).map_err(|err| TrustVcError::Encoding {
+                // The expected-result marker is a synthetic source-catalog
+                // implementation detail, not a user-callable builtin. Grant it
+                // only on a scoped clone when the originating obligation carries
+                // the crate-private provenance bit.
+                let scoped_env = obligation
+                    .source_catalog_math_int_context
+                    .then(|| env.clone().with_source_catalog_math_int_marker());
+                let lowering_env = scoped_env.as_ref().unwrap_or(env);
+
+                lower_syn_expr(&syn_expr, lowering_env).map_err(|err| TrustVcError::Encoding {
                     context: "prepare obligation",
                     detail: format!(
                         "Failed to lower obligation '{}'{}: {}",

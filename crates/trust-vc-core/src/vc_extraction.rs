@@ -1199,6 +1199,14 @@ fn extract_verification_conditions_from_parts_inner(
     // body (signature-derived; empty without a file). Drives the free-call
     // `&mut`-referent havoc that closes the dropped-mutation false `Verified`.
     let mut mut_ref_call_args = BTreeMap::new();
+    // Base context for the broadcast-lemma contract check, captured while the
+    // spec catalog is in scope: the target's declarations plus EVERY catalogued
+    // spec fn's definitional body axiom, forcibly revealed, and no obligations.
+    // See `suppress_unestablished_broadcast_lemma_axioms`.
+    let mut broadcast_check_base: Option<VerificationContext> = None;
+    // Rendered `assert!` proof steps per broadcast-lemma axiom name, sharing the
+    // contract's `__bcq_*` binder renaming.
+    let mut broadcast_lemma_proof_steps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some(file) = file {
         validate_block_use_alias_resolution(
             file,
@@ -1244,7 +1252,22 @@ fn extract_verification_conditions_from_parts_inner(
         // bodies). requires->guard folding is enforced inside. Grouped axioms are
         // gated FORWARD-ONLY by the body-ordered `broadcast_use!` markers via the
         // position-aware encoder gate. Part of the file-path broadcast_use! wiring.
-        collect_source_broadcast_lemmas(file, &spec_catalog, &mut vc)?;
+        collect_source_broadcast_lemmas(
+            file,
+            &spec_catalog,
+            &mut vc,
+            &mut broadcast_lemma_proof_steps,
+        )?;
+        if vc
+            .obligations()
+            .iter()
+            .any(|o| o.name().starts_with("__source_broadcast_"))
+        {
+            let mut base = vc.clone();
+            base.obligations.clear();
+            spec_catalog.apply_all_specs_revealed(&mut base);
+            broadcast_check_base = Some(base);
+        }
         apply_source_spec_recommends_in_target_contracts(
             file,
             func,
@@ -1320,22 +1343,45 @@ fn extract_verification_conditions_from_parts_inner(
     // dispatch arm, so they MERGE into `concrete_method_call_contracts` (zero
     // body_extract change). COLLISION HANDLING (an inherent `(S, m)` key
     // colliding with a concrete-trait `(S, m)` — a method that is somehow both
-    // inherent and trait-supplied): DROP the key entirely (remove the existing
-    // concrete entry, skip the inherent one) so NEITHER fires. A missed
-    // obligation is always sound; emitting either member's `requires` risks
-    // attributing the wrong contract — never emit a wrong `requires`.
+    // inherent and trait-supplied): CONJOIN the two `requires` sets.
+    //
+    // This used to drop the key entirely so NEITHER fired, justified as "a
+    // missed obligation is always sound". That is TRUE FOR AN ASSUMPTION AND
+    // FALSE FOR A `requires`: dropping it lets a precondition-VIOLATING call
+    // through unflagged. It is the third member of the same class as the
+    // receiver-shape drop (`body_extract.rs`) and the two-trait ambiguity drop
+    // (`trait_contracts.rs`), both fixed.
+    //
+    // Conjunction is the sound resolution and the concern that motivated the
+    // drop — "never emit a wrong `requires`" — is what picks it over the
+    // disjunction. The call is one of the candidates and we cannot tell which,
+    // so requiring BOTH is stronger than either: it over-rejects, never misses.
+    // The disjunction would be weaker than either and would preserve the hole.
+    // Both entries bind `self` (`TRAIT_RECEIVER_NAME`), so when the parameter
+    // lists agree the clauses share binders and the call-site positional
+    // substitution is well-formed for all of them.
     if let Some(file) = file {
         let inherent_method_call_contracts =
             trait_contracts::inherent_impl_method_requires(&file.items)?;
         for (key, contract) in inherent_method_call_contracts {
-            if concrete_method_call_contracts.contains_key(&key) {
-                // Ambiguous (S, m): a concrete-trait entry already owns this
-                // key. Drop both so neither contributes a (possibly wrong)
-                // obligation.
-                concrete_method_call_contracts.remove(&key);
-                continue;
+            match concrete_method_call_contracts.get_mut(&key) {
+                Some(existing) if existing.param_names == contract.param_names => {
+                    for clause in contract.requires {
+                        if !existing.requires.contains(&clause) {
+                            existing.requires.push(clause);
+                        }
+                    }
+                }
+                // Differing arity or parameter names: the clauses bind different
+                // binders, so there is no well-formed conjunction and merging
+                // would substitute against the wrong ones. Still drops.
+                Some(_) => {
+                    concrete_method_call_contracts.remove(&key);
+                }
+                None => {
+                    concrete_method_call_contracts.insert(key, contract);
+                }
             }
-            concrete_method_call_contracts.insert(key, contract);
         }
     }
 
@@ -1371,6 +1417,34 @@ fn extract_verification_conditions_from_parts_inner(
             &fn_bound_spec_fn_param_names,
         )?
     };
+
+    // SOUNDNESS-CRITICAL (cardinal false-verify): drop any `#[trust_vc::broadcast]`
+    // lemma axiom whose own contract does not establish its `ensures`.
+    //
+    // `collect_source_broadcast_lemmas` publishes `forall params. guard ==> ensures`
+    // for every lemma WITHOUT checking it. A bogus lemma therefore injects a
+    // CONTRADICTORY premise, and a contradictory premise proves everything — the
+    // engine documents that against itself in `encoder/verification/assertion.rs`.
+    // The `broadcast_vacuity_probe` backstop only fires when the assumption set is
+    // INCONSISTENT; a lemma that is consistent but simply unestablished (the
+    // ordinary case, an `ensures` over an `#[opaque]` spec fn) sails through it.
+    //
+    // WHY HERE AND NOT AT THE PUBLISH SITE. The check needs the definitional
+    // spec-fn body axioms to be present, and at collector time they are NOT: a
+    // spec fn referenced only from inside `ensures!()` / `assert!()` macro tokens
+    // is registered during BODY EXTRACTION, which runs after the collector.
+    // Measured — the context holds ZERO obligations at collector time, so a check
+    // placed there proves `bcf(c) == c` with nothing known about `bcf` and
+    // suppresses every legitimate lemma. Running after extraction is what makes
+    // the definitional axioms available. This is still extraction-local: it never
+    // re-enters `extract_verification_conditions_from_parts_inner`.
+    //
+    // Removing the obligation here is exactly equivalent to never publishing it.
+    suppress_unestablished_broadcast_lemma_axioms(
+        &mut vc,
+        broadcast_check_base.as_ref(),
+        &broadcast_lemma_proof_steps,
+    );
 
     canonicalize_visibility_aliases(&mut vc, &exact_spec_aliases);
 
@@ -5925,6 +5999,7 @@ fn collect_source_broadcast_lemmas(
     file: &File,
     spec_catalog: &crate::spec_function_catalog::SpecFunctionCatalog,
     vc: &mut VerificationContext,
+    lemma_proof_steps: &mut BTreeMap<String, Vec<String>>,
 ) -> TrustVcResult<()> {
     let ill_founded = ill_founded_recursive_function_names(file, vc);
     for item in &file.items {
@@ -5998,6 +6073,23 @@ fn collect_source_broadcast_lemmas(
                 .collect(),
         );
 
+        // PROOF STEPS. A lemma body may carry `assert!(..)` steps that do the
+        // actual work of establishing the `ensures`. Render them with the SAME
+        // renamer so they bind the same `__bcq_*` binders as the contract —
+        // that shared renaming is why this must happen HERE and not in the
+        // later suppression pass, which sees only obligations.
+        //
+        // They are carried out as ASSERTS, not assumes: each is discharged in
+        // turn and only then available as a fact for the next one and for the
+        // `ensures`. Assuming them would let a lemma bootstrap itself from an
+        // unproven step, which is the very hole this check exists to close.
+        let (_, assert_exprs) = body_broadcast_clause_exprs(&item_fn.block, "assert");
+        let proof_steps: Vec<String> = assert_exprs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| render_broadcast_clause(e, &mut renamer))
+            .collect();
+
         // Requires (body statements; renamed) → the guard. #NEW SOUNDNESS GUARD:
         // a lemma that HAS a requires but whose guard we could not render must
         // NOT publish a bare ensures.
@@ -6023,6 +6115,9 @@ fn collect_source_broadcast_lemmas(
         }
 
         let axiom_name = format!("__source_broadcast_{name}");
+        if !proof_steps.is_empty() {
+            lemma_proof_steps.insert(axiom_name.clone(), proof_steps);
+        }
         let mut obligation = ProofObligation::broadcast_assume(axiom_name, ensures_str)
             .with_bound_vars(bound_vars)
             .with_trigger_patterns(vec![vec![trigger]]);
@@ -6046,6 +6141,121 @@ fn collect_source_broadcast_lemmas(
         vc.push_obligation(obligation);
     }
     Ok(())
+}
+
+/// Drops every `#[trust_vc::broadcast]` lemma axiom whose own contract does not
+/// establish the `ensures` it publishes.
+///
+/// For each `__source_broadcast_*` obligation this discharges
+/// `guard |- ensures` over the lemma's already-renamed fresh binders, in a
+/// DISCARDED child that carries the ambient definitional spec-fn axioms but NO
+/// lemma axiom of its own. Proving `P(c)` for free UNCONSTRAINED constants is
+/// proving `forall x. P(x)`, so this is the right query, and it reuses the
+/// strings the collector already rendered — no re-parse, no `syn` work.
+///
+/// NO LEMMA CAN JUSTIFY ITSELF OR A SIBLING: `broadcast_lemma_check_child` drops
+/// every `__source_broadcast_*`. The call-edge SCC in
+/// `ill_founded_recursive_function_names` does NOT cover this — two lemmas that
+/// never call each other can still prove each other through published axioms.
+/// The cost is that a lemma legitimately depending on a prior lemma is dropped;
+/// that is over-rejection, and the fix for it is in-order publish-as-you-go, NOT
+/// relaxing to "keep all", which reintroduces the hole in circular form.
+///
+/// SCOPE, stated honestly. `body_broadcast_clause_exprs` reads only top-level
+/// `requires!` / `ensures!` statements, so the collector's model of a lemma is
+/// already contract-only and this check is faithful to that model and no wider.
+/// A lemma carrying real PROOF STEPS (`assert!`, `calc!`, a helper call) is
+/// judged on its contract alone and is dropped if the `ensures` does not follow.
+/// No file-path lemma in the tree has such a step today. The failure direction is
+/// over-rejection, never a hole.
+///
+/// VACUITY IS A PASS, for the reason the closure def-side check gives: an
+/// unsatisfiable guard makes the published `guard ==> ensures` INERT, since the
+/// guard can never hold. Every other non-`Verified` verdict — counterexample,
+/// not-proved, timeout, encoding error — DROPS the axiom.
+fn suppress_unestablished_broadcast_lemma_axioms(
+    vc: &mut VerificationContext,
+    check_base: Option<&VerificationContext>,
+    lemma_proof_steps: &BTreeMap<String, Vec<String>>,
+) {
+    let Some(check_base) = check_base else {
+        return;
+    };
+    const SOURCE_BROADCAST_PREFIX: &str = "__source_broadcast_";
+
+    let candidates: Vec<(String, String, Vec<String>)> = vc
+        .obligations()
+        .iter()
+        .filter(|obligation| obligation.name().starts_with(SOURCE_BROADCAST_PREFIX))
+        .map(|obligation| {
+            (
+                obligation.name().to_string(),
+                obligation.condition().to_string(),
+                obligation
+                    .broadcast_guard
+                    .as_ref()
+                    .map(|guards| guards.iter().map(|g| g.condition.clone()).collect())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut unestablished: BTreeSet<String> = BTreeSet::new();
+    for (name, ensures, guards) in candidates {
+        // The base already carries the TRUE definitions, revealed. Without them
+        // an opaque spec fn contributes nothing and EVERY lemma over one is
+        // dropped, legitimate or not.
+        let mut child = check_base.broadcast_lemma_check_child();
+        for (index, guard) in guards.iter().enumerate() {
+            child.push_obligation(ProofObligation::assume(
+                format!("__broadcast_lemma_guard_{name}_{index}"),
+                guard.clone(),
+            ));
+        }
+        // Discharge the body's proof steps IN ORDER first: each is asserted, and
+        // once proven becomes a usable fact for the next step and for the
+        // `ensures`. A lemma that does its work in the body is therefore judged
+        // on that work, not on its contract alone.
+        for (index, step) in lemma_proof_steps
+            .get(&name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            child.push_obligation(ProofObligation::assert(
+                format!("__broadcast_lemma_step_{name}_{index}"),
+                step.clone(),
+            ));
+        }
+        child.push_obligation(ProofObligation::assert(
+            format!("__broadcast_lemma_check_{name}"),
+            ensures.clone(),
+        ));
+
+        let verdict = child.verify();
+        let established = match &verdict {
+            VerifyResult::Verified => true,
+            VerifyResult::Unknown { category, .. } => {
+                matches!(category, crate::encoder::UnknownCategory::VacuousTruth)
+            }
+            _ => false,
+        };
+        if std::env::var("TVC_DEBUG_BCAST_CHECK").is_ok() {
+            eprintln!("[bcast-check] {name} established={established} verdict={verdict:?}");
+        }
+        if !established {
+            unestablished.insert(name);
+        }
+    }
+
+    if !unestablished.is_empty() {
+        vc.obligations
+            .retain(|obligation| !unestablished.contains(obligation.name()));
+    }
 }
 
 fn helper_call_contract_from_item_fn(
@@ -6138,6 +6348,16 @@ fn renamed_requires_guard(
 /// pairs this with an impl-side requires check and a no-arg gate, and a genuinely
 /// requires-bearing method that can't be seen also can't be body-axiom-lowered
 /// into an obligation, so it stays fail-closed regardless.
+///
+/// SOUNDNESS: the search must recurse into `mod` blocks. The safety argument
+/// above — "a declaration this can't see also can't be lowered, so it's
+/// fail-closed regardless" — holds only for traits genuinely outside the file. A
+/// module-NESTED trait is in the file and IS registered:
+/// `trait_contracts::collect_source_trait_declarations` recurses into
+/// `syn::Item::Mod`. Scanning only `file.items` therefore missed exactly the
+/// declarations the collector had already accepted, so a requires-bearing
+/// method's body axiom published unconditionally and a precondition-violating
+/// call could verify. The two views must not diverge.
 fn trait_method_declares_requires(
     file: &syn::File,
     item_impl: &syn::ItemImpl,
@@ -6149,20 +6369,43 @@ fn trait_method_declares_requires(
     let Some(trait_ident) = trait_path.segments.last().map(|seg| seg.ident.to_string()) else {
         return Ok(false);
     };
-    for item in &file.items {
-        let syn::Item::Trait(item_trait) = item else {
-            continue;
-        };
-        if item_trait.ident != trait_ident {
-            continue;
-        }
-        for trait_item in &item_trait.items {
-            let syn::TraitItem::Fn(trait_fn) = trait_item else {
-                continue;
-            };
-            if trait_fn.sig.ident == method_name {
-                return helper_has_requires_clause(&trait_fn.attrs);
+    trait_method_declares_requires_in_items(&file.items, &trait_ident, method_name)
+}
+
+/// Recursive half of [`trait_method_declares_requires`], mirroring the module
+/// recursion in `trait_contracts::collect_source_trait_declarations`.
+fn trait_method_declares_requires_in_items(
+    items: &[syn::Item],
+    trait_ident: &str,
+    method_name: &str,
+) -> TrustVcResult<bool> {
+    for item in items {
+        match item {
+            syn::Item::Trait(item_trait) => {
+                if item_trait.ident != trait_ident {
+                    continue;
+                }
+                for trait_item in &item_trait.items {
+                    let syn::TraitItem::Fn(trait_fn) = trait_item else {
+                        continue;
+                    };
+                    if trait_fn.sig.ident == method_name {
+                        return helper_has_requires_clause(&trait_fn.attrs);
+                    }
+                }
             }
+            syn::Item::Mod(module) => {
+                if let Some((_, inner_items)) = &module.content {
+                    if trait_method_declares_requires_in_items(
+                        inner_items,
+                        trait_ident,
+                        method_name,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(false)
@@ -9080,7 +9323,21 @@ fn self_recursive_body_axiom_unsound(
 /// (round-8 finding 15's decreases-bearing variant) — it is the mutual analog
 /// of the deliberately-unaffected self-recursive-with-decreases case, and
 /// closing it needs the semantic measure-decrease proof the spec catalog runs in
-/// `recursion_suppresses_axiom` Stage 2. The detection is name-approximate
+/// `recursion_suppresses_axiom` Stage 2.
+///
+/// "NOT caught HERE" IS NOT A SYSTEM-LEVEL GAP — read at face value the
+/// paragraph above describes a live false `Verified`, and it is not one. Stage 2
+/// does catch it. Probed cache-off: a contradictory `bad(n) == bad(n) + 1` under
+/// a non-shrinking `#[decreases]`, and its mutual analog `p/q`, are both REFUTED
+/// (axiom suppressed), while a well-founded `#[decreases]` and a non-recursive
+/// spec fn both stay usable — so the discrimination is on whether the measure
+/// shrinks, not on recursion per se. That Stage-2 coverage is what stands
+/// between this structural partial and a cardinal false `Verified`, and nothing
+/// pinned it, so a Stage-2 regression would have opened the hole silently with
+/// every local comment still reading as intended. All four rows are now pinned
+/// by `tests/nonshrinking_decreases_axiom_suppression.rs`.
+///
+/// The detection is name-approximate
 /// (calls match by final-segment identifier; method calls match by method name),
 /// which can only OVER-suppress (register a function uninterpreted), so it is
 /// sound.
@@ -9612,13 +9869,40 @@ fn apply_sibling_helper_functions(
             function_discovery::EnclosingModuleResolution::Unique(path) => Some(path),
             function_discovery::EnclosingModuleResolution::Ambiguous => None,
         };
-        validate_block_use_alias_resolution(
+        let alias_validation = validate_block_use_alias_resolution(
             file,
             helper,
             helper,
             helper_module.as_deref(),
             source_file_is_crate_root,
-        )?;
+        );
+        if let Err(error) = alias_validation {
+            // A unit-returning sibling with no `&mut` parameters has no logical
+            // result or caller-visible mutation to axiomize. If its body uses
+            // an import shape whose lexical identity we cannot represent, keep
+            // that call opaque instead of failing an otherwise independent
+            // caller. This is a loss of completeness, never authority: the
+            // helper body and all of its transitive body facts are omitted.
+            // Requires/ensures were collected separately above and remain
+            // enforced at the call site.
+            //
+            // Non-unit results and `&mut` parameters must still fail closed:
+            // omitting either could hide exactly the value or mutation that the
+            // caller's postcondition observes.
+            let body_is_logically_opaque = matches!(helper.sig.output, syn::ReturnType::Default)
+                && !helper.sig.inputs.iter().any(fn_arg_is_mut_reference);
+            if matches!(
+                &error,
+                TrustVcError::Encoding {
+                    context: "block use alias resolution",
+                    ..
+                }
+            ) && body_is_logically_opaque
+            {
+                continue;
+            }
+            return Err(error);
+        }
         let mut spec_catalog = crate::spec_function_catalog::SpecFunctionCatalog::from_file(file);
         spec_catalog.register_exact_aliases(&block_use_function_aliases(&helper.block))?;
         spec_catalog.apply_referenced_specs(helper, vc)?;
@@ -9775,14 +10059,58 @@ fn validate_block_use_alias_resolution(
         });
     }
 
-    if collector.outer_has_glob || collector.nested_has_glob {
+    if collector.nested_has_glob {
         return Err(TrustVcError::Encoding {
             context: "block use alias resolution",
-            detail: "block `use ...::*` imports are not source-symbol indexed; TrustVc fails \
+            detail: "nested-block `use ...::*` import is not source-symbol indexed; its symbols \
+                     enter an inner lexical scope that TrustVc does not model, so TrustVc fails \
                      closed instead of resolving a bare call through a same-spelled function \
                      from another Rust scope"
                 .to_string(),
         });
+    }
+
+    // An outer-block glob is rejected only for the ambiguity this gate actually
+    // names: a bare call the glob could bind whose spelling ALSO exists in some
+    // other Rust scope. rustc already resolved this body — it compiled — so when
+    // no competing binding of that spelling exists, the glob is the only
+    // candidate and resolving through it reproduces rustc's own choice.
+    //
+    // This is deliberately conservative in both directions. A file-local
+    // function of the same spelling actually *shadows* the glob in rustc, so
+    // resolving to it would be correct; we still fail closed there rather than
+    // encode a shadowing rule this lane does not otherwise model.
+    if collector.outer_has_glob {
+        // Only CALL spellings matter here. `called` above is deliberately a
+        // superset — it mixes in expression paths and visibility targets — so
+        // intersecting it directly would fire on every ordinary parameter or
+        // `let` binder. A local binder or an explicit `use` alias also shadows a
+        // glob deterministically in rustc and is already modelled by this lane,
+        // so neither is an ambiguity. What is left is the real hazard: a bare
+        // call whose spelling is ALSO defined as a function in this file.
+        let mut call_symbols = referenced_helper_call_symbols(func);
+        call_symbols.extend(crate::spec_function_catalog::called_names_in_block(
+            &func.block,
+        ));
+        let file_function_spellings = SourceFunctionRegistry::from_file(file)
+            .functions
+            .keys()
+            .filter_map(|path| path.rsplit("::").next().map(str::to_string))
+            .collect::<BTreeSet<_>>();
+        let shadowed = call_symbols
+            .iter()
+            .find(|name| file_function_spellings.contains(*name));
+        if let Some(alias) = shadowed {
+            return Err(TrustVcError::Encoding {
+                context: "block use alias resolution",
+                detail: format!(
+                    "block `use ...::*` import can bind `{alias}`, which another Rust scope \
+                     spells identically; glob imports are not source-symbol indexed, so TrustVc \
+                     fails closed instead of resolving that bare call through the wrong \
+                     definition"
+                ),
+            });
+        }
     }
 
     if collector.local_macro_contains_use {
@@ -9897,6 +10225,7 @@ fn validate_block_use_alias_resolution(
         let source_path = source_paths
             .iter()
             .next()
+            // quality-audit: allow-expect — the len() != 1 ambiguity gate above returned Err
             .expect("one source path after ambiguity gate");
         let Some(source_helper) = source_functions.get(source_path) else {
             return Err(TrustVcError::Encoding {

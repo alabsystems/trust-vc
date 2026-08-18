@@ -19,7 +19,9 @@ use crate::encoder::quantifiers::integer_range_bounds;
 use crate::encoder::types::{quantifier_sort_for_type, sort_for_type};
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
-use crate::ir::{CompareOp, IntConstKind, LogicOp, QuantifierKind, TrustVcExpr, TrustVcType};
+use crate::ir::{
+    ArithOp, CompareOp, IntConstKind, LogicOp, QuantifierKind, TrustVcExpr, TrustVcType,
+};
 
 /// Maximum finite-domain size for ground-expanding a bounded `forall`
 /// refutation. Bounded `forall`s over a wider concrete domain fall through to
@@ -135,15 +137,6 @@ impl<'a> AstExpressionParser<'a> {
                     self.encode_forall_refutation(bound_vars, body, triggers.as_deref())
                 }
             }
-            TrustVcExpr::Quantifier {
-                kind: QuantifierKind::Exists,
-                bound_vars,
-                body,
-                triggers: Some(trigger_groups),
-                ..
-            } if !trigger_groups.is_empty() => {
-                self.encode_exists_refutation_with_triggers(bound_vars, body, trigger_groups)
-            }
             expr if statically_refutes_finite_exists(expr) => Ok(self.solver.bool_const(true)),
             TrustVcExpr::Quantifier {
                 kind: QuantifierKind::Exists,
@@ -151,7 +144,36 @@ impl<'a> AstExpressionParser<'a> {
                 body,
                 triggers,
                 ..
-            } if triggers.as_ref().is_none_or(|groups| groups.is_empty()) => {
+            } => {
+                // A conjunctive equality can carry its own constructive witness:
+                //
+                //   exists |n| (n + 0 == x) && P(n)
+                //
+                // is soundly proved by the stronger, quantifier-free goal
+                // `(x + 0 == x) && P(x)`. Prefer that exact witness instance when
+                // it is available. AY 0.8 correctly fails closed on the otherwise
+                // triggerless arithmetic universal (`incomplete quantifier-cegqi`),
+                // even when a body assertion already establishes `P(x)`. This
+                // route keeps the proof in the strict ground arithmetic lane; it
+                // never invents a witness because the equality itself determines
+                // the candidate, and a false candidate body remains satisfiable.
+                if let Some(refutation) =
+                    self.try_encode_exists_constructive_witness_refutation(bound_vars, body)?
+                {
+                    return Ok(refutation);
+                }
+
+                if let Some(trigger_groups) = triggers
+                    .as_deref()
+                    .filter(|trigger_groups| !trigger_groups.is_empty())
+                {
+                    return self.encode_exists_refutation_with_triggers(
+                        bound_vars,
+                        body,
+                        trigger_groups,
+                    );
+                }
+
                 // Triggerless existential (e.g. upstream `exists |n: nat|
                 // nat_to_real(n) >= x` with no explicit `#[trigger]`). Infer a
                 // trigger from the body so the exact-negation universal
@@ -462,6 +484,76 @@ impl<'a> AstExpressionParser<'a> {
     ) -> Option<Vec<TrustVcExpr>> {
         let groups = crate::trigger_inference::infer_triggers(bound_vars, body);
         groups.into_iter().next().filter(|group| !group.is_empty())
+    }
+
+    /// Build a quantifier-free refutation from a structurally determined
+    /// existential witness.
+    ///
+    /// For one binder, `exists |n: T| ID(n) == w && BODY(n)` follows from the
+    /// stronger ground fact `range_T(w) && BODY(w)`, where `ID` is either `n` or
+    /// exact-arithmetic `n + 0` / `0 + n`. We therefore refute that ground fact.
+    /// The candidate must be independent of every existential binder and have
+    /// the binders' exact effective type. Unsupported shapes simply retain the
+    /// ordinary quantified path.
+    fn try_encode_exists_constructive_witness_refutation(
+        &mut self,
+        bound_vars: &[(String, TrustVcType)],
+        body: &TrustVcExpr,
+    ) -> TrustVcResult<Option<Term>> {
+        let [(name, ty)] = bound_vars else {
+            return Ok(None);
+        };
+        let bound_names = HashSet::from([name.as_str()]);
+        let Some(candidate) = find_conjunctive_equality_witness(body, name, ty, &bound_names)
+            .or_else(|| find_reflexive_order_witness(body, name, ty, &bound_names))
+        else {
+            return Ok(None);
+        };
+        let candidate = Self::coerce_default_int_literal(&candidate, ty).unwrap_or(candidate);
+        if self.infer_effective_expr_type(&candidate, None) != *ty {
+            return Ok(None);
+        }
+
+        // `exists n:T. body(n)` includes the binder-domain guard. Proving a
+        // candidate therefore requires BOTH its range membership and its body.
+        // Refute their conjunction as `!range(candidate) || !body(candidate)`.
+        let candidate_term = self.encode_subexpr(&candidate)?;
+        let candidate_term = self.coerce_bv_term_to_int_for_type(candidate_term, ty)?;
+        let range_guards = self.build_range_guards(bound_vars, &[candidate_term])?;
+        let range_guard = conjoin_terms(self, &range_guards)?;
+
+        // Encode the original body under a ground binding for the existential
+        // variable, at the same widened quantifier depth as the ordinary
+        // quantified path. This matters for bounded Rust integers: their free
+        // variables are BV-sorted, while quantifier binders use mathematical Int
+        // plus explicit range guards. IR substitution at depth zero would silently
+        // switch the instantiated body back to wrapping BV arithmetic.
+        let old_depth = self.quantifier_depth;
+        self.quantifier_depth += 1;
+        self.push_quantifier_scope(bound_vars);
+        if let Some(scope) = self.quantifier_scopes.last_mut() {
+            scope.add_bound_term(candidate_term);
+        }
+        let saved_local = self.save_local_binding(name.clone(), candidate_term, ty.clone());
+        let before_body = self.overflow_checks.len();
+        let body_refutation = self.encode_refutation_expr(body);
+        self.restore_locals(vec![saved_local]);
+        self.quantifier_depth = old_depth;
+        self.pop_quantifier_scope();
+        let mut refutation = body_refutation?;
+
+        if let Some(range_guard) = range_guard {
+            let outside_range = self
+                .solver
+                .try_not(range_guard)
+                .map_err(|e| e.to_string())?;
+            self.guard_overflow_checks_since(before_body, outside_range)?;
+            refutation = self
+                .solver
+                .try_or(outside_range, refutation)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(Some(refutation))
     }
 
     /// Refute `exists |n: T| #[trigger] g(n) ▷ body(n)` via trigger-driven
@@ -960,6 +1052,230 @@ fn conjoin_terms(
         parser.solver.try_and(acc, term).map_err(|e| e.to_string())
     })?;
     Ok(Some(term))
+}
+
+/// Find a constructive witness fixed by an equality in a top-level conjunction.
+///
+/// Only conjunctions are traversed: an equality under `or`, `not`, `implies`,
+/// or a nested quantifier does not necessarily constrain a satisfying witness.
+fn find_conjunctive_equality_witness(
+    expr: &TrustVcExpr,
+    bound_name: &str,
+    bound_ty: &TrustVcType,
+    all_bound_names: &HashSet<&str>,
+) -> Option<TrustVcExpr> {
+    match expr {
+        TrustVcExpr::Logic {
+            op: LogicOp::And,
+            left,
+            right,
+        } => find_conjunctive_equality_witness(left, bound_name, bound_ty, all_bound_names)
+            .or_else(|| {
+                find_conjunctive_equality_witness(right, bound_name, bound_ty, all_bound_names)
+            }),
+        TrustVcExpr::Compare {
+            op: CompareOp::Eq,
+            left,
+            right,
+        } => equality_witness_from_sides(left, right, bound_name, bound_ty, all_bound_names)
+            .or_else(|| {
+                equality_witness_from_sides(right, left, bound_name, bound_ty, all_bound_names)
+            }),
+        _ => None,
+    }
+}
+
+fn equality_witness_from_sides(
+    identity_side: &TrustVcExpr,
+    candidate_side: &TrustVcExpr,
+    bound_name: &str,
+    bound_ty: &TrustVcType,
+    all_bound_names: &HashSet<&str>,
+) -> Option<TrustVcExpr> {
+    if is_exact_bound_identity(identity_side, bound_name, bound_ty)
+        && !crate::ir_expr_traversal::expr_references_any_name(candidate_side, all_bound_names)
+    {
+        Some(candidate_side.clone())
+    } else {
+        None
+    }
+}
+
+/// Find the outer variable as a witness for a reflexive non-strict order.
+///
+/// This covers exact `forall i:T. exists j:T. i <= j` / `i >= j` shapes after
+/// the outer `forall` has been refuted with its symbolic witness. Substituting
+/// `j := i` yields the reflexive ground fact `i <= i`; no quantifier search is
+/// needed. The comparison sides must be the two bare variables (allowing only
+/// exact casts between MathInt/Nat), and the candidate may not reference this
+/// existential binder. Unsupported shapes retain the ordinary quantified path.
+fn find_reflexive_order_witness(
+    expr: &TrustVcExpr,
+    bound_name: &str,
+    bound_ty: &TrustVcType,
+    all_bound_names: &HashSet<&str>,
+) -> Option<TrustVcExpr> {
+    let TrustVcExpr::Compare { op, left, right } = expr else {
+        return None;
+    };
+    if !matches!(op, CompareOp::Le | CompareOp::Ge) {
+        return None;
+    }
+    let candidate = if is_exact_bound_projection(left, bound_name, bound_ty) {
+        right
+    } else if is_exact_bound_projection(right, bound_name, bound_ty) {
+        left
+    } else {
+        return None;
+    };
+    if crate::ir_expr_traversal::expr_references_any_name(candidate, all_bound_names) {
+        return None;
+    }
+    let candidate_source = exact_projection_source(candidate)?;
+    (candidate_source.ty == *bound_ty).then(|| candidate_source.expr)
+}
+
+fn is_exact_bound_projection(expr: &TrustVcExpr, bound_name: &str, bound_ty: &TrustVcType) -> bool {
+    match expr {
+        TrustVcExpr::Var { name, ty } => name == bound_name && ty == bound_ty,
+        TrustVcExpr::Cast {
+            expr,
+            from_ty,
+            to_ty,
+        } => {
+            from_ty == bound_ty
+                && is_exact_math_integer_cast(from_ty, to_ty)
+                && is_exact_bound_projection(expr, bound_name, bound_ty)
+        }
+        _ => false,
+    }
+}
+
+struct ExactProjectionSource {
+    expr: TrustVcExpr,
+    ty: TrustVcType,
+}
+
+fn exact_projection_source(expr: &TrustVcExpr) -> Option<ExactProjectionSource> {
+    match expr {
+        TrustVcExpr::Var { ty, .. } => Some(ExactProjectionSource {
+            expr: expr.clone(),
+            ty: ty.clone(),
+        }),
+        TrustVcExpr::Cast {
+            expr,
+            from_ty,
+            to_ty,
+        } if is_exact_math_integer_cast(from_ty, to_ty) => {
+            let source = exact_projection_source(expr)?;
+            (source.ty == *from_ty).then_some(source)
+        }
+        _ => None,
+    }
+}
+
+fn is_exact_math_integer_cast(from_ty: &TrustVcType, to_ty: &TrustVcType) -> bool {
+    matches!(from_ty, TrustVcType::MathInt | TrustVcType::Nat)
+        && matches!(to_ty, TrustVcType::MathInt | TrustVcType::Nat)
+}
+
+/// Recognize expressions that are definitionally the bound variable. The
+/// add-zero cases are restricted to exact arithmetic carriers; IEEE floats are
+/// deliberately excluded because NaN and signed zero invalidate this identity.
+fn is_exact_bound_identity(expr: &TrustVcExpr, bound_name: &str, bound_ty: &TrustVcType) -> bool {
+    match expr {
+        TrustVcExpr::Var { name, ty } => name == bound_name && ty == bound_ty,
+        TrustVcExpr::Arith {
+            op: ArithOp::Add,
+            left,
+            right,
+            ty,
+        } if ty == bound_ty && is_exact_additive_carrier(ty) => {
+            (is_exact_bound_identity(left, bound_name, bound_ty) && is_zero_int_literal(right))
+                || (is_zero_int_literal(left)
+                    && is_exact_bound_identity(right, bound_name, bound_ty))
+        }
+        _ => false,
+    }
+}
+
+fn is_exact_additive_carrier(ty: &TrustVcType) -> bool {
+    matches!(
+        ty,
+        TrustVcType::MathInt | TrustVcType::Nat | TrustVcType::Real
+    ) || ty.is_integer()
+}
+
+fn is_zero_int_literal(expr: &TrustVcExpr) -> bool {
+    matches!(expr, TrustVcExpr::IntLit { value: 0, .. })
+}
+
+#[cfg(test)]
+mod constructive_witness_tests {
+    use super::*;
+
+    fn var(name: &str, ty: TrustVcType) -> TrustVcExpr {
+        TrustVcExpr::Var {
+            name: name.to_string(),
+            ty,
+        }
+    }
+
+    #[test]
+    fn recognizes_bare_non_strict_integer_order() {
+        let ty = TrustVcType::MathInt;
+        let expr = TrustVcExpr::Compare {
+            op: CompareOp::Le,
+            left: Box::new(var("i", ty.clone())),
+            right: Box::new(var("j", ty.clone())),
+        };
+        let names = HashSet::from(["j"]);
+        assert_eq!(
+            find_reflexive_order_witness(&expr, "j", &ty, &names),
+            Some(var("i", ty)),
+        );
+    }
+
+    #[test]
+    fn recognizes_exact_nat_to_int_projections() {
+        let nat = TrustVcType::Nat;
+        let int = TrustVcType::MathInt;
+        let cast = |name: &str| TrustVcExpr::Cast {
+            expr: Box::new(var(name, nat.clone())),
+            from_ty: nat.clone(),
+            to_ty: int.clone(),
+        };
+        let expr = TrustVcExpr::Compare {
+            op: CompareOp::Le,
+            left: Box::new(cast("i")),
+            right: Box::new(cast("j")),
+        };
+        let names = HashSet::from(["j"]);
+        assert_eq!(
+            find_reflexive_order_witness(&expr, "j", &nat, &names),
+            Some(var("i", nat)),
+        );
+    }
+
+    #[test]
+    fn rejects_strict_and_type_mismatched_shapes() {
+        let int = TrustVcType::MathInt;
+        let nat = TrustVcType::Nat;
+        let strict = TrustVcExpr::Compare {
+            op: CompareOp::Lt,
+            left: Box::new(var("i", int.clone())),
+            right: Box::new(var("j", int.clone())),
+        };
+        let names = HashSet::from(["j"]);
+        assert!(find_reflexive_order_witness(&strict, "j", &int, &names).is_none());
+
+        let mismatched = TrustVcExpr::Compare {
+            op: CompareOp::Le,
+            left: Box::new(var("i", int)),
+            right: Box::new(var("j", nat.clone())),
+        };
+        assert!(find_reflexive_order_witness(&mismatched, "j", &nat, &names).is_none());
+    }
 }
 
 /// True iff `left` and `right` are alpha-equivalent quantifiers: same kind, the

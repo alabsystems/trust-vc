@@ -25,9 +25,9 @@
 //!    TrustVcExpr trees. A left-leaning chain of N operations should take
 //!    O(N) time, not O(N²) from intermediate allocations.
 //!
-//! 4. Trigger encoding var_types clone: `encode_trigger_typed` clones
-//!    `var_types` per trigger expression. With V variables and T triggers,
-//!    cost should be O(T * V), not worse.
+//! 4. Trigger encoding: `encode_trigger_typed` lowers against the cached type
+//!    environment. With V variables and fixed T triggers, setup plus encoding
+//!    should be O(V), not worse.
 //!
 //! 5. Wide conjunction typed encoding: flat N-way && chains should scale
 //!    linearly through `encode_trust_vc_expr` (direct benchmark, not full
@@ -241,9 +241,11 @@ fn time_expression_chain(chain_len: usize) -> u128 {
 // Test 4: Broadcast trigger encoding with many variables
 // ============================================================
 
-/// `encode_trigger_typed` (eval.rs:55) clones `self.var_types` per trigger.
-/// With V variables and T triggers, cost should be O(T * V) — not worse.
-/// This test scales V for fixed T and verifies linear growth.
+/// `encode_trigger_typed` lowers against the encoder's cached type environment.
+/// With V variables and fixed T triggers, setup plus trigger encoding should be
+/// O(V) — not worse. This is deliberately a direct encoding benchmark: a
+/// performance regression test has no authority to require a quantified UNSAT
+/// proof from the certified solver lane.
 #[test]
 fn test_trigger_encoding_scales_linearly_with_variables() {
     let small_v = 5;
@@ -285,24 +287,25 @@ fn time_trigger_encoding_n_vars(n_vars: usize) -> u128 {
             crate::ir::TrustVcType::parse_or_opaque("i32"),
         );
     }
-    ctx.push_obligation(ProofObligation::assume("bound", "v0 > 0"));
-
-    // Add a broadcast with a trigger pattern referencing v0.
-    // The trigger encoding path clones var_types once per trigger expression.
-    // Body must be satisfiable as a universal — "v0 == v0" is always true,
-    // avoiding vacuous truth from contradictory "forall v0: v0 > 0" (#2258).
-    let mut broadcast = ProofObligation::broadcast_assume("bc_0", "v0 == v0");
-    broadcast = broadcast.with_bound_vars(vec!["v0".to_string()]);
-    broadcast = broadcast.with_trigger_patterns(vec![vec!["v0".to_string()]]);
-    ctx.obligations.push(broadcast);
-
-    ctx.push_obligation(ProofObligation::assert("check", "v0 >= 0"));
+    let prepared = crate::prepared_context::prepare_context(&ctx)
+        .expect("trigger scaling fixture should prepare");
+    let slices =
+        crate::encoder::verification::VerificationSlices::new(&prepared, &[], &[], &[], &[], &[]);
 
     let start = std::time::Instant::now();
-    let result = AYEncoder::verify(&ctx);
+    let mut encoder = AYEncoder::setup_from_prepared(&slices, false, None)
+        .expect("trigger scaling fixture should set up");
+    let term = encoder
+        .encode_trigger_typed("v0")
+        .expect("typed trigger should encode");
     let elapsed = start.elapsed().as_micros();
 
-    expect_verified(&result, "Trigger scaling test failed");
+    assert_eq!(
+        encoder.solver.term_sort(term),
+        ay_dpll::api::Sort::bitvec(32),
+        "typed trigger must retain the declared i32 carrier",
+    );
+    std::hint::black_box(term);
 
     elapsed
 }

@@ -413,11 +413,31 @@ fn verify_implless_trait_defaults(
             ) {
                 Ok(ctx) => ctx,
                 // Fail SAFE on a default body we cannot lower onto the abstract
-                // surface: no worse than the prior (no-check) state, and never an
-                // over-rejection of an unrelated function. The round-4 holes
-                // (literal bodies, contract-less declaration-only sibling) all
-                // build and fail CLOSED via a genuine Counterexample below.
-                // Addressed by name, the skip becomes a fail-CLOSED `Unknown`.
+                // surface, and never an over-rejection of an unrelated function.
+                // The round-4 holes (literal bodies, contract-less
+                // declaration-only sibling) all build and fail CLOSED via a
+                // genuine Counterexample below. Addressed by name, the skip
+                // becomes a fail-CLOSED `Unknown`.
+                //
+                // "NO WORSE THAN THE PRIOR (NO-CHECK) STATE" WAS THE OLD
+                // JUSTIFICATION HERE AND IT DOES NOT ESTABLISH SOUNDNESS. A
+                // skipped conformance check leaves `register_trait`'s published
+                // `forall self. Trait__m(self) <ensures>` UNJUSTIFIED, and a
+                // generic-bounded caller consumes it directly. What actually
+                // makes this arm safe is an ORDERING invariant: `select` records
+                // the obligation name BEFORE this build is attempted, so an
+                // unbuildable obligation is still enumerated and any
+                // list-then-verify-each driver reaches `VerifyOne`, where
+                // `unbuildable` fails closed. `None` here is therefore only
+                // reachable under `List`, where continuing is correct.
+                //
+                // Move `select` after the build and that collapses silently:
+                // unbuildable obligations vanish from the list, nothing ever
+                // addresses them by name, and this `continue` becomes the
+                // unjustified-axiom hole. Adding a walk variant is
+                // compiler-enforced (`unbuildable` matches exhaustively); the
+                // ordering is NOT, so it is pinned by
+                // `tests/unbuildable_conformance_obligation_is_still_listed.rs`.
                 Err(_) => match walk.unbuildable(&obligation_name) {
                     Some(result) => return result,
                     None => continue,
@@ -992,13 +1012,29 @@ fn synthesize_default_function_context(
 ///  * its sibling postcondition axioms must be in scope so a CONFORMING default
 ///    that relies on a contract-bearing sibling still Verifies.
 ///
-/// Keeping the trait registered is sound here precisely BECAUSE there is no impl:
-/// `register_trait_impl` (which emits the `UF == default_body` linking axiom that
-/// would CONTRADICT a violated postcondition axiom and make the context
-/// vacuously valid) never runs. The postcondition axiom stands alone and remains
-/// satisfiable, so the body is checked on its own merits. A contract-less
-/// declaration-only sibling has no postcondition axiom, leaving its UF
-/// unconstrained — exactly the underivability that fails the default closed.
+/// CARDINAL — the trait is registered with the METHOD-UNDER-CHECK's OWN `ensures`
+/// STRIPPED ([`trait_decl_without_own_postcondition`]). Asserting
+/// `∀ self, args. ensures[result := Trait__m(self, args)]` while trying to prove
+/// that a body establishes that very `ensures` is assuming the conclusion, and it
+/// is not merely redundant — it is a PROOF HOLE whenever the postcondition is
+/// unsatisfiable as a universal. `ensures(result > x)` over `u32` is exactly such
+/// a case (nothing is `bvult`-above `u32::MAX`, so NO total interpretation of
+/// `Tr__p` exists), which makes the premise set CONTRADICTORY and the conformance
+/// obligation vacuously valid; the violating impl would then be reported as
+/// conforming, and its published trait contract would let every generic-bounded
+/// caller prove anything. Only ay's BV-quantifier incompleteness (a deferral, not
+/// a decision) stood between that encoding and a false verify. Stripping the
+/// method's own postcondition removes the circular premise; the body is checked
+/// against the `ensures` on its own merits and the violating case now yields a
+/// concrete counterexample.
+///
+/// SIBLING axioms are KEPT, and are justified as before: each sibling's own
+/// conformance obligation discharges it (and for a contract-less
+/// declaration-only sibling there is no axiom at all, leaving its UF
+/// unconstrained — exactly the underivability that fails a default closed).
+/// Keeping the trait registered at all is sound here precisely BECAUSE no impl
+/// linking axiom is emitted: `register_trait_impl` (whose `UF == default_body`
+/// axiom would contradict a violated postcondition) never runs on this surface.
 fn build_implless_default_conformance_context(
     base: &PreparedVerificationContext,
     trait_decl: &TraitDecl,
@@ -1075,7 +1111,7 @@ fn build_implless_default_conformance_context(
     // drop all impls (there are none for this trait) and every OTHER trait (the
     // default body references only THIS trait's methods on `self`, and isolating
     // it avoids any unrelated trait's axioms perturbing the check).
-    conformance_ctx.trait_decls = vec![trait_decl.clone()];
+    conformance_ctx.trait_decls = vec![trait_decl_without_own_postcondition(trait_decl, method)];
     conformance_ctx.trait_impl_decls = Vec::new();
     conformance_ctx.verification_mode = VerificationMode::BodyLevel;
     conformance_ctx.overflow_behavior = base.overflow_behavior;
@@ -1090,6 +1126,38 @@ fn build_implless_default_conformance_context(
     conformance_ctx.struct_types = base.struct_types.clone();
     conformance_ctx.type_invariants = base.type_invariants.clone();
     Ok(conformance_ctx)
+}
+
+/// Clones `trait_decl` with `method`'s OWN `ensures` (and `default_ensures`)
+/// removed, so [`AYEncoder::register_trait`] declares every method UF but emits
+/// NO postcondition axiom for the method whose conformance is under check.
+///
+/// This is the "do not assume the conclusion" rule for the abstract-self
+/// conformance surface. The obligation being solved is
+/// `body_definition ∧ ¬ensures` — SAT means "refuted, here is the witness".
+/// Adding `∀ self, args. ensures[result := Trait__m(self, args)]` to that premise
+/// set can only (a) do nothing, when the body's result is a fresh variable the
+/// axiom never mentions, or (b) POISON it, when the axiom is unsatisfiable, in
+/// which case the query is UNSAT for reasons that have nothing to do with the
+/// body and the obligation is discharged VACUOUSLY. Case (b) is not
+/// hypothetical: `ensures(result > x)` over `u32` is unsatisfiable as a universal.
+/// (a) is why the satisfiable-postcondition fixtures never exposed this.
+///
+/// Method UFs stay declared (only the axiom is suppressed), so a body that still
+/// mentions `self.m()` lowers exactly as before. Sibling methods keep their
+/// axioms — each is discharged by its own conformance obligation.
+fn trait_decl_without_own_postcondition(
+    trait_decl: &TraitDecl,
+    method: &TraitMethodDecl,
+) -> TraitDecl {
+    let mut scrubbed = trait_decl.clone();
+    for decl_method in &mut scrubbed.methods {
+        if decl_method.name == method.name {
+            decl_method.ensures.clear();
+            decl_method.default_ensures.clear();
+        }
+    }
+    scrubbed
 }
 
 /// Synthesizes the stand-in [`FunctionContext`] for an impl-absent default-method

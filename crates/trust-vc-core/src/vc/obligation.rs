@@ -102,6 +102,10 @@ pub struct ProofObligation {
     pub(crate) broadcast_guard: Option<Vec<BroadcastGuardClause>>,
     /// Provenance for the stored condition payload. Part of #1830 Slice 1.
     pub(crate) condition_origin: ConditionOrigin,
+    /// Authenticates the one synthetic marker used to preserve a source spec
+    /// function's declared mathematical-`int` result context. This defaults
+    /// false and has only a crate-private builder used by the source catalog.
+    pub(crate) source_catalog_math_int_context: bool,
     /// Proof-step metadata: separates internal scope key from display label.
     /// When present, the verifier uses `step_meta.label` in user-facing
     /// diagnostics and `step_meta.key` (= `name`) for scope-map lookups.
@@ -334,6 +338,7 @@ impl ProofObligation {
             trigger_inference_mode: None,
             broadcast_guard: None,
             condition_origin: ConditionOrigin::LoweredFromCondition,
+            source_catalog_math_int_context: false,
             step_meta: None,
             proof_note: None,
         }
@@ -362,6 +367,7 @@ impl ProofObligation {
             trigger_inference_mode: None,
             broadcast_guard: None,
             condition_origin: ConditionOrigin::TypedTrustVcExpr,
+            source_catalog_math_int_context: false,
             step_meta: None,
             proof_note: None,
         }
@@ -448,6 +454,7 @@ impl ProofObligation {
             trigger_inference_mode: None,
             broadcast_guard: None,
             condition_origin: ConditionOrigin::LoweredFromCondition,
+            source_catalog_math_int_context: false,
             step_meta: None,
             proof_note: None,
         }
@@ -472,6 +479,7 @@ impl ProofObligation {
             trigger_inference_mode: None,
             broadcast_guard: None,
             condition_origin: ConditionOrigin::LoweredFromCondition,
+            source_catalog_math_int_context: false,
             step_meta: None,
             proof_note: None,
         }
@@ -501,6 +509,7 @@ impl ProofObligation {
             trigger_inference_mode: None,
             broadcast_guard: None,
             condition_origin: ConditionOrigin::LoweredFromCondition,
+            source_catalog_math_int_context: false,
             step_meta: None,
             proof_note: None,
         }
@@ -565,6 +574,13 @@ impl ProofObligation {
     /// Sets the provenance of how the condition reached the prepared boundary.
     pub fn with_condition_origin(mut self, origin: ConditionOrigin) -> Self {
         self.condition_origin = origin;
+        self
+    }
+    /// Grants the synthetic source-catalog math-int marker capability to this
+    /// exact obligation. Crate-private so authored contracts and API consumers
+    /// cannot forge the provenance bit.
+    pub(crate) fn with_source_catalog_math_int_context(mut self) -> Self {
+        self.source_catalog_math_int_context = true;
         self
     }
     /// Attaches proof-step metadata separating the scope key from the display label.

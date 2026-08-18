@@ -340,6 +340,15 @@ impl AYEncoder {
         func_ctx: &FunctionContext,
     ) -> TrustVcResult<()> {
         let return_ty = self.record_function_context_metadata(func_ctx)?;
+        // Ordering, not a weakening: declaring this function below introduces
+        // the sorts of its return and parameter types, and ay 0.4.0 refuses to
+        // declare a datatype over an already-declared sort. Register any
+        // datatype those types mention first. Idempotent, so the later
+        // datatype passes in setup still apply.
+        self.register_datatypes_in_type(&return_ty)?;
+        for (_, param_type) in &func_ctx.params {
+            self.register_datatypes_in_type(param_type)?;
+        }
         let return_sort = sort_for_type(&return_ty);
 
         if func_ctx.params.is_empty() {

@@ -78,8 +78,14 @@ pub(super) fn trait_bound_method_requires(
 ///   the first declaration seen for a given method name is the most-derived.
 ///
 /// An unknown supertrait name (no matching `TraitDecl`) simply contributes
-/// nothing (it is enqueued but yields no methods and no further edges) — a
-/// missed obligation is conservative.
+/// nothing (it is enqueued but yields no methods and no further edges).
+///
+/// This is sound for a REASON THAT DOES NOT GENERALISE, so state it precisely
+/// rather than as "a missed obligation is conservative": an unknown trait
+/// declares no `requires` we ever knew about, so there is no obligation to
+/// miss. That is different from DROPPING a `requires` we did know about, which
+/// is a hole — three of those were fixed in this file and its siblings
+/// (`29c4526d`, `2cab5434`, `9852a5e8`), each guarded by that same sentence.
 pub(crate) fn supertrait_closure_methods<'a>(
     trait_decls: &'a [crate::ir::TraitDecl],
     start: &str,
@@ -163,9 +169,21 @@ fn type_has_nested_type_param(ty: &TrustVcType) -> bool {
 ///
 /// Mirrors `trait_bound_method_requires` (unit 1), keyed by the CONCRETE type
 /// name (`impl_decl.concrete_type.to_type_string()`) instead of the type
-/// parameter. The receiver side keys on `receiver_ty.to_type_string()`, so a
-/// mismatch (e.g. `&S` vs `S`) simply fails closed — a missed obligation,
-/// conservative.
+/// parameter. The receiver side keys on `receiver_ty.to_type_string()`.
+///
+/// The `&S` vs `S` mismatch this comment used to warn about DOES NOT OCCUR, and
+/// calling the resulting drop "conservative" understated it twice over. Probed
+/// cache-off, each fixture violating `requires(x < 10)` with `x = 999`: `&S`,
+/// `S`, `&mut S`, `&&S`, and `&A` where `type A = S` ALL emit the obligation and
+/// are refuted. Reference and alias layers normalise away before the key is
+/// formed, so no mismatch arises for these shapes.
+///
+/// Had one arisen it would NOT have been conservative — it would be a dropped
+/// `requires`, which lets a precondition-violating call pass unflagged. Three
+/// such drops were live in this file and its siblings until `29c4526d`,
+/// `2cab5434` and `9852a5e8`, each guarded by that same "conservative" wording.
+/// Anything genuinely unresolvable now fails closed in
+/// `record_trait_method_contract_call` rather than falling through.
 ///
 /// For each registered `impl T for S`, every requires-bearing method of the
 /// TRAIT (`trait_decl.methods`) is keyed — not just the physically-written impl
@@ -178,10 +196,33 @@ fn type_has_nested_type_param(ty: &TrustVcType) -> bool {
 /// - Skip GENERIC impls (concrete type contains a `TypeParam`) — out of scope.
 /// - Skip impls whose `trait_name` has no matching `TraitDecl`.
 /// - Skip trait methods with an EMPTY `requires` (nothing to discharge).
-/// - AMBIGUITY DROP: if two DIFFERENT traits supply the same `(type, method)`
-///   key, drop it entirely and never re-insert — a wrong-trait requires would
-///   be a spurious failure; a missed one is conservative. Same-trait
-///   re-registration is idempotent (kept).
+/// - AMBIGUITY MERGE: if two DIFFERENT traits supply the same `(type, method)`
+///   key, emit the CONJUNCTION of their `requires`. Same-trait re-registration
+///   is idempotent (kept). Only a pair whose signatures differ (arity or
+///   parameter names) still drops, since no well-formed conjunction exists.
+///
+///   CAREFUL — "a missed one is conservative" was the older phrasing here and it
+///   is TRUE FOR AN ASSUMPTION AND FALSE FOR A `requires`. Dropping the key does
+///   not let the caller conclude more (the trait postcondition axiom is
+///   `requires ==> ensures`, so an unestablished precondition yields no
+///   `ensures`), but it does mean a precondition-VIOLATING call is never
+///   flagged — a missed bug report, not a false proof. Both traits lost the
+///   obligation, not just the ambiguous one.
+///
+///   CONJUNCTION, NOT DISJUNCTION. This comment used to recommend the
+///   disjunction, and implementing that as written would have shipped a second
+///   hole. The call `s.f(a)` resolves to exactly one of the candidates and we do
+///   not know which, so the obligation must hold for WHICHEVER it is — that is
+///   `req_T && req_U`, which is stronger than either and over-rejects. The
+///   disjunction is WEAKER than either, so it misses violations the drop already
+///   missed: with `T::f` requiring `x < 10` and `U::f` requiring `x > 100`, the
+///   call `s.f(5)` satisfies `5 < 10 || 5 > 100` and passes, even when it is
+///   `U::f` and genuinely violating.
+///
+///   `uf_prefix` stays the FIRST declaring trait's. It is used only for
+///   obligation naming and error text (`add_trait_method_requires_obligations`),
+///   never for resolution, and names stay unique via the call index — so the
+///   merged clauses are not misrouted by it.
 ///
 /// `uf_prefix` uses the TRAIT name (`{trait}__{method}`) so the obligation
 /// routes through the encoder's linking axiom `T__req(Box_S(s)) == S__req(s)`,
@@ -244,14 +285,42 @@ pub(super) fn concrete_impl_method_requires(
                 continue;
             }
             match source_trait.get(&key) {
-                // A DIFFERENT declaring trait already claimed this key:
-                // ambiguous, drop. Keyed on the DECLARING trait so the same
-                // method reached through two impls of related traits (e.g. `T`
-                // and `Super` both impl'd for `S`, `Super` declaring the method)
-                // is idempotent rather than a spurious drop.
+                // A DIFFERENT declaring trait already claimed this key. Keyed on
+                // the DECLARING trait so the same method reached through two
+                // impls of related traits (e.g. `T` and `Super` both impl'd for
+                // `S`, `Super` declaring the method) is idempotent rather than a
+                // spurious merge.
+                //
+                // The call could be either candidate, so CONJOIN their requires
+                // (see the fn doc — the disjunction is a hole). A third trait
+                // conjoins again: `source_trait` keeps the first, so each later
+                // trait re-enters this arm.
                 Some(existing) if existing != &declaring_trait => {
-                    map.remove(&key);
-                    ambiguous.insert(key);
+                    let params: Vec<String> = method
+                        .params
+                        .iter()
+                        .map(|(name, _ty)| name.clone())
+                        .collect();
+                    match map.get_mut(&key) {
+                        // Signatures agree, so every clause binds the same names
+                        // and the positional substitution at the call site is
+                        // well-formed for all of them.
+                        Some(previous) if previous.param_names == params => {
+                            for clause in &method.requires {
+                                if !previous.requires.contains(clause) {
+                                    previous.requires.push(clause.clone());
+                                }
+                            }
+                        }
+                        // Differing arity or parameter names: the clauses bind
+                        // different binders, so there is no well-formed
+                        // conjunction to emit. Falls back to the drop, which is
+                        // the residual hole this fn's doc names.
+                        _ => {
+                            map.remove(&key);
+                            ambiguous.insert(key);
+                        }
+                    }
                     continue;
                 }
                 // Same declaring-trait (idempotent) re-registration, or first
@@ -485,21 +554,32 @@ fn collect_source_trait_declarations(
                         // own-`requires` method (itself ill-formed; Verus rejects an
                         // impl that adds its own requires). A plain inherited-contract
                         // violation likewise conformance-checks and Counterexamples.
-                        let trait_declares_returns = trait_contracts
-                            .methods
-                            .get(&(decl.trait_name.clone(), method_name.clone()))
-                            .is_some_and(|contracts| contracts.has_returns);
-                        // Validate the `requires` attr is well-formed (fail closed on a
-                        // malformed one via `?`); the result no longer gates exemption.
+                        // Validate the contract attrs are well-formed (fail closed on
+                        // a malformed one via `?`). The results no longer gate any
+                        // exemption.
                         has_requires_clause(&method.attrs)?;
-                        let impl_declares_returns =
-                            has_returns_clause(&method.attrs, Some(&method.sig))?;
-                        if impl_declares_returns && trait_declares_returns {
-                            vc.register_conformance_exempt_method(concrete_fn_name.clone());
-                            continue;
-                        }
+                        has_returns_clause(&method.attrs, Some(&method.sig))?;
 
-                        // Otherwise capture the method's single-pure-return body,
+                        // A `returns`-on-both impl method is NO LONGER exempted from
+                        // the conformance pass. Exempting it removed the only
+                        // obligation that fails the file closed when the impl method
+                        // is not itself discovered as a standalone verification
+                        // target: a client of the trait `ensures` could then verify
+                        // over an unconstrained body — a live false-verify
+                        // (returns-on-both + non-pinning body, even with NO
+                        // `requires`; the requires variant is adversary
+                        // `attack6`/`attack7`). The old exemption trusted net A to
+                        // fail the file closed, but net A's strict token-identity
+                        // match is defeated by the contract attrs `extract_contracts`
+                        // strips from the verified `func`, so it silently did not
+                        // fire. Letting returns-on-both flow to the conformance pass
+                        // fails closed via Counterexample for every body shape,
+                        // independent of function discovery; the name-based fallback
+                        // in `inherited_trait_method_contracts` additionally gives a
+                        // discovered method the precise returns-conflict Error the
+                        // corpus `trait_impl_conflicting_returns_clause` case pins.
+
+                        // Capture the method's single-pure-return body,
                         // keyed by its concrete UF name, so the conformance pass can
                         // bind the method's result to what it ACTUALLY returns even
                         // when the verified function never references it (otherwise
@@ -517,11 +597,15 @@ fn collect_source_trait_declarations(
                             // captured (so the conformance pass can pin
                             // `result == body` and VERIFY `body ⊨ impl_ensures`
                             // before any caller assumes it). `extract_contracts`
-                            // drops `returns` and yields plain `ensures`. Gated to
-                            // the non-exempt branch: an impl with own `requires` or
-                            // a `returns`-on-both conflict is already blocked and
-                            // never reaches here, so its unverified `ensures` is
-                            // never propagated. Fail-closed on a malformed attr via
+                            // drops `returns` and yields plain `ensures`. An impl
+                            // with own `requires` never enters this block
+                            // (`capture_conformance_method_body` declines on
+                            // `requires`); a `returns`-on-both method may now reach
+                            // here (it is no longer exempted), but `extract_contracts`
+                            // has dropped its `returns`, so `impl_ensures` is empty
+                            // and nothing is propagated — and the method is failed
+                            // closed anyway (net-A fallback Error / conformance
+                            // Counterexample). Fail-closed on a malformed attr via
                             // the `?`.
                             let (_impl_requires, impl_ensures) =
                                 crate::extern_spec_helpers::extract_contracts(
@@ -716,6 +800,37 @@ fn inherited_trait_method_contracts(
     let mut matches = Vec::new();
     collect_matching_trait_impl_methods(&file.items, func, &mut matches);
     let Some((trait_name, method)) = matches.pop() else {
+        // Strict token-identity match failed. `impl_method_matches_item_fn`
+        // compares `attrs_to_string(method) == attrs_to_string(func)`, but
+        // `extract_contracts` strips the contract attrs from the verified `func`,
+        // so ANY impl method carrying its own `requires`/`returns` no longer
+        // matches its raw source method and net A returns `Ok(None)` — leaving
+        // the returns-conflict/requires errors below unreachable for exactly
+        // those methods. A `returns`-on-both impl is ALSO conformance-EXEMPT
+        // (`trait_contracts.rs` :566), so when it additionally declares
+        // `requires` NOTHING checks `body ⊨ trait ensures` and a client of the
+        // trait ensures verifies over a violating body — a cardinal false-verify
+        // at the file/gate level (adversary `attack6`/`attack7`: the file
+        // reports all-verified). Returns-on-both is ill-formed regardless of
+        // attrs (Verus rejects it too), so detect it by NAME here and fail the
+        // method closed with the SAME error net A emits, scoped to this
+        // function's verification — restoring the fail-closed gate the corpus
+        // `trait_impl_conflicting_returns_clause` case pins. Requires-only is
+        // deliberately NOT re-raised here: it keeps routing to the conformance
+        // pass (fail-closed Counterexample) per the exemption comment.
+        let registry = SourceTraitContractRegistry::from_file(file)?;
+        if returns_conflict_impl_method_by_name(
+            &file.items,
+            &func.sig.ident.to_string(),
+            &registry,
+        )? {
+            return Err(TrustVcError::Encoding {
+                context: "extract inherited trait method contracts",
+                detail:
+                    "a `returns` clause cannot be declared on both a trait method impl and its declaration"
+                        .to_string(),
+            });
+        }
         return Ok(None);
     };
     if !matches.is_empty() {
@@ -756,6 +871,66 @@ fn inherited_trait_method_contracts(
         requires: contracts.requires.clone(),
         ensures: contracts.ensures.clone(),
     }))
+}
+
+/// Name-based fallback detector for a `returns`-on-both conflict, used when the
+/// strict token-identity match in `collect_matching_trait_impl_methods` fails to
+/// bind the verified `func` to its raw impl method (which happens whenever the
+/// impl method carries a contract attr `extract_contracts` strips from `func`).
+/// Returns `true` iff some `#[trust_vc::trait_impl]` block declares a method
+/// named `func_name` that itself carries a `returns` clause AND whose trait
+/// declares that method with a `returns` clause too. Additive and conservative:
+/// this shape is ill-formed under Verus, so no legitimately-verifying case is
+/// affected — the only files it fails closed are ones that were already meant to
+/// be blocked.
+fn returns_conflict_impl_method_by_name(
+    items: &[syn::Item],
+    func_name: &str,
+    registry: &SourceTraitContractRegistry,
+) -> TrustVcResult<bool> {
+    for item in items {
+        match item {
+            syn::Item::Impl(item_impl)
+                if has_trust_vc_attr(&item_impl.attrs, "trait_impl")
+                    && item_impl.trait_.is_some() =>
+            {
+                let Some(trait_name) = item_impl
+                    .trait_
+                    .as_ref()
+                    .and_then(|(_, path, _)| path.segments.last())
+                    .map(|segment| segment.ident.to_string())
+                else {
+                    continue;
+                };
+                for impl_item in &item_impl.items {
+                    let syn::ImplItem::Fn(method) = impl_item else {
+                        continue;
+                    };
+                    if method.sig.ident != func_name {
+                        continue;
+                    }
+                    let trait_declares_returns = registry
+                        .methods
+                        .get(&(trait_name.clone(), func_name.to_string()))
+                        .is_some_and(|contracts| contracts.has_returns);
+                    if trait_declares_returns
+                        && has_returns_clause(&method.attrs, Some(&method.sig))?
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, inner_items)) = &module.content {
+                    if returns_conflict_impl_method_by_name(inner_items, func_name, registry)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 /// Returns true if any top-level (or nested-module) free `Item::Fn` in `items`
@@ -1504,11 +1679,17 @@ mod tests {
     }
 
     #[test]
-    fn test_concrete_impl_method_requires_drops_ambiguous_trait_selection() {
+    fn test_concrete_impl_method_requires_conjoins_ambiguous_trait_selection() {
         // Two DIFFERENT traits `T` and `U` each declare a requires-bearing `f`,
         // and `S` impls BOTH. The `(S, f)` key is AMBIGUOUS (which trait's
-        // requires?) and must be dropped entirely — a missed obligation is
-        // conservative; a wrong-trait one is a spurious failure.
+        // requires?).
+        //
+        // This used to DROP the key, so NEITHER trait's precondition was checked
+        // and a violating `s.f()` passed unflagged. The call is one of the two
+        // and we cannot tell which, so the sound obligation is the CONJUNCTION —
+        // stronger than either, hence over-rejecting rather than missing. The
+        // disjunction, which this fn's doc used to recommend, is weaker than
+        // either and would have preserved the hole.
         let trait_t = trait_t_with_requires_bearing_f();
         let trait_u = TraitDecl::new(
             "U",
@@ -1535,9 +1716,55 @@ mod tests {
 
         let map = concrete_impl_method_requires(&[impl_t, impl_u], &[trait_t, trait_u]);
 
+        let contract = map
+            .get(&("S".to_string(), "f".to_string()))
+            .expect("an ambiguous (two-trait) (S, f) key must be CONJOINED, not dropped");
+        assert_eq!(
+            contract.requires,
+            vec!["self.req()".to_string(), "self.other()".to_string()],
+            "both traits' requires must be present, so whichever trait the call resolves to, \
+             its precondition is checked"
+        );
+    }
+
+    #[test]
+    fn test_concrete_impl_method_requires_drops_ambiguity_with_mismatched_signatures() {
+        // The residual case. `T::f(&self)` and `U::f(&self, k)` bind different
+        // parameter names, so their clauses cannot be conjoined into one
+        // positionally-substituted contract and the key still drops.
+        //
+        // This pins the boundary of the merge above: if it ever starts merging
+        // mismatched signatures, the call-site substitution would bind clauses
+        // against the wrong binders, which is worse than the drop.
+        let trait_t = trait_t_with_requires_bearing_f();
+        let trait_u = TraitDecl::new(
+            "U",
+            vec![TraitMethodDecl::new(
+                "f",
+                vec![("k".to_string(), TrustVcType::Uint { width: 64 })],
+                TrustVcType::Unit,
+                vec!["k > 0".to_string()],
+                Vec::new(),
+                false,
+                None,
+            )],
+        );
+        let impl_t = TraitImplDecl::new(
+            "T",
+            TrustVcType::Opaque("S".to_string()),
+            vec![("f".to_string(), "S__f".to_string())],
+        );
+        let impl_u = TraitImplDecl::new(
+            "U",
+            TrustVcType::Opaque("S".to_string()),
+            vec![("f".to_string(), "S__f".to_string())],
+        );
+
+        let map = concrete_impl_method_requires(&[impl_t, impl_u], &[trait_t, trait_u]);
+
         assert!(
             !map.contains_key(&("S".to_string(), "f".to_string())),
-            "an ambiguous (two-trait) (S, f) key must be dropped: {:?}",
+            "mismatched signatures have no well-formed conjunction and must still drop: {:?}",
             map.keys().collect::<Vec<_>>()
         );
     }

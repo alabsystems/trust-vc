@@ -211,3 +211,36 @@ fn test_duplicate_variable_same_type_rejected() {
         _ => panic!("Expected Error for duplicate variable, got: {:?}", result),
     }
 }
+
+#[test]
+fn test_map_dom_name_collision_is_error_not_panic() {
+    // A user variable occupying a Map's internal `{name}_dom` companion name
+    // bypasses the `self.variables` duplicate check when the Map is declared
+    // AFTER it: `declare_variable` then minted the domain array through the
+    // PANICKING `Solver::declare_const`, unwinding out of the encoder (in
+    // trustc, a compiler ICE). The collision is an embedder mistake and must
+    // surface as `VerifyResult::Error`. The reverse declaration order is
+    // already caught by the duplicate check above (#58).
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x_dom", crate::ir::TrustVcType::parse_or_opaque("bool"));
+    ctx.declare_var_typed(
+        "x",
+        crate::ir::TrustVcType::parse_or_opaque("Map<i32, i32>"),
+    );
+    ctx.push_obligation(ProofObligation::assert("dummy", "true"));
+
+    let result = AYEncoder::verify(&ctx);
+    match result {
+        VerifyResult::Error { message } => {
+            assert!(
+                message.contains("map domain") && message.contains("already declared"),
+                "Error should surface the declare_const collision: {}",
+                message
+            );
+        }
+        _ => panic!(
+            "Expected Error for map-dom name collision, got: {:?}",
+            result
+        ),
+    }
+}

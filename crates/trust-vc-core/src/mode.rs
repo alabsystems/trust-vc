@@ -81,7 +81,7 @@ impl std::fmt::Display for FunctionMode {
 ///
 /// This is distinct from [`FunctionMode`] (which classifies whole functions).
 /// Verus tracks a per-binding mode for every `let` declaration inside a body,
-/// and the body-level mode checker ([`crate::mode_body`]) uses this lattice to
+/// and the body-level mode checker (`crate::mode_body`) uses this lattice to
 /// implement the assign/declare-in-exec rules (backlog #3, R3).
 ///
 /// Verus's underlying `vir::ast::Mode` has only three values — `Spec`,

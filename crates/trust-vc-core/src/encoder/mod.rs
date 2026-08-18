@@ -100,6 +100,11 @@ use ay_dpll::CounterexampleStyle;
 pub struct AYEncoder {
     /// The ay solver instance.
     solver: Solver,
+    /// Constructor logic retained only so routing regressions can assert that
+    /// the intended solver was actually built. ay's generic SMT serializer
+    /// deliberately emits `ALL` regardless of the native API constructor.
+    #[cfg(test)]
+    configured_logic: Logic,
     /// Mapping from variable names to ay terms.
     variables: std::collections::HashMap<String, Term>,
     /// Mapping from variable names to their types for selecting correct operations.
@@ -208,6 +213,8 @@ impl AYEncoder {
         solver.set_produce_unsat_cores(true);
         Self {
             solver,
+            #[cfg(test)]
+            configured_logic: logic,
             variables: std::collections::HashMap::new(),
             var_types: std::collections::HashMap::new(),
             collection_lengths: std::collections::HashMap::new(),
@@ -456,8 +463,24 @@ impl AYEncoder {
                 ),
             });
         }
+        // Ordering, not a weakening: `declare_const` below introduces this
+        // variable's sort, and ay 0.4.0 refuses to declare a datatype over an
+        // already-declared sort. Register any datatype the type mentions first.
+        // Idempotent, so the later `register_builtin_datatypes` /
+        // `register_datatypes_from_prepared_context` passes still apply.
+        self.register_datatypes_in_type(&var.ty)?;
         let sort = sort_for_type(&var.ty);
-        let term = self.solver.declare_const(&var.name, sort);
+        // `try_declare_const`, never the panicking `declare_const`: a name the
+        // solver refuses (reserved spelling, or a collision with a symbol that
+        // is not tracked in `self.variables`) is an embedder mistake and must
+        // surface as `TrustVcError`, not unwind out of the encoder.
+        let term = self
+            .solver
+            .try_declare_const(&var.name, sort)
+            .map_err(|e| TrustVcError::Encoding {
+                context: "declare variable",
+                detail: format!("Failed to declare variable '{}': {}", var.name, e),
+            })?;
         self.variables.insert(var.name.clone(), term);
         self.var_types.insert(var.name.clone(), var.ty.clone());
         self.state
@@ -561,7 +584,13 @@ impl AYEncoder {
                 self.solver.int_const(value)
             } else {
                 let len_name = format!("__trust_vc_len_{}", var.name);
-                let len_term = self.solver.declare_const(&len_name, Sort::Int);
+                let len_term = self
+                    .solver
+                    .try_declare_const(&len_name, Sort::Int)
+                    .map_err(|e| TrustVcError::Encoding {
+                        context: "declare variable",
+                        detail: format!("Failed to declare length term for '{}': {}", var.name, e),
+                    })?;
 
                 // Assert length >= 0 (Int non-negativity — unbounded nat
                 // semantics).
@@ -625,10 +654,19 @@ impl AYEncoder {
                             var.name, e
                         ),
                     })?;
-            let int_len = self.solver.declare_const(
-                &format!("__native_string_len_{}", var.name),
-                ay_dpll::api::Sort::Int,
-            );
+            let int_len = self
+                .solver
+                .try_declare_const(
+                    &format!("__native_string_len_{}", var.name),
+                    ay_dpll::api::Sort::Int,
+                )
+                .map_err(|e| TrustVcError::Encoding {
+                    context: "declare variable",
+                    detail: format!(
+                        "Failed to declare native string length for '{}': {}",
+                        var.name, e
+                    ),
+                })?;
             let len_bridge =
                 self.solver
                     .try_eq(int_len, str_len_raw)
@@ -702,10 +740,19 @@ impl AYEncoder {
                     })?;
             // Alias: int_len is a plain Int variable that the model validator
             // can evaluate, bridged to seq.len(s) via equality.
-            let int_len = self.solver.declare_const(
-                &format!("__native_seq_len_{}", var.name),
-                ay_dpll::api::Sort::Int,
-            );
+            let int_len = self
+                .solver
+                .try_declare_const(
+                    &format!("__native_seq_len_{}", var.name),
+                    ay_dpll::api::Sort::Int,
+                )
+                .map_err(|e| TrustVcError::Encoding {
+                    context: "declare variable",
+                    detail: format!(
+                        "Failed to declare native seq length for '{}': {}",
+                        var.name, e
+                    ),
+                })?;
             let len_bridge =
                 self.solver
                     .try_eq(int_len, seq_len_raw)
@@ -756,9 +803,17 @@ impl AYEncoder {
             }
 
             let shadow_name = native_seq_shadow_var_name(&var.name);
+            let shadow_sort = self.solver.term_sort(term);
             let shadow_term = self
                 .solver
-                .declare_const(&shadow_name, self.solver.term_sort(term));
+                .try_declare_const(&shadow_name, shadow_sort)
+                .map_err(|e| TrustVcError::Encoding {
+                    context: "declare variable",
+                    detail: format!(
+                        "Failed to declare native shadow variable for '{}': {}",
+                        var.name, e
+                    ),
+                })?;
             let shadow_eq =
                 self.solver
                     .try_eq(term, shadow_term)
@@ -839,7 +894,16 @@ impl AYEncoder {
                 element_sort: Sort::Bool,
             }));
             let dom_name = format!("{}_dom", var.name);
-            let dom_term = self.solver.declare_const(&dom_name, dom_sort);
+            let dom_term = self
+                .solver
+                .try_declare_const(&dom_name, dom_sort)
+                .map_err(|e| TrustVcError::Encoding {
+                    context: "declare variable",
+                    detail: format!(
+                        "Failed to declare map domain term for '{}': {}",
+                        var.name, e
+                    ),
+                })?;
             self.variables.insert(dom_name, dom_term);
         }
 

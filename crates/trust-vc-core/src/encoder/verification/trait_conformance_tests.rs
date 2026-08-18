@@ -1370,3 +1370,162 @@ fn median_of<F: Fn() -> u128>(f: F, trials: usize) -> u128 {
     timings.sort_unstable();
     timings[timings.len() / 2]
 }
+
+// ---------------------------------------------------------------------------
+// Phase A3 — associated-type trait-ensures client seam, conformance-gated.
+//
+// Trait `AssocView { type V; fn produce(&self) -> Self::V ensures(result == 7) }`.
+// The impl binds `type V = u64`, so the trait `ensures` is CONCRETELY sorted only
+// after `Self::V` is resolved to `u64`. `assert_impl_trait_ensures_concrete_axioms`
+// emits `∀self. Impl__produce(self) == 7` about the PER-IMPL concrete function, so
+// a client relying on the trait spec can verify. That axiom is a FORGED FACT for a
+// non-conforming impl; it is justified ONLY by the per-impl conformance pass. These
+// tests pin (a) a conforming impl lets a client verify AND conforms, (b) a
+// non-conforming impl is refuted on its own conformance obligation, and FALSIFY the
+// gate by showing that the client verdict ALONE (conformance not consulted) FALSELY
+// verifies for the bad impl.
+// ---------------------------------------------------------------------------
+
+fn assoc_view_trait_decl() -> TraitDecl {
+    TraitDecl {
+        name: "AssocView".to_string(),
+        methods: vec![TraitMethodDecl {
+            name: "produce".to_string(),
+            params: vec![],
+            // Declared as the associated-type projection `Self::V`.
+            return_type: TrustVcType::Opaque("Self::V".to_string()),
+            requires: vec![],
+            ensures: vec!["result == 7".to_string()],
+            has_default: false,
+            default_body: None,
+            default_ensures: Vec::new(),
+        }],
+        supertraits: Vec::new(),
+        generics: Vec::new(),
+    }
+}
+
+fn assoc_view_impl(concrete_fn: &str) -> TraitImplDecl {
+    TraitImplDecl::new(
+        "AssocView",
+        TrustVcType::Bool,
+        vec![("produce".to_string(), concrete_fn.to_string())],
+    )
+    .with_assoc_type_bindings(vec![("V".to_string(), TrustVcType::Uint { width: 64 })])
+}
+
+/// Builds a pipeline whose client obligation `client_expr` relies on the trait
+/// spec of the `produce` method, backed by an impl whose captured body is
+/// `body_text`.
+fn assoc_view_client(
+    concrete_fn: &str,
+    body_text: &str,
+    client_expr: &str,
+) -> crate::verification_bridge::VerificationPipeline {
+    let mut pipeline = crate::verification_bridge::VerificationPipeline::new();
+    let ctx = pipeline.context_mut();
+    ctx.declare_var_typed("self", TrustVcType::Bool);
+    ctx.register_trait_decl(assoc_view_trait_decl());
+    ctx.register_trait_impl(assoc_view_impl(concrete_fn));
+    // Declare the per-impl concrete function so the client obligation naming it
+    // lowers with its resolved concrete return sort (`Self::V` = u64). This is the
+    // same surface `synthesize_impl_method_contexts` provides for real source; the
+    // concrete-sorted trait-ensures axiom is emitted about exactly this function.
+    ctx.declare_helper_function_typed(
+        concrete_fn,
+        TrustVcType::Uint { width: 64 },
+        vec![("self".to_string(), TrustVcType::Bool)],
+    );
+    ctx.register_trait_impl_method_body(
+        concrete_fn.to_string(),
+        crate::ir::ConformanceMethodBody::new(body_text, 0),
+    );
+    ctx.push_obligation(crate::vc::ProofObligation::assert(
+        "client_uses_trait_spec",
+        client_expr,
+    ));
+    pipeline
+}
+
+/// (a) A CONFORMING impl (`produce` returns `7u64`) lets a client that relies on
+/// the trait `ensures(result == 7)` verify — the associated-type projection
+/// `Self::V` resolved to `u64` and the concrete-sorted postcondition axiom
+/// carried the contract — AND the impl passes its own conformance obligation.
+#[test]
+fn assoc_conforming_client_verifies_via_trait_spec() {
+    let pipeline = assoc_view_client(
+        "AssocViewImpl__good",
+        "7u64",
+        "AssocViewImpl__good(self) == 7",
+    );
+    expect_verified(
+        &pipeline.verify(),
+        "a client relying on produce()'s ensures (result == 7) must verify against a conforming impl",
+    );
+    expect_verified(
+        &pipeline_conformance_verdict(&pipeline),
+        "the conforming assoc impl must pass its own conformance obligation",
+    );
+}
+
+/// Soundness control: the emitted axiom carries the SPECIFIC contract value, not a
+/// vacuous pass. A client asserting `produce() == 8` (the trait ensures says `== 7`)
+/// must NOT verify — proving the axiom is `== 7`, so a wrong client claim is caught.
+#[test]
+fn assoc_client_wrong_value_does_not_verify() {
+    let pipeline = assoc_view_client(
+        "AssocViewImpl__ctl",
+        "7u64",
+        "AssocViewImpl__ctl(self) == 8",
+    );
+    let verdict = pipeline.verify();
+    assert!(
+        !verdict.is_verified(),
+        "a client claiming produce() == 8 must NOT verify (trait ensures result == 7): {verdict:?}"
+    );
+}
+
+/// (b) + FALSIFICATION. A NON-CONFORMING impl (`produce` returns `3u64`, violating
+/// `ensures(result == 7)`).
+///
+/// FALSIFICATION (conformance gate removed): the client verdict ALONE — the entry
+/// point that does NOT consult conformance — verifies `produce() == 7`, because the
+/// concrete-sorted trait-ensures axiom is emitted for EVERY impl and justified only
+/// by the (separate) conformance pass. With the gate not consulted, this Verified is
+/// a FALSE VERIFY: the impl body returns `3u64`, not `7`.
+///
+/// THE GATE (restored): consulting the per-impl conformance obligation REFUTES the
+/// impl (Counterexample on its own obligation), so the file cannot verify. This is
+/// what withholds the forged axiom's effect — the cardinal trait soundness invariant.
+#[test]
+fn assoc_nonconforming_falsify_gate_then_gate_catches() {
+    let pipeline = assoc_view_client(
+        "AssocViewImpl__bad",
+        "3u64",
+        "AssocViewImpl__bad(self) == 7",
+    );
+
+    // Gate REMOVED (client obligation verdict only): FALSE VERIFY observed.
+    let client_only = pipeline.verify();
+    expect_verified(
+        &client_only,
+        "OBSERVED FALSE-VERIFY: with the conformance gate removed, a client relying on \
+         produce() == 7 verifies even though the impl body returns 3u64",
+    );
+
+    // Gate RESTORED (per-impl conformance obligation): the impl is refuted.
+    let gate = pipeline_conformance_verdict(&pipeline);
+    expect_counterexample(
+        &gate,
+        "the conformance gate must refute the non-conforming impl on its own obligation",
+    );
+    if let VerifyResult::Counterexample {
+        obligation_name, ..
+    } = &gate
+    {
+        assert_eq!(
+            obligation_name,
+            "trait impl conformance AssocView::produce for bool"
+        );
+    }
+}

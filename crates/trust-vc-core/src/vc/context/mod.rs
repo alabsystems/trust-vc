@@ -381,6 +381,20 @@ pub struct VerificationContext {
     /// any malformed query reaches the solver. Sound (Verus monomorphizes per
     /// instantiation; we are merely incomplete here), not soundness-relevant.
     pub(crate) generic_instantiation_conflict: Option<String>,
+    /// Inconclusive authority verdict from an isolated source-spec termination
+    /// check. A recursive defining axiom is never published unless that check is
+    /// `Verified`; when AY computed a result but strict proof replay rejected its
+    /// evidence, preserve that exact non-verifying verdict instead of discarding
+    /// it and later misreporting the now-uninterpreted helper as a counterexample.
+    pub(crate) source_catalog_termination_failure: Option<crate::VerifyResult>,
+    /// Names of source-catalog definitions whose body axioms passed every
+    /// admission gate and were actually published.  For a recursive SCC this
+    /// is an unforgeable (crate-private) capability recording that the isolated
+    /// `decreases` proof succeeded for the whole cycle.  Demand-inline may use
+    /// it when replacing a fully ground recursive call during counterexample
+    /// recovery; an authored broadcast with a body-axiom-looking name cannot
+    /// manufacture this authority.
+    pub(crate) source_catalog_admitted_definitions: HashSet<String>,
     /// When true, the timeout retry cascade (int-mode + extended-timeout) is
     /// skipped after the initial BV attempt. Tests that accept Unknown can set
     /// this to avoid ~30s of wasted retry per timeout assertion. Part of #2707.
@@ -669,6 +683,69 @@ impl VerificationContext {
         child.assert_by_scopes.clear();
         child.warnings.clear();
         child.closure_def_side_failure = None;
+        child.source_catalog_termination_failure = None;
+        child
+    }
+
+    /// A child for discharging a `#[trust_vc::broadcast]` lemma's OWN `ensures`
+    /// against its declared contract, before that `ensures` is published as a
+    /// global `forall` axiom (`collect_source_broadcast_lemmas`).
+    ///
+    /// Sibling of [`Self::isolated_closure_child`], but deliberately NOT the same:
+    /// that one clears EVERY obligation, which would also drop the definitional
+    /// spec-fn body axioms (`__body_axiom_*`) the lemma's `ensures` is supposed to
+    /// follow FROM. A lemma over a transparent spec fn would then be suppressed —
+    /// mass over-rejection wearing the costume of a working soundness fix.
+    ///
+    /// So this keeps exactly the definitional axioms and drops everything else:
+    ///
+    /// * **Every `__source_broadcast_*` is dropped.** This is what stops a lemma
+    ///   justifying ITSELF, and stops two lemmas justifying EACH OTHER. The
+    ///   call-edge SCC in `ill_founded_recursive_function_names` does not cover
+    ///   that: lemmas that never call one another can still prove each other
+    ///   through published axioms.
+    /// * **Retained definitional axioms are REVEALED** (`is_opaque = false`, and
+    ///   `hidden_fns` cleared). A body axiom is a TRUE fact about the function;
+    ///   opacity is an abstraction/performance control, not a soundness gate, and
+    ///   Verus likewise lets a lemma body `reveal(f)` and publish the result.
+    ///   Without this, every lemma over an `#[trust_vc::opaque]` spec fn is
+    ///   suppressed. Measured, cache-off: an opaque fn's definitional fact is
+    ///   `Counterexample` unrevealed and `Verified` revealed.
+    /// * **`function_context` is cleared** so acceptance cannot depend on WHICH
+    ///   target triggered extraction — a recursive target routes body axioms down
+    ///   the fuel path in `setup_broadcasts`, which would otherwise let the same
+    ///   lemma be accepted for one function and suppressed for another.
+    ///
+    /// The child is DISCARDED; only the boolean verdict crosses back.
+    /// Retains only the obligations matching `keep`. Used by the session-lane
+    /// broadcast suppression pass to drop lemma axioms that failed their own
+    /// contract check — equivalent to never having published them.
+    pub(crate) fn retain_obligations<F>(&mut self, keep: F)
+    where
+        F: FnMut(&ProofObligation) -> bool,
+    {
+        self.obligations.retain(keep);
+    }
+
+    pub(crate) fn broadcast_lemma_check_child(&self) -> Self {
+        // Mirrors `encoder::verification::body_support::BODY_AXIOM_PREFIX`, which
+        // is `pub(super)` to the encoder and so not nameable here.
+        const BODY_AXIOM_PREFIX: &str = "__body_axiom_";
+
+        let mut child = self.clone();
+        child.assert_by_scopes.clear();
+        child.warnings.clear();
+        child.closure_def_side_failure = None;
+        child.source_catalog_termination_failure = None;
+        child.obligations.retain(|obligation| {
+            obligation.kind() == crate::vc::ObligationKind::BroadcastAssume
+                && obligation.name().starts_with(BODY_AXIOM_PREFIX)
+        });
+        for obligation in &mut child.obligations {
+            obligation.is_opaque = false;
+        }
+        child.hidden_fns.clear();
+        child.function_context = None;
         child
     }
 
@@ -680,6 +757,27 @@ impl VerificationContext {
         if self.closure_def_side_failure.is_none() {
             self.closure_def_side_failure = Some(result);
         }
+    }
+
+    /// Preserve the first inconclusive isolated termination verdict. The
+    /// corresponding recursive body axiom remains suppressed; this channel only
+    /// prevents a later solver query from fabricating a refutation narrative for
+    /// an uninterpreted helper whose definition was withheld for lack of checked
+    /// proof authority.
+    pub(crate) fn record_source_catalog_termination_failure(
+        &mut self,
+        result: crate::VerifyResult,
+    ) {
+        if self.source_catalog_termination_failure.is_none() {
+            self.source_catalog_termination_failure = Some(result);
+        }
+    }
+
+    /// Records that the source catalog actually published this definition after
+    /// all opacity/body/termination gates. Crate-private by design: this is proof
+    /// provenance, not a public solver-tuning switch.
+    pub(crate) fn record_source_catalog_admitted_definition(&mut self, name: impl Into<String>) {
+        self.source_catalog_admitted_definitions.insert(name.into());
     }
 
     /// Appends a typed proof obligation to this context.

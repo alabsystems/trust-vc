@@ -47,6 +47,38 @@ fn seq_from_fn_ground_seed_count(len_expr: &TrustVcExpr) -> i64 {
     }
 }
 
+/// Whether the `Seq::from_fn` ground seeds already cover EVERY in-range index,
+/// which makes the quantified pointwise axiom logically redundant.
+///
+/// The seeding loop emits, for `k in 0..seed_count`, the instance
+/// `bvult(k, len_bv) => result[k] == f(k)`, and the quantified axiom is
+/// `forall idx. bvult(idx, len_bv) => result[idx] == f(idx)` — the SAME body
+/// over the SAME `len_bv` guard term. So when the set of indices admitted by
+/// `bvult(idx, len_bv)` is a subset of the seeded literals `{0..seed_count-1}`,
+/// the conjunction of seeds ENTAILS the quantified axiom (every non-vacuous
+/// instance is literally one of the seeds; every other instance has a false
+/// guard and holds vacuously). Asserting it as well adds no content while
+/// forcing the SAT direction — which is what a REFUTATION is — to construct a
+/// model satisfying a quantifier over the whole `2^pointer_width` index domain.
+///
+/// A literal length `n` gives `val(len_bv) == n` (the coercions in
+/// `coerce_to_len_width` are value-preserving for `0 <= n <= LIMIT`, far inside
+/// every supported pointer width), so `bvult(idx, len_bv)` admits exactly
+/// `{0..n-1}`, and the seeds cover it iff `n <= seed_count`. A symbolic length
+/// admits an unknown index set and keeps the quantified axiom.
+#[cfg(not(feature = "native-seq"))]
+fn seq_from_fn_seeds_cover_all_indices(len_expr: &TrustVcExpr) -> bool {
+    let TrustVcExpr::IntLit { value, .. } = len_expr else {
+        return false;
+    };
+    // A negative literal would coerce to a huge unsigned `len_bv`, admitting
+    // indices no seed covers — keep the axiom.
+    let Ok(len) = i64::try_from(*value) else {
+        return false;
+    };
+    (0..=seq_from_fn_ground_seed_count(len_expr)).contains(&len)
+}
+
 struct SeqFilterBoundedPack<'a> {
     source: Term,
     source_name: Option<&'a str>,
@@ -167,9 +199,22 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_forall_with_triggers(&[bound_idx], guarded_body, &[&[result_elem]])
             .map_err(|e| format!("Seq::from_fn forall: {e}"))?;
-        self.solver
-            .try_assert_term(axiom)
-            .map_err(|e| format!("Seq::from_fn assert axiom: {e}"))?;
+        // Assert the quantified pointwise axiom ONLY when the ground seeds below
+        // do not already cover every in-range index. When they do
+        // (`seq_from_fn_seeds_cover_all_indices`), the seed conjunction entails
+        // this axiom verbatim, so asserting it adds ZERO logical content — but it
+        // does force a refutation (a SAT query) to build a model satisfying a
+        // quantifier ranging over the entire `2^pointer_width` index domain, which
+        // is what made `Seq::new` refutations time out. Dropping an entailed
+        // assumption cannot change the assumption set's models, so the encoder
+        // refutes exactly the same programs; and in general dropping an assumption
+        // can only SHRINK the `Verified` set and GROW the refuted set, never the
+        // reverse — a false `Verified` cannot be introduced this way.
+        if !seq_from_fn_seeds_cover_all_indices(len_expr) {
+            self.solver
+                .try_assert_term(axiom)
+                .map_err(|e| format!("Seq::from_fn assert axiom: {e}"))?;
+        }
 
         // Ground-instance seeding for the pointwise index axiom.
         //

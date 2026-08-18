@@ -724,6 +724,7 @@ fn projection_marker_ident(field: &str, span: Span) -> proc_macro2::Ident {
 
     let mut marker = String::from("__trust_vc_field_proj_x");
     for byte in field.as_bytes() {
+        // quality-audit: allow-expect — fmt::Write to a String is infallible
         write!(&mut marker, "{byte:02x}").expect("writing to String cannot fail");
     }
     proc_macro2::Ident::new(&marker, span)

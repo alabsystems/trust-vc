@@ -200,6 +200,27 @@ fn test_nonlinear_arith_rejects_false() {
     );
 }
 
+/// `NonlinearArith` intentionally interprets fixed-width values as bounded
+/// mathematical integers. It is therefore not a wrapping-execution tactic:
+/// callers may transfer an exec theorem to this lane only after their premises
+/// establish that every arithmetic operation stays in range.
+#[test]
+fn test_nonlinear_arith_fixed_width_is_math_not_wrapping() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("u32"));
+    ctx.push_obligation(ProofObligation::assume("x_max", "x == 4294967295"));
+    ctx.push_obligation(
+        ProofObligation::assert("math_successor", "x + 1 > x")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+
+    let result = AYEncoder::verify(&ctx);
+    expect_verified(
+        &result,
+        "NonlinearArith is bounded mathematical-int semantics, not u32 wrapping",
+    );
+}
+
 /// NonlinearArith with mixed mode: default assertion + NIA assertion.
 /// Both should verify without interference.
 #[test]

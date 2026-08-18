@@ -9,7 +9,7 @@
 use super::super::{
     expr_path_to_string, infer_expr_type, lower_syn_expr_with_depth,
     operators::coerce_unsuffixed_literal, trust_vc_type_from_syn_type_with_env, LoweringError,
-    TypeEnv,
+    TypeEnv, SOURCE_CATALOG_MATH_INT_MARKER,
 };
 use super::collections::lower_collection_constructor;
 use super::macros::{lower_choose, lower_quantifier};
@@ -92,6 +92,22 @@ pub(in crate::ir_lowering) fn lower_call(
             }
         }
         let name = expr_path_to_string(path);
+        if name == SOURCE_CATALOG_MATH_INT_MARKER {
+            if !env.allows_source_catalog_math_int_marker() {
+                return Err(LoweringError::UnsupportedExpr(
+                    "reserved source-catalog math-int marker outside its authenticated obligation"
+                        .into(),
+                ));
+            }
+            if call.args.len() != 1 {
+                return Err(LoweringError::TypeInference(format!(
+                    "internal math-int expression marker expects 1 argument, got {}",
+                    call.args.len()
+                )));
+            }
+            let lowered = lower_syn_expr_with_depth(&call.args[0], env, depth)?;
+            return promote_result_expr_to_math_int(lowered);
+        }
         if name == "forall" || name == "exists" {
             let kind = if name == "forall" {
                 QuantifierKind::Forall
@@ -294,6 +310,91 @@ pub(in crate::ir_lowering) fn lower_call(
     ))
 }
 
+/// Apply the expected `int` result type of a source spec function to its body.
+///
+/// Plain arithmetic is promoted recursively so an expression such as
+/// `(x + x) + x`, with `x: u16`, is encoded as mathematical integer arithmetic
+/// throughout. Explicit finite-width boundaries (`as u16`, `wrapping_add`,
+/// bitwise/shift operations, and finite-returning calls) keep their own
+/// semantics and are converted only after they produce a value.
+fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, LoweringError> {
+    fn cast_finite(expr: TrustVcExpr, from_ty: TrustVcType) -> TrustVcExpr {
+        TrustVcExpr::Cast {
+            expr: Box::new(expr),
+            from_ty,
+            to_ty: TrustVcType::MathInt,
+        }
+    }
+
+    let original_ty = infer_expr_type(&expr);
+    let promoted = match expr {
+        TrustVcExpr::Arith {
+            op, left, right, ..
+        } if original_ty.is_integer() => TrustVcExpr::Arith {
+            op,
+            left: Box::new(promote_result_expr_to_math_int(*left)?),
+            right: Box::new(promote_result_expr_to_math_int(*right)?),
+            ty: TrustVcType::MathInt,
+        },
+        TrustVcExpr::Neg(inner) if original_ty.is_integer() => {
+            TrustVcExpr::Neg(Box::new(promote_result_expr_to_math_int(*inner)?))
+        }
+        TrustVcExpr::Ite {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } if original_ty.is_integer() => TrustVcExpr::Ite {
+            cond,
+            then_branch: Box::new(promote_result_expr_to_math_int(*then_branch)?),
+            else_branch: Box::new(promote_result_expr_to_math_int(*else_branch)?),
+            ty: TrustVcType::MathInt,
+        },
+        TrustVcExpr::Match {
+            scrutinee, arms, ..
+        } if original_ty.is_integer() => TrustVcExpr::Match {
+            scrutinee,
+            arms: arms
+                .into_iter()
+                .map(|mut arm| {
+                    arm.body = promote_result_expr_to_math_int(arm.body)?;
+                    Ok(arm)
+                })
+                .collect::<Result<Vec<_>, LoweringError>>()?,
+            ty: TrustVcType::MathInt,
+        },
+        TrustVcExpr::Let {
+            name,
+            ty,
+            value,
+            body,
+        } if original_ty.is_integer() => TrustVcExpr::Let {
+            name,
+            ty,
+            // A local initializer keeps the type it inferred at the `let`;
+            // only the block's result is in the function return context.
+            value,
+            body: Box::new(promote_result_expr_to_math_int(*body)?),
+        },
+        already_math
+            if matches!(
+                original_ty,
+                TrustVcType::MathInt | TrustVcType::Nat | TrustVcType::Real
+            ) =>
+        {
+            already_math
+        }
+        finite if original_ty.is_integer() => cast_finite(finite, original_ty),
+        other => {
+            return Err(LoweringError::TypeInference(format!(
+                "source spec function body has type `{}`, expected `int`",
+                infer_expr_type(&other).to_type_string()
+            )))
+        }
+    };
+    Ok(promoted)
+}
+
 /// Exposes the well-founded STRUCTURAL ordering — the existing trusted `dt_size`
 /// measure UF — to the spec surface as `height(x)` and `is_smaller_than(a, b)`
 /// (the value side of Verus's `decreases_to!` predicate & height intrinsic):
@@ -405,6 +506,7 @@ pub(super) fn component_smaller(a: TrustVcExpr, b: TrustVcExpr) -> TrustVcExpr {
 /// equality on that component.
 pub(super) fn lexicographic_smaller(components: Vec<(TrustVcExpr, TrustVcExpr)>) -> TrustVcExpr {
     let mut iter = components.into_iter().rev();
+    // quality-audit: allow-expect — both callers reject empty arity before building components
     let (last_a, last_b) = iter.next().expect("non-empty tuple");
     let mut acc = component_smaller(last_a, last_b);
     for (a, b) in iter {

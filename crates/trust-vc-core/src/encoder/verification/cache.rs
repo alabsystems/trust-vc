@@ -8,7 +8,7 @@
 //! and persists `VerifyResult::Verified` entries in a filesystem cache under
 //! a hex-encoded SHA-256 fingerprint filename.
 //! Cache hits skip both typed verification and trait-conformance
-//! verification. Cache I/O failures are fail-open.
+//! verification. Cache I/O failures become misses and run fresh verification.
 //!
 //! Part of #2646.
 
@@ -102,11 +102,53 @@ use crate::prepared_context::PreparedVerificationContext;
 // the verifier implementation and requires the cache entry to match the exact
 // canonical JSON shape. Builds without an authenticated source identity bypass
 // the persistent cache; malformed scalar/metadata lines can no longer smuggle
-// trailing or unknown material into an otherwise authoritative entry.
-pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 14;
+// trailing or unknown material into an otherwise authoritative entry. v15
+// removes verdict authority from every pre-existing disk entry. A `Verified`
+// entry may now be replayed only after this process has independently produced
+// and stored that exact fingerprint, serialized entry, and canonical path. Disk
+// remains a within-process accelerator; cross-process reuse requires a
+// replayable certificate checked by the kernel.
+pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 15;
 
 /// Attempt cached verification. Returns `Some(VerifyResult::Verified)` on
 /// cache hit, `None` on miss or any I/O error.
+/// Only exact cache entries this process stored during this run carry authority.
+///
+/// SOUNDNESS: the JSON file has no MAC, signature, certificate, or independent
+/// writer identity. Its `entry.fingerprint == filename` check is only
+/// self-consistency, so a writable file cannot itself justify `Verified` in
+/// either the default target directory or an environment-redirected directory.
+/// `SESSION_WRITTEN_ENTRIES` records the independent fact that this process
+/// already solved and stored the same canonical context, exact serialized
+/// content, and canonical path. Including path and content is essential:
+/// storing a fingerprint in one directory must not authorize a forged file in
+/// another directory, and a post-store mutation at the same path must revoke
+/// authority. This makes disk a within-process accelerator without letting any
+/// pre-existing or subsequently modified file substitute for proof. Certified
+/// cross-process reuse belongs to the checked-certificate cache, not this
+/// verdict-only cache.
+static SESSION_WRITTEN_ENTRIES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeSet<(PathBuf, String)>>,
+> = std::sync::OnceLock::new();
+
+fn session_written() -> &'static std::sync::Mutex<std::collections::BTreeSet<(PathBuf, String)>> {
+    SESSION_WRITTEN_ENTRIES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+fn record_session_write(entry_path: PathBuf, content_digest: String) {
+    if let Ok(mut set) = session_written().lock() {
+        set.insert((entry_path, content_digest));
+    }
+}
+
+fn session_wrote(entry_path: &std::path::Path, content: &str) -> bool {
+    let key = (entry_path.to_path_buf(), sha256_hex(content.as_bytes()));
+    session_written()
+        .lock()
+        .map(|set| set.contains(&key))
+        .unwrap_or(false)
+}
+
 pub(in crate::encoder) fn lookup_cache(ctx: &PreparedVerificationContext) -> Option<VerifyResult> {
     if is_cache_disabled() {
         return None;
@@ -118,6 +160,7 @@ pub(in crate::encoder) fn lookup_cache(ctx: &PreparedVerificationContext) -> Opt
 
     let content = std::fs::read_to_string(&entry_path).ok()?;
     let entry: CacheEntry = serde_json_parse(&content)?;
+    let canonical_entry_path = std::fs::canonicalize(&entry_path).ok()?;
 
     if entry.schema_version != VC_CACHE_SCHEMA_VERSION {
         return None;
@@ -128,12 +171,18 @@ pub(in crate::encoder) fn lookup_cache(ctx: &PreparedVerificationContext) -> Opt
     if entry.result != "verified" {
         return None;
     }
+    // No disk location is a verdict authority. The entry is reusable only
+    // after this process independently verified and stored this exact entry.
+    if !session_wrote(&canonical_entry_path, &content) {
+        return None;
+    }
 
     bump_cache_hit_count();
     Some(VerifyResult::Verified)
 }
 
-/// Store a verified result in the cache. Fail-open on any I/O error.
+/// Store a verified result in the cache. Any I/O error leaves the entry
+/// unauthorized, so a later lookup misses and performs a fresh solve.
 pub(in crate::encoder) fn store_cache(ctx: &PreparedVerificationContext, result: &VerifyResult) {
     if is_cache_disabled() {
         return;
@@ -169,8 +218,11 @@ pub(in crate::encoder) fn store_cache(ctx: &PreparedVerificationContext, result:
     // Write to temp file, then rename into place (atomic on same filesystem).
     let tmp_path = cache_dir.join(format!("{hash_hex}.tmp"));
     let final_path = cache_dir.join(format!("{hash_hex}.json"));
-    if std::fs::write(&tmp_path, json).is_ok() {
-        let _ = std::fs::rename(&tmp_path, &final_path);
+    let content_digest = sha256_hex(json.as_bytes());
+    if std::fs::write(&tmp_path, &json).is_ok() && std::fs::rename(&tmp_path, &final_path).is_ok() {
+        if let Ok(canonical_entry_path) = std::fs::canonicalize(&final_path) {
+            record_session_write(canonical_entry_path, content_digest);
+        }
     }
 }
 
@@ -298,13 +350,29 @@ fn parse_json_string_literal(value: &str) -> Option<String> {
 
 // --- Environment controls ---
 
+#[cfg(test)]
 fn is_cache_disabled() -> bool {
-    if is_test_cache_disabled() {
-        return true;
-    }
+    // Unit tests default to cache-off through the thread-local. Cache-specific
+    // tests opt in explicitly, which must remain deterministic even when the
+    // surrounding soundness command exports TRUST_VC_DISABLE_VC_CACHE=1. An
+    // opt-in is accepted only with an explicit test cache directory, so no
+    // unrelated unit test can accidentally override the ambient soundness
+    // control merely by inheriting a thread-local flag.
+    is_test_cache_disabled() || !has_test_cache_dir_override()
+}
+
+#[cfg(not(test))]
+fn is_cache_disabled() -> bool {
     std::env::var("TRUST_VC_DISABLE_VC_CACHE")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Test-only accessor for the resolved cache directory, so a witness test can
+/// write a file where `lookup_cache` will look for one.
+#[cfg(test)]
+pub(in crate::encoder) fn cache_directory_for_test() -> Option<PathBuf> {
+    cache_directory()
 }
 
 fn cache_directory() -> Option<PathBuf> {
@@ -329,6 +397,11 @@ fn cache_directory() -> Option<PathBuf> {
         }
         dir = dir.parent()?;
     }
+}
+
+#[cfg(test)]
+fn has_test_cache_dir_override() -> bool {
+    VC_CACHE_DIR_OVERRIDE.with(|cell| cell.borrow().is_some())
 }
 
 // --- Fingerprint payload ---
@@ -393,7 +466,7 @@ fn authenticated_build_source_identity() -> Option<String> {
     }
 }
 
-fn is_full_git_revision(value: &str) -> bool {
+pub(in crate::encoder) fn is_full_git_revision(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
             .bytes()
@@ -428,11 +501,6 @@ const TEST_BUILD_SOURCE_IDENTITY: &str = "11111111111111111111111111111111111111
 #[cfg(test)]
 fn is_test_cache_disabled() -> bool {
     VC_CACHE_DISABLE.with(|flag| flag.get())
-}
-
-#[cfg(not(test))]
-fn is_test_cache_disabled() -> bool {
-    false
 }
 
 #[cfg(test)]
@@ -514,5 +582,38 @@ pub(in crate::encoder) struct TestFingerprintPayload {
 impl TestFingerprintPayload {
     pub(in crate::encoder) fn fingerprint_hex_for_test(&self) -> String {
         self.hex.clone()
+    }
+}
+
+#[cfg(test)]
+mod session_authority_tests {
+    use super::*;
+
+    /// A store records its exact path so a matching lookup in this process is
+    /// authoritative. The same fingerprint in another directory remains
+    /// untrusted.
+    #[test]
+    fn a_stored_entry_is_recorded_only_at_its_exact_path() {
+        let root = PathBuf::from("session-authority-test");
+        let first = root.join("first").join("hash.json");
+        let second = root.join("second").join("hash.json");
+        let content = "canonical verified entry";
+        assert!(
+            !session_wrote(&first, content),
+            "unwritten entry must not be recorded"
+        );
+        record_session_write(first.clone(), sha256_hex(content.as_bytes()));
+        assert!(
+            session_wrote(&first, content),
+            "a stored entry must be recorded for this session"
+        );
+        assert!(
+            !session_wrote(&second, content),
+            "the same fingerprint at a different path must remain untrusted"
+        );
+        assert!(
+            !session_wrote(&first, "mutated verified entry"),
+            "mutating a stored file's content must revoke session authority"
+        );
     }
 }

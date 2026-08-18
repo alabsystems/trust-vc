@@ -607,12 +607,15 @@ fn finish_regular_assertion_step(
     assertion: &PreparedObligation,
     post_loop_modified_vars: Option<&HashSet<String>>,
 ) -> Option<VerifyResult> {
-    // Broadcast-vacuity gate (SOUNDNESS-CRITICAL): a #[broadcast] lemma can
-    // publish a contradictory assumption that proves a regular assert! /
-    // postcondition vacuously. If the goal verified only because the broadcast
-    // assumptions are contradictory, downgrade it to Unknown(VacuousTruth).
+    // Vacuity gate (SOUNDNESS-CRITICAL): a #[broadcast] lemma OR a trait-method
+    // `ensures` can publish a contradictory premise that proves a regular
+    // assert! / postcondition vacuously — for a trait contract the premise can
+    // even be UNREALIZABLE (`ensures(result > x)` over u32 has no solution at
+    // u32::MAX), under which BOTH a claim and its negation reported Verified.
+    // If the goal verified only because those premises are contradictory,
+    // downgrade it to Unknown(VacuousTruth).
     // Regular asserts carry no forall bound vars, so extra_variables is empty.
-    let result = super::assertion::apply_broadcast_vacuity_probe_to_result(
+    let result = super::assertion::apply_vacuity_probe_to_result(
         result,
         slices,
         assertion,

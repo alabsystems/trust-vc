@@ -141,6 +141,9 @@ pub(crate) struct TypeEnv {
     /// transitively contains one as a field). Spec-only extensional `==` is a
     /// separate concern; this conservative gate matches the `.eq()` method gate.
     manual_partial_eq_types: HashSet<String>,
+    /// Crate-private capability for the synthetic source-catalog `int` result
+    /// marker. False in every ordinary/user-authored lowering environment.
+    allow_source_catalog_math_int_marker: bool,
 }
 
 impl TypeEnv {
@@ -164,7 +167,22 @@ impl TypeEnv {
             derived_partial_eq_types: HashSet::new(),
             derived_clone_types: HashSet::new(),
             manual_partial_eq_types: HashSet::new(),
+            allow_source_catalog_math_int_marker: false,
         }
+    }
+
+    /// Returns a scoped clone that may consume the synthetic source-catalog
+    /// mathematical-integer result marker. The original environment remains
+    /// incapable, so the permission cannot leak to another obligation.
+    pub(crate) fn with_source_catalog_math_int_marker(mut self) -> Self {
+        self.allow_source_catalog_math_int_marker = true;
+        self
+    }
+
+    /// Whether this exact scoped environment carries the internal marker
+    /// capability. There is intentionally no public or mutable setter.
+    pub(crate) const fn allows_source_catalog_math_int_marker(&self) -> bool {
+        self.allow_source_catalog_math_int_marker
     }
 
     /// Records that a datatype's source carried `#[derive(PartialEq)]`.

@@ -223,6 +223,59 @@ impl AYEncoder {
         Ok(())
     }
 
+    /// Registers every datatype reachable from `ty`, innermost first.
+    ///
+    /// ay 0.4.0's elaborator rejects declaring a datatype whose sort name is
+    /// already declared — "re-declaring it as a datatype would conflate
+    /// existing symbols over the old sort with the new datatype's members".
+    /// That guard is correct, so the fix is ordering: the datatype must be
+    /// declared before anything introduces its sort. `declare_const` introduces
+    /// a variable's sort, so every datatype a variable's type mentions has to be
+    /// registered before the variable is declared.
+    ///
+    /// This is the same ordering class the setup-level fixes addressed for user
+    /// structs and for generic/associated types. It covers what those could not
+    /// reach: a datatype named by the variable's own type — notably tuple
+    /// carriers such as `(u64, u64)` — and datatypes nested inside collection
+    /// element, key, or return types.
+    ///
+    /// Fields are walked before their owning datatype because declaring a
+    /// datatype also introduces its field sorts. Recursion terminates because a
+    /// recursive datatype refers to itself through `RecursiveRef`, which carries
+    /// no variants to descend into; `register_datatype` is additionally
+    /// idempotent, returning the existing encoding for an already-known name.
+    pub(crate) fn register_datatypes_in_type(
+        &mut self,
+        ty: &crate::ir::TrustVcType,
+    ) -> TrustVcResult<()> {
+        use crate::ir::TrustVcType as Ty;
+        match ty {
+            Ty::Datatype { name, variants } => {
+                for variant in variants {
+                    for (_, field_ty) in &variant.fields {
+                        self.register_datatypes_in_type(field_ty)?;
+                    }
+                }
+                self.register_datatype(name, variants)?;
+            }
+            Ty::Seq(inner) | Ty::Array(inner, _) | Ty::Set(inner) | Ty::Multiset(inner) => {
+                self.register_datatypes_in_type(inner)?;
+            }
+            Ty::Map(key, value) => {
+                self.register_datatypes_in_type(key)?;
+                self.register_datatypes_in_type(value)?;
+            }
+            Ty::SpecFn(args, ret) => {
+                for arg in args {
+                    self.register_datatypes_in_type(arg)?;
+                }
+                self.register_datatypes_in_type(ret)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Exposes `FuncDecl`/constant handles for one variant's
     /// constructor/selectors/tester. The datatype is already registered natively
     /// via `try_declare_datatype`; these `try_declare_fun` calls (over the native

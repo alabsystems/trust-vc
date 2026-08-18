@@ -127,7 +127,10 @@ fn test_all_retry_policy_fields_change_fingerprint() {
     assert_ne!(base_fp, fingerprint_hex_for_context(&disabled));
 
     let mut deeper = make_simple_context();
-    deeper.set_demand_inline_depth(2);
+    // The default depth is 2; use a genuinely distinct policy value so this
+    // control tests cache-key sensitivity rather than expecting a no-op setter
+    // to perturb the canonical payload.
+    deeper.set_demand_inline_depth(3);
     assert_ne!(base_fp, fingerprint_hex_for_context(&deeper));
 
     let mut wider = make_simple_context();
@@ -1090,7 +1093,7 @@ fn test_trait_generic_and_default_metadata_change_fingerprint() {
 }
 
 #[test]
-fn test_cache_hit_does_not_require_persisted_canonical_text() {
+fn test_preexisting_canonical_entry_has_no_verdict_authority() {
     let cache_dir = CacheTestEnvGuard::install("trust_vc_cache_test_no_canonical_text");
     std::fs::create_dir_all(&cache_dir.dir).expect("create test cache dir");
     reset_test_cache_disable();
@@ -1107,23 +1110,215 @@ fn test_cache_hit_does_not_require_persisted_canonical_text() {
     reset_cache_counts();
     reset_setup_from_prepared_count();
     let result = AYEncoder::verify(&ctx);
+    expect_verified(&result, "pre-existing canonical entry should solve fresh");
+    assert!(
+        setup_from_prepared_count() >= 1,
+        "a pre-existing disk entry must not skip solver setup"
+    );
+    assert_eq!(cache_hit_count(), 0, "unvalidated disk entry must not hit");
+    assert_eq!(cache_miss_count(), 1, "unvalidated disk entry must miss");
+}
+
+/// SOUNDNESS: an ambient `TVC_CORE_BUILD_GIT_HEAD` must not be able to
+/// authenticate a build.
+///
+/// The consumer reads the build identity with `option_env!`, which falls back to
+/// the ambient process environment when the build script sets nothing. The build
+/// script used to `return` without emitting on every failure path — dirty tree,
+/// no git, malformed HEAD — so "deliberately leave the identity unset" actually
+/// left it OPEN: an exported 40-hex-character value would satisfy the check below
+/// and re-enable the persistent VC cache on exactly the builds the design locks
+/// out. The build script now emits an empty value on those paths so Cargo's value
+/// always wins.
+///
+/// This pins the second half of that fix: whatever arrives, it is only accepted
+/// when it has the shape of a full git revision — and the empty sentinel does
+/// not.
+#[test]
+fn empty_build_identity_cannot_authenticate_a_build() {
+    assert!(
+        !super::super::cache::is_full_git_revision(""),
+        "the empty sentinel emitted on unauthenticated builds must never pass"
+    );
+    assert!(
+        !super::super::cache::is_full_git_revision("unauthenticated"),
+        "a non-hex sentinel must never pass"
+    );
+    // Shape-only check: a forged value of the right shape still passes here, which
+    // is why the build script must pin the value rather than leave it ambient.
+    assert!(super::super::cache::is_full_git_revision(&"a".repeat(40)));
+}
+
+/// SOUNDNESS: a canonical cache file written without a solver run must never
+/// mint `Verified`.
+///
+/// `lookup_cache` returns `Verified` after three checks: the schema version,
+/// `entry.result == "verified"`, and `entry.fingerprint == hash_hex` — where
+/// `hash_hex` IS the filename. That last check is self-referential, so the entry
+/// attests to nothing but itself. There is no MAC, no secret, and no record of
+/// which process produced it. Anything that can write the cache directory can
+/// mint a proof.
+///
+/// Below, a context whose obligation is FALSE (`x != x`) is verified honestly
+/// and refuted. A forged entry is then written at that same context's
+/// fingerprint, with no verification behind it. The next verification must run
+/// the solver again and refute it again.
+///
+/// Trust's own cache names and refuses this threat — `trust-cache/src/entry.rs`:
+/// disk contents are user-writable, so a structurally valid record "must
+/// therefore be independently revalidated before this predicate may be replayed
+/// as a hit". trust-vc has no equivalent.
+///
+/// The file's history is the argument for why key-widening is not the fix: its
+/// v2..v14 comment block records eleven previously-shipped false-`verified`
+/// replays, every one addressed by widening the KEY. That defends against
+/// collision, not forgery, and eleven rounds of it left this open.
+///
+/// The paired positive cache tests establish that an entry this process really
+/// stored still hits on the second verification.
+#[test]
+fn a_forged_cache_entry_is_rejected_and_resolved_fresh() {
+    let _cache_dir = CacheTestEnvGuard::install("trust_vc_cache_forged_entry_witness");
+    reset_test_cache_disable();
+    reset_cache_counts();
+
+    // A context whose obligation is FALSE. Honest verification refutes it.
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", TrustVcType::Int { width: 32 });
+    ctx.push_obligation(ProofObligation::assert("never_true", "x != x"));
+
+    let honest = AYEncoder::verify(&ctx);
+    assert!(
+        !matches!(honest, VerifyResult::Verified),
+        "control: `x != x` must not verify honestly, got {honest:?}"
+    );
+
+    // Forge an entry at this context's own fingerprint. No verification behind it.
+    let hash_hex = fingerprint_hex_for_context(&ctx);
+    let dir =
+        crate::encoder::verification::cache::cache_directory_for_test().expect("cache directory");
+    std::fs::create_dir_all(&dir).expect("create cache dir");
+    // The parser accepts only the exact canonical shape `serialize_entry` emits —
+    // ordering, keys, commas and all. That is real defence in depth against a
+    // malformed file, and none against a forged one: the format is in the source,
+    // so a forger simply writes it correctly, as here.
+    let forged = format!(
+        "{{\n  \"schema_version\": {},\n  \"fingerprint\": {:?},\n  \"display_name\": null,\n  \"primary_location\": null,\n  \"result\": {:?}\n}}",
+        crate::encoder::verification::cache::VC_CACHE_SCHEMA_VERSION,
+        hash_hex,
+        "verified",
+    );
+    std::fs::write(dir.join(format!("{hash_hex}.json")), forged).expect("write forged entry");
+
+    reset_cache_counts();
+    reset_setup_from_prepared_count();
+    let replayed = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &replayed,
+        "a forged cache entry for `x != x` must not mint Verified",
+    );
+    assert_eq!(cache_hit_count(), 0, "forged entry must not cache-hit");
+    assert_eq!(cache_miss_count(), 1, "forged entry must fall through");
+    assert!(
+        setup_from_prepared_count() >= 1,
+        "forged entry must reach a fresh solver setup"
+    );
+}
+
+/// SOUNDNESS: session authority is for one exact cache path, not merely one
+/// fingerprint. Otherwise a legitimate solve in directory A would authorize a
+/// forged file with the same fingerprint after the process switches to
+/// directory B.
+#[test]
+fn a_session_write_does_not_authorize_another_cache_directory() {
+    let first = CacheTestEnvGuard::install("trust_vc_cache_session_path_first");
+    reset_test_cache_disable();
+    reset_cache_counts();
+
+    let ctx = make_simple_context();
     expect_verified(
-        &result,
-        "test_cache_hit_does_not_require_persisted_canonical_text",
+        &AYEncoder::verify(&ctx),
+        "the first directory should be populated by an honest solve",
     );
-    assert_eq!(
-        setup_from_prepared_count(),
-        0,
-        "cache hit should skip solver setup even without canonical text"
+
+    let second = std::env::temp_dir().join("trust_vc_cache_session_path_second");
+    let _ = std::fs::remove_dir_all(&second);
+    std::fs::create_dir_all(&second).expect("create second cache directory");
+    set_test_cache_dir(second.clone());
+
+    let hash_hex = fingerprint_hex_for_context(&ctx);
+    let forged = format!(
+        "{{\n  \"schema_version\": {VC_CACHE_SCHEMA_VERSION},\n  \"fingerprint\": {:?},\n  \"display_name\": null,\n  \"primary_location\": null,\n  \"result\": \"verified\"\n}}",
+        hash_hex,
     );
-    assert_eq!(
-        cache_hit_count(),
+    std::fs::write(second.join(format!("{hash_hex}.json")), forged)
+        .expect("write canonical entry in second directory");
+
+    reset_cache_counts();
+    reset_setup_from_prepared_count();
+    expect_verified(
+        &AYEncoder::verify(&ctx),
+        "the second directory should fall through to a fresh solve",
+    );
+    assert_eq!(cache_hit_count(), 0, "another directory must not hit");
+    assert_eq!(cache_miss_count(), 1, "another directory must miss");
+    assert!(
+        setup_from_prepared_count() >= 1,
+        "another directory must reach a fresh solver setup"
+    );
+
+    let _ = std::fs::remove_dir_all(&second);
+    drop(first);
+}
+
+/// SOUNDNESS: an entry may be used only while its bytes are exactly those this
+/// process wrote. A same-path replacement must not inherit session authority.
+#[test]
+fn a_session_entry_mutation_revokes_authority() {
+    let cache_dir = CacheTestEnvGuard::install("trust_vc_cache_session_mutation");
+    reset_test_cache_disable();
+
+    let ctx = make_simple_context();
+    expect_verified(&AYEncoder::verify(&ctx), "honest solve should store entry");
+
+    let hash_hex = fingerprint_hex_for_context(&ctx);
+    let path = cache_dir.dir.join(format!("{hash_hex}.json"));
+    let stored = std::fs::read_to_string(&path).expect("read stored cache entry");
+    let mutated = stored.replacen(
+        "\"display_name\": null",
+        "\"display_name\": \"attacker-replaced\"",
         1,
-        "minimal cache entry should count as hit"
     );
-    assert_eq!(
-        cache_miss_count(),
-        0,
-        "minimal cache entry should avoid a miss"
+    assert_ne!(stored, mutated, "test mutation must change canonical bytes");
+    std::fs::write(&path, mutated).expect("replace cache entry at same path");
+
+    reset_cache_counts();
+    reset_setup_from_prepared_count();
+    expect_verified(
+        &AYEncoder::verify(&ctx),
+        "mutated entry should fall through to a fresh solve",
+    );
+    assert_eq!(cache_hit_count(), 0, "mutated bytes must not hit");
+    assert_eq!(cache_miss_count(), 1, "mutated bytes must miss");
+    assert!(
+        setup_from_prepared_count() >= 1,
+        "mutated bytes must reach a fresh solver setup"
+    );
+}
+
+/// Test-only cache enablement is coupled to an isolated directory override.
+/// A bare thread-local opt-in must not defeat the ambient cache-off policy for
+/// unrelated solver tests.
+#[test]
+fn cache_test_opt_in_requires_an_isolated_directory() {
+    use crate::encoder::verification::cache::{lookup_cache, store_cache};
+
+    clear_test_cache_dir();
+    reset_test_cache_disable();
+    let prepared = prepare_context(&make_simple_context()).expect("prepare context");
+    store_cache(&prepared, &VerifyResult::Verified);
+    assert!(
+        lookup_cache(&prepared).is_none(),
+        "a test opt-in without an isolated cache directory must remain disabled"
     );
 }

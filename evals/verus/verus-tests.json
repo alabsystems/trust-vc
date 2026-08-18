@@ -1602,7 +1602,7 @@
       "upstream_path": "source/rust_verify_test/tests/assoc_type_impls.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2785",
-      "reason": "Partial executable TrustVc coverage now exists for a Rust-valid View impl-associated-type witness, a generic associated-output method constrained by an associated type equality, local AND parameter-position concrete associated-type projection normalization with a paired concrete overstrong-bound counterexample, an associated-type trait default-body counterexample, and direct/non-direct View dispatch fail-closed guards. Concrete parameter-position <Concrete as Trait>::Assoc projections now normalize (Phase A3) to the impl's bound type and verify. The broader upstream associated-type normalization/equality/dispatch/lifetime surface remains unsupported.",
+      "reason": "Partial executable TrustVc coverage now exists for a Rust-valid View impl-associated-type witness, a generic associated-output method constrained by an associated type equality, local AND parameter-position concrete associated-type projection normalization with a paired concrete overstrong-bound counterexample, an associated-type trait default-body counterexample, direct/non-direct View dispatch fail-closed guards, and (Phase A3) a concrete-receiver client that CONSUMES an associated-type-RETURNING trait method's ensures — the conforming impl verifies and a wrong-value client is refuted, justified by the per-impl conformance obligation. Concrete parameter-position <Concrete as Trait>::Assoc projections now normalize (Phase A3) to the impl's bound type and verify. The broader upstream associated-type normalization/equality/dispatch/lifetime surface remains unsupported.",
       "trust_vc_paths": [
         "evals/verus/ported/assoc_type_impls.rs"
       ],
@@ -1660,11 +1660,24 @@
           "upstream_case_id": "assoc_normalize",
           "expected_verdict": "verified",
           "min_obligations": 1
+        },
+        {
+          "case_id": "associated_type_returning_method_client_consumes_ensures_verified",
+          "upstream_case_id": "ensures_projection_poly",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "associated_type_returning_method_client_wrong_value_counterexample",
+          "upstream_case_id": "ensures_projection_poly",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         }
       ],
       "known_gaps": [
         "This slice only covers a concrete trust_vc_types::View impl binding ViewTy = u64, a generic local trait method with Output = int, one local and one parameter-position concrete associated-type projection normalization to u8 with a paired concrete overstrong-bound counterexample, one associated-type trait default-body counterexample, and direct/non-direct view fail-closed guards.",
         "Concrete <Concrete as Trait>::Assoc projections in parameter position now normalize (Phase A3) to the impl's bound type and verify; bare-generic <T as Trait>::Assoc projection reasoning (self is a type parameter) remains unsupported.",
+        "The Phase A3 client-consume seam covers a CONCRETE-receiver call to an associated-type-returning method with a self-contained ensures (result == literal). The full upstream ensures_projection_poly/trait_typ_equality1 shapes — an ensures that references a projected spec fn (self.f()), and consumption through a bare-generic bound <A: T<X = u8>> rather than a concrete receiver — remain unsupported.",
         "Direct View receiver dispatch, rich generic associated-type normalization, bare-generic <T as Trait>::Assoc projection reasoning, associated type equality over external traits, lifetimes, overlap/dispatch, and Verus diagnostic parity remain unsupported."
       ],
       "notes": "The expected_cases listed here document targeted partial assoc_type_impls.rs coverage only. Because this entry remains unsupported-gap, these cases are not accepted replacement evidence and are not scheduled by --run-trust-vc-corpus. Focused regression coverage lives in crates/trust-vc/tests/assoc_type_impls_rs_trust_vc_regressions.rs."

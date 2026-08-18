@@ -42,10 +42,14 @@ fn assert_verified(code: &str, name: &str) {
 }
 
 /// A false `Verified` on an unequal claim would be the cardinal soundness
-/// failure. Fail-closed (Counterexample/Unknown) is acceptable; `Verified` not.
+/// failure. Fail-closed (Counterexample/model-less NotProved/Unknown) is
+/// acceptable; `Verified` is not. `NotProved` records genuine solver
+/// incompleteness without inventing a model.
 fn assert_not_verified(code: &str, name: &str) {
     match verdict(code, name) {
-        VerifyResult::Counterexample { .. } | VerifyResult::Unknown { .. } => {}
+        VerifyResult::Counterexample { .. }
+        | VerifyResult::NotProved { .. }
+        | VerifyResult::Unknown { .. } => {}
         VerifyResult::Verified => {
             panic!(
                 "fn {name} must NOT verify (wrong map-index value) — a false Verified is unsound"

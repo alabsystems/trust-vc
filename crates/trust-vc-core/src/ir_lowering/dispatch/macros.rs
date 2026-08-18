@@ -223,17 +223,18 @@ fn lower_binary_marker_operands(
     depth: usize,
     label: &str,
 ) -> Result<(TrustVcExpr, TrustVcExpr), LoweringError> {
-    let mut operands =
+    let operands =
         crate::chained_comparisons::split_top_level_comma_operands(mac.mac.tokens.clone());
-    if operands.len() != 2 {
-        return Err(LoweringError::UnsupportedExpr(format!(
-            "logical {} lowers to exactly two operands, got {}",
-            label,
-            operands.len()
-        )));
-    }
-    let right_tokens = operands.pop().expect("two operands present");
-    let left_tokens = operands.pop().expect("two operands present");
+    let [left_tokens, right_tokens] = match <[_; 2]>::try_from(operands) {
+        Ok(pair) => pair,
+        Err(operands) => {
+            return Err(LoweringError::UnsupportedExpr(format!(
+                "logical {} lowers to exactly two operands, got {}",
+                label,
+                operands.len()
+            )));
+        }
+    };
 
     let left_expr = crate::chained_comparisons::parse_expr_tokens_with_chains(left_tokens)
         .map_err(|err| {
@@ -1046,8 +1047,8 @@ fn lower_multi_binder_choose_closure(
         kind: QuantifierKind::Forall,
         bound_vars: params.clone(),
         body: Box::new(TrustVcExpr::Implies {
-            premise: Box::new(condition),
-            conclusion: Box::new(combined_conclusion),
+            premise: Box::new(condition.clone()),
+            conclusion: Box::new(combined_conclusion.clone()),
         }),
         triggers: None,
         trigger_inference_mode: None,
@@ -1066,11 +1067,22 @@ fn lower_multi_binder_choose_closure(
             }
         }
     } else if let Some(TrustVcExpr::Choose { also_assert, .. }) = tuple_args.last_mut() {
-        // Decidable arithmetic predicate: keep the OLD behavior — nested-`exists`
-        // per-field conditions plus the combined axiom on the last field only,
-        // UNMARKED (it verifies via arithmetic; the encoder will not mark it
-        // because it mentions no fn call).
-        *also_assert = Some(Box::new(combined_axiom));
+        // Decidable arithmetic predicate: retain the universal Hilbert axiom,
+        // and add bounded, GROUND instances at deterministic small witnesses.
+        // ay's CEGQI can miss even `exists i,j. i < j`; each ground implication
+        // here is just a valid universal instance `P(w) ==> P(chosen)`, never an
+        // unconditional witness claim. Thus an unsatisfiable predicate leaves
+        // every antecedent false, while an inhabited small arithmetic relation
+        // avoids depending on incomplete quantifier search.
+        let mut instances = vec![combined_axiom];
+        for witness in small_integer_witness_assignments(&params) {
+            let premise = substitute_unbound_vars(condition.clone(), &witness);
+            instances.push(TrustVcExpr::Implies {
+                premise: Box::new(premise),
+                conclusion: Box::new(combined_conclusion.clone()),
+            });
+        }
+        *also_assert = balanced_conjunction(instances).map(Box::new);
     }
 
     Ok(TrustVcExpr::FnCall {
@@ -1078,6 +1090,135 @@ fn lower_multi_binder_choose_closure(
         args: tuple_args,
         return_ty: tuple_ty,
     })
+}
+
+/// Build a logarithmic-depth conjunction, avoiding a new expression-depth cliff
+/// when the full 27-instance basis is available.
+fn balanced_conjunction(mut exprs: Vec<TrustVcExpr>) -> Option<TrustVcExpr> {
+    while exprs.len() > 1 {
+        let mut next = Vec::with_capacity(exprs.len().div_ceil(2));
+        let mut iter = exprs.into_iter();
+        while let Some(left) = iter.next() {
+            if let Some(right) = iter.next() {
+                next.push(TrustVcExpr::Logic {
+                    op: LogicOp::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                });
+            } else {
+                next.push(left);
+            }
+        }
+        exprs = next;
+    }
+    exprs.pop()
+}
+
+/// Enumerate a deliberately tiny Cartesian witness basis for arithmetic
+/// multi-binder choice. The cap is structural (at most 3^3 = 27 assignments),
+/// and unsupported or higher-arity types simply retain the universal axiom.
+fn small_integer_witness_assignments(
+    params: &[(String, TrustVcType)],
+) -> Vec<HashMap<String, TrustVcExpr>> {
+    const MAX_ARITY: usize = 3;
+    if params.is_empty() || params.len() > MAX_ARITY {
+        return Vec::new();
+    }
+
+    let mut assignments = vec![HashMap::new()];
+    for (name, ty) in params {
+        let values: &[i128] = match ty {
+            TrustVcType::MathInt | TrustVcType::Int { .. } => &[-1, 0, 1],
+            TrustVcType::Nat | TrustVcType::Uint { .. } => &[0, 1],
+            _ => return Vec::new(),
+        };
+        let mut next = Vec::with_capacity(assignments.len() * values.len());
+        for assignment in assignments {
+            for value in values {
+                let mut extended = assignment.clone();
+                extended.insert(
+                    name.clone(),
+                    TrustVcExpr::IntLit {
+                        value: *value,
+                        ty: ty.clone(),
+                    },
+                );
+                next.push(extended);
+            }
+        }
+        assignments = next;
+    }
+    assignments
+}
+
+#[cfg(test)]
+mod small_integer_witness_tests {
+    use super::*;
+
+    #[test]
+    fn signed_basis_is_cartesian_and_type_correct() {
+        let params = vec![
+            ("i".to_string(), TrustVcType::MathInt),
+            ("j".to_string(), TrustVcType::Int { width: 16 }),
+        ];
+        let assignments = small_integer_witness_assignments(&params);
+        assert_eq!(assignments.len(), 9);
+        for assignment in assignments {
+            for (name, expected_ty) in &params {
+                match assignment.get(name) {
+                    Some(TrustVcExpr::IntLit { value, ty }) => {
+                        assert!([-1, 0, 1].contains(value));
+                        assert_eq!(ty, expected_ty);
+                    }
+                    other => panic!("expected typed integer witness for {name}, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_basis_is_nonnegative() {
+        let params = vec![
+            ("n".to_string(), TrustVcType::Nat),
+            ("u".to_string(), TrustVcType::Uint { width: 8 }),
+        ];
+        let assignments = small_integer_witness_assignments(&params);
+        assert_eq!(assignments.len(), 4);
+        assert!(assignments.iter().all(|assignment| {
+            assignment
+                .values()
+                .all(|expr| matches!(expr, TrustVcExpr::IntLit { value: 0 | 1, .. }))
+        }));
+    }
+
+    #[test]
+    fn arity_cap_and_unsupported_types_keep_universal_only() {
+        let four = (0..4)
+            .map(|index| (format!("v{index}"), TrustVcType::MathInt))
+            .collect::<Vec<_>>();
+        assert!(small_integer_witness_assignments(&four).is_empty());
+        assert!(
+            small_integer_witness_assignments(&[("b".to_string(), TrustVcType::Bool,)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn conjunction_depth_is_logarithmic() {
+        fn depth(expr: &TrustVcExpr) -> usize {
+            match expr {
+                TrustVcExpr::Logic {
+                    op: LogicOp::And,
+                    left,
+                    right,
+                } => 1 + depth(left).max(depth(right)),
+                _ => 1,
+            }
+        }
+
+        let exprs = (0..28).map(|_| TrustVcExpr::BoolLit(true)).collect();
+        let conjunction = balanced_conjunction(exprs).expect("non-empty conjunction");
+        assert_eq!(depth(&conjunction), 6);
+    }
 }
 
 fn substitute_unbound_vars(

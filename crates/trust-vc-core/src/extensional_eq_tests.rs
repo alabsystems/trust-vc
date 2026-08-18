@@ -146,6 +146,27 @@ fn multiset_var(name: &str) -> TrustVcExpr {
     crate::ir_builder::var(name, multiset_i32_ty())
 }
 
+fn multiset_empty() -> TrustVcExpr {
+    TrustVcExpr::FnCall {
+        name: format!(
+            "{}Multiset_i32_empty",
+            crate::ir_lowering::COLLECTION_CONSTRUCTOR_PREFIX
+        ),
+        args: vec![],
+        return_ty: multiset_i32_ty(),
+    }
+}
+
+fn multiset_insert(receiver: TrustVcExpr, elem: TrustVcExpr) -> TrustVcExpr {
+    crate::ir_builder::collection_op(
+        CollectionOp::Insert,
+        receiver,
+        None,
+        vec![elem],
+        multiset_i32_ty(),
+    )
+}
+
 fn map_i32_bool_ty() -> TrustVcType {
     TrustVcType::Map(
         Box::new(TrustVcType::Int { width: 32 }),
@@ -262,6 +283,137 @@ fn test_build_ext_eq_expr_multiset_expands_to_forall_count_eq() {
         build_ext_eq_expr(multiset_var("lhs"), multiset_var("rhs")),
         expected
     );
+}
+
+#[test]
+fn test_finite_multiset_ext_eq_deduplicates_support_but_preserves_duplicate_counts() {
+    let a = i32_var("a");
+    let b = i32_var("b");
+    let lhs = multiset_insert(
+        multiset_insert(multiset_insert(multiset_empty(), a.clone()), a.clone()),
+        b.clone(),
+    );
+    let rhs = multiset_insert(
+        multiset_insert(multiset_insert(multiset_empty(), b), a.clone()),
+        a,
+    );
+
+    let result = build_ext_eq_expr(lhs, rhs);
+    assert!(
+        !matches!(result, TrustVcExpr::Quantifier { .. }),
+        "finite empty-rooted multiset equality must use exact ground support"
+    );
+    let rendered = format!("{result:?}");
+    assert_eq!(
+        rendered.matches("op: Count").count(),
+        4,
+        "two structurally unique support keys require exactly two count comparisons"
+    );
+}
+
+#[test]
+fn test_finite_multiset_ext_eq_duplicate_mismatch_remains_discriminating() {
+    let a = i32_var("a");
+    let lhs = multiset_insert(multiset_insert(multiset_empty(), a.clone()), a.clone());
+    let rhs = multiset_insert(multiset_empty(), a);
+
+    let result = build_ext_eq_expr(lhs, rhs);
+    assert!(
+        !matches!(result, TrustVcExpr::BoolLit(true)),
+        "different finite multiplicities must retain a real count equality obligation"
+    );
+    assert!(format!("{result:?}").contains("Count"));
+}
+
+#[test]
+fn test_multiset_ext_eq_symbolic_base_preserves_quantified_fallback() {
+    let a = i32_var("a");
+    let lhs = multiset_insert(multiset_var("lhs"), a.clone());
+    let rhs = multiset_insert(multiset_var("rhs"), a);
+
+    assert!(matches!(
+        build_ext_eq_expr(lhs, rhs),
+        TrustVcExpr::Quantifier {
+            kind: crate::ir_expr::QuantifierKind::Forall,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_multiset_ext_eq_over_finite_cap_preserves_quantified_fallback() {
+    let mut lhs = multiset_empty();
+    let mut rhs = multiset_empty();
+    for i in 0..=MULTISET_EXT_EQ_FINITE_SUPPORT_CAP / 2 {
+        let elem = crate::ir_builder::int_lit(i as i128, TrustVcType::Int { width: 32 });
+        lhs = multiset_insert(lhs, elem.clone());
+        rhs = multiset_insert(rhs, elem);
+    }
+
+    assert!(matches!(
+        build_ext_eq_expr(lhs, rhs),
+        TrustVcExpr::Quantifier {
+            kind: crate::ir_expr::QuantifierKind::Forall,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_multiset_ext_eq_single_chain_over_cap_preserves_quantified_fallback() {
+    let mut lhs = multiset_empty();
+    for i in 0..=MULTISET_EXT_EQ_FINITE_SUPPORT_CAP {
+        let elem = crate::ir_builder::int_lit(i as i128, TrustVcType::Int { width: 32 });
+        lhs = multiset_insert(lhs, elem);
+    }
+
+    assert!(matches!(
+        build_ext_eq_expr(lhs, multiset_empty()),
+        TrustVcExpr::Quantifier {
+            kind: crate::ir_expr::QuantifierKind::Forall,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_multiset_ext_eq_malformed_cross_element_insert_fails_closed_to_forall() {
+    let malformed_key = crate::ir_builder::var("wide", TrustVcType::Uint { width: 64 });
+    let lhs = multiset_insert(multiset_empty(), malformed_key);
+    let rhs = multiset_empty();
+
+    assert!(matches!(
+        build_ext_eq_expr(lhs, rhs),
+        TrustVcExpr::Quantifier {
+            kind: crate::ir_expr::QuantifierKind::Forall,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_multiset_ext_eq_malformed_cross_element_constructor_fails_closed_to_forall() {
+    let malformed_empty = TrustVcExpr::FnCall {
+        name: format!(
+            "{}Multiset_u64_empty",
+            crate::ir_lowering::COLLECTION_CONSTRUCTOR_PREFIX
+        ),
+        args: vec![],
+        return_ty: TrustVcType::Multiset(Box::new(TrustVcType::Uint { width: 64 })),
+    };
+    // Forge an outer i32 Multiset result around the wrong receiver. The public
+    // lowering path never creates this shape; finite support must still reject
+    // it rather than manufacturing a cross-sort count comparison.
+    let lhs = multiset_insert(malformed_empty, i32_var("a"));
+    let rhs = multiset_empty();
+
+    assert!(matches!(
+        build_ext_eq_expr(lhs, rhs),
+        TrustVcExpr::Quantifier {
+            kind: crate::ir_expr::QuantifierKind::Forall,
+            ..
+        }
+    ));
 }
 
 #[test]

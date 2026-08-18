@@ -75,6 +75,51 @@ fn lower_comparison() {
 }
 
 #[test]
+fn lower_internal_math_int_result_promotes_nested_finite_arithmetic() {
+    let expr: syn::Expr = syn::parse_str("__trust_vc_math_int_expr((x + x) + x)").unwrap();
+    let env = env_with(&[("x", "u16")]).with_source_catalog_math_int_marker();
+    let result = lower_syn_expr(&expr, &env).unwrap();
+
+    let TrustVcExpr::Arith { left, ty, .. } = result else {
+        panic!("math-int marker should preserve the arithmetic tree");
+    };
+    assert_eq!(ty, TrustVcType::MathInt);
+    assert!(matches!(
+        left.as_ref(),
+        TrustVcExpr::Arith {
+            ty: TrustVcType::MathInt,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn lower_internal_math_int_result_preserves_explicit_wrapping_boundary() {
+    let expr: syn::Expr = syn::parse_str("__trust_vc_math_int_expr(x.wrapping_add(x))").unwrap();
+    let env = env_with(&[("x", "u16")]).with_source_catalog_math_int_marker();
+    let result = lower_syn_expr(&expr, &env).unwrap();
+
+    assert!(matches!(
+        result,
+        TrustVcExpr::Cast {
+            expr,
+            from_ty: TrustVcType::Uint { width: 16 },
+            to_ty: TrustVcType::MathInt,
+        } if matches!(expr.as_ref(), TrustVcExpr::WrappingArith { .. })
+    ));
+}
+
+#[test]
+fn lower_authored_math_int_marker_without_capability_fails_closed() {
+    let expr: syn::Expr = syn::parse_str("__trust_vc_math_int_expr(x + x)").unwrap();
+    let err = lower_syn_expr(&expr, &env_with(&[("x", "u16")]))
+        .expect_err("the source-catalog marker must default to unavailable");
+    assert!(err
+        .to_string()
+        .contains("reserved source-catalog math-int marker"));
+}
+
+#[test]
 fn lower_logical_and() {
     let expr: syn::Expr = syn::parse_str("a && b").unwrap();
     let env = env_with(&[("a", "bool"), ("b", "bool")]);

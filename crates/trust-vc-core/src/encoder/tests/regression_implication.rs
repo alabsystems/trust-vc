@@ -50,17 +50,23 @@ fn conditional_ite_positive() {
     let mut ctx = VerificationContext::new();
     ctx.declare_var_typed("x", i32_ty());
     ctx.push_obligation(ProofObligation::assume("not_min", "x > -2147483648"));
-    ctx.push_obligation(ProofObligation::assert(
-        "abs_nonneg",
-        "if x > 0 { x } else { -x } >= 0",
-    ));
+    // The explicit arithmetic tactic uses mathematical integers. `x > MIN`
+    // excludes the sole i32 input whose negation would overflow, so it agrees
+    // with executable i32 semantics for both ITE arms.
+    ctx.push_obligation(
+        ProofObligation::assert("abs_nonneg", "if x > 0 { x } else { -x } >= 0")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
-    // This may or may not parse depending on ITE support — accept verified or error
-    match result {
-        VerifyResult::Verified => {}
-        VerifyResult::Error { .. } => {}
-        other => panic!("unexpected: {:?}", other),
-    }
+    expect_verified(&result, "i32 abs is nonnegative away from MIN");
+
+    ctx.push_obligation(ProofObligation::assume("x_is_negative_five", "x == -5"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_abs_bound", "if x > 0 { x } else { -x } < 5")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(&result, "the nonlinear tactic must reject abs(-5) < 5");
 }
 
 #[test]

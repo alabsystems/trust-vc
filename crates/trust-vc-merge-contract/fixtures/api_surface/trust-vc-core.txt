@@ -29,6 +29,8 @@ const fn trust_vc_core::VerificationReportOptions::verbose(self: Self) -> bool
 const fn trust_vc_core::VerificationReportOptions::with_verbose(self: Self, verbose: bool) -> Self
 const fn trust_vc_core::VerifyResult::is_counterexample(self: &Self) -> bool
 const fn trust_vc_core::VerifyResult::is_error(self: &Self) -> bool
+const fn trust_vc_core::VerifyResult::is_failure(self: &Self) -> bool
+const fn trust_vc_core::VerifyResult::is_not_proved(self: &Self) -> bool
 const fn trust_vc_core::VerifyResult::is_unknown(self: &Self) -> bool
 const fn trust_vc_core::VerifyResult::is_verified(self: &Self) -> bool
 const fn trust_vc_core::compilation_proven_facts::CompilationProvenFact::phase(self: &Self) -> VerificationPhase
@@ -127,6 +129,7 @@ const fn trust_vc_core::verification_report::VerificationReport::total_elapsed(s
 const fn trust_vc_core::verification_report::VerificationReportOptions::new() -> Self
 const fn trust_vc_core::verification_report::VerificationReportOptions::verbose(self: Self) -> bool
 const fn trust_vc_core::verification_report::VerificationReportOptions::with_verbose(self: Self, verbose: bool) -> Self
+const trust_vc_core::proof_note::AT_MOST_ONE_PROOF_NOTE: &str
 enum trust_vc_core::HarnessOutcome
 enum trust_vc_core::SolverStatValue
 enum trust_vc_core::StepResultKind
@@ -194,6 +197,8 @@ field trust_vc_core::VerifyResult::Counterexample::bindings: Vec<CounterexampleB
 field trust_vc_core::VerifyResult::Counterexample::model: Option<String>
 field trust_vc_core::VerifyResult::Counterexample::obligation_name: String
 field trust_vc_core::VerifyResult::Error::message: String
+field trust_vc_core::VerifyResult::NotProved::category: crate::encoder::UnknownCategory
+field trust_vc_core::VerifyResult::NotProved::reason: String
 field trust_vc_core::VerifyResult::Unknown::category: crate::encoder::UnknownCategory
 field trust_vc_core::VerifyResult::Unknown::reason: String
 field trust_vc_core::full_verification::FullVerificationError::RejectedEvidence::rejected: Vec<EvidenceRejection>
@@ -212,6 +217,8 @@ field trust_vc_core::harness::HarnessOutcome::MultipleFailed::assertions: usize
 field trust_vc_core::harness::HarnessOutcome::MultipleFailed::failures: Vec<HarnessAssertion>
 field trust_vc_core::harness::HarnessOutcome::OneFailed::assertions: usize
 field trust_vc_core::harness::HarnessOutcome::OneFailed::failure: HarnessAssertion
+field trust_vc_core::ir::ConformanceMethodBody::body_text: String
+field trust_vc_core::ir::ConformanceMethodBody::param_count: usize
 field trust_vc_core::ir::DatatypeVariant::fields: Vec<(String, TrustVcType)>
 field trust_vc_core::ir::DatatypeVariant::name: String
 field trust_vc_core::ir::DatatypeWellFoundednessError::MutualRecursionUnsupported::datatype: String
@@ -221,6 +228,7 @@ field trust_vc_core::ir::MatchArm::body: TrustVcExpr
 field trust_vc_core::ir::MatchArm::guard: Option<TrustVcExpr>
 field trust_vc_core::ir::MatchArm::pattern: MatchPattern
 field trust_vc_core::ir::MatchPattern::Constructor::bindings: Vec<String>
+field trust_vc_core::ir::MatchPattern::Constructor::has_rest: bool
 field trust_vc_core::ir::MatchPattern::Constructor::variant_name: String
 field trust_vc_core::ir::MatchPattern::Ident::0: String
 field trust_vc_core::ir::MatchPattern::Lit::0: TrustVcExpr
@@ -228,18 +236,24 @@ field trust_vc_core::ir::MatchPattern::Or::0: Vec<MatchPattern>
 field trust_vc_core::ir::MatchPattern::Struct::fields: Vec<StructPatternField>
 field trust_vc_core::ir::MatchPattern::Struct::has_rest: bool
 field trust_vc_core::ir::MatchPattern::Struct::variant_name: String
+field trust_vc_core::ir::StructDef::derived_clone: bool
+field trust_vc_core::ir::StructDef::derived_partial_eq: bool
 field trust_vc_core::ir::StructDef::fields: Vec<(String, TrustVcType)>
 field trust_vc_core::ir::StructDef::name: String
 field trust_vc_core::ir::StructPatternField::binding: Option<String>
 field trust_vc_core::ir::StructPatternField::field_name: String
 field trust_vc_core::ir::TraitBound::trait_name: String
 field trust_vc_core::ir::TraitBound::type_param: String
+field trust_vc_core::ir::TraitDecl::generics: Vec<String>
 field trust_vc_core::ir::TraitDecl::methods: Vec<TraitMethodDecl>
 field trust_vc_core::ir::TraitDecl::name: String
 field trust_vc_core::ir::TraitDecl::supertraits: Vec<String>
+field trust_vc_core::ir::TraitImplDecl::assoc_type_bindings: Vec<(String, TrustVcType)>
 field trust_vc_core::ir::TraitImplDecl::concrete_type: TrustVcType
+field trust_vc_core::ir::TraitImplDecl::is_external: bool
 field trust_vc_core::ir::TraitImplDecl::method_bindings: Vec<(String, String)>
 field trust_vc_core::ir::TraitImplDecl::trait_name: String
+field trust_vc_core::ir::TraitImplDecl::trait_type_args: Vec<TrustVcType>
 field trust_vc_core::ir::TraitMethodDecl::default_body: Option<String>
 field trust_vc_core::ir::TraitMethodDecl::default_ensures: Vec<String>
 field trust_vc_core::ir::TraitMethodDecl::ensures: Vec<String>
@@ -256,6 +270,7 @@ field trust_vc_core::ir::TrustVcExpr::BoolLit::0: bool
 field trust_vc_core::ir::TrustVcExpr::Cast::expr: Box<Self>
 field trust_vc_core::ir::TrustVcExpr::Cast::from_ty: crate::ir::TrustVcType
 field trust_vc_core::ir::TrustVcExpr::Cast::to_ty: crate::ir::TrustVcType
+field trust_vc_core::ir::TrustVcExpr::Choose::also_assert: Option<Box<Self>>
 field trust_vc_core::ir::TrustVcExpr::Choose::condition: Box<Self>
 field trust_vc_core::ir::TrustVcExpr::Choose::key: String
 field trust_vc_core::ir::TrustVcExpr::Choose::var_name: String
@@ -345,6 +360,8 @@ field trust_vc_core::ir::TrustVcType::Uint::width: u32
 field trust_vc_core::ir::TrustVcTypeParseError::InvalidSyntax::input: String
 field trust_vc_core::ir::TrustVcTypeParseError::InvalidSyntax::kind: &'static str
 field trust_vc_core::ir::TrustVcTypeParseError::UnknownType::input: String
+field trust_vc_core::proof_note::ProofNoteLabel::is_custom_err: bool
+field trust_vc_core::proof_note::ProofNoteLabel::text: String
 field trust_vc_core::vc::InvariantMask::Namespaces::0: Vec<i64>
 field trust_vc_core::vc::VariableDecl::name: String
 field trust_vc_core::vc::VariableDecl::ty: crate::ir::TrustVcType
@@ -398,6 +415,15 @@ fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::safe_indexin
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::to_json(self: &Self) -> String
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::total_matches(self: &Self) -> usize
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::try_from_report(report: &VerificationReport) -> Result<Self, CompilationProvenFactsError>
+fn trust_vc_core::env::EnvEditor::remove<impl AsRef<OsStr>>(self: &mut Self, key: impl AsRef<OsStr>)
+fn trust_vc_core::env::EnvEditor::set<impl AsRef<OsStr>, impl AsRef<OsStr>>(self: &mut Self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>)
+fn trust_vc_core::env::ScopedEnvVar::set<impl AsRef<OsStr>, impl AsRef<OsStr>>(key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self
+fn trust_vc_core::env::ScopedEnvVar::unset<impl AsRef<OsStr>>(key: impl AsRef<OsStr>) -> Self
+fn trust_vc_core::env::lock_env() -> std::sync::MutexGuard<'static, ()>
+fn trust_vc_core::env::set_persistent_env_var<impl AsRef<OsStr>, impl AsRef<OsStr>>(key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>)
+fn trust_vc_core::env::with_env_edits<T, impl FnOnce(&mut EnvEditor) -> T>(f: impl FnOnce(&mut EnvEditor) -> T) -> T
+fn trust_vc_core::env::with_serialized_env_vars<T, impl FnOnce() -> T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T
+fn trust_vc_core::env::with_serialized_env_vars_removed<T, impl FnOnce() -> T>(vars: &[&str], f: impl FnOnce() -> T) -> T
 fn trust_vc_core::full_verification::EvidenceRejection::obligation_name(self: &Self) -> &str
 fn trust_vc_core::full_verification::FullVerificationError::rejected(self: &Self) -> &[EvidenceRejection]
 fn trust_vc_core::full_verification::FullVerificationRequest::declare_var_typed(self: &mut Self, name: &str, ty: TrustVcType)
@@ -429,32 +455,43 @@ fn trust_vc_core::harness::HarnessOutcome::is_inconclusive(self: &Self) -> bool
 fn trust_vc_core::harness::HarnessOutcome::matches_assert_fails(self: &Self, total: usize, fails: usize) -> bool
 fn trust_vc_core::harness::HarnessOutcome::total_assertions(self: &Self) -> usize
 fn trust_vc_core::harness::HarnessOutcome::verified_count(self: &Self) -> usize
+fn trust_vc_core::ir::ConformanceMethodBody::new<impl Into<String>>(body_text: impl Into<String>, param_count: usize) -> Self
 fn trust_vc_core::ir::DatatypeVariant::new<impl Into<String>>(name: impl Into<String>, fields: Vec<(String, TrustVcType)>) -> Self
 fn trust_vc_core::ir::MatchArm::new(pattern: MatchPattern, body: TrustVcExpr) -> Self
 fn trust_vc_core::ir::PointerWidthGuard::install(width_bits: u32) -> Self
 fn trust_vc_core::ir::StructDef::new<impl Into<String>>(name: impl Into<String>, fields: Vec<(String, TrustVcType)>) -> Self
 fn trust_vc_core::ir::StructDef::to_datatype_type(self: &Self) -> TrustVcType
+fn trust_vc_core::ir::StructDef::with_derives(self: Self, derived_partial_eq: bool, derived_clone: bool) -> Self
 fn trust_vc_core::ir::StructPatternField::new<impl Into<String>>(field_name: impl Into<String>, binding: Option<String>) -> Self
 fn trust_vc_core::ir::TraitBound::new<impl Into<String>, impl Into<String>>(type_param: impl Into<String>, trait_name: impl Into<String>) -> Self
 fn trust_vc_core::ir::TraitDecl::new<impl Into<String>>(name: impl Into<String>, methods: Vec<TraitMethodDecl>) -> Self
+fn trust_vc_core::ir::TraitDecl::with_generics(self: Self, generics: Vec<String>) -> Self
 fn trust_vc_core::ir::TraitDecl::with_supertraits(self: Self, supertraits: Vec<String>) -> Self
 fn trust_vc_core::ir::TraitImplDecl::new<impl Into<String>>(trait_name: impl Into<String>, concrete_type: TrustVcType, method_bindings: Vec<(String, String)>) -> Self
+fn trust_vc_core::ir::TraitImplDecl::resolve_assoc_projections(self: &Self, ty: &TrustVcType) -> TrustVcType
+fn trust_vc_core::ir::TraitImplDecl::with_assoc_type_bindings(self: Self, bindings: Vec<(String, TrustVcType)>) -> Self
+fn trust_vc_core::ir::TraitImplDecl::with_external(self: Self, is_external: bool) -> Self
+fn trust_vc_core::ir::TraitImplDecl::with_trait_type_args(self: Self, trait_type_args: Vec<TrustVcType>) -> Self
 fn trust_vc_core::ir::TraitMethodDecl::new<impl Into<String>>(name: impl Into<String>, params: Vec<(String, TrustVcType)>, return_type: TrustVcType, requires: Vec<String>, ensures: Vec<String>, has_default: bool, default_body: Option<String>) -> Self
 fn trust_vc_core::ir::TraitMethodDecl::with_default_ensures(self: Self, default_ensures: Vec<String>) -> Self
 fn trust_vc_core::ir::TrustVcExpr::collect_conjuncts(self: &Self) -> Vec<&TrustVcExpr>
+fn trust_vc_core::ir::TrustVcExpr::contains_forall_quantifier(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcExpr::contains_quantifier(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcExpr::has_non_skolemized_quantifier(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcExpr::may_emit_overflow_checks(self: &Self, check_overflow: bool) -> bool
 fn trust_vc_core::ir::TrustVcExpr::references_collection(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcType::bit_width(self: &Self) -> Option<u32>
+fn trust_vc_core::ir::TrustVcType::collect_type_param_bindings(self: &Self, actual: &TrustVcType, bindings: &mut Vec<(String, TrustVcType)>)
 fn trust_vc_core::ir::TrustVcType::collection_elem(self: &Self) -> Option<TrustVcType>
 fn trust_vc_core::ir::TrustVcType::contains_float(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcType::contains_opaque(self: &Self) -> bool
+fn trust_vc_core::ir::TrustVcType::contains_type_param(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcType::cow_inner_type(self: &Self) -> Option<TrustVcType>
 fn trust_vc_core::ir::TrustVcType::cow_view_type(self: &Self) -> Option<TrustVcType>
 fn trust_vc_core::ir::TrustVcType::from_str(ty: &str) -> Result<TrustVcType, String>
 fn trust_vc_core::ir::TrustVcType::has_collection_length(self: &Self) -> bool
 fn trust_vc_core::ir::TrustVcType::is_cow(self: &Self) -> bool
+fn trust_vc_core::ir::TrustVcType::monomorphize(self: &Self, bindings: &[(String, TrustVcType)]) -> TrustVcType
 fn trust_vc_core::ir::TrustVcType::parse_or_opaque(ty: &str) -> TrustVcType
 fn trust_vc_core::ir::TrustVcType::to_type_string(self: &Self) -> String
 fn trust_vc_core::ir::TrustVcType::try_from_str(ty: &str) -> Result<TrustVcType, TrustVcTypeParseError>
@@ -467,12 +504,18 @@ fn trust_vc_core::ir::pointer_width() -> u32
 fn trust_vc_core::ir::scan_pointer_width_directive(source: &str) -> Result<Option<PointerWidthGuard>, String>
 fn trust_vc_core::ir::strip_pointer_width_directives(source: &str) -> String
 fn trust_vc_core::json_escape(text: &str) -> String
+fn trust_vc_core::list_trait_conformance_obligations(file_path: &str) -> error::TrustVcResult<Vec<String>>
 fn trust_vc_core::mode::FunctionMode::as_str(self: Self) -> &'static str
 fn trust_vc_core::mode::FunctionMode::can_call(self: Self, callee: FunctionMode) -> bool
 fn trust_vc_core::mode::VarMode::as_str(self: Self) -> &'static str
 fn trust_vc_core::mode::VarMode::is_exec(self: Self) -> bool
 fn trust_vc_core::mode::VarMode::join(self: Self, other: VarMode) -> VarMode
 fn trust_vc_core::mode::VarMode::le(self: Self, other: VarMode) -> bool
+fn trust_vc_core::proof_note::at_most_one_proof_note(labels: Vec<ProofNoteLabel>) -> crate::error::TrustVcResult<Option<ProofNoteLabel>>
+fn trust_vc_core::proof_note::peel_leading_inner_proof_note_attrs(tokens: proc_macro2::TokenStream) -> crate::error::TrustVcResult<(Vec<ProofNoteLabel>, proc_macro2::TokenStream)>
+fn trust_vc_core::proof_note::proof_note_label_from_attribute(attr: &syn::Attribute) -> crate::error::TrustVcResult<Option<ProofNoteLabel>>
+fn trust_vc_core::proof_note::proof_note_labels_from_attrs(attrs: &[syn::Attribute]) -> crate::error::TrustVcResult<Vec<ProofNoteLabel>>
+fn trust_vc_core::proof_note::take_leading_proof_note_labels(expr: &mut syn::Expr) -> crate::error::TrustVcResult<Vec<ProofNoteLabel>>
 fn trust_vc_core::proven_facts::AssertionFact::assertion_name(self: &Self) -> &str
 fn trust_vc_core::proven_facts::AssertionFact::condition(self: &Self) -> &str
 fn trust_vc_core::proven_facts::AssertionFact::function_name(self: &Self) -> &str
@@ -557,6 +600,7 @@ fn trust_vc_core::vc::ProofObligation::broadcast_assume<impl Into<String>, impl 
 fn trust_vc_core::vc::ProofObligation::broadcast_group(self: &Self) -> Option<&str>
 fn trust_vc_core::vc::ProofObligation::condition(self: &Self) -> &str
 fn trust_vc_core::vc::ProofObligation::ensures<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
+fn trust_vc_core::vc::ProofObligation::hide<impl Into<String>>(fn_name: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::invariant_close<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::invariant_except_break<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::invariant_open<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
@@ -570,6 +614,7 @@ fn trust_vc_core::vc::ProofObligation::name(self: &Self) -> &str
 fn trust_vc_core::vc::ProofObligation::new<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>, kind: ObligationKind) -> Self
 fn trust_vc_core::vc::ProofObligation::new_typed<impl Into<String>>(name: impl Into<String>, expr: crate::ir::TrustVcExpr, kind: ObligationKind) -> Self
 fn trust_vc_core::vc::ProofObligation::post_loop_assume<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
+fn trust_vc_core::vc::ProofObligation::proof_note(self: &Self) -> Option<&crate::proof_note::ProofNoteLabel>
 fn trust_vc_core::vc::ProofObligation::recommends<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::requires<impl Into<String>, impl Into<String>>(name: impl Into<String>, condition: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::reveal<impl Into<String>>(fn_name: impl Into<String>) -> Self
@@ -584,6 +629,7 @@ fn trust_vc_core::vc::ProofObligation::with_inline(self: Self, inline: bool) -> 
 fn trust_vc_core::vc::ProofObligation::with_invariant_namespace(self: Self, namespace: i64) -> Self
 fn trust_vc_core::vc::ProofObligation::with_location<impl Into<String>>(self: Self, location: impl Into<String>) -> Self
 fn trust_vc_core::vc::ProofObligation::with_opaque(self: Self, opaque: bool) -> Self
+fn trust_vc_core::vc::ProofObligation::with_proof_note(self: Self, label: Option<crate::proof_note::ProofNoteLabel>) -> Self
 fn trust_vc_core::vc::ProofObligation::with_solver_mode(self: Self, mode: SolverMode) -> Self
 fn trust_vc_core::vc::ProofObligation::with_step_meta(self: Self, meta: ProofStepMeta) -> Self
 fn trust_vc_core::vc::ProofObligation::with_trigger_patterns(self: Self, patterns: Vec<Vec<String>>) -> Self
@@ -638,8 +684,12 @@ fn trust_vc_core::vc::VerificationContext::has_assertions(self: &Self) -> bool
 fn trust_vc_core::vc::VerificationContext::has_assumptions(self: &Self) -> bool
 fn trust_vc_core::vc::VerificationContext::has_variable(self: &Self, name: &str) -> bool
 fn trust_vc_core::vc::VerificationContext::helper_functions(self: &Self) -> &HashMap<String, String>
+fn trust_vc_core::vc::VerificationContext::hidden_fns(self: &Self) -> &HashSet<String>
+fn trust_vc_core::vc::VerificationContext::hide_function<impl Into<String>>(self: &mut Self, name: impl Into<String>)
 fn trust_vc_core::vc::VerificationContext::is_erased_ghost_var(self: &Self, name: &str) -> bool
 fn trust_vc_core::vc::VerificationContext::is_erased_shared_ref_var(self: &Self, name: &str) -> bool
+fn trust_vc_core::vc::VerificationContext::loop_body_transitions(self: &Self) -> &HashMap<String, Vec<(String, String)>>
+fn trust_vc_core::vc::VerificationContext::loop_entry_scopes(self: &Self) -> &HashMap<String, Vec<ProofObligation>>
 fn trust_vc_core::vc::VerificationContext::loop_guards(self: &Self) -> &HashMap<String, String>
 fn trust_vc_core::vc::VerificationContext::loop_modified_vars(self: &Self) -> &HashMap<String, Vec<String>>
 fn trust_vc_core::vc::VerificationContext::mark_erased_ghost_var(self: &mut Self, name: &str)
@@ -652,12 +702,15 @@ fn trust_vc_core::vc::VerificationContext::push_assert(self: &mut Self, name: &s
 fn trust_vc_core::vc::VerificationContext::push_assume(self: &mut Self, name: &str, condition: &str)
 fn trust_vc_core::vc::VerificationContext::push_obligation(self: &mut Self, obligation: ProofObligation)
 fn trust_vc_core::vc::VerificationContext::push_typed_obligation(self: &mut Self, obligation: TypedProofObligation)
+fn trust_vc_core::vc::VerificationContext::register_conformance_exempt_method(self: &mut Self, concrete_fn_name: String)
 fn trust_vc_core::vc::VerificationContext::register_counterexample_alias<impl Into<String>, impl Into<String>>(self: &mut Self, raw_name: impl Into<String>, display_name: impl Into<String>, visible: bool)
 fn trust_vc_core::vc::VerificationContext::register_prophecy_binding(self: &mut Self, name: &str, ty: crate::ir::TrustVcType)
 fn trust_vc_core::vc::VerificationContext::register_source_type_alias(self: &mut Self, name: &str, ty: crate::ir::TrustVcType)
 fn trust_vc_core::vc::VerificationContext::register_struct_type(self: &mut Self, def: StructDef)
 fn trust_vc_core::vc::VerificationContext::register_trait_decl(self: &mut Self, decl: TraitDecl)
 fn trust_vc_core::vc::VerificationContext::register_trait_impl(self: &mut Self, decl: TraitImplDecl)
+fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_body(self: &mut Self, concrete_fn_name: String, body: crate::ir::ConformanceMethodBody)
+fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_ensures(self: &mut Self, concrete_fn_name: String, ensures: Vec<String>)
 fn trust_vc_core::vc::VerificationContext::set_bitshift_behavior(self: &mut Self, behavior: BitshiftBehavior)
 fn trust_vc_core::vc::VerificationContext::set_demand_inline_config(self: &mut Self, config: DemandInlineConfig)
 fn trust_vc_core::vc::VerificationContext::set_demand_inline_depth(self: &mut Self, depth_bound: usize)
@@ -666,6 +719,8 @@ fn trust_vc_core::vc::VerificationContext::set_demand_inline_max_callees(self: &
 fn trust_vc_core::vc::VerificationContext::set_div0_behavior(self: &mut Self, behavior: Div0Behavior)
 fn trust_vc_core::vc::VerificationContext::set_function_context(self: &mut Self, context: FunctionContext)
 fn trust_vc_core::vc::VerificationContext::set_invariant_mask(self: &mut Self, mask: InvariantMask)
+fn trust_vc_core::vc::VerificationContext::set_loop_body_transition(self: &mut Self, invariant_name: &str, transitions: Vec<(String, String)>)
+fn trust_vc_core::vc::VerificationContext::set_loop_entry_scope(self: &mut Self, invariant_name: &str, entry_obligations: Vec<ProofObligation>)
 fn trust_vc_core::vc::VerificationContext::set_loop_modified_vars(self: &mut Self, invariant_name: &str, vars: Vec<String>)
 fn trust_vc_core::vc::VerificationContext::set_overflow_behavior(self: &mut Self, behavior: OverflowBehavior)
 fn trust_vc_core::vc::VerificationContext::set_rlimit(self: &mut Self, ms: u64)
@@ -680,6 +735,7 @@ fn trust_vc_core::vc::VerificationContext::verification_mode(self: &Self) -> Ver
 fn trust_vc_core::vc::VerificationContext::verify(self: &Self) -> VerifyResult
 fn trust_vc_core::vc::VerificationContext::verify_harness(self: &Self) -> HarnessOutcome
 fn trust_vc_core::vc::VerificationContext::verify_with_report(self: &Self, _options: VerificationReportOptions) -> VerificationReport
+fn trust_vc_core::vc::VerificationContext::warnings(self: &Self) -> &[String]
 fn trust_vc_core::vc::VerificationContext::with_call_site_mode(self: Self) -> Self
 fn trust_vc_core::vc::VerificationContext::with_mode_overflow(self: Self, mode: crate::mode::FunctionMode) -> Self
 fn trust_vc_core::vc::VerificationContext::with_overflow_checks(self: Self) -> Self
@@ -720,16 +776,19 @@ fn trust_vc_core::verify::Verifier::verify_context(ctx: &VerificationContext) ->
 fn trust_vc_core::verify::Verifier::verify_context_with_report(ctx: &VerificationContext, options: VerificationReportOptions) -> VerificationReport
 fn trust_vc_core::verify::Verifier::verify_function(func: &ItemFn) -> VerifyResult
 fn trust_vc_core::verify::Verifier::verify_with_report(proof: &Proof, options: VerificationReportOptions) -> VerificationReport
+fn trust_vc_core::verify_trait_conformance_obligation(file_path: &str, obligation_name: &str) -> error::TrustVcResult<crate::encoder::VerifyResult>
 macro trust_vc_core::proof
 macro trust_vc_core::verify_extern_call
 macro trust_vc_core::verify_markers
 macro trust_vc_core::verify_proof
 module trust_vc_core::compilation_proven_facts
+module trust_vc_core::env
 module trust_vc_core::full_verification
 module trust_vc_core::harness
 module trust_vc_core::ir
 module trust_vc_core::loop_metadata
 module trust_vc_core::mode
+module trust_vc_core::proof_note
 module trust_vc_core::proven_facts
 module trust_vc_core::proven_facts::extraction
 module trust_vc_core::proven_facts::hints
@@ -768,6 +827,7 @@ pub use trust_vc_core::ir::StructPatternField = crate::ir_expr::StructPatternFie
 pub use trust_vc_core::ir::TrustVcExpr = crate::ir_expr::TrustVcExpr
 pub use trust_vc_core::ir::TrustVcTypeParseError = crate::ir_error::TrustVcTypeParseError
 pub use trust_vc_core::ir::WrappingMode = crate::ir_expr::WrappingMode
+pub use trust_vc_core::list_trait_conformance_obligations = vc_extraction::list_trait_conformance_obligations
 pub use trust_vc_core::proven_facts::AssertionFact = extraction::AssertionFact
 pub use trust_vc_core::proven_facts::OptimizationHint = hints::OptimizationHint
 pub use trust_vc_core::proven_facts::OptimizationHintKind = hints::OptimizationHintKind
@@ -795,6 +855,7 @@ pub use trust_vc_core::vc::VerificationContext = context::VerificationContext
 pub use trust_vc_core::vc::VerificationMode = context::VerificationMode
 pub use trust_vc_core::verification_report::SolverStatValue = solver_stats::SolverStatValue
 pub use trust_vc_core::verification_report::SolverStats = solver_stats::SolverStats
+pub use trust_vc_core::verify_trait_conformance_obligation = vc_extraction::verify_trait_conformance_obligation
 struct trust_vc_core::BatchVerifyResult
 struct trust_vc_core::CounterexampleBinding
 struct trust_vc_core::DemandInlineRecovery
@@ -807,6 +868,8 @@ struct trust_vc_core::VerificationReport
 struct trust_vc_core::VerificationReportOptions
 struct trust_vc_core::compilation_proven_facts::CompilationProvenFact
 struct trust_vc_core::compilation_proven_facts::CompilationProvenFacts
+struct trust_vc_core::env::EnvEditor
+struct trust_vc_core::env::ScopedEnvVar
 struct trust_vc_core::full_verification::EvidenceRejection
 struct trust_vc_core::full_verification::FullVerificationRequest
 struct trust_vc_core::full_verification::FullVerificationResult
@@ -814,6 +877,7 @@ struct trust_vc_core::full_verification::TypedMemorySafetyFact
 struct trust_vc_core::full_verification::VerifiedMemorySafetyFact
 struct trust_vc_core::full_verification::VerifiedProofEvidence
 struct trust_vc_core::harness::HarnessAssertion
+struct trust_vc_core::ir::ConformanceMethodBody
 struct trust_vc_core::ir::DatatypeVariant
 struct trust_vc_core::ir::MatchArm
 struct trust_vc_core::ir::PointerWidthGuard
@@ -823,6 +887,7 @@ struct trust_vc_core::ir::TraitBound
 struct trust_vc_core::ir::TraitDecl
 struct trust_vc_core::ir::TraitImplDecl
 struct trust_vc_core::ir::TraitMethodDecl
+struct trust_vc_core::proof_note::ProofNoteLabel
 struct trust_vc_core::proven_facts::AssertionFact
 struct trust_vc_core::proven_facts::OptimizationHint
 struct trust_vc_core::proven_facts::ProvenFact
@@ -859,6 +924,7 @@ variant trust_vc_core::SolverStatValue::Int
 variant trust_vc_core::SolverStatValue::String
 variant trust_vc_core::StepResultKind::Counterexample
 variant trust_vc_core::StepResultKind::Error
+variant trust_vc_core::StepResultKind::NotProved
 variant trust_vc_core::StepResultKind::Skipped
 variant trust_vc_core::StepResultKind::Unknown
 variant trust_vc_core::StepResultKind::Verified
@@ -877,6 +943,7 @@ variant trust_vc_core::UnknownCategory::UnsupportedMode
 variant trust_vc_core::UnknownCategory::VacuousTruth
 variant trust_vc_core::VerificationPhase::AssertBy
 variant trust_vc_core::VerificationPhase::Assertion
+variant trust_vc_core::VerificationPhase::LoopDecreases
 variant trust_vc_core::VerificationPhase::LoopEnsures
 variant trust_vc_core::VerificationPhase::LoopInvariant
 variant trust_vc_core::VerificationPhase::LoopInvariantInductiveStep
@@ -885,6 +952,7 @@ variant trust_vc_core::VerificationPhase::Recommendation
 variant trust_vc_core::VerificationPhase::VacuousPrecheck
 variant trust_vc_core::VerifyResult::Counterexample
 variant trust_vc_core::VerifyResult::Error
+variant trust_vc_core::VerifyResult::NotProved
 variant trust_vc_core::VerifyResult::Unknown
 variant trust_vc_core::VerifyResult::Verified
 variant trust_vc_core::compilation_proven_facts::CompilationProvenFactsError::ReportNotVerified
@@ -1086,6 +1154,7 @@ variant trust_vc_core::vc::ObligationKind::Assume
 variant trust_vc_core::vc::ObligationKind::BroadcastAssume
 variant trust_vc_core::vc::ObligationKind::BroadcastUse
 variant trust_vc_core::vc::ObligationKind::Ensures
+variant trust_vc_core::vc::ObligationKind::Hide
 variant trust_vc_core::vc::ObligationKind::InvariantClose
 variant trust_vc_core::vc::ObligationKind::InvariantExceptBreak
 variant trust_vc_core::vc::ObligationKind::InvariantOpen
@@ -1112,11 +1181,13 @@ variant trust_vc_core::verification_report::SolverStatValue::Int
 variant trust_vc_core::verification_report::SolverStatValue::String
 variant trust_vc_core::verification_report::StepResultKind::Counterexample
 variant trust_vc_core::verification_report::StepResultKind::Error
+variant trust_vc_core::verification_report::StepResultKind::NotProved
 variant trust_vc_core::verification_report::StepResultKind::Skipped
 variant trust_vc_core::verification_report::StepResultKind::Unknown
 variant trust_vc_core::verification_report::StepResultKind::Verified
 variant trust_vc_core::verification_report::VerificationPhase::AssertBy
 variant trust_vc_core::verification_report::VerificationPhase::Assertion
+variant trust_vc_core::verification_report::VerificationPhase::LoopDecreases
 variant trust_vc_core::verification_report::VerificationPhase::LoopEnsures
 variant trust_vc_core::verification_report::VerificationPhase::LoopInvariant
 variant trust_vc_core::verification_report::VerificationPhase::LoopInvariantInductiveStep

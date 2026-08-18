@@ -227,11 +227,36 @@ pub(crate) fn parse_trait_impl_decl(input: &ItemImpl) -> TrustVcResult<TraitImpl
     // the Verus external_trait_specification trust model — the impl's bodies
     // are trusted, so the body-conformance pass skips this impl while callers
     // still consume the trait contract.
+    //
+    // SOUNDNESS: match the WHOLE path, not just its last segment. This attribute
+    // is a trust hatch — it skips body conformance while the trait's
+    // `forall self, params. requires ==> ensures` axiom stays published to
+    // callers — so which namespace asked for it is load-bearing. A trailing-
+    // segment test also accepted `#[verifier::external]` and any other
+    // `#[whatever::external]`, and in Verus `#[verifier::external]` means
+    // "outside the verification universe", NOT "trust this body against a
+    // published in-file contract". Honouring another tool's attribute as a
+    // trust-vc trust grant is a proof hole with someone else's name on it.
+    //
+    // No in-corpus trigger today (the ported corpus uses
+    // `#[verifier::external_body]`, a different ident), but this becomes an
+    // ordinary shape the moment Phase 2 ingests Verus source — which is the
+    // stated program, so the gate is tightened before the trigger arrives rather
+    // than after.
     let is_external = input.attrs.iter().any(|attr| {
-        attr.path()
+        let segments: Vec<String> = attr
+            .path()
             .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "external")
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        match segments.as_slice() {
+            // Bare `#[external]`, as produced by trust-vc's own partial expansion.
+            [only] => only == "external",
+            // Fully qualified: only trust-vc's own namespace grants this.
+            [namespace, name] => namespace == "trust_vc" && name == "external",
+            _ => false,
+        }
     });
 
     Ok(

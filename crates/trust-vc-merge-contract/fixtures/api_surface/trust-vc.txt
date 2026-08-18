@@ -13,6 +13,7 @@ proc_macro trust_vc::assume_by!
 proc_macro trust_vc::broadcast_use!
 proc_macro trust_vc::calc!
 proc_macro trust_vc::choose!
+proc_macro trust_vc::cite!
 proc_macro trust_vc::closure!
 proc_macro trust_vc::decreases_to!
 proc_macro trust_vc::ensures!
@@ -25,6 +26,7 @@ proc_macro trust_vc::external_spec!
 proc_macro trust_vc::forall!
 proc_macro trust_vc::ghost_ensures!
 proc_macro trust_vc::ghost_requires!
+proc_macro trust_vc::hide!
 proc_macro trust_vc::invariant!
 proc_macro trust_vc::invariant_except_break!
 proc_macro trust_vc::loop_decreases!

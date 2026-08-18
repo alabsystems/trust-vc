@@ -10,10 +10,34 @@ use std::process::Command;
 const BUILD_GIT_HEAD_ENV: &str = "TVC_CORE_BUILD_GIT_HEAD";
 
 fn main() {
+    // SOUNDNESS: emit the variable on EVERY path, including the failure paths.
+    //
+    // The consumer reads it with `option_env!`, which falls back to the ambient
+    // process environment when Cargo sets nothing. So "deliberately leave the
+    // build identity unset" did not leave it unset — it left it open. An
+    // exported `TVC_CORE_BUILD_GIT_HEAD=<40 hex chars>` in the build shell
+    // satisfies the consumer's `is_full_git_revision` check (which tests only
+    // length and hex-ness, never that the revision exists or that the tree
+    // matches it) and re-enables the persistent VC cache on precisely the builds
+    // this function means to lock out: dirty trees, git-less environments,
+    // malformed HEADs.
+    //
+    // Emitting an empty value on those paths makes Cargo's value always win.
+    // Empty is not a full git revision, so the consumer's existing check rejects
+    // it and the intended "bypass the cache" behaviour is preserved — now
+    // because the compiled-in value says so, rather than because nothing was
+    // said.
+    //
+    // `rerun-if-env-changed` is declared so the ambient value is a tracked build
+    // input rather than an untracked one that can change under a cached build.
+    println!("cargo:rerun-if-env-changed={BUILD_GIT_HEAD_ENV}");
+
     let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
+        emit_unauthenticated_build_identity();
         return;
     };
     let Some(repo_root) = find_repo_root(&manifest_dir) else {
+        emit_unauthenticated_build_identity();
         return;
     };
 
@@ -22,12 +46,19 @@ fn main() {
 
     // A Git revision authenticates the bytes being compiled only for a clean
     // checkout. If Git is unavailable, HEAD is abbreviated/malformed, or any
-    // tracked/untracked byte differs from HEAD, deliberately leave the build
-    // identity unset. The verifier will then bypass its persistent VC cache.
+    // tracked/untracked byte differs from HEAD, the build identity is emitted
+    // EMPTY. The verifier then bypasses its persistent VC cache.
     let Some(head) = clean_full_git_head(&repo_root) else {
+        emit_unauthenticated_build_identity();
         return;
     };
     println!("cargo:rustc-env={BUILD_GIT_HEAD_ENV}={head}");
+}
+
+/// Pin the build identity to a value that cannot authenticate anything, so an
+/// ambient environment variable cannot supply one instead.
+fn emit_unauthenticated_build_identity() {
+    println!("cargo:rustc-env={BUILD_GIT_HEAD_ENV}=");
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {

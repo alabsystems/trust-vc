@@ -50,12 +50,14 @@ fn clear_state() {
 
 fn assert_verifies<F: FnOnce() + std::panic::UnwindSafe>(proof_fn: F) {
     if let Err(msg) = run_proof(proof_fn) {
+        // quality-audit: allow-panic — test-harness assert helper: a failed proof must abort the test
         panic!("expected proof to verify, but it was rejected: {msg}");
     }
 }
 
 fn assert_rejected<F: FnOnce() + std::panic::UnwindSafe>(proof_fn: F) {
     match run_proof(proof_fn) {
+        // quality-audit: allow-panic — test-harness assert helper: a passing proof must abort the test
         Ok(()) => panic!("expected proof to be rejected (opaque body hidden), but it verified"),
         Err(msg) => {
             // The rejection MUST be a genuine non-`Verified` verdict

@@ -224,6 +224,47 @@ fn test_multiset_type_param_insert2_unconstrained_ext_eq_verified() {
 }
 
 #[test]
+fn test_multiset_type_param_duplicate_insert_permutation_ext_eq_verified() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("a", crate::ir::TrustVcType::TypeParam("T".to_string()));
+    ctx.declare_var_typed("b", crate::ir::TrustVcType::TypeParam("T".to_string()));
+    ctx.push_obligation(ProofObligation::assert(
+        "generic_duplicate_insert_permutation_ext_eq",
+        "ext_eq!(
+            trust_vc_types::Multiset::<T>::empty().insert(a).insert(a).insert(b),
+            trust_vc_types::Multiset::<T>::empty().insert(b).insert(a).insert(a)
+        )",
+    ));
+
+    let result = AYEncoder::verify(&ctx);
+    expect_verified(
+        &result,
+        "finite-support multiset equality must retain duplicate multiplicities while commuting inserts",
+    );
+}
+
+#[test]
+fn test_multiset_distinct_singletons_ext_eq_has_model_counterexample() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("a", crate::ir::TrustVcType::parse_or_opaque("i32"));
+    ctx.declare_var_typed("b", crate::ir::TrustVcType::parse_or_opaque("i32"));
+    ctx.push_obligation(ProofObligation::assume("distinct", "a != b"));
+    ctx.push_obligation(ProofObligation::assert(
+        "distinct_singletons_ext_eq",
+        "ext_eq!(
+            trust_vc_types::Multiset::<i32>::empty().insert(a),
+            trust_vc_types::Multiset::<i32>::empty().insert(b)
+        )",
+    ));
+
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "finite-support multiset equality must expose a model for a missing/distinct key",
+    );
+}
+
+#[test]
 fn test_multiset_type_param_singleton_doubleton_ext_eq_fails_closed() {
     let mut ctx = VerificationContext::new();
     ctx.declare_var_typed("a", crate::ir::TrustVcType::TypeParam("T".to_string()));
@@ -255,9 +296,9 @@ fn test_multiset_singleton_doubleton_ext_eq_fails_closed() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_counterexample(
         &result,
-        "insert extensional equality must reject singleton versus doubleton",
+        "finite-support multiset equality must expose a model for unequal multiplicities",
     );
 }
 

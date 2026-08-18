@@ -259,6 +259,36 @@ pub fn register_broadcast_lemma_with_group(name: String, group: Option<String>) 
                     Some(guard_clauses)
                 };
 
+                // KNOWN CARDINAL FALSE-VERIFY, DEMONSTRATED, NOT YET FIXED.
+                //
+                // This flip turns an obligation that would have been ASSERTED
+                // against the lemma body into an ASSUMPTION handed to every
+                // caller, and NOTHING checks it in between. A lemma whose
+                // `ensures` is FALSE of its own body therefore publishes a false
+                // axiom — a contradictory premise, which proves anything.
+                //
+                // Reproducer (currently passing, i.e. the hole is live):
+                // `crates/trust-vc/tests/broadcast_session_lane_unchecked_witness.rs`
+                // — `sess_bogus_fn(x) == 42` over a body of `x` publishes, and
+                // the caller proves `sess_bogus_fn(7) == 42`. Its HONEST control
+                // verifies too, so the verdict is attributable to the lemma being
+                // unchecked rather than to broadcast being broken generally.
+                //
+                // The FILE path closed this at `63ac39c0`
+                // (`vc_extraction::suppress_unestablished_broadcast_lemma_axioms`):
+                // discharge `guard |- ensures` in a discarded child seeded with
+                // the REVEALED definitional axioms, and drop the axiom unless it
+                // verifies. The shape ports; the execution model does not — there
+                // is no `SpecFunctionCatalog` here (no source file) and this lane
+                // runs on thread-local session state.
+                //
+                // TWO THINGS THE IMPLEMENTER MUST NOT MISS:
+                //  * On failure DROP these obligations. Leaving them as `Ensures`
+                //    wrongly charges the lemma's postcondition to the CALLER.
+                //  * `start_idx` (`BROADCAST_OBLIGATION_START`) is an INDEX into
+                //    `context.obligations`. A nested verify that pushes
+                //    obligations mid-harvest invalidates it — snapshot what is
+                //    needed before verifying, or verify on a clone.
                 for obligation in context.obligations.iter_mut().skip(start_idx) {
                     if matches!(obligation.kind, ObligationKind::Ensures) {
                         obligation.kind = ObligationKind::BroadcastAssume;

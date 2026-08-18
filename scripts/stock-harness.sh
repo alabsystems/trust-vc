@@ -14,12 +14,20 @@
 #   `trust-vc-driver` rustc-driver links `rustc_private` and needs the fork; the
 #   harness tests below do not use it.
 #
-# THE ONE THING THIS SCRIPT HANDLES (the only blocker on stock rustc)
-#   `RUSTFLAGS=""` overrides `.cargo/config.toml`'s `build.rustflags =
-#      ["-Zno-trust-verify"]` (a Trust-rustc-only `-Z` flag that stock rustc
-#      rejects). Setting RUSTFLAGS in the environment takes precedence over
-#      `build.rustflags`, so the flag is dropped for this invocation only — the
-#      committed config (and the Trust-toolchain build path) is untouched.
+# WHAT THIS SCRIPT HANDLES (the two blockers on stock rustc)
+#   1. `rustc` RESOLUTION. Homebrew cargo carries no baked-in rustc path: it
+#      resolves `rustc` from PATH, where `~/.cargo/bin/rustc` (the rustup shim)
+#      shadows homebrew's. The shim honors rust-toolchain.toml's
+#      channel="trust" pin, so while the fork is mid-rebuild every unit dies
+#      with "'rustc' is not installed for the custom toolchain 'trust'" — even
+#      though cargo itself was the stock one. The script therefore pins RUSTC
+#      to the rustc that ships WITH the chosen cargo, so both halves of the
+#      toolchain come from the same stock install.
+#   2. `RUSTFLAGS=""` clears any ambient Trust-only flags for this invocation.
+#      The committed .cargo/config.toml no longer sets `build.rustflags` (Targo
+#      injects its own per-unit off-switch), so this is purely defensive: it
+#      protects the run from a caller's exported Trust-only RUSTFLAGS, which
+#      stock rustc would reject as unknown options.
 #   Dependencies remain on the same exact, locked Git revisions used by normal
 #   and downstream builds.  No local checkout patching is involved.
 #
@@ -43,6 +51,9 @@ cd "$REPO_ROOT"
 # fall back to a rustup `stable` toolchain via `+stable` if only rustup is present.
 if [ -x /opt/homebrew/bin/cargo ]; then
   CARGO=(/opt/homebrew/bin/cargo)
+  # See header item 1: without this, homebrew cargo finds the rustup rustc
+  # shim on PATH and the channel="trust" pin kills the build.
+  export RUSTC=/opt/homebrew/bin/rustc
 elif command -v rustup >/dev/null 2>&1; then
   CARGO=(cargo +stable)
 else

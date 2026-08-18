@@ -17,7 +17,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use trust_vc_core::{verify_function_from_file, VerifyResult};
+use trust_vc_core::{
+    list_trait_conformance_obligations, verify_function_from_file,
+    verify_trait_conformance_obligation, VerifyResult,
+};
 
 #[path = "../../../evals/verus/ported/assoc_type_impls.rs"]
 mod assoc_type_impls_port;
@@ -71,6 +74,12 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "associated_type_parameter_projection_normalizes_to_u8_verified",
         "assoc_normalize",
     ),
+    // Phase A3: a client consuming an associated-type-RETURNING trait method's
+    // `ensures(result == 7u64)` verifies against the per-impl concrete axiom.
+    (
+        "associated_type_returning_method_client_consumes_ensures_verified",
+        "ensures_projection_poly",
+    ),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
@@ -81,6 +90,12 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
     (
         "associated_type_local_projection_too_strong_bound_counterexample",
         "assoc_normalize",
+    ),
+    // Control: the SAME client asserting the wrong value (`== 8`) is refuted —
+    // the A3 axiom carries exactly `result == 7`, not a vacuous pass.
+    (
+        "associated_type_returning_method_client_wrong_value_counterexample",
+        "ensures_projection_poly",
     ),
 ];
 
@@ -144,6 +159,18 @@ const EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "associated_type_parameter_projection_normalizes_to_u8_verified",
         "assoc_normalize",
         "verified",
+        1,
+    ),
+    (
+        "associated_type_returning_method_client_consumes_ensures_verified",
+        "ensures_projection_poly",
+        "verified",
+        1,
+    ),
+    (
+        "associated_type_returning_method_client_wrong_value_counterexample",
+        "ensures_projection_poly",
+        "counterexample",
         1,
     ),
 ];
@@ -449,6 +476,35 @@ fn assoc_type_impls_rs_counterexample_subset_is_rejected_from_file() {
             "{case} ({upstream_case}) should be rejected, got: {result:?}"
         );
     }
+}
+
+// The A3 client-consume axiom for `AssocReturningEnsures::produce` is a FORGED
+// fact unless the impl body discharges the trait `ensures`. It is justified
+// ENTIRELY by the per-impl conformance obligation, which the file's verdict
+// requires. This test witnesses, on the corpus surface, that the conforming
+// impl's own conformance obligation Verifies — the load-bearing gate under the
+// "verified" client case above.
+#[test]
+fn assoc_type_impls_rs_assoc_returning_ensures_conformance_obligation_verifies() {
+    let path = assoc_type_impls_port_path();
+    let path = path
+        .to_str()
+        .expect("assoc_type_impls port path should be UTF-8");
+
+    let obligations = list_trait_conformance_obligations(path)
+        .expect("assoc_type_impls port should list conformance obligations");
+    let name = "trait impl conformance AssocReturningEnsures::produce for AssocProducer";
+    assert!(
+        obligations.iter().any(|o| o == name),
+        "expected conformance obligation {name:?}, got: {obligations:?}"
+    );
+
+    let result = verify_trait_conformance_obligation(path, name)
+        .expect("conformance obligation should be checkable");
+    assert!(
+        matches!(result, VerifyResult::Verified),
+        "conforming produce()->Self::V impl must pass conformance, got: {result:?}"
+    );
 }
 
 #[test]

@@ -74,6 +74,18 @@ pub const ASSOC_TYPE_IMPLS_RS_EXPECTED_CASES: &[AssocTypeImplsRsExpectedCase] = 
         "verified",
         1,
     ),
+    (
+        "associated_type_returning_method_client_consumes_ensures_verified",
+        "ensures_projection_poly",
+        "verified",
+        1,
+    ),
+    (
+        "associated_type_returning_method_client_wrong_value_counterexample",
+        "ensures_projection_poly",
+        "counterexample",
+        1,
+    ),
 ];
 
 pub const ASSOC_TYPE_IMPLS_RS_FAIL_CLOSED_ERROR_PATTERNS:
@@ -184,4 +196,43 @@ fn associated_type_parameter_projection_normalizes_to_u8_verified(
 
 fn impl_associated_view_type_cow_variable_currently_errors(c: Cow<'static, AssocViewNum>) {
     trust_vc::assert!(c.view() == c.view());
+}
+
+// Phase A3 client seam (upstream `ensures_projection_poly` family): a trait
+// method whose RETURN type is the associated type `Self::V` carries an
+// `ensures`, and a concrete-receiver client consumes that ensures. Before A3
+// the shared per-trait method UF's return slot for a `Self::V`-typed method was
+// the erased Poly/Int sort, so `result == 7` could not encode and the
+// postcondition was silently dropped; A3 emits the trait ensures on the PER-IMPL
+// CONCRETE fn with `Self::V` resolved to `u64` (BV64). SOUND ONLY because the
+// per-impl conformance obligation proves `body ⊨ ensures(result == 7)` at these
+// resolved sorts — a non-conforming body (e.g. `3u64`) is refuted on its own
+// conformance obligation, so the file cannot verify on a forged axiom.
+#[trust_vc::trait_spec]
+trait AssocReturningEnsures {
+    type V;
+
+    #[trust_vc::ensures(result == 7u64)]
+    fn produce(&self) -> Self::V;
+}
+
+struct AssocProducer;
+
+#[trust_vc::trait_impl]
+impl AssocReturningEnsures for AssocProducer {
+    type V = u64;
+
+    fn produce(&self) -> u64 {
+        7u64
+    }
+}
+
+fn associated_type_returning_method_client_consumes_ensures_verified(p: AssocProducer) {
+    let r = p.produce();
+    trust_vc::assert!(r == 7u64);
+}
+
+fn associated_type_returning_method_client_wrong_value_counterexample(p: AssocProducer) {
+    let r = p.produce();
+    trust_vc::assert!(r == 8u64);
 }

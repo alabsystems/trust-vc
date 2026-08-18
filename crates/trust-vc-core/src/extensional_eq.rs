@@ -540,6 +540,44 @@ fn build_set_ext_eq(lhs: TrustVcExpr, rhs: TrustVcExpr, elem_ty: TrustVcType) ->
 }
 
 fn build_multiset_ext_eq(lhs: TrustVcExpr, rhs: TrustVcExpr, elem_ty: TrustVcType) -> TrustVcExpr {
+    // A pure empty().insert(..) chain has finite support consisting exactly of
+    // its inserted key expressions. Two such multisets are equal iff their
+    // counts agree at every key in the union of those supports; outside that
+    // union both empty-rooted count arrays are zero. Emit that exact finite
+    // conjunction when the support is small enough, avoiding an unhandled
+    // triggerless FORALL over a type parameter while preserving multiplicities.
+    if let (Some(lhs_elems), Some(rhs_elems)) = (
+        concrete_multiset_insert_chain(&lhs, &elem_ty),
+        concrete_multiset_insert_chain(&rhs, &elem_ty),
+    ) {
+        if lhs_elems.len() + rhs_elems.len() <= MULTISET_EXT_EQ_FINITE_SUPPORT_CAP {
+            let mut support = Vec::with_capacity(lhs_elems.len() + rhs_elems.len());
+            for elem in lhs_elems.iter().chain(&rhs_elems) {
+                if !support.contains(elem) {
+                    support.push(elem.clone());
+                }
+            }
+            return support.into_iter().fold(
+                crate::ir_builder::bool_lit(true),
+                |conjunction, elem| {
+                    let lhs_count = collection_op_expr(
+                        CollectionOp::Count,
+                        lhs.clone(),
+                        vec![elem.clone()],
+                        TrustVcType::Nat,
+                    );
+                    let rhs_count = collection_op_expr(
+                        CollectionOp::Count,
+                        rhs.clone(),
+                        vec![elem],
+                        TrustVcType::Nat,
+                    );
+                    crate::ir_builder::and(conjunction, crate::ir_builder::eq(lhs_count, rhs_count))
+                },
+            );
+        }
+    }
+
     let mut used_names = free_names_in_operands(&lhs, &rhs);
     let elem_name = fresh_bound_name("__trust_vc_ext_multiset_elem", &mut used_names);
     let elem_var = crate::ir_builder::var(&elem_name, elem_ty.clone());
@@ -558,6 +596,63 @@ fn build_multiset_ext_eq(lhs: TrustVcExpr, rhs: TrustVcExpr, elem_ty: TrustVcTyp
         crate::ir_builder::eq(lhs_count, rhs_count),
         None,
     )
+}
+
+/// Maximum total insert-chain length admitted to finite multiset
+/// extensionality. Above this, or for any non-empty-rooted/symbolic operand, the
+/// existing quantified formula remains the fail-closed fallback.
+const MULTISET_EXT_EQ_FINITE_SUPPORT_CAP: usize = 64;
+
+/// Exact inserted-key sequence for a concrete finite multiset. Duplicate keys
+/// are intentionally retained here because each insertion contributes one to
+/// multiplicity; only the later comparison support is structurally deduplicated.
+fn concrete_multiset_insert_chain(
+    expr: &TrustVcExpr,
+    elem_ty: &TrustVcType,
+) -> Option<Vec<TrustVcExpr>> {
+    // `build_ext_eq_expr` establishes equal top-level operand types, but this
+    // helper also validates every nested constructor, insert result, and key.
+    // That makes the finite-support rule fail closed for malformed hand-built
+    // IR instead of mixing counts from different Multiset element sorts.
+    let multiset_ty = TrustVcType::Multiset(Box::new(elem_ty.clone()));
+    let mut cursor = expr;
+    let mut reversed_elems = Vec::new();
+    loop {
+        match cursor {
+            TrustVcExpr::FnCall {
+                name,
+                args,
+                return_ty,
+            } if args.is_empty()
+                && name.starts_with(crate::ir_lowering::COLLECTION_CONSTRUCTOR_PREFIX)
+                && name.ends_with("_empty")
+                && return_ty == &multiset_ty =>
+            {
+                reversed_elems.reverse();
+                return Some(reversed_elems);
+            }
+            TrustVcExpr::CollectionOp {
+                op: CollectionOp::Insert,
+                receiver,
+                args,
+                ty,
+                ..
+            } if args.len() == 1
+                && ty == &multiset_ty
+                && crate::ir_lowering::infer_expr_type(receiver) == multiset_ty
+                && crate::ir_lowering::infer_expr_type(&args[0]) == *elem_ty =>
+            {
+                // Enforce the resource cap during recognition, before walking
+                // or allocating for an arbitrarily deep hostile IR chain.
+                if reversed_elems.len() == MULTISET_EXT_EQ_FINITE_SUPPORT_CAP {
+                    return None;
+                }
+                reversed_elems.push(args[0].clone());
+                cursor = receiver;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Build the domain predicate `operand.contains_key(key)` by structurally

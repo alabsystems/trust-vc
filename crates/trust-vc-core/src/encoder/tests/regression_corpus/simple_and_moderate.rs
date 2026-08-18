@@ -106,22 +106,28 @@ pub(super) fn cases() -> Vec<CaseSpec> {
             vec![assume("x_val", "x == 10"), assert("sum", "x + 5 == 15")],
             vec![],
         ),
-        context_case(
-            "M11",
-            CaseCategory::Moderate,
-            "bounded x + y > 0",
-            LockedOutcome::Verified,
-            40,
-            vec![var("x", TypeSpec::I32), var("y", TypeSpec::I32)],
-            vec![
+        // Mandatory proof-quality instrumentation moved this tiny certified
+        // query from ~40ms to 130-250ms on the release host. Keep a meaningful
+        // 1.2s contention ceiling without sampling it three times in the full
+        // parallel suite.
+        CaseSpec {
+            label: "M11",
+            category: CaseCategory::Moderate,
+            description: "bounded x + y > 0",
+            program: ProgramKind::Context,
+            expected: LockedOutcome::Verified,
+            baseline_ms: 300,
+            budget_multiplier: 4,
+            vars: vec![var("x", TypeSpec::I32), var("y", TypeSpec::I32)],
+            obligations: vec![
                 assume("x_pos", "x > 0"),
                 assume("y_pos", "y > 0"),
                 assume("x_bnd", "x < 1000000"),
                 assume("y_bnd", "y < 1000000"),
                 assert("sum_pos", "x + y > 0"),
             ],
-            vec![],
-        ),
+            measures: vec![],
+        },
         context_case(
             "M12",
             CaseCategory::Moderate,
@@ -177,7 +183,10 @@ pub(super) fn cases() -> Vec<CaseSpec> {
             vec![
                 assume("x_pos", "x > 0 && x <= 100"),
                 assume("y_pos", "y > 0 && y <= 100"),
-                assert("mul_pos", "x * y > 0"),
+                // The explicit nonlinear tactic uses mathematical integers;
+                // these bounds make it equivalent to i32 execution because
+                // the product is in 1..=10_000 and cannot overflow.
+                assert_nonlinear("mul_pos", "x * y > 0"),
             ],
             vec![],
         ),
@@ -277,4 +286,23 @@ corpus_case_tests! {
     corpus_m18_transitivity => "M18",
     corpus_m19_real_commutative => "M19",
     corpus_m20_real_sub_self => "M20",
+}
+
+#[test]
+fn corpus_m15_nonlinear_rejects_stronger_false_product_claim() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", i32_ty());
+    ctx.declare_var_typed("y", i32_ty());
+    ctx.push_obligation(ProofObligation::assume("x_val", "x == 1"));
+    ctx.push_obligation(ProofObligation::assume("y_val", "y == 1"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_product", "x * y > 1")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "M15's nonlinear tactic must reject a stronger false product claim",
+    );
 }

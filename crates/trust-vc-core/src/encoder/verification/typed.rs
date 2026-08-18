@@ -1109,15 +1109,16 @@ impl AYEncoder {
             post_loop_modified_vars,
             extra_variables,
         );
-        // Broadcast-vacuity gate (SOUNDNESS-CRITICAL): covers every goal that
+        // Vacuity gate (SOUNDNESS-CRITICAL): covers every goal that
         // flows through the typed step — assert_by! (and assert_by! with a
         // let-bound local), loop invariant base case, and loop ensures. A
-        // #[broadcast] lemma can publish a contradictory assumption that proves
-        // any of these vacuously; if the goal verified only because the broadcast
-        // assumptions are contradictory, downgrade it to Unknown(VacuousTruth).
+        // #[broadcast] lemma or a trait-method `ensures` axiom can publish a
+        // contradictory premise that proves any of these vacuously; if the goal
+        // verified only because those premises are contradictory, downgrade it
+        // to Unknown(VacuousTruth).
         // `extra_variables` (forall bound vars) are forwarded so the negated
         // probe is skolemized identically to the goal.
-        super::assertion::apply_broadcast_vacuity_probe_to_result(
+        super::assertion::apply_vacuity_probe_to_result(
             result,
             slices,
             assertion,

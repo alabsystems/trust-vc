@@ -110,11 +110,38 @@ impl UnknownCategory {
             | UnknownReason::QuantifierRoundLimit
             | UnknownReason::QuantifierDeferred
             | UnknownReason::SplitLimit
-            // InternalError / ProofTrusted / Unknown are deliberately NOT
-            // incompleteness: an internal error or a strict-proof trust-gate
-            // downgrade or a reason-less unknown must never be reported as a
+            // InternalError / SelfCheckRejected / ProofTrusted / Unknown are
+            // deliberately NOT incompleteness: an internal error, a verdict ay's
+            // own gates declined to certify, an unsat whose proof ay would not
+            // stand behind, or a reason-less unknown must never be reported as a
             // verification failure (fail-open to a soft Unknown).
+            //
+            // These are TWO variants again, not one. ay 0.6 (66538b006) deleted
+            // `ProofTrusted` and left `SelfCheckRejected` carrying both facts;
+            // ay 0.7 restored it at its original spelling, and ay's own docs now
+            // insist on the distinction: `SelfCheckRejected` is the mandatory
+            // certification funnel REFUTING a verdict it could not certify,
+            // while `ProofTrusted` is the strict-proof gate WITHHOLDING an unsat
+            // whose derivation chain is not independently checkable (a `trust`/
+            // `hole` step or an unbacked `assume` leaf reaches the empty clause).
+            // Both land in this arm, so the categorisation did not move across
+            // the bump — but do not re-merge the comment: they are different
+            // gates and a future arm may want to split them.
+            //
+            // ay's doc calls each occurrence "a LATENT WRONG ANSWER" — DO NOT
+            // take that at face value. ay's own measurement contradicts it
+            // (~86% of self-check unknowns agree with z3), and the three
+            // occurrences chased down on 2026-08-08 were all ay-side defects
+            // with CORRECT verdicts underneath: an `or`-step premise built with
+            // a simplifying constructor (ay 028b53d91), a certified-default
+            // model row aliasing the all-zeros point (ay 9ddf1283d), and a
+            // nested re-solve forging the authored assertion epoch (ay
+            // 0937e0b18). Set AY_PROBE_CERT_REJECT=1 to see which gate refused.
+            //
+            // SolverUnknown is correct and SOUND either way: an uncertified
+            // verdict is not a proof and must not discharge an obligation.
             | UnknownReason::InternalError
+            | UnknownReason::SelfCheckRejected
             | UnknownReason::ProofTrusted
             | UnknownReason::Unknown
             | _ => Self::SolverUnknown,

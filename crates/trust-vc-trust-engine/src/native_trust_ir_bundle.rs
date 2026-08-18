@@ -40,12 +40,20 @@ pub struct TrustVcNativeTrustIrBundleReport {
     compiler_facts_digest: String,
     module_name: String,
     requests: Vec<TrustVcNativeTrustIrRequestReport>,
+    /// Worst-wins rollup over `requests`.
+    #[serde(default = "default_verdict")]
+    verdict: TrustVcNativeTrustIrVerdict,
 }
 
 impl TrustVcNativeTrustIrBundleReport {
     /// Return the native bundle producer label.
     pub fn producer(&self) -> &str {
         &self.producer
+    }
+
+    /// Return the worst verdict across every request in this bundle.
+    pub const fn verdict(&self) -> TrustVcNativeTrustIrVerdict {
+        self.verdict
     }
 
     /// Return the kind of input artifact that backs this bundle.
@@ -109,6 +117,15 @@ pub struct TrustVcNativeTrustIrRequestReport {
     mode: TrustVcNativeTrustIrRequestMode,
     lineage_roots: Vec<u32>,
     proof_evidence: Vec<TrustVcNativeTrustIrCertificateEvidence>,
+    /// `serde(default)` so a report written before this field existed still
+    /// deserializes; the default is the permissive verdict, which is safe only
+    /// because it is never used for a report this crate PRODUCES.
+    #[serde(default = "default_verdict")]
+    verdict: TrustVcNativeTrustIrVerdict,
+}
+
+const fn default_verdict() -> TrustVcNativeTrustIrVerdict {
+    TrustVcNativeTrustIrVerdict::CertificatesAdmitted
 }
 
 impl TrustVcNativeTrustIrRequestReport {
@@ -120,6 +137,11 @@ impl TrustVcNativeTrustIrRequestReport {
     /// Return the requested TrustVc native operation.
     pub const fn mode(&self) -> TrustVcNativeTrustIrRequestMode {
         self.mode
+    }
+
+    /// Return what came of this request.
+    pub const fn verdict(&self) -> TrustVcNativeTrustIrVerdict {
+        self.verdict
     }
 
     /// Return lineage roots bound to this request.
@@ -144,6 +166,57 @@ impl TrustVcNativeTrustIrRequestReport {
     }
 }
 
+/// What actually came of a native TrustIr TrustVc request.
+///
+/// EXISTS BECAUSE SILENCE READ AS SUCCESS. Neither report struct carried any
+/// outcome, and `report_exit_code` returned EXIT_OK for every native-bundle
+/// report — so a request that discharged nothing was indistinguishable from one
+/// that admitted every certificate. That is the shape of a provable no-op, and
+/// it is most dangerous exactly when a discharge lane is half-built: the mode is
+/// expressible today and NOT answerable, so without this the honest answer
+/// ("trust-vc cannot do this yet") would have been reported as a pass.
+///
+/// Deliberately NOT `trust_vc_core::VerifyResult`: that type has no `Serialize`,
+/// would leak counterexample bindings into a wire report, and has no variant
+/// meaning "discharged nothing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TrustVcNativeTrustIrVerdict {
+    /// Every cited certificate was admitted at release grade.
+    CertificatesAdmitted,
+    /// The request was structurally valid, but at least one certificate was
+    /// refused release grade (e.g. it carries trusted evidence).
+    CertificatesRejected,
+    /// The request asked trust-vc to DISCHARGE obligations, which it cannot yet
+    /// do. Reported explicitly rather than as an empty success.
+    DischargeNotAnswerable,
+}
+
+impl TrustVcNativeTrustIrVerdict {
+    /// Is this verdict a clean pass?
+    ///
+    /// Used for the bundle rollup and the process exit code, so the two can
+    /// never disagree about what counts as success.
+    pub const fn is_ok(self) -> bool {
+        matches!(self, Self::CertificatesAdmitted)
+    }
+
+    /// Worst-wins fold, so one bad request cannot be averaged away by good ones.
+    /// Order of severity: not-answerable > rejected > admitted.
+    fn worse_of(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::DischargeNotAnswerable, _) | (_, Self::DischargeNotAnswerable) => {
+                Self::DischargeNotAnswerable
+            }
+            (Self::CertificatesRejected, _) | (_, Self::CertificatesRejected) => {
+                Self::CertificatesRejected
+            }
+            _ => Self::CertificatesAdmitted,
+        }
+    }
+}
+
 /// Native TrustVc operation requested by TrustIr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,6 +224,23 @@ impl TrustVcNativeTrustIrRequestReport {
 pub enum TrustVcNativeTrustIrRequestMode {
     ImportProofCertificates,
     MergeProofCertificates,
+    /// TrustIr asked trust-vc to DISCHARGE the request's obligations itself,
+    /// rather than check certificates produced elsewhere.
+    ///
+    /// NOT YET ANSWERABLE. Nothing in this crate lowers a trust-ir function body
+    /// to trust-vc's IR, so a discharge request currently fails LOUDLY on the
+    /// existing certificate requirements — which is the correct behaviour until
+    /// a discharge engine and a verdict channel exist. Do not relax
+    /// `build_request_report`'s missing-certificate check to accommodate it: the
+    /// report structs carry no verdict field and `report_exit_code` returns
+    /// EXIT_OK unconditionally, so a silently-accepted discharge request would
+    /// read as SUCCESS.
+    ///
+    /// Mirrors `trust_ir::request::TrustVcVerificationMode::DischargeProofObligations`.
+    /// The seam spelling differs by design: upstream serializes as
+    /// `DischargeProofObligations`, this enum as `discharge_proof_obligations`
+    /// via `rename_all = "snake_case"`.
+    DischargeProofObligations,
 }
 
 impl From<TrustVcVerificationMode> for TrustVcNativeTrustIrRequestMode {
@@ -158,6 +248,7 @@ impl From<TrustVcVerificationMode> for TrustVcNativeTrustIrRequestMode {
         match value {
             TrustVcVerificationMode::ImportProofCertificates => Self::ImportProofCertificates,
             TrustVcVerificationMode::MergeProofCertificates => Self::MergeProofCertificates,
+            TrustVcVerificationMode::DischargeProofObligations => Self::DischargeProofObligations,
         }
     }
 }
@@ -384,6 +475,15 @@ pub enum TrustVcNativeTrustIrEvidenceKind {
     KaniHarness,
     GammaCrownBound,
     TranslationValidation,
+    /// A kernel-recheckable CIC proof term (`ProofEvidence::CleanCic`).
+    ///
+    /// Distinct from `Trusted` DELIBERATELY, and the distinction is the point:
+    /// `Trusted` is a manual audit justification taken on faith, while this is
+    /// backed by a term a kernel can re-check. Collapsing the two — as this
+    /// enum did before, mapping CleanCic onto `Trusted` as an "unmapped strong
+    /// evidence" placeholder — made the report UNDERSTATE its own evidence and
+    /// made `trusted()` answer true for a kernel-checked proof.
+    CleanCic,
     Trusted,
 }
 
@@ -699,6 +799,16 @@ impl TrustVcTrustEngine {
             trust_ir_module_digest,
             compiler_facts_digest,
             module_name: bundle.module.name.clone(),
+            // Worst-wins. An empty request list cannot reach here — the
+            // no-TrustVc-request case is refused above — so folding from
+            // `CertificatesAdmitted` cannot manufacture a pass out of nothing.
+            verdict: requests
+                .iter()
+                .map(TrustVcNativeTrustIrRequestReport::verdict)
+                .fold(
+                    TrustVcNativeTrustIrVerdict::CertificatesAdmitted,
+                    TrustVcNativeTrustIrVerdict::worse_of,
+                ),
             requests,
         })
     }
@@ -845,6 +955,26 @@ fn build_request_report(
         }));
     }
 
+    // Discharge is unconditionally not-answerable: nothing in this crate lowers
+    // a trust-ir function body, so an empty evidence list means "could not", not
+    // "nothing to do". Import/Merge fold their certificates' release admission.
+    let verdict = match request.mode {
+        TrustVcVerificationMode::DischargeProofObligations => {
+            TrustVcNativeTrustIrVerdict::DischargeNotAnswerable
+        }
+        TrustVcVerificationMode::ImportProofCertificates
+        | TrustVcVerificationMode::MergeProofCertificates => {
+            if proof_evidence
+                .iter()
+                .all(|evidence| evidence.release_admission().is_admissible())
+            {
+                TrustVcNativeTrustIrVerdict::CertificatesAdmitted
+            } else {
+                TrustVcNativeTrustIrVerdict::CertificatesRejected
+            }
+        }
+    };
+
     Ok(TrustVcNativeTrustIrRequestReport {
         request_id,
         mode: request.mode.into(),
@@ -854,6 +984,7 @@ fn build_request_report(
             .map(|root| root.index())
             .collect(),
         proof_evidence,
+        verdict,
     })
 }
 
@@ -1171,8 +1302,6 @@ fn evidence_kind(evidence: &ProofEvidence) -> TrustVcNativeTrustIrEvidenceKind {
         ProofEvidence::InheritedFromCallee { .. } => TrustVcNativeTrustIrEvidenceKind::Trusted,
         // Sibling trust-ir added `CleanCic` (a kernel-checkable CIC proof term)
         // after this crate's last sync. There is no dedicated native CIC
-        // evidence kind yet; surface it as `Trusted` like the other unmapped
-        // strong-evidence variants until one is added.
-        ProofEvidence::CleanCic { .. } => TrustVcNativeTrustIrEvidenceKind::Trusted,
+        ProofEvidence::CleanCic { .. } => TrustVcNativeTrustIrEvidenceKind::CleanCic,
     }
 }

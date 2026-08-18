@@ -191,11 +191,18 @@ fn verify_assertion_with_shared_bv_encoder_inner(
         .expr
         .may_emit_overflow_checks(arith_overflow_enabled)
     {
-        let mut overflow_encoder =
-            match AYEncoder::setup_from_prepared(slices, false, post_loop_modified_vars) {
-                Ok(enc) => enc,
-                Err(err) => return convert_setup_error(err).map(SharedBvFastPathAttempt::Terminal),
-            };
+        let mut overflow_encoder = match AYEncoder::setup_overflow_from_prepared(
+            slices,
+            assertion,
+            false,
+            post_loop_modified_vars,
+            &[],
+            None,
+            None,
+        ) {
+            Ok(enc) => enc,
+            Err(err) => return convert_setup_error(err).map(SharedBvFastPathAttempt::Terminal),
+        };
         let overflow_outcome =
             check_overflow_predicates(&mut overflow_encoder, assertion, arith_overflow_enabled)?;
         run_diagnostics.merge(&overflow_encoder.state.diagnostics);

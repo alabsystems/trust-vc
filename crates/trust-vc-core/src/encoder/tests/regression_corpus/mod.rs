@@ -88,6 +88,7 @@ struct ObligationSpec {
     kind: ObligationKind,
     name: &'static str,
     expr: &'static str,
+    solver_mode: Option<crate::vc::SolverMode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +116,7 @@ const fn assume(name: &'static str, expr: &'static str) -> ObligationSpec {
         kind: ObligationKind::Assume,
         name,
         expr,
+        solver_mode: None,
     }
 }
 
@@ -123,6 +125,16 @@ const fn assert(name: &'static str, expr: &'static str) -> ObligationSpec {
         kind: ObligationKind::Assert,
         name,
         expr,
+        solver_mode: None,
+    }
+}
+
+const fn assert_nonlinear(name: &'static str, expr: &'static str) -> ObligationSpec {
+    ObligationSpec {
+        kind: ObligationKind::Assert,
+        name,
+        expr,
+        solver_mode: Some(crate::vc::SolverMode::NonlinearArith),
     }
 }
 
@@ -208,9 +220,13 @@ fn resolve_type(ty: TypeSpec) -> crate::ir::TrustVcType {
 }
 
 fn build_obligation(spec: ObligationSpec) -> ProofObligation {
-    match spec.kind {
+    let obligation = match spec.kind {
         ObligationKind::Assume => ProofObligation::assume(spec.name, spec.expr),
         ObligationKind::Assert => ProofObligation::assert(spec.name, spec.expr),
+    };
+    match spec.solver_mode {
+        Some(mode) => obligation.with_solver_mode(mode),
+        None => obligation,
     }
 }
 

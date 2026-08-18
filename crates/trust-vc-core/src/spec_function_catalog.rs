@@ -17,6 +17,7 @@ use syn::visit_mut::VisitMut;
 
 use crate::error::{TrustVcError, TrustVcResult};
 use crate::ir::TrustVcType;
+use crate::ir_lowering::SOURCE_CATALOG_MATH_INT_MARKER;
 use crate::local_vars::extract_type_string;
 use crate::vc::{ProofObligation, VerificationContext};
 use crate::VerifyResult;
@@ -102,7 +103,19 @@ pub(crate) struct SpecFunctionCatalog {
     /// that proves the `decreases` measure actually shrinks is run at most once
     /// per recursive cycle even though the gate is consulted once per applied
     /// cycle member.
-    termination_cache: RefCell<HashMap<String, bool>>,
+    termination_cache: RefCell<HashMap<String, TerminationCheck>>,
+}
+
+#[derive(Clone)]
+enum TerminationCheck {
+    Proven,
+    /// The cycle cannot be admitted (a real decrease counterexample or a
+    /// structurally unsupported/ill-formed definition), with no independent
+    /// authority verdict to preserve.
+    NotAdmitted,
+    /// No model/refutation exists: proof authority was withheld (for example,
+    /// strict AY replay rejected an unsupported theory step).
+    Inconclusive(VerifyResult),
 }
 
 /// Converts the narrow Verus-style open spec spelling used by source-only
@@ -408,7 +421,9 @@ impl SpecFunctionCatalog {
             if self.specs.contains_key(&name) {
                 continue;
             }
-            let key = keys.into_iter().next().expect("len == 1 checked above");
+            let Some(key) = keys.into_iter().next() else {
+                continue;
+            };
             // The helper symbol is keyed by the function's own ident; only the
             // case where the in-scope name equals the def's ident binds correctly
             // (renamed imports are skipped — fail closed).
@@ -484,6 +499,49 @@ impl SpecFunctionCatalog {
         self.specs
             .get(name)
             .map(|source_spec| source_spec.recommends.as_slice())
+    }
+
+    /// Seed `ctx` with EVERY catalogued spec function's definitional body axiom,
+    /// forcibly REVEALED, for use in a throwaway checking context.
+    ///
+    /// Only for the broadcast-lemma contract check
+    /// (`vc_extraction::suppress_unestablished_broadcast_lemma_axioms`), whose
+    /// child context is DISCARDED — nothing here reaches a target's context, so
+    /// no opacity is leaked to a caller.
+    ///
+    /// Revealing is what makes the check meaningful rather than vacuous. An
+    /// `#[trust_vc::opaque]` spec fn contributes NO body axiom to an ordinary
+    /// context, so a lemma asserting `bcf(x) == x` over an opaque `bcf` is
+    /// indistinguishable from one asserting `bcf(x) == 42` — both are unprovable
+    /// and both would be dropped, silently deleting every legitimate lemma over
+    /// an opaque function. Judging the lemma against the TRUE definition
+    /// separates them: the first verifies, the second is refuted.
+    ///
+    /// Sound because a definitional body axiom is a true fact about the function;
+    /// opacity is an abstraction/performance control, not a soundness gate. Verus
+    /// likewise lets a lemma body `reveal(f)` and publish the resulting fact.
+    pub(crate) fn apply_all_specs_revealed(&self, ctx: &mut VerificationContext) {
+        let revealed = RevealNames {
+            top_level: self.specs.keys().cloned().collect(),
+            scoped: BTreeSet::new(),
+        };
+        let mut applied = BTreeSet::new();
+        let mut applying = BTreeSet::new();
+        let concrete_carriers = HashMap::new();
+        let names: Vec<String> = self.specs.keys().cloned().collect();
+        for name in names {
+            // Best effort: a spec that cannot be applied simply contributes no
+            // axiom, which can only make the CHECK stricter (an unestablished
+            // lemma is dropped). It can never admit a lemma that should fail.
+            let _ = self.apply_spec_by_name(
+                &name,
+                ctx,
+                &mut applied,
+                &mut applying,
+                &revealed,
+                &concrete_carriers,
+            );
+        }
     }
 
     pub(crate) fn apply_referenced_specs(
@@ -842,7 +900,7 @@ impl SpecFunctionCatalog {
     ///    recursive axiom.
     ///
     /// Returns `true` to suppress the axiom (fail closed), `false` to emit it.
-    fn recursion_suppresses_axiom(&self, name: &str, ctx: &VerificationContext) -> bool {
+    fn recursion_suppresses_axiom(&self, name: &str, ctx: &mut VerificationContext) -> bool {
         // Cycle members of `name`: nodes reachable from `name` that can also reach
         // back to `name` — the strongly-connected component of `name`. A single
         // node with no self-edge is non-recursive and triggers no gate.
@@ -867,44 +925,57 @@ impl SpecFunctionCatalog {
         }
 
         // Stage 2 — semantic: the measure must be PROVEN to strictly decrease.
-        // Suppress unless the isolated termination query succeeds.
-        !self.cycle_termination_proven(&cycle, ctx)
+        // Suppress unless the isolated termination query succeeds. Preserve an
+        // inconclusive authority verdict on the parent context: discarding it
+        // would turn an unproven definition into an uninterpreted helper and let
+        // a later SAT model masquerade as a refutation of the authored spec.
+        match self.cycle_termination_check(&cycle, ctx) {
+            TerminationCheck::Proven => false,
+            TerminationCheck::NotAdmitted => true,
+            TerminationCheck::Inconclusive(result) => {
+                ctx.record_source_catalog_termination_failure(result);
+                true
+            }
+        }
     }
 
     /// Stage-2 termination proof for a recursive cycle (memoized per cycle).
     ///
-    /// Returns `true` only when the declared `decreases` measure is discharged on
-    /// every recursive edge of the cycle. Any failure — an unproven decrease, an
-    /// unparseable / unsupported measure, an arity mismatch between mutual
-    /// measures, or a solver `Unknown`/`Error`/`Counterexample` — yields `false`
-    /// so the caller fails closed (never trusts an unproven measure).
-    fn cycle_termination_proven(
+    /// Returns `Proven` only when every recursive edge is discharged. A concrete
+    /// decrease counterexample or structurally unmodelable definition returns
+    /// `NotAdmitted`; an authority/incompleteness verdict is preserved verbatim
+    /// as `Inconclusive`. Every non-`Proven` result suppresses the body axiom.
+    fn cycle_termination_check(
         &self,
         cycle: &BTreeSet<&String>,
         ctx: &VerificationContext,
-    ) -> bool {
+    ) -> TerminationCheck {
         let mut members: Vec<String> = cycle.iter().map(|member| (*member).to_string()).collect();
         members.sort();
         let cache_key = members.join(",");
         if let Some(verdict) = self.termination_cache.borrow().get(&cache_key) {
-            return *verdict;
+            return verdict.clone();
         }
         let verdict = self.prove_cycle_terminates(&members, ctx);
         self.termination_cache
             .borrow_mut()
-            .insert(cache_key, verdict);
+            .insert(cache_key, verdict.clone());
         verdict
     }
 
-    fn prove_cycle_terminates(&self, members: &[String], ctx: &VerificationContext) -> bool {
+    fn prove_cycle_terminates(
+        &self,
+        members: &[String],
+        ctx: &VerificationContext,
+    ) -> TerminationCheck {
         // Recover each member's parameters, return type, and parsed measure.
         let mut infos: HashMap<&str, MemberTermInfo> = HashMap::new();
         for member in members {
             let Some(source_spec) = self.specs.get(member) else {
-                return false;
+                return TerminationCheck::NotAdmitted;
             };
             let Some(info) = MemberTermInfo::from_spec(&source_spec.item_fn, ctx) else {
-                return false;
+                return TerminationCheck::NotAdmitted;
             };
             infos.insert(member.as_str(), info);
         }
@@ -912,9 +983,11 @@ impl SpecFunctionCatalog {
         // Every member's recursive edges must discharge. Each member is checked in
         // its OWN isolated context (its parameters are the free variables), so
         // mutual partners with clashing parameter names never collide.
-        members
-            .iter()
-            .all(|caller| member_edges_decrease(caller, &infos, &member_set))
+        aggregate_termination_checks(
+            members
+                .iter()
+                .map(|caller| member_edges_decrease(caller, &infos, &member_set)),
+        )
     }
 
     /// All catalog specs reachable from `name` along dependency edges, including
@@ -1077,11 +1150,30 @@ pub(crate) fn source_cycle_terminates(
         infos.insert(name.as_str(), info);
     }
     let member_set: BTreeSet<String> = members.iter().map(|(name, ..)| name.clone()).collect();
-    Some(
-        members
-            .iter()
-            .all(|(caller, ..)| member_edges_decrease(caller, &infos, &member_set)),
-    )
+    Some(matches!(
+        aggregate_termination_checks(members.iter().map(|(caller, ..)| member_edges_decrease(
+            caller,
+            &infos,
+            &member_set
+        )),),
+        TerminationCheck::Proven
+    ))
+}
+
+fn aggregate_termination_checks(
+    checks: impl IntoIterator<Item = TerminationCheck>,
+) -> TerminationCheck {
+    let mut inconclusive = None;
+    for check in checks {
+        match check {
+            TerminationCheck::Proven => {}
+            TerminationCheck::NotAdmitted => return TerminationCheck::NotAdmitted,
+            TerminationCheck::Inconclusive(result) => {
+                inconclusive.get_or_insert(result);
+            }
+        }
+    }
+    inconclusive.map_or(TerminationCheck::Proven, TerminationCheck::Inconclusive)
 }
 
 /// A recursive call edge discovered in a member's body, together with the path
@@ -1132,16 +1224,29 @@ struct ArmBinding {
 /// (bit-vector) or leaves the well-founded `nat` range through a partial cast —
 /// exactly how the bogus `f(n) == f(n) + 1` and unguarded
 /// `f(n: nat) == f((n - 1) as nat) + 1` definitions fail to terminate — does NOT
-/// discharge, and the axiom is suppressed. Returns `true` only when the isolated
-/// query returns `Verified`.
+/// discharge, and the axiom is suppressed. Returns `Proven` only when the
+/// isolated query is `Verified`; preserves an inconclusive authority verdict.
 fn member_edges_decrease(
     caller: &str,
     infos: &HashMap<&str, MemberTermInfo>,
     members: &BTreeSet<String>,
-) -> bool {
+) -> TerminationCheck {
     let Some(caller_info) = infos.get(caller) else {
-        return false;
+        return TerminationCheck::NotAdmitted;
     };
+    let parameter_names: BTreeSet<&str> = caller_info
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    if block_binds_any_name(&caller_info.body, &parameter_names) {
+        // The termination query currently models caller parameters but not
+        // arbitrary local bindings. A local/closure/match binding that shadows
+        // one of those parameters would make rendered guards or recursive-call
+        // arguments ambiguous. Refuse the definition rather than accidentally
+        // interpreting the local as the entry parameter.
+        return TerminationCheck::NotAdmitted;
+    }
 
     let mut scan = RecursiveCallScan {
         members,
@@ -1154,7 +1259,7 @@ fn member_edges_decrease(
     // (that is how the SCC edge was discovered). Finding none means we cannot
     // account for the recursion — fail closed.
     if scan.calls.is_empty() {
-        return false;
+        return TerminationCheck::NotAdmitted;
     }
 
     let mut ctx = VerificationContext::new();
@@ -1205,15 +1310,15 @@ fn member_edges_decrease(
 
     for (index, edge) in scan.calls.iter().enumerate() {
         let Some(callee_info) = infos.get(edge.callee.as_str()) else {
-            return false;
+            return TerminationCheck::NotAdmitted;
         };
         // Cannot map arguments onto the callee's parameters, or compare measures
         // of different lexicographic arity — fail closed.
         if edge.args.len() != callee_info.params.len() {
-            return false;
+            return TerminationCheck::NotAdmitted;
         }
         if caller_info.measures.len() != callee_info.measures.len() {
-            return false;
+            return TerminationCheck::NotAdmitted;
         }
 
         // Reconstruct the structural equation(s) for the constructor match-arms
@@ -1239,7 +1344,7 @@ fn member_edges_decrease(
                     deref_binders.extend(deref_names);
                 }
                 ArmResolution::Skip => {}
-                ArmResolution::Fail => return false,
+                ArmResolution::Fail => return TerminationCheck::NotAdmitted,
             }
         }
 
@@ -1285,8 +1390,23 @@ fn member_edges_decrease(
         // (implication) antecedent — rather than a global assume — keeps mutually
         // exclusive arms (`t == A(x)` vs `t == B(y)`) from contradicting each
         // other and collapsing the whole query to a vacuous pass.
-        let mut antecedents: Vec<String> =
-            edge.path.iter().map(|cond| format!("({cond})")).collect();
+        let mut antecedents: Vec<String> = edge
+            .path
+            .iter()
+            .map(|condition| {
+                // The false branch of `if n == 0` is normally rendered as
+                // `!(n == 0)`. For a `nat` parameter the encoder also asserts
+                // `0 <= n`, so that guard is exactly `0 < n`. Keep the query in
+                // that inequality form: AY can attach a checked LIA certificate
+                // to the resulting decrease proof, whereas the equivalent
+                // disequality currently requires an uncertified generic split.
+                // This is a typed equivalence, not a strengthening: non-`nat`
+                // guards and every unsupported syntactic shape stay unchanged.
+                nat_zero_false_guard_lower_bound(condition, &caller_params)
+                    .unwrap_or_else(|| condition.clone())
+            })
+            .map(|condition| format!("({condition})"))
+            .collect();
         antecedents.extend(arm_equations.iter().map(|eq| format!("({eq})")));
         let guarded = if antecedents.is_empty() {
             body_condition
@@ -1301,7 +1421,108 @@ fn member_edges_decrease(
         ));
     }
 
-    matches!(ctx.verify(), VerifyResult::Verified)
+    match ctx.verify() {
+        VerifyResult::Verified => TerminationCheck::Proven,
+        VerifyResult::Counterexample { .. } => TerminationCheck::NotAdmitted,
+        inconclusive => TerminationCheck::Inconclusive(inconclusive),
+    }
+}
+
+/// Whether a block introduces a pattern binding with one of `names`.
+///
+/// The function parameters themselves are outside `body`, so every matching
+/// `PatIdent` here is a genuine shadowing site (including `let`, closure, `for`,
+/// and match-arm bindings). The conservative whole-body rejection keeps the
+/// string-rendered isolated termination query from confusing two scopes.
+fn block_binds_any_name(body: &syn::Block, names: &BTreeSet<&str>) -> bool {
+    struct BindingScan<'a> {
+        names: &'a BTreeSet<&'a str>,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for BindingScan<'_> {
+        fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+            let ident = pattern.ident.to_string();
+            if self.names.iter().any(|name| *name == ident.as_str()) {
+                self.found = true;
+            }
+            syn::visit::visit_pat_ident(self, pattern);
+        }
+    }
+
+    let mut scan = BindingScan {
+        names,
+        found: false,
+    };
+    scan.visit_block(body);
+    scan.found
+}
+
+/// Re-express `!(n == 0)` / `!(0 == n)` as `0 < n` when `n` is a `nat` caller
+/// parameter. Nat declarations carry the global invariant `0 <= n`, making the
+/// two predicates equivalent. Returning `None` preserves the original guard.
+fn nat_zero_false_guard_lower_bound(
+    condition: &str,
+    caller_params: &HashMap<&str, &TrustVcType>,
+) -> Option<String> {
+    fn peel(mut expr: &syn::Expr) -> &syn::Expr {
+        loop {
+            expr = match expr {
+                syn::Expr::Paren(paren) => &paren.expr,
+                syn::Expr::Group(group) => &group.expr,
+                _ => return expr,
+            };
+        }
+    }
+
+    fn bare_name(expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Path(path) = peel(expr) else {
+            return None;
+        };
+        if path.qself.is_some()
+            || path.path.leading_colon.is_some()
+            || path.path.segments.len() != 1
+        {
+            return None;
+        }
+        path.path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string())
+    }
+
+    fn is_zero(expr: &syn::Expr) -> bool {
+        matches!(
+            peel(expr),
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(value),
+                ..
+            }) if matches!(value.base10_parse::<u128>(), Ok(0))
+        )
+    }
+
+    let parsed = syn::parse_str::<syn::Expr>(condition).ok()?;
+    let syn::Expr::Unary(negated) = peel(&parsed) else {
+        return None;
+    };
+    if !matches!(negated.op, syn::UnOp::Not(_)) {
+        return None;
+    }
+    let syn::Expr::Binary(equality) = peel(&negated.expr) else {
+        return None;
+    };
+    if !matches!(equality.op, syn::BinOp::Eq(_)) {
+        return None;
+    }
+    let name = if is_zero(&equality.right) {
+        bare_name(&equality.left)?
+    } else if is_zero(&equality.left) {
+        bare_name(&equality.right)?
+    } else {
+        return None;
+    };
+    matches!(caller_params.get(name.as_str()), Some(TrustVcType::Nat))
+        .then(|| format!("0 < {name}"))
 }
 
 /// Renders pre-rendered measure component strings as the scalar (single) or
@@ -1886,6 +2107,22 @@ impl SpecFunctionDef {
         reject_shadowing_param_binders(item_fn, &params)?;
         reject_block_items(item_fn)?;
 
+        // The marker is injected only after this source audit and accepted only
+        // by a crate-private obligation capability. Reject authored use (and an
+        // authored bare definition with the same identity) before constructing
+        // the body axiom, so a user cannot smuggle a privileged coercion into a
+        // nested call inside an otherwise-authenticated source-catalog body.
+        if bare_ident == SOURCE_CATALOG_MATH_INT_MARKER
+            || called_names_in_block(&item_fn.block).contains(SOURCE_CATALOG_MATH_INT_MARKER)
+        {
+            return Err(TrustVcError::Encoding {
+                context: "source spec function catalog",
+                detail: format!(
+                    "`{SOURCE_CATALOG_MATH_INT_MARKER}` is a reserved internal marker and cannot appear in authored source"
+                ),
+            });
+        }
+
         let call_args = bound_vars.join(", ");
         let trigger = format!("{}({})", name, call_args);
 
@@ -1902,7 +2139,19 @@ impl SpecFunctionDef {
             let mut renamed_block = (*item_fn.block).clone();
             IdentRenamer { rename_map }.visit_block_mut(&mut renamed_block);
             let body = quote!(#renamed_block).to_string();
-            format!("{trigger} == {body}")
+            // A finite-width value used directly as the result of a Verus
+            // `spec fn -> int` is interpreted in the mathematical-integer
+            // context of that result. In particular, `fn double(x: u16) ->
+            // int { x + x }` denotes the unbounded sum, not `bv2int(bvadd
+            // x x)`. Preserve that expected-type context across the
+            // source-catalog string seam with a reserved lowering marker. The
+            // marker is erased into typed IR by `ir_lowering::dispatch::calls`;
+            // it never reaches the solver as an uninterpreted function.
+            if matches!(return_ty, TrustVcType::MathInt) {
+                format!("{trigger} == {SOURCE_CATALOG_MATH_INT_MARKER}({body})")
+            } else {
+                format!("{trigger} == {body}")
+            }
         };
 
         // Soundness gate: a recursive spec function's defining axiom is faithful
@@ -2002,13 +2251,22 @@ impl SpecFunctionDef {
             return;
         }
 
-        ctx.push_obligation(
+        let mut body_axiom =
             ProofObligation::broadcast_assume(axiom_name, self.body_condition.clone())
                 .with_bound_vars(self.bound_vars.clone())
                 .with_trigger_patterns(vec![vec![self.trigger.clone()]])
                 .with_inline(self.is_inline)
-                .with_opaque(scope_gated),
-        );
+                .with_opaque(scope_gated);
+        if matches!(self.return_ty, TrustVcType::MathInt) {
+            body_axiom = body_axiom.with_source_catalog_math_int_context();
+        }
+        ctx.push_obligation(body_axiom);
+        // Reaching this point means the source definition had a body, crossed
+        // the visibility gate, and (for a recursive SCC) its isolated decreases
+        // query was strictly Verified. Preserve that authority separately from
+        // the forgeable diagnostic obligation name for exact ground recursive
+        // counterexample recovery.
+        ctx.record_source_catalog_admitted_definition(self.name.clone());
     }
 
     /// Install an exact source-name alias for this canonical function.
@@ -3163,6 +3421,61 @@ fn type_contains_type_param(ty: &TrustVcType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_only_nat_zero_false_guards_to_positive_bounds() {
+        let nat = TrustVcType::Nat;
+        let math_int = TrustVcType::MathInt;
+        let nat_params = HashMap::from([("n", &nat)]);
+        let int_params = HashMap::from([("n", &math_int)]);
+
+        assert_eq!(
+            nat_zero_false_guard_lower_bound("!(n == 0)", &nat_params).as_deref(),
+            Some("0 < n")
+        );
+        assert_eq!(
+            nat_zero_false_guard_lower_bound("!((0 == n))", &nat_params).as_deref(),
+            Some("0 < n")
+        );
+        assert_eq!(
+            nat_zero_false_guard_lower_bound("!(n == 0)", &int_params),
+            None,
+            "an unbounded integer may be negative, so disequality is not positivity"
+        );
+        assert_eq!(
+            nat_zero_false_guard_lower_bound("!(n == 1)", &nat_params),
+            None
+        );
+        assert_eq!(
+            nat_zero_false_guard_lower_bound("n == 0", &nat_params),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_parameter_shadowing_across_pattern_binding_forms() {
+        let names = BTreeSet::from(["n"]);
+        let clean: syn::Block = syn::parse_quote!({
+            let other = n;
+            if n == 0 {
+                0
+            } else {
+                other
+            }
+        });
+        let shadowed_let: syn::Block = syn::parse_quote!({
+            let n = 7;
+            n
+        });
+        let shadowed_closure: syn::Block = syn::parse_quote!({
+            let f = |n| n + 1;
+            f(n)
+        });
+
+        assert!(!block_binds_any_name(&clean, &names));
+        assert!(block_binds_any_name(&shadowed_let, &names));
+        assert!(block_binds_any_name(&shadowed_closure, &names));
+    }
 
     #[test]
     fn normalizes_open_spec_named_return() {

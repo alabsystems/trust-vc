@@ -7,20 +7,29 @@ Its destination is to be Trust's proof backend: it consumes Trust's compiler IR
 (no Z3, ay is git-pinned), and emits independently-checkable proof certificates
 back to Trust.
 
-**The Verus-replacement goal is RETIRED (R1, 2026-07-11)** per the ratified
-two-language spec-surface design
-(the Trust repo's `docs/design/2026-07-09-two-language-spec-surface.md` §6, §3.2, R1):
-Trust ships **one** spec surface (first-class Rust contract clauses + Clean),
-engines are invisible backends behind trust-router, and the Verus-compat
-program — the 67-macro frontend, the rustc-driver skeleton, cargo-trust-vc as
-a user CLI, and the diagnostic-string-parity workstream — is retired with it.
+**R1 (2026-07-11) retired the Verus-surface program — and was AMENDED two days
+later.** `docs/capability-audit-2026-07-13.md` §preamble reinstates the program
+in two phases, and the **ACTIVE GOAL** (author-set 2026-07-15, re-affirmed
+2026-07-18) is **100% of Verus functionality in trust-vc at "full or
+superior"** — verification-power parity on the native surface across the whole
+156-file corpus, per `docs/execution-plan-100-verus-2026-07-15.md` §2/§5.
+Phase 1: all of Verus's verification functionality on a better, ay/Trust-native
+surface (no slavish copying; diagnostic-string byte-parity stays retired).
+Phase 2 (follow-up): drop-in Verus replacement, scoped in that doc's §8.
+R1 was a documentation-only change — it deleted no macro, no CLI, no driver:
+the 69-macro frontend, targo-trust-vc (invoked `targo trust-vc`;
+`cargo trust-vc` alias), and `trust-vc-driver` are retained Phase-2 assets,
+not debt. Per the ratified two-language spec-surface design (the Trust repo's
+`docs/design/2026-07-09-two-language-spec-surface.md` §6, §3.2), Trust still
+ships **one** spec surface (first-class Rust contract clauses + Clean) and
+engines stay invisible backends behind trust-router.
 What trust-vc **is**: the fleet's auto-active SMT proof-calculus engine
 (triggers, fuel, broadcast, `calc!`, `by(compute)`) — trust-vc-core +
 trust-vc-trust-engine + trust-vc-types behind the router, with the ay-native
 collection theory encodings and the production `mir_memory` certificate lane.
 The 156-file Verus corpus is retained forever as regression material, re-keyed
-to the native Trust surface at R4; the evidence gate is retained as the
-corpus-port instrument, not as a product goal.
+to the native Trust surface at R4; the evidence gate is the corpus-port
+instrument that measures the active goal.
 
 > North-star design: see `design-trust-proof-backend.md` (Trust proof
 > backend). `design-rustc-driver-frontend.md` (the Verus-compat front
@@ -31,7 +40,7 @@ corpus-port instrument, not as a product goal.
 
 ## What trust-vc Does
 
-trust-vc proves mathematical properties of Rust code — preconditions, postconditions, loop invariants, termination measures, quantifiers — automatically, using the ay SMT solver. As Trust's proof backend it lowers resolved compiler facts (types/borrows from `trust-ir`) into its own typed IR, discharges them through ay, and re-checks ay's UNSAT/Alethe proofs to produce certificates Trust can trust. Users reach it through Trust's native contract surface via trust-router — never through a trust-vc-specific annotation dialect (R1: the Verus-compat surface is retired).
+trust-vc proves mathematical properties of Rust code — preconditions, postconditions, loop invariants, termination measures, quantifiers — automatically, using the ay SMT solver. As Trust's proof backend it lowers resolved compiler facts (types/borrows from `trust-ir`) into its own typed IR, discharges them through ay, and re-checks ay's UNSAT/Alethe proofs to produce certificates Trust can trust. Users reach it through Trust's native contract surface via trust-router — the trust-vc-specific annotation dialect is not a user-facing surface (R1 as amended: the native surface is primary; the macro frontend is a retained Phase-2 compat asset).
 
 ```rust
 use trust_vc::*;
@@ -53,7 +62,7 @@ fn lemma_sum_nonneg(n: u64) {
 }
 ```
 
-When you run `targo test`, trust_vc collects proof obligations from your annotations and sends them to ay. Each assertion is checked via refutation: ay attempts to find a counterexample to `NOT(assertion)`. If no counterexample exists (UNSAT), the assertion is verified. If ay finds one, it reports the concrete values that violate the property.
+When you run `targo --unverified test`, trust_vc collects proof obligations from your annotations and sends them to ay. Each assertion is checked via refutation: ay attempts to find a counterexample to `NOT(assertion)`. If no counterexample exists (UNSAT), the assertion is verified. If ay finds one, it reports the concrete values that violate the property. `--unverified` describes the outer Trust compiler lane; these trust_vc engine checks still run.
 
 ## How It Works
 
@@ -61,13 +70,17 @@ When you run `targo test`, trust_vc collects proof obligations from your annotat
 
 ```
 crates/
-├── cargo-trust-vc/         # CLI wrapper (`cargo trust-vc check`)
+├── cargo-trust-vc/         # CLI wrapper, package `targo-trust-vc` (`targo trust-vc check`; `cargo trust-vc check` alias)
 ├── trust-vc/               # Proc macros (#[proof], #[decreases], requires!, etc.)
 ├── trust-vc-core/          # Verification engine (encoder, VC generation, ay interface)
-├── trust-vc-types/         # Ghost types (Seq, Set, Map) for specifications
+├── trust-vc-driver/        # rustc-driver (THIR) front end — the one crate needing the Trust rustc fork
+├── trust-vc-kernel/        # Proof certificate wire format + independent resolution checker
 ├── trust-vc-merge-contract/# Versioned MergeBundle boundary for Trust integration
 ├── trust-vc-merge-runner/  # Merge parity gate runner
-└── trust-vc-trust-engine/  # Trust adapter: consumes trust-ir compiler facts, emits proof certificates
+├── trust-vc-oracle/        # LLM proof oracle — semantic counterexample feedback
+├── trust-vc-std/           # Standard-library lemma surface for specifications
+├── trust-vc-trust-engine/  # Trust adapter: consumes trust-ir compiler facts, emits proof certificates
+└── trust-vc-types/         # Ghost types (Seq, Set, Map) for specifications
 ```
 
 ### Verification Pipeline
@@ -104,9 +117,9 @@ Each proc macro generates code for three `cfg` targets:
 
 | Mode | When | Behavior |
 |------|------|----------|
-| `cfg(test)` | `targo test` | Collects obligations, invokes ay, panics on counterexample |
+| `cfg(test)` | `targo --unverified test` | Collects obligations, invokes ay, panics on counterexample |
 | `cfg(trust_mc)` | trust-mc verifier | Emits `__trust_vc_*` marker variables for trust-mc to consume |
-| default | `targo build` | Proof functions become no-ops; assertions become runtime panics |
+| default | `targo --unverified build` | Proof functions become no-ops; assertions become runtime panics |
 
 ### What ay Encodes
 
@@ -207,23 +220,23 @@ Specification-only collection types. These are `PhantomData` wrappers — zero r
 
 ## Current Status
 
-**Build:** passes `targo check --workspace --all-targets` in this checkout. **Verus replacement:** evidence-gated by
-`./target/debug/cargo-trust-vc evidence`; **`replacement_verdict: not_proven`** today — not proven until the full trust-vc,
+**Build:** passes `targo --unverified check --workspace --all-targets` in this checkout. **Verus replacement:** evidence-gated by
+`./target/debug/targo-trust-vc evidence` (the `cargo-trust-vc` bin remains as a back-compat alias); **`replacement_verdict: not_proven`** today — not proven until the full trust-vc,
 upstream Verus, and corpus gates pass from a clean worktree. **Honest parity:** the feature surface below is broad, but only
 ~12–15% of the upstream Verus test corpus is genuinely ported at the proof-language level (111 of 156 entries are
 `unsupported-gap`). Do not read "broad feature list" as Verus parity; the gate is the source of truth. The dependency-ordered
 path to a proven replacement lives in the internal parity-to-100 program plan. **Lines:** about
-727k Rust across 10 workspace crates (source + tests). **Note:** CI runs
-`fmt`/`tippy`/`targo check` but does **not** run `targo test` or the evidence
-gate, so test health is not gate-enforced; run `targo test` locally before
-relying on a checkout.
+727k Rust across 11 workspace crates (source + tests). **Note:** there is
+**no CI** — every gate is a local script (`scripts/quality_audit.py`,
+`scripts/stock-harness.sh`, the merge-parity gate) run by hand, so test health
+is not gate-enforced; run `targo --unverified test` locally before relying on a checkout.
 
 ### Replacement Evidence
 
 Generate the current replacement evidence report:
 
 ```bash
-./target/debug/cargo-trust-vc evidence . --strict --run-trust-vc --run-trust-vc-corpus --run-verus \
+./target/debug/targo-trust-vc evidence . --strict --run-trust-vc --run-trust-vc-corpus --run-verus \
   --verus-path /path/to/verus --verus-rev <verus-commit> \
   --manifest evals/verus/verus-tests.json --json --markdown
 ```
@@ -250,7 +263,7 @@ borrows + model checking + separation logic + proof calculus, one engine, one
 solver) rather than a Rust-surface-plus-Z3 silo. It also offers cross-IR
 portability and an ay-vs-Z3 differential oracle.
 
-- Broad proc macro surface (67 macros) with three-way cfg expansion (test/trust-mc/runtime)
+- Broad proc macro surface (69 macros) with three-way cfg expansion (test/trust-mc/runtime)
 - End-to-end verification: annotation → obligation collection → ay solving → result
 - Bitvector-precise arithmetic for all Rust integer types (i8–i128, u8–u128)
 - Pre/postconditions, loop invariants, proof functions, recursive termination (self + mutual via Tarjan SCC)
@@ -291,7 +304,7 @@ unified verifier rather than a standalone tool.
 | **P3** | Demand-driven cross-function inlining | done | #2655 |
 
 Execution enablers such as test-tiering, gate-serialization removal, and the
-`cargo trust-vc` wrapper are tracked in epic #2656 rather than this public
+`targo trust-vc` wrapper are tracked in epic #2656 rather than this public
 capability table.
 
 #### Deferred research
@@ -344,9 +357,40 @@ Current integration staging:
 ## Installation and Usage
 
 ```bash
-targo build
-targo test
+targo --unverified build
+targo --unverified test
 ```
+
+Targo requires an explicit lane. These commands build and test trust_vc without
+claiming that the Trust compiler verified the produced artifacts. Use
+`targo trust check` for the compiler-verified lane.
+
+### `trust-vc` — verify in one command
+
+The build produces two front ends over the same verifier (both from crate
+`targo-trust-vc`). Neither needs cargo, rustc, a sysroot or an external solver
+at runtime: sources are parsed with `syn` and the proof obligations are
+discharged in-process on `ay`.
+
+```bash
+trust-vc example > demo.rs   # a tiny annotated program that verifies as-is
+trust-vc demo.rs             # verify a single file
+trust-vc path/to/crate       # verify a crate through its src/ tree
+trust-vc --help              # answers with nothing installed, as does --version
+```
+
+Every check flag is reachable from either front end — `--function`, `--filter`,
+`--json`, `--ci`, `--diff`, `--localize`, `--no-cheating`, `--timeout`, `-j`,
+`--emit-certificate`, `--emit-hints`, `--watch` — and the cargo subcommand is
+unchanged:
+
+```bash
+targo trust-vc check <crate>   # `cargo trust-vc check <crate>` still works (alias)
+```
+
+Cargo-driven selection (`--package`, `--manifest-path`, `--features`, …) stays
+on the cargo subcommand. `trust-vc` never silently ignores a flag: it names the
+one you passed and the one to use instead.
 
 ## Running proofs on STOCK rustc (no Trust fork — minutes, not hours)
 
@@ -372,24 +416,28 @@ scripts/stock-harness.sh ay_incumbent_vig_realbody
 Equivalently, by hand:
 
 ```bash
-RUSTFLAGS="" cargo test -p trust-vc-core \
-  --test ay_incumbent_vig_realbody --locked
+RUSTC=/opt/homebrew/bin/rustc RUSTFLAGS="" /opt/homebrew/bin/cargo test \
+  -p trust-vc-core --test ay_incumbent_vig_realbody --locked
 ```
 
-The `RUSTFLAGS=""` override leaves the Trust-toolchain path untouched:
+Both overrides leave the Trust-toolchain path untouched:
 
-It overrides `.cargo/config.toml`'s
-`build.rustflags = ["-Zno-trust-verify"]` (a Trust-rustc-only `-Z` flag that
-stock rustc rejects). An `RUSTFLAGS` env value takes precedence over
-`build.rustflags`, so the flag is dropped for this invocation only. Dependencies
-stay on the same exact revisions recorded in `Cargo.lock`; the stock harness
-does not redirect them to mutable local checkouts.
+`RUSTC` matters because homebrew `cargo` — a non-rustup cargo that itself
+ignores `rust-toolchain.toml`'s `channel = "trust"` — still resolves `rustc`
+from `PATH`, where the rustup shim usually shadows homebrew's; the shim honors
+the `trust` pin and fails whenever that toolchain is absent or mid-rebuild.
+Pinning `RUSTC` to the rustc that ships with the chosen cargo keeps both
+halves of the toolchain stock. `RUSTFLAGS=""` clears any ambient Trust-only
+`-Z` flags that stock rustc would reject (the committed `.cargo/config.toml`
+no longer sets `build.rustflags`; Targo injects its own per-unit off-switch).
+Dependencies stay on the same exact revisions recorded in `Cargo.lock`; the
+stock harness does not redirect them to mutable local checkouts.
 
-Homebrew `cargo` is a non-rustup cargo, so it ignores `rust-toolchain.toml`'s
-`channel = "trust"`; if you drive a rustup `stable` instead, add
-`RUSTUP_TOOLCHAIN=stable` (or `cargo +stable`). `scripts/stock-harness.sh`
-selects the homebrew cargo automatically and isolates artifacts in
-`target-stock/` so it never thrashes the Trust-toolchain `target/` cache.
+If you drive a rustup `stable` instead, `cargo +stable` (or
+`RUSTUP_TOOLCHAIN=stable`) handles both halves at once.
+`scripts/stock-harness.sh` selects the homebrew cargo automatically and
+isolates artifacts in `target-stock/` so it never thrashes the
+Trust-toolchain `target/` cache.
 
 ## False-Verified Fuzzing
 
@@ -397,16 +445,16 @@ The cargo-fuzz suite for contradictory postconditions lives under
 `fuzz/` and exercises the VC extraction plus encoder path.
 
 ```bash
-targo test --manifest-path fuzz/Cargo.toml
+targo --unverified test --manifest-path fuzz/Cargo.toml
 ```
 
 For a 1-hour release sweep, run each target for 15 minutes:
 
 ```bash
-targo fuzz run ensures_false -- -max_total_time=900
-targo fuzz run strict_inequality -- -max_total_time=900
-targo fuzz run mode_crossing -- -max_total_time=900
-targo fuzz run collections_contradiction -- -max_total_time=900
+rustup run nightly cargo fuzz run ensures_false -- -max_total_time=900
+rustup run nightly cargo fuzz run strict_inequality -- -max_total_time=900
+rustup run nightly cargo fuzz run mode_crossing -- -max_total_time=900
+rustup run nightly cargo fuzz run collections_contradiction -- -max_total_time=900
 ```
 
 Extended fuzzing runbooks stay in the internal development docs; the public

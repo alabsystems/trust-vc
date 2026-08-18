@@ -69,7 +69,7 @@ pub struct PointerWidthGuard {
 impl PointerWidthGuard {
     /// Installs `width_bits` as the current thread's pointer width.
     ///
-    /// `width_bits` MUST be one of [`SUPPORTED_USIZE_WIDTHS`]; callers should
+    /// `width_bits` MUST be one of `SUPPORTED_USIZE_WIDTHS`; callers should
     /// validate via [`parse_global_size_of_usize`] before constructing the
     /// guard. Construction does not itself reject unsupported widths because
     /// the supported set is enforced at the directive-parsing boundary; this
@@ -502,7 +502,7 @@ impl TraitImplDecl {
     /// Rewrites associated-type projections in `ty` to the impl's bound type,
     /// recursing through container types. Both the trait-signature spelling
     /// `Self::X` and the fully-qualified spelling `<Concrete as Trait>::X` are
-    /// resolved (see [`Self::resolve_projection_name`]). Projections without a
+    /// resolved (see `Self::resolve_projection_name`). Projections without a
     /// binding (or bindings that are themselves unresolvable) are left as-is,
     /// so every existing `contains_opaque()` fail-closed guard still rejects
     /// them — this only *resolves*, it never invents a type.

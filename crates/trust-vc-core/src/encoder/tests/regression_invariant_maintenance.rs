@@ -90,12 +90,26 @@ fn range_preserved_by_clamp() {
         "clamp_def",
         "clamped == if x < lo { lo } else { if x > hi { hi } else { x } }",
     ));
-    ctx.push_obligation(ProofObligation::assert(
-        "clamped_bounds",
-        "clamped >= 0 && clamped <= 100",
-    ));
+    // This explicit arithmetic tactic uses mathematical integers. The input
+    // and both endpoints are bounded far inside i32, and the ITE only selects
+    // one of those values, so there is no wrapping behavior to abstract away.
+    ctx.push_obligation(
+        ProofObligation::assert("clamped_bounds", "clamped >= 0 && clamped <= 100")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "clamp should preserve the target range invariant");
+
+    ctx.push_obligation(ProofObligation::assume("x_at_upper_endpoint", "x == 100"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_clamped_bound", "clamped < 100")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a strict bound at the clamp endpoint",
+    );
 }
 
 #[test]

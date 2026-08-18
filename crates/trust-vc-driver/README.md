@@ -41,7 +41,7 @@ logic is portable and unit-tested.
 Default (stable) — compiles and tests the `lower` seam end to end through ay:
 
 ```bash
-targo test -p trust-vc-driver
+targo --unverified test -p trust-vc-driver
 ```
 
 The `tests/lower_end_to_end.rs` suite proves the seam is **sound**: valid
@@ -96,7 +96,7 @@ the dependency graph stays cached; `test` must put them on global `RUSTFLAGS`
 ## Why this is additive and safe
 
 `trust-vc-driver` is a workspace member, but the `rustc-driver` feature is **off
-by default**, so a root `targo build`/`targo test` compiles only the stable
+by default**, so a root `targo --unverified build`/`targo --unverified test` compiles only the stable
 `lower` layer and the evidence gate is undisturbed. The nightly pin lives in this
 crate's own `rust-toolchain.toml`, which only applies when targo is invoked from
 inside this directory.

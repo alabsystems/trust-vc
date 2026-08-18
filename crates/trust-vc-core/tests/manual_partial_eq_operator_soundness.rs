@@ -24,8 +24,11 @@ fn verify(id: &str, func: &str, src: &str) -> VerifyResult {
     let mut p = std::env::temp_dir();
     p.push(format!("tvc_mpe_{}_{}.rs", std::process::id(), id));
     std::fs::write(&p, src).expect("write fixture");
-    let r = verify_function_from_file(p.to_str().unwrap(), func)
-        .unwrap_or_else(|e| VerifyResult::Error { message: e.to_string() });
+    let r = verify_function_from_file(p.to_str().unwrap(), func).unwrap_or_else(|e| {
+        VerifyResult::Error {
+            message: e.to_string(),
+        }
+    });
     let _ = std::fs::remove_file(&p);
     r
 }

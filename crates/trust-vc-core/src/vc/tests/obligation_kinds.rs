@@ -133,3 +133,16 @@ fn test_typed_obligation_retains_expr_payload_and_origin() {
     ctx.obligations.clear();
     assert!(!ctx.has_assertions());
 }
+
+#[test]
+fn source_catalog_math_int_context_defaults_false_for_all_public_constructors() {
+    let ordinary = ProofObligation::new("ordinary", "x + x", ObligationKind::Assert);
+    let typed = ProofObligation::new_typed(
+        "typed",
+        crate::ir::TrustVcExpr::BoolLit(true),
+        ObligationKind::Assert,
+    );
+
+    assert!(!ordinary.source_catalog_math_int_context);
+    assert!(!typed.source_catalog_math_int_context);
+}

@@ -659,6 +659,63 @@ fn block_glob_import_fails_closed_without_scope_indexed_exports() {
     );
 }
 
+const OPAQUE_UNIT_SIBLING_WITH_BLOCK_GLOB: &str = r#"
+mod nested {
+    pub fn external_effect() {}
+}
+
+fn unverified_unit_helper() {
+    use nested::*;
+    external_effect();
+}
+
+#[trust_vc::ensures(true)]
+fn caller_does_not_observe_unit_helper_body() {
+    unverified_unit_helper();
+}
+"#;
+
+#[test]
+fn unresolved_glob_in_unobservable_unit_sibling_stays_opaque() {
+    let result = verify(
+        OPAQUE_UNIT_SIBLING_WITH_BLOCK_GLOB,
+        "caller_does_not_observe_unit_helper_body",
+    )
+    .unwrap_or_else(|error| panic!("opaque unit sibling should not poison its caller: {error}"));
+    assert!(
+        matches!(result, VerifyResult::Verified),
+        "omitting an unobservable unit helper body should preserve the caller's tautological postcondition, got {result:?}"
+    );
+}
+
+const OBSERVABLE_SIBLING_WITH_BLOCK_GLOB: &str = r#"
+mod nested {
+    pub fn imported_value() -> bool { false }
+}
+
+fn observable_helper() -> bool {
+    use nested::*;
+    imported_value()
+}
+
+#[trust_vc::ensures(result)]
+fn caller_observes_helper_result() -> bool {
+    observable_helper()
+}
+"#;
+
+#[test]
+fn unresolved_glob_in_value_returning_sibling_still_fails_closed() {
+    let result = verify(
+        OBSERVABLE_SIBLING_WITH_BLOCK_GLOB,
+        "caller_observes_helper_result",
+    );
+    assert!(
+        result.is_err(),
+        "a value-returning sibling body must not be omitted when its glob target is unresolved, got {result:?}"
+    );
+}
+
 const PARAMETER_SHADOWS_BLOCK_ALIAS: &str = r#"
 mod nested {
     #[trust_vc::spec]

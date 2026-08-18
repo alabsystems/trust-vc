@@ -376,33 +376,25 @@ fn tv_var(name: &str) -> TrustVcExpr {
 
 /// Encode a match over a two-variant datatype scrutinee. Returns the solver,
 /// the scrutinee term, and the match result term.
-fn encode_tv_match(expr: &TrustVcExpr) -> (Solver, Term, Term) {
-    let mut solver = Solver::try_new(Logic::All).unwrap();
-    // The scrutinee is a datatype variable, so it carries the native datatype
-    // carrier sort `Sort::Uninterpreted("TV")` (was the legacy shared Sort::Int).
-    // The match encoder builds the scrutinee's testers/selectors over
-    // `term_sort(scrutinee)`, i.e. this carrier sort.
-    let e = solver.declare_const("e", crate::encoder::datatype::datatype_carrier_sort("TV"));
-    let mut variables = std::collections::HashMap::new();
-    variables.insert("e".into(), e);
-    let mut var_types = std::collections::HashMap::new();
-    var_types.insert("e".into(), two_variant_ty());
-    let mut collection_lengths = std::collections::HashMap::new();
-    let functions = std::collections::HashMap::new();
-
-    let mut parser = AstExpressionParser::new(
-        &mut solver,
-        &variables,
-        &mut collection_lengths,
-        &var_types,
-        &functions,
-    );
-    let term = parser
-        .encode_trust_vc_expr(expr)
+fn encode_tv_match(expr: &TrustVcExpr) -> (AYEncoder, Term, Term) {
+    // Register the datatype through the production encoder before declaring the
+    // scrutinee. Final ay authenticates every native tester/selector handle and
+    // correctly rejects forged `FuncDecl::new(...)` handles, so this fixture
+    // must exercise the same native declarations as production.
+    let mut encoder = AYEncoder::new();
+    encoder
+        .declare_variable(&VariableDecl {
+            name: "e".into(),
+            ty: two_variant_ty(),
+            bounded_len: false,
+        })
+        .expect("native TV variable should register its datatype");
+    let e = encoder.variables["e"];
+    let term = encoder
+        .encode_condition_typed(expr)
         .expect("match expression should encode without error");
-    drop(parser);
 
-    (solver, e, term)
+    (encoder, e, term)
 }
 
 /// DISCRIMINATING: `match e { Foo(x) | Bar(x) => x }` should encode
@@ -434,7 +426,7 @@ fn test_or_pattern_constructor_binding_encodes_without_error() {
         ty: TrustVcType::Int { width: 32 },
     };
 
-    let (_solver, _e, _match_term) = encode_tv_match(&expr);
+    let (_encoder, _e, _match_term) = encode_tv_match(&expr);
     // Success: encoding didn't panic with "Undefined variable: x".
 }
 
@@ -467,29 +459,21 @@ fn test_or_pattern_constructor_binding_selects_correct_field() {
         ty: TrustVcType::Int { width: 32 },
     };
 
-    let (mut solver, e, match_term) = encode_tv_match(&expr);
-
-    // Create the tester and selector function symbols that the encoder uses
-    // internally (same naming convention: datatype.rs). Native-datatype
-    // migration: testers use the `is-` (hyphen) convention and tester/selector
-    // domains are the native datatype carrier sort `Sort::Uninterpreted("TV")`
-    // (the scrutinee's sort), not the legacy Sort::Int.
-    let carrier = crate::encoder::datatype::datatype_carrier_sort("TV");
-    let is_foo = FuncDecl::new("is-TV_Foo".into(), vec![carrier.clone()], Sort::Bool);
-    let foo_sel = FuncDecl::new("TV_Foo_0".into(), vec![carrier.clone()], Sort::bitvec(32));
-    let is_bar = FuncDecl::new("is-TV_Bar".into(), vec![carrier.clone()], Sort::Bool);
-    let bar_sel = FuncDecl::new("TV_Bar_0".into(), vec![carrier], Sort::bitvec(32));
+    let (mut encoder, e, match_term) = encode_tv_match(&expr);
 
     // When is_Foo(e), the match result should equal Foo's selector for e.
-    solver.try_push().unwrap();
-    let foo_cond = solver.try_apply(&is_foo, &[e]).unwrap();
-    let foo_field = solver.try_apply(&foo_sel, &[e]).unwrap();
-    solver.try_assert_term(foo_cond).unwrap();
-    let eq = solver.try_eq(match_term, foo_field).unwrap();
-    let neq = solver.try_not(eq).unwrap();
-    solver.try_assert_term(neq).unwrap();
-    let sat = solver.try_check_sat().unwrap();
-    solver.try_pop().unwrap();
+    encoder.solver.try_push().unwrap();
+    let foo_cond = encoder.solver.try_datatype_tester("TV_Foo", e).unwrap();
+    let foo_field = encoder
+        .solver
+        .try_datatype_selector("TV_Foo_0", e, Sort::bitvec(32))
+        .unwrap();
+    encoder.solver.try_assert_term(foo_cond).unwrap();
+    let eq = encoder.solver.try_eq(match_term, foo_field).unwrap();
+    let neq = encoder.solver.try_not(eq).unwrap();
+    encoder.solver.try_assert_term(neq).unwrap();
+    let sat = encoder.solver.check_sat();
+    encoder.solver.try_pop().unwrap();
     assert!(
         sat.is_unsat(),
         "when is_Foo(e), match result should equal Foo's field, got {:?}",
@@ -498,18 +482,21 @@ fn test_or_pattern_constructor_binding_selects_correct_field() {
 
     // When is_Bar(e) and NOT is_Foo(e), the match result should equal Bar's
     // selector. (The ITE defaults to Bar's term when Foo's tester is false.)
-    solver.try_push().unwrap();
-    let bar_cond = solver.try_apply(&is_bar, &[e]).unwrap();
-    let foo_cond2 = solver.try_apply(&is_foo, &[e]).unwrap();
-    let not_foo = solver.try_not(foo_cond2).unwrap();
-    let bar_field = solver.try_apply(&bar_sel, &[e]).unwrap();
-    solver.try_assert_term(bar_cond).unwrap();
-    solver.try_assert_term(not_foo).unwrap();
-    let eq2 = solver.try_eq(match_term, bar_field).unwrap();
-    let neq2 = solver.try_not(eq2).unwrap();
-    solver.try_assert_term(neq2).unwrap();
-    let sat2 = solver.try_check_sat().unwrap();
-    solver.try_pop().unwrap();
+    encoder.solver.try_push().unwrap();
+    let bar_cond = encoder.solver.try_datatype_tester("TV_Bar", e).unwrap();
+    let foo_cond2 = encoder.solver.try_datatype_tester("TV_Foo", e).unwrap();
+    let not_foo = encoder.solver.try_not(foo_cond2).unwrap();
+    let bar_field = encoder
+        .solver
+        .try_datatype_selector("TV_Bar_0", e, Sort::bitvec(32))
+        .unwrap();
+    encoder.solver.try_assert_term(bar_cond).unwrap();
+    encoder.solver.try_assert_term(not_foo).unwrap();
+    let eq2 = encoder.solver.try_eq(match_term, bar_field).unwrap();
+    let neq2 = encoder.solver.try_not(eq2).unwrap();
+    encoder.solver.try_assert_term(neq2).unwrap();
+    let sat2 = encoder.solver.check_sat();
+    encoder.solver.try_pop().unwrap();
     assert!(
         sat2.is_unsat(),
         "when is_Bar(e) and not is_Foo(e), match result should equal Bar's field, got {:?}",

@@ -36,12 +36,29 @@ fn range_product_sign() {
         "ranges",
         "a >= 1 && a <= 10 && b >= 1 && b <= 10",
     ));
-    ctx.push_obligation(ProofObligation::assert("product_sign", "a * b >= 1"));
+    // The bounds constrain the product to 1..=100, so mathematical-integer
+    // reasoning is equivalent to i32 multiplication for this obligation.
+    ctx.push_obligation(
+        ProofObligation::assert("product_sign", "a * b >= 1")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
-    expect_verified_or_unknown(
+    expect_verified(
         &result,
         "positive ranges should imply product is at least 1",
     );
+
+    // The former verified-or-unknown oracle could hide a proof-resource
+    // regression. Pin the lower endpoint and require a real counterexample to
+    // the adjacent false claim as a control for the explicit tactic.
+    ctx.push_obligation(ProofObligation::assume("a_at_lower_endpoint", "a == 1"));
+    ctx.push_obligation(ProofObligation::assume("b_at_lower_endpoint", "b == 1"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_product_sign", "a * b > 1")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(&result, "the nonlinear tactic must reject 1 * 1 > 1");
 }
 
 #[test]

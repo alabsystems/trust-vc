@@ -130,6 +130,7 @@ fn gate_help_lists_stages_and_flags() {
         "test",
         "examples",
         "evidence",
+        "--locked",
         "--quick",
         "--no-fuzz",
     ] {
@@ -145,6 +146,59 @@ fn gate_rejects_unknown_flag() {
     let (_stdout, stderr, code) = run(&["trust-vc", "gate", "--bogus"]);
     assert_eq!(code, 2, "unknown gate flag should be a CLI error: {stderr}");
     assert!(stderr.contains("--bogus"), "{stderr}");
+}
+
+#[test]
+fn gate_rejects_verus_path_with_checkout_evidence_guidance() {
+    let (_stdout, stderr, code) = run(&["trust-vc", "gate", "--verus-path", "/tmp/verus"]);
+    assert_eq!(code, 2, "checkout evidence is a separate command: {stderr}");
+    assert!(stderr.contains("offline local-integrity gate"), "{stderr}");
+    assert!(stderr.contains("--port-manifest-only"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn gate_json_stdout_is_one_clean_report() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = temp_dir("json_clean");
+    std::fs::create_dir_all(&temp).expect("temp directory should be creatable");
+    let fake_cargo = temp.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        "#!/bin/sh\nprintf 'fake cargo stdout\\n'\nprintf 'fake cargo stderr\\n' >&2\nexit 0\n",
+    )
+    .expect("fake cargo should be writable");
+    let mut permissions = std::fs::metadata(&fake_cargo)
+        .expect("fake cargo metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_cargo, permissions).expect("fake cargo should be executable");
+
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve");
+    let output = Command::new(cargo_trust_vc_bin())
+        .current_dir(workspace)
+        .env("CARGO", &fake_cargo)
+        .args(["trust-vc", "gate", "--quick", "--no-fuzz", "--json"])
+        .output()
+        .expect("JSON gate should execute");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "fake local gate should pass: stdout={stdout} stderr={stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must contain exactly one JSON value");
+    assert_eq!(report["overall"], "pass", "{stdout}");
+    assert!(!stdout.contains("fake cargo"), "{stdout}");
+    assert!(!stderr.contains("fake cargo"), "{stderr}");
+
+    std::fs::remove_dir_all(&temp).ok();
 }
 
 #[test]

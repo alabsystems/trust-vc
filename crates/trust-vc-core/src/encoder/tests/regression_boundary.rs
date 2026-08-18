@@ -238,10 +238,35 @@ fn boundary_u32_mul_small_values() {
     ctx.declare_var_typed("b", u32_ty());
     ctx.push_obligation(ProofObligation::assume("a_bounded", "a <= 100"));
     ctx.push_obligation(ProofObligation::assume("b_bounded", "b <= 100"));
-    ctx.push_obligation(ProofObligation::assert("mul_bounded", "a * b <= 10000"));
+    // This explicit Verus-style nonlinear tactic uses mathematical integers.
+    // The premises make that interpretation equivalent to u32 execution here:
+    // the product is in 0..=10_000 and therefore cannot wrap.
+    ctx.push_obligation(
+        ProofObligation::assert("mul_bounded", "a * b <= 10000")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
 
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "small u32 factors should keep the product bounded");
+}
+
+#[test]
+fn boundary_u32_mul_nonlinear_rejects_stronger_false_bound() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("a", u32_ty());
+    ctx.declare_var_typed("b", u32_ty());
+    ctx.push_obligation(ProofObligation::assume("a_max", "a == 100"));
+    ctx.push_obligation(ProofObligation::assume("b_max", "b == 100"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_bound", "a * b < 10000")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a stronger false product bound",
+    );
 }
 
 #[test]

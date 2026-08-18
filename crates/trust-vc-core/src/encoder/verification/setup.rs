@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use ay_dpll::api::Term;
+use ay_dpll::api::{Logic, Term};
 
 use crate::encoder::AYEncoder;
 use crate::error::TrustVcResult;
@@ -417,6 +417,93 @@ fn bootstrap_prepared_encoder_with_prune_plan(
         .collect();
     declared_variables.extend(extra_variables.iter());
 
+    // Register user-defined struct types as single-variant datatypes.
+    //
+    // ORDERING IS LOAD-BEARING (ay 0.4.0). This must precede variable
+    // declaration and trait/impl registration, not merely
+    // `register_builtin_datatypes` and assumption encoding. Declaring a
+    // variable or impl over a user struct `S` introduces the sort `S`, and
+    // ay 0.4.0 rejects a later datatype declaration for an already-declared
+    // sort:
+    //
+    //   sort 'S' is already declared; re-declaring it as a datatype would
+    //   conflate existing symbols over the old sort with the new datatype's
+    //   members
+    //
+    // That guard is correct — conflating opaque-sort symbols with datatype
+    // members is exactly the confusion it names — so the fix is to declare the
+    // datatype FIRST and let everything downstream resolve against it, rather
+    // than to weaken the check. Under ay 0.3.0 the collision was silent, which
+    // is why this ordering was not previously forced.
+    // DEPENDENCY ORDER within this loop is load-bearing for the same reason:
+    // registering an OUTER struct introduces the sorts of its field types, so a
+    // struct that appears as another's field must be declared as a datatype
+    // FIRST or its own registration collides with the sort the outer one
+    // created. Emit each struct after every in-context struct it references.
+    let struct_order = {
+        let names: std::collections::BTreeSet<&str> =
+            ctx.struct_types.iter().map(|d| d.name.as_str()).collect();
+        let mut emitted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut order: Vec<&crate::ir::StructDef> = Vec::with_capacity(ctx.struct_types.len());
+        // Bounded fixpoint: each pass emits every struct whose in-context
+        // dependencies are already out. A cycle (mutually recursive structs)
+        // stops making progress, and the remainder is emitted in declaration
+        // order — no worse than the previous unordered behaviour.
+        loop {
+            let before = order.len();
+            for def in &ctx.struct_types {
+                if emitted.contains(&def.name) {
+                    continue;
+                }
+                let ready = def.fields.iter().all(|(_, ty)| {
+                    let dep = ty.to_type_string();
+                    !names.contains(dep.as_str()) || dep == def.name || emitted.contains(&dep)
+                });
+                if ready {
+                    emitted.insert(def.name.clone());
+                    order.push(def);
+                }
+            }
+            if order.len() == before {
+                break;
+            }
+        }
+        for def in &ctx.struct_types {
+            if !emitted.contains(&def.name) {
+                order.push(def);
+            }
+        }
+        order
+    };
+
+    for struct_def in struct_order {
+        let dt_type = struct_def.to_datatype_type();
+        if matches!(dt_type, crate::ir::TrustVcType::Datatype { .. }) {
+            // Register through the type walker rather than calling
+            // `register_datatype` directly: declaring a datatype also
+            // introduces its FIELD sorts, so a struct carrying a datatype-typed
+            // field (a tuple carrier such as `(u64, u64)`, say) would introduce
+            // that field's sort as opaque here and make the later datatype
+            // declaration for it fail under ay 0.4.0. The walker declares
+            // fields innermost-first, and is idempotent.
+            encoder
+                .register_datatypes_in_type(&dt_type)
+                .map_err(|err| {
+                    setup_encoding_error(format!(
+                        "Failed to register struct type '{}': {}",
+                        struct_def.name, err
+                    ))
+                })?;
+        }
+    }
+
+    // Same ay 0.4.0 ordering constraint as the struct block above, for datatypes
+    // that are not user structs: a GENERIC or ASSOCIATED-TRAIT type (e.g. an
+    // associated type resolving to `Option<u8>`) has its sort introduced by
+    // variable declaration or by `register_trait`, and a later datatype
+    // declaration for that sort is then rejected. Register them first.
+    register_datatypes_from_prepared_context(encoder, ctx, extra_variables)?;
+
     for var in &declared_variables {
         let var = *var;
         if use_int_for_measures {
@@ -595,24 +682,28 @@ fn bootstrap_prepared_encoder_with_prune_plan(
                     err
                 ))
             })?;
-    }
 
-    // Register user-defined struct types as single-variant datatypes.
-    // Must happen before register_builtin_datatypes and assumption encoding
-    // so constructor/selector/tester symbols are available. Part of #2419.
-    for struct_def in &ctx.struct_types {
-        let dt_type = struct_def.to_datatype_type();
-        if let crate::ir::TrustVcType::Datatype {
-            ref name,
-            ref variants,
-        } = dt_type
+        // Propagate the TRAIT method `ensures` for associated-type-returning
+        // methods to concrete-receiver callers, bound to the per-impl concrete
+        // function with the projection resolved to its concrete sort (Phase A3
+        // assoc-spec-fn client seam). Sound ONLY because the per-impl conformance
+        // pass proves `body ⊨ trait_ensures` at exactly these sorts; a
+        // non-conforming impl is refuted on its own conformance obligation.
+        if let Some(trait_decl) = ctx
+            .trait_decls
+            .iter()
+            .find(|decl| decl.name == impl_decl.trait_name)
         {
-            encoder.register_datatype(name, variants).map_err(|err| {
-                setup_encoding_error(format!(
-                    "Failed to register struct type '{}': {}",
-                    struct_def.name, err
-                ))
-            })?;
+            encoder
+                .assert_impl_trait_ensures_concrete_axioms(trait_decl, impl_decl)
+                .map_err(|err| {
+                    setup_encoding_error(format!(
+                        "Failed to propagate associated-type trait ensures for '{}' on {}: {}",
+                        impl_decl.trait_name,
+                        impl_decl.concrete_type.to_type_string(),
+                        err
+                    ))
+                })?;
         }
     }
 
@@ -622,6 +713,9 @@ fn bootstrap_prepared_encoder_with_prune_plan(
     // where no top-level variable carries the datatype. Must happen before
     // assumptions are encoded so those symbols are available to the encoder.
     // Part of #1942 Slice 4.
+    // Idempotent re-run: everything reachable was already registered early (see
+    // the ordering block above). Kept so any datatype introduced by the
+    // intervening registration steps is still picked up.
     register_datatypes_from_prepared_context(encoder, ctx, extra_variables)?;
     encoder.register_builtin_datatypes()?;
 
@@ -782,12 +876,75 @@ impl AYEncoder {
         inline_overrides: &[String],
         cached_prune_plan: Option<&super::pruning::PrunePlan>,
     ) -> TrustVcResult<Self> {
+        Self::setup_from_prepared_with_logic(
+            slices,
+            use_int_for_measures,
+            post_loop_modified_vars,
+            extra_variables,
+            assertion_focus,
+            inline_overrides,
+            cached_prune_plan,
+            Logic::All,
+        )
+    }
+
+    /// Builds the isolated overflow helper with the narrowest sound logic.
+    /// Mixed-theory contexts deliberately remain on `Logic::All`; only a
+    /// conservatively classified quantifier-free Bool/BV context uses `QfBv`.
+    pub(in crate::encoder) fn setup_overflow_from_prepared(
+        slices: &VerificationSlices<'_>,
+        assertion: &PreparedObligation,
+        use_int_for_measures: bool,
+        post_loop_modified_vars: Option<&HashSet<String>>,
+        extra_variables: &[VariableDecl],
+        assertion_focus: Option<&PreparedObligation>,
+        cached_prune_plan: Option<&super::pruning::PrunePlan>,
+    ) -> TrustVcResult<Self> {
+        let logic = super::overflow_logic::isolated_overflow_logic(
+            slices.ctx,
+            assertion,
+            use_int_for_measures,
+            post_loop_modified_vars,
+            extra_variables,
+        );
+        let mut encoder = Self::setup_from_prepared_with_logic(
+            slices,
+            use_int_for_measures,
+            post_loop_modified_vars,
+            extra_variables,
+            assertion_focus,
+            &[],
+            cached_prune_plan,
+            logic,
+        )?;
+        // Overflow helpers need a validated model when they find a violation,
+        // but they do not need ay's readability-minimization probes.  Keep
+        // model production enabled for counterexample diagnostics while making
+        // this helper use the non-minimizing route; the user-facing main solver
+        // remains on `Readable`.
+        encoder
+            .solver
+            .set_counterexample_style(ay_dpll::CounterexampleStyle::Any);
+        Ok(encoder)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn setup_from_prepared_with_logic(
+        slices: &VerificationSlices<'_>,
+        use_int_for_measures: bool,
+        post_loop_modified_vars: Option<&HashSet<String>>,
+        extra_variables: &[VariableDecl],
+        assertion_focus: Option<&PreparedObligation>,
+        inline_overrides: &[String],
+        cached_prune_plan: Option<&super::pruning::PrunePlan>,
+        logic: Logic,
+    ) -> TrustVcResult<Self> {
         let ctx = slices.ctx;
         super::test_hooks::bump_setup_from_prepared_count();
         let timeout_ms = ctx
             .rlimit_ms
             .unwrap_or(super::timeout::DEFAULT_SOLVER_NOMINAL_TIMEOUT_MS);
-        let mut encoder = Self::new().with_limits(timeout_ms, 512);
+        let mut encoder = Self::with_logic(logic).with_limits(timeout_ms, 512);
         encoder.state.unpruned_proof_fact_count = slices.assumptions.len()
             + slices.broadcast_assumptions.len()
             + slices.verified_invariants.len()

@@ -897,7 +897,7 @@ fn quadratic_form_is_psd(poly: &Poly) -> bool {
     }
     let vars: Vec<u32> = var_set.into_iter().collect();
     let n = vars.len();
-    let index_of = |v: u32| vars.iter().position(|&x| x == v).unwrap();
+    let index_of = |v: u32| vars.iter().position(|&x| x == v);
 
     // Build the symmetric matrix with rational entries (off-diagonals halved).
     let mut m: Vec<Vec<Rational>> = vec![vec![Rational::zero(); n]; n];
@@ -905,8 +905,13 @@ fn quadratic_form_is_psd(poly: &Poly) -> bool {
         match mono.len() {
             2 => {
                 let (a, b) = (mono[0], mono[1]);
-                let ia = index_of(a);
-                let ib = index_of(b);
+                // Every len-2 monomial variable was gathered into `var_set`
+                // above, so the lookups succeed; if that invariant ever
+                // breaks, fail closed ("not PSD") — losing a proof is sound,
+                // panicking inside the verifier is not.
+                let (Some(ia), Some(ib)) = (index_of(a), index_of(b)) else {
+                    return false;
+                };
                 if ia == ib {
                     // x^2 term: diagonal entry is the coefficient.
                     m[ia][ia] = m[ia][ia].add(coeff);

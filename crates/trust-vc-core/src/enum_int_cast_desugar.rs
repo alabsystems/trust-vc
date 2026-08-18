@@ -226,8 +226,10 @@ fn literal_variant_value(expr: &Expr, enums: &CastableEnums) -> Option<i128> {
 /// unary negation so it parses.
 fn int_literal(value: i128) -> Expr {
     if value < 0 {
-        let lit: syn::LitInt =
-            syn::parse_str(&(-value).to_string()).expect("magnitude literal parses");
+        // `unsigned_abs` (not `-value`) so `i128::MIN` cannot overflow the negation.
+        let lit: syn::LitInt = syn::parse_str(&value.unsigned_abs().to_string())
+            // quality-audit: allow-expect — a plain decimal literal always parses as LitInt
+            .expect("magnitude literal parses");
         return Expr::Unary(syn::ExprUnary {
             attrs: Vec::new(),
             op: syn::UnOp::Neg(syn::token::Minus::default()),
@@ -237,6 +239,7 @@ fn int_literal(value: i128) -> Expr {
             })),
         });
     }
+    // quality-audit: allow-expect — a plain decimal literal always parses as LitInt
     let lit: syn::LitInt = syn::parse_str(&value.to_string()).expect("value literal parses");
     Expr::Lit(syn::ExprLit {
         attrs: Vec::new(),

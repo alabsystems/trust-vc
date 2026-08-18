@@ -266,6 +266,32 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
                 impl_decl,
                 method,
             ) else {
+                // The instantiator fails closed on any associated-type-projection
+                // position (the shared per-trait UF cannot carry a per-impl
+                // projected sort). But a concrete client calling `s.produce()`
+                // still needs the call to RESOLVE. Register it against the
+                // PER-IMPL concrete function instead (no shared-UF boxing), with
+                // the projection resolved to this impl's concrete binding — the
+                // concrete-sorted trait-ensures postcondition axiom
+                // (`assert_impl_trait_ensures_concrete_axioms`) carries the
+                // contract on that same function. Non-generic trait only: a
+                // parameterized trait ALSO using assoc types stays fail-closed.
+                if let Some((key, meta)) = assoc_concrete_method_candidate(
+                    &concrete_type_name,
+                    trait_decl,
+                    impl_decl,
+                    method,
+                ) {
+                    match candidates.get(&key) {
+                        Some(existing) if existing == &meta => {}
+                        Some(_) => {
+                            ambiguous.insert(key.clone());
+                        }
+                        None => {
+                            candidates.insert(key, meta);
+                        }
+                    }
+                }
                 continue;
             };
 
@@ -363,6 +389,65 @@ fn is_concrete_boxable_type(ty: &crate::ir::TrustVcType) -> bool {
     !matches!(ty, crate::ir::TrustVcType::Poly)
         && !ty.contains_type_param()
         && !ty.contains_opaque()
+}
+
+/// Client-side resolution for an associated-type-bearing trait method that the
+/// generic-bridge instantiator (`instantiate_trait_method_sig`) fail-closes on
+/// (the shared per-trait UF cannot carry a per-impl projected sort). Registers
+/// the concrete receiver's call directly against the PER-IMPL concrete function
+/// named in `impl_decl.method_bindings`, with the method's `Self::Assoc`
+/// projections resolved to this impl's concrete bindings, so a caller
+/// `s.produce()` lowers to a well-sorted `Impl__produce(s)` (`box_receiver: None`
+/// — no shared-UF boxing). The trait contract on that function is supplied
+/// separately by `assert_impl_trait_ensures_concrete_axioms`, itself gated by the
+/// per-impl conformance pass.
+///
+/// Returns `None` (fail-closed) unless the signature genuinely projects an
+/// associated type this impl resolves FULLY CONCRETE, the method is
+/// `requires`-free, and the trait is non-generic (a parameterized trait that
+/// ALSO uses associated types stays out of scope). Registering a resolution
+/// introduces NO fact on its own — it only lets the call name a declared
+/// function — so this widening is sound (completeness only).
+fn assoc_concrete_method_candidate(
+    concrete_type_name: &str,
+    trait_decl: &crate::ir::TraitDecl,
+    impl_decl: &crate::ir::TraitImplDecl,
+    method: &crate::ir::TraitMethodDecl,
+) -> Option<((String, String), MethodMeta)> {
+    if !trait_decl.generics.is_empty() || !method.requires.is_empty() {
+        return None;
+    }
+    let has_projection = method
+        .params
+        .iter()
+        .map(|(_, ty)| ty)
+        .chain(std::iter::once(&method.return_type))
+        .any(|ty| impl_decl.resolve_assoc_projections(ty) != *ty);
+    if !has_projection {
+        return None;
+    }
+    let return_type = impl_decl.resolve_assoc_projections(&method.return_type);
+    let param_types: Vec<crate::ir::TrustVcType> = method
+        .params
+        .iter()
+        .map(|(_, ty)| impl_decl.resolve_assoc_projections(ty))
+        .collect();
+    if !is_concrete_boxable_type(&return_type) || !param_types.iter().all(is_concrete_boxable_type)
+    {
+        return None;
+    }
+    let concrete_fn = impl_decl
+        .method_bindings
+        .iter()
+        .find(|(trait_method, _)| trait_method == &method.name)
+        .map(|(_, concrete_fn)| concrete_fn.clone())?;
+    let meta = MethodMeta {
+        uf_name: concrete_fn,
+        return_type,
+        param_types,
+        box_receiver: None,
+    };
+    Some(((concrete_type_name.to_string(), method.name.clone()), meta))
 }
 
 fn register_method_metadata(

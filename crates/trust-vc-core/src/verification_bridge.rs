@@ -248,6 +248,12 @@ impl VerificationPipeline {
         #[cfg(feature = "ty")]
         protocol_types::assemble_protocol_components(&mut pipeline.protocol_obligations)?;
 
+        // SOUNDNESS-CRITICAL (cardinal false-verify): drop any session-lane
+        // `#[broadcast]` lemma axiom whose contract does not establish it.
+        // Sibling of the file-path fix in
+        // `vc_extraction::suppress_unestablished_broadcast_lemma_axioms`.
+        suppress_unestablished_session_broadcast_axioms(&mut pipeline.context);
+
         Ok(pipeline)
     }
 
@@ -466,3 +472,84 @@ impl std::fmt::Display for PipelineDiagnostic {
 #[cfg(test)]
 #[path = "verification_bridge_tests.rs"]
 mod tests;
+
+/// Drops every SESSION-lane `#[trust_vc::broadcast]` lemma axiom whose contract
+/// does not establish the `ensures` it publishes.
+///
+/// `broadcast_state.rs` does not build an axiom from parsed source: it EXECUTES
+/// the lemma body under `IN_BROADCAST_MODE` and then flips each recorded
+/// `ObligationKind::Ensures` in place to `BroadcastAssume`, renaming it
+/// `broadcast_*`. An obligation that would have been ASSERTED against the body
+/// becomes an ASSUMPTION handed to every caller, and nothing checked it in
+/// between — so a lemma whose `ensures` is FALSE of its own body publishes a
+/// false axiom, i.e. a contradictory premise that proves anything.
+///
+/// WHY HERE AND NOT AT THE FLIP. `start_idx` (`BROADCAST_OBLIGATION_START`) is an
+/// INDEX into `context.obligations`; verifying mid-harvest, while that index is
+/// live, risks invalidating it. Running after collection completes sidesteps that
+/// entirely — the same reason the file-path check runs after extraction.
+///
+/// The check base is the collected context itself, which (unlike the file-path
+/// case) ALREADY carries the definitional `__body_axiom_*` obligations; that is
+/// what lets an honest lemma over an `#[trust_vc::opaque]` spec fn still verify.
+/// `broadcast_lemma_check_child` retains exactly those, REVEALED, and drops every
+/// lemma axiom — so no lemma can justify itself or a sibling.
+///
+/// Vacuity counts as a pass: an unsatisfiable guard makes the published
+/// `guard ==> ensures` inert. Every other non-`Verified` verdict drops the axiom.
+fn suppress_unestablished_session_broadcast_axioms(ctx: &mut VerificationContext) {
+    use crate::vc::{ObligationKind, ProofObligation};
+
+    let candidates: Vec<(String, String, Vec<String>)> = ctx
+        .obligations()
+        .iter()
+        .filter(|o| {
+            o.kind() == ObligationKind::BroadcastAssume
+                && o.name().starts_with("broadcast_")
+                && !o.name().starts_with("__body_axiom_")
+        })
+        .map(|o| {
+            (
+                o.name().to_string(),
+                o.condition().to_string(),
+                o.broadcast_guard
+                    .as_ref()
+                    .map(|guards| guards.iter().map(|g| g.condition.clone()).collect())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut unestablished: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, ensures, guards) in candidates {
+        let mut child = ctx.broadcast_lemma_check_child();
+        for (index, guard) in guards.iter().enumerate() {
+            child.push_obligation(ProofObligation::assume(
+                format!("__session_lemma_guard_{name}_{index}"),
+                guard.clone(),
+            ));
+        }
+        child.push_obligation(ProofObligation::assert(
+            format!("__session_lemma_check_{name}"),
+            ensures.clone(),
+        ));
+
+        let established = match child.verify() {
+            VerifyResult::Verified => true,
+            VerifyResult::Unknown { category, .. } => {
+                matches!(category, crate::encoder::UnknownCategory::VacuousTruth)
+            }
+            _ => false,
+        };
+        if !established {
+            unestablished.insert(name);
+        }
+    }
+
+    if !unestablished.is_empty() {
+        ctx.retain_obligations(|o| !unestablished.contains(o.name()));
+    }
+}

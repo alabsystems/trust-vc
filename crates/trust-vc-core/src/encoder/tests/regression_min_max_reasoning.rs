@@ -17,11 +17,30 @@ fn max_ge_both() {
         "m_def",
         "m == if a >= b { a } else { b }",
     ));
-    ctx.push_obligation(ProofObligation::assert("max_ge_both", "m >= a && m >= b"));
+    // The explicit arithmetic tactic uses mathematical integers. `m` only
+    // selects one of two values in -1000..=1000, so that interpretation is
+    // equivalent to i32 execution here.
+    ctx.push_obligation(
+        ProofObligation::assert("max_ge_both", "m >= a && m >= b")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(
         &result,
         "max should be greater than or equal to both inputs",
+    );
+
+    // Keep the explicit tactic honest at a branch-selecting endpoint.
+    ctx.push_obligation(ProofObligation::assume("a_at_lower_endpoint", "a == -1000"));
+    ctx.push_obligation(ProofObligation::assume("b_at_upper_endpoint", "b == 1000"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_max_bound", "m < b")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a strict bound on max(-1000, 1000)",
     );
 }
 
@@ -39,9 +58,26 @@ fn min_le_both() {
         "m_def",
         "m == if a <= b { a } else { b }",
     ));
-    ctx.push_obligation(ProofObligation::assert("min_le_both", "m <= a && m <= b"));
+    // As above, all possible selected values are far inside i32, making the
+    // explicit mathematical-integer tactic equivalent to machine execution.
+    ctx.push_obligation(
+        ProofObligation::assert("min_le_both", "m <= a && m <= b")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "min should be less than or equal to both inputs");
+
+    ctx.push_obligation(ProofObligation::assume("a_at_lower_endpoint", "a == -1000"));
+    ctx.push_obligation(ProofObligation::assume("b_at_upper_endpoint", "b == 1000"));
+    ctx.push_obligation(
+        ProofObligation::assert("false_min_bound", "m > a")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a strict bound on min(-1000, 1000)",
+    );
 }
 
 #[test]

@@ -229,6 +229,12 @@ fn test_from_unknown_reason_resource_reasons_are_not_incompleteness() {
         UnknownReason::QuantifierDeferred,
         UnknownReason::SplitLimit,
         UnknownReason::InternalError,
+        // Neither of the next two is a resource limit, but both sit in the same
+        // SolverUnknown arm and neither is ever an incompleteness FAILURE.
+        // `ProofTrusted` was deleted by ay 0.6 (66538b006) and RESTORED at its
+        // original spelling in ay 0.7, so the two gates — certification refuted
+        // a verdict vs. strict proofs withheld an unsat — are distinct again.
+        UnknownReason::SelfCheckRejected,
         UnknownReason::ProofTrusted,
         UnknownReason::Unknown,
     ] {

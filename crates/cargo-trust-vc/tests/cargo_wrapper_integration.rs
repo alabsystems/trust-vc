@@ -143,7 +143,7 @@ fn main() {
     .expect("fake cargo source should be writable");
 
     let output = Command::new(rustc_command())
-        .arg("-Zno-trust-verify")
+        .arg("-Ztrust-verify=off")
         .arg(&source)
         .arg("-o")
         .arg(&binary)
@@ -231,7 +231,7 @@ fn main() {
     .expect("fake rustc source should be writable");
 
     let output = Command::new(rustc_command())
-        .arg("-Zno-trust-verify")
+        .arg("-Ztrust-verify=off")
         .arg(&source)
         .arg("-o")
         .arg(&binary)

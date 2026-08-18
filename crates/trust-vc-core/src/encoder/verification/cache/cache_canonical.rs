@@ -59,6 +59,14 @@ pub(super) fn write_context(
     // without `hide!(f)` must never replay for a query that hides `f` (the
     // hidden body could have carried the proof — an unsound replay).
     write_sorted_set(out, "hidden_fns", &ctx.hidden_fns);
+    // Recursive demand-inline may adopt a model only with checked source
+    // definition provenance. Replaying across a context without the same
+    // authority could turn a fail-closed Unknown into a false Counterexample.
+    write_sorted_set(
+        out,
+        "source_catalog_admitted_definitions",
+        &ctx.source_catalog_admitted_definitions,
+    );
     write_sorted_set(out, "tracked_params", &ctx.tracked_params);
 
     write_invariant_mask(out, &ctx.invariant_mask);
@@ -338,6 +346,7 @@ fn assert_cache_field_classification_is_exhaustive(ctx: &PreparedVerificationCon
         has_collection_context: _,
         revealed_fns: _,
         hidden_fns: _,
+        source_catalog_admitted_definitions: _,
         helper_function_contexts: _,
         struct_types: _,
         type_invariants: _,

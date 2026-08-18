@@ -40,6 +40,9 @@ impl VerificationContext {
         if let Some(failure) = &self.closure_def_side_failure {
             return failure.clone();
         }
+        if let Some(failure) = &self.source_catalog_termination_failure {
+            return failure.clone();
+        }
         if !self.has_assertions() && !self.has_assumptions() {
             return VerifyResult::Error {
                 message: EMPTY_CONTEXT_MESSAGE.to_string(),
@@ -57,6 +60,9 @@ impl VerificationContext {
         // verdict crossed back, so no closure hypothesis ever entered this
         // parent's obligations. See `VerificationContext::closure_def_side_failure`.
         if let Some(failure) = &self.closure_def_side_failure {
+            return failure.clone();
+        }
+        if let Some(failure) = &self.source_catalog_termination_failure {
             return failure.clone();
         }
         if !self.has_assertions() && !self.has_assumptions() {

@@ -66,6 +66,7 @@ pub use native_trust_ir_bundle::{
     TrustVcNativeTrustIrInputKind, TrustVcNativeTrustIrObligationKind,
     TrustVcNativeTrustIrReplayMetadata, TrustVcNativeTrustIrReplayMetadataSource,
     TrustVcNativeTrustIrRequestMode, TrustVcNativeTrustIrRequestReport,
+    TrustVcNativeTrustIrVerdict,
 };
 pub mod trust_ir_adapter;
 pub use trust_ir_adapter::{

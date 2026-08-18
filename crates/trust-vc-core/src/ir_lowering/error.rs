@@ -44,7 +44,7 @@ pub enum LoweringError {
     /// cannot model. The `Display` text reproduces upstream Verus's byte-exact
     /// diagnostics from `vir/src/bitvector_to_air.rs`:
     /// - `IntRange error: expected finite-width integer for bit-vector, got <Typ>`
-    /// - `error: bit_vector prover cannot handle type `<typ>``
+    /// - ``error: bit_vector prover cannot handle type `<typ>` ``
     ///
     /// Diagnostic-parity surface for upstream #2778 `bitvector.rs`
     /// `not_supported_*_in_by_bit_vector` cases.

@@ -389,3 +389,46 @@ fn test_triggerless_exists_without_witness_is_not_refuted() {
          discharged"
     );
 }
+
+/// SOUNDNESS: a constructive equality candidate outside the binder domain is
+/// not a witness. `c < 0` cannot satisfy `exists |n: nat| n == c`, even though
+/// substituting the equality body alone would yield the tautology `c == c`.
+#[test]
+fn test_equality_witness_respects_nat_domain_guard() {
+    let mut env = ExistsTriggerEnv::new();
+    env.declare_var("c", TrustVcType::Nat);
+    let c = *env.variables.get("c").unwrap();
+    let zero = env.solver.int_const(0);
+    let c_negative = env.solver.try_lt(c, zero).unwrap();
+    env.solver.try_assert_term(c_negative).unwrap();
+
+    let exists = TrustVcExpr::Quantifier {
+        kind: QuantifierKind::Exists,
+        bound_vars: vec![("n".to_string(), TrustVcType::Nat)],
+        body: Box::new(TrustVcExpr::Compare {
+            op: CompareOp::Eq,
+            left: Box::new(TrustVcExpr::Var {
+                name: "n".to_string(),
+                ty: TrustVcType::Nat,
+            }),
+            right: Box::new(TrustVcExpr::Var {
+                name: "c".to_string(),
+                ty: TrustVcType::Nat,
+            }),
+        }),
+        triggers: None,
+        trigger_inference_mode: None,
+    };
+    let refutation = {
+        let mut parser = env.parser();
+        parser
+            .encode_refutation_expr(&exists)
+            .expect("equality-witness refutation should encode")
+    };
+    env.solver.try_assert_term(refutation).unwrap();
+
+    assert!(
+        !env.solver.check_sat().is_unsat(),
+        "an out-of-domain equality candidate must not discharge a nat existential"
+    );
+}

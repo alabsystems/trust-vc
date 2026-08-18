@@ -365,6 +365,42 @@ fn test_select_candidates_depth_2_chained() {
 }
 
 #[test]
+fn test_recursive_demand_inline_requires_whole_scc_admission() {
+    let a = non_inline_body_axiom("__body_axiom_a", &["a", "b"], "a(x) == b(x) + 1");
+    let b = non_inline_body_axiom("__body_axiom_b", &["a", "b"], "b(x) == a(x) - 1");
+    let broadcasts: Vec<&PreparedObligation> = vec![&a, &b];
+    let catalog = build_body_catalog(&broadcasts, None, &HashSet::new(), &HashSet::new());
+    let selected = vec!["a".to_string(), "b".to_string()];
+
+    assert!(
+        !selected_recursive_cycles_are_admitted(&catalog, &selected, &HashSet::new()),
+        "a mutually recursive body-looking broadcast has no proof provenance"
+    );
+    let only_a: HashSet<String> = ["a".to_string()].into_iter().collect();
+    assert!(
+        !selected_recursive_cycles_are_admitted(&catalog, &selected, &only_a),
+        "authority for one cycle member must not vouch for its partner"
+    );
+    let both: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+    assert!(selected_recursive_cycles_are_admitted(
+        &catalog, &selected, &both
+    ));
+}
+
+#[test]
+fn test_acyclic_demand_inline_needs_no_recursive_authority() {
+    let helper = non_inline_body_axiom("__body_axiom_helper", &["helper"], "helper(x) == x + 1");
+    let broadcasts: Vec<&PreparedObligation> = vec![&helper];
+    let catalog = build_body_catalog(&broadcasts, None, &HashSet::new(), &HashSet::new());
+
+    assert!(selected_recursive_cycles_are_admitted(
+        &catalog,
+        &["helper".to_string()],
+        &HashSet::new(),
+    ));
+}
+
+#[test]
 fn test_select_candidates_include_supporting_query_roots_after_goal() {
     let goal_fn =
         non_inline_body_axiom("__body_axiom_goal_fn", &["goal_fn"], "goal_fn(x) == x + x");

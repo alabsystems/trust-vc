@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use trust_ir::request::NativeVerificationBundle;
 use trust_vc_trust_engine::{
     TrustMirMemoryProofUnit, TrustOutcome, TrustProofPolicy, TrustTrustIrAdapterRequest,
-    TrustVcNativeTrustIrBundleReport, TrustVcTrustEngine, TrustVerificationReport,
-    TrustVerificationRequest, TrustVerifier,
+    TrustVcNativeTrustIrBundleReport, TrustVcNativeTrustIrVerdict, TrustVcTrustEngine,
+    TrustVerificationReport, TrustVerificationRequest, TrustVerifier,
 };
 
 const EXIT_OK: i32 = 0;
@@ -398,8 +398,23 @@ enum RunnerReport {
 }
 
 fn report_exit_code(report: &RunnerReport) -> i32 {
-    let RunnerReport::Trust(report) = report else {
-        return EXIT_OK;
+    let report = match report {
+        RunnerReport::Trust(report) => report,
+        // NATIVE BUNDLES USED TO EXIT 0 UNCONDITIONALLY, which meant a request
+        // trust-vc could not answer was indistinguishable from one it fully
+        // admitted. Read the rollup instead.
+        //
+        // Scoped deliberately: only `DischargeNotAnswerable` is non-zero for
+        // now. `CertificatesRejected` stays 0 because release admission is a
+        // GRADING result — the bundle was consumed and the report says which
+        // certificates are non-release — and promoting it to a failure exit is
+        // a separate, user-visible policy change that deserves its own commit.
+        RunnerReport::NativeTrustIr(native) => {
+            return match native.verdict() {
+                TrustVcNativeTrustIrVerdict::DischargeNotAnswerable => EXIT_UNKNOWN,
+                _ => EXIT_OK,
+            };
+        }
     };
 
     if report

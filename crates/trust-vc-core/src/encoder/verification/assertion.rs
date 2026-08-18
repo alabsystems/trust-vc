@@ -45,7 +45,7 @@ pub(super) fn convert_setup_error(err: TrustVcError) -> TrustVcResult<AssertionO
 /// probe. The probe re-verifies the *negation* of a just-verified goal in the
 /// same context; this prefix both documents the synthetic origin and guards
 /// against the probe ever recursing into itself (see
-/// `broadcast_vacuity_probe_result`).
+/// `vacuity_probe_result`).
 pub(super) const VACUITY_PROBE_PREFIX: &str = "__vacuity_probe_";
 
 /// True iff a *genuine* `#[broadcast]` lemma assumption (not a definitional
@@ -65,6 +65,55 @@ pub(super) fn context_has_broadcast_lemma(slices: &VerificationSlices<'_>) -> bo
         .broadcast_assumptions
         .iter()
         .any(|obligation| !obligation.name.contains("__body_axiom_"))
+}
+
+/// True iff this context publishes a TRAIT-METHOD postcondition as a global
+/// universal axiom (SOUNDNESS-CRITICAL gate — see [`vacuity_probe_result`]).
+///
+/// `register_trait` emits every trait method `ensures` as an unconditional
+/// `∀ self, args. requires ⟹ ensures[result := Trait__m(self, args)]`
+/// (`assert_trait_postconditions`), and `register_trait_impl` does the same for
+/// an impl's own `ensures` (`assert_impl_postcondition_axioms`,
+/// `assert_impl_trait_ensures_concrete_axioms`). Those axioms land in the SAME
+/// solver context that discharges an ordinary caller's obligations
+/// (`setup::…`), and — exactly like a `#[broadcast]` lemma — nothing in the
+/// caller's own query establishes them.
+///
+/// The premise this class can inject is not merely unproven, it can be
+/// UNREALIZABLE. `ensures(result > x)` over `u32` has NO total interpretation
+/// (nothing is `bvult`-above `u32::MAX`), so the axiom is UNSAT standing alone;
+/// under it, `t.p(u32::MAX) == 5` and `t.p(u32::MAX) != 5` were BOTH reported
+/// `Verified`. The conformance obligation does not backstop this: with no impl
+/// in the file there is no conformance obligation at all, and with an impl the
+/// caller's own verdict is still the one reported.
+///
+/// Why this predicate and not "any universal axiom": a DEFINITIONAL axiom
+/// (`f(args) == body`, and the seq/set/map/array structural axioms) is
+/// consistent by construction — it defines a function, so a model always
+/// exists. A POSTCONDITION axiom constrains a UF by an arbitrary user
+/// predicate and may pin it to a value that does not exist. Free functions emit
+/// no postcondition axiom at all (`register_function_context` publishes only
+/// signature metadata), so this class is exactly the trait surface.
+pub(super) fn context_publishes_trait_postcondition_axiom(slices: &VerificationSlices<'_>) -> bool {
+    let ctx = slices.ctx;
+    ctx.trait_decls
+        .iter()
+        .any(|decl| decl.methods.iter().any(|m| !m.ensures.is_empty()))
+        || ctx
+            .trait_impl_method_ensures
+            .values()
+            .any(|ensures| !ensures.is_empty())
+}
+
+/// True iff the context carries at least one premise that was published as a
+/// global axiom WITHOUT this query verifying it — the only premise classes that
+/// can be contradictory, and therefore the exact gate for the vacuity probe.
+///
+/// Two members, both confirmed to have produced a false `Verified`:
+/// a `#[broadcast]` lemma ([`context_has_broadcast_lemma`]) and a trait-method
+/// postcondition ([`context_publishes_trait_postcondition_axiom`]).
+pub(super) fn context_publishes_unverified_axiom(slices: &VerificationSlices<'_>) -> bool {
+    context_has_broadcast_lemma(slices) || context_publishes_trait_postcondition_axiom(slices)
 }
 
 /// True iff the goal expression contains any quantifier (`forall`/`exists`),
@@ -117,17 +166,38 @@ fn negated_probe_obligation(assertion: &PreparedObligation) -> PreparedObligatio
     probe
 }
 
-/// Broadcast-vacuity probe (SOUNDNESS-CRITICAL).
+/// Vacuity probe (SOUNDNESS-CRITICAL).
 ///
 /// trust-vc proves a goal `G` when `assumptions ∧ ¬G` is UNSAT (i.e.
-/// `assumptions ⊨ G`). A `#[broadcast]` lemma publishes its `ensures!` as a
-/// global `forall` axiom WITHOUT verifying the body establishes it, so a bogus
-/// lemma (e.g. `ensures!(x * x < 0)`) injects a contradictory premise: under
-/// contradictory assumptions BOTH `G` and `¬G` are provable, and `G` verifies
-/// vacuously — a CATASTROPHIC false `Verified` that proves false.
+/// `assumptions ⊨ G`). Two premise classes reach that query as global axioms
+/// that the query itself never establishes, and either can be CONTRADICTORY —
+/// under which BOTH `G` and `¬G` are provable and `G` verifies vacuously, a
+/// CATASTROPHIC false `Verified` that proves false:
 ///
-/// This probe is consulted whenever a goal transitions to `Verified` AND a real
-/// broadcast lemma is in scope. It re-verifies the *negated* goal `¬G` in the
+///  1. a `#[broadcast]` lemma, which publishes its `ensures!` as a global
+///     `forall` axiom without verifying the body establishes it (a bogus
+///     `ensures!(x * x < 0)` is contradictory outright); and
+///  2. a TRAIT-METHOD postcondition, which `register_trait` publishes as
+///     `∀ self, args. ensures[result := Trait__m(self, args)]`. This one is
+///     worse than merely unproven — it can be UNREALIZABLE, i.e. UNSAT with no
+///     impl anywhere able to satisfy it. `ensures(result > x)` over `u32` is
+///     such a contract, and it made `t.p(u32::MAX) == 5` AND
+///     `t.p(u32::MAX) != 5` both report `Verified`. See
+///     [`context_publishes_trait_postcondition_axiom`].
+///
+/// Class 2 has no other backstop. `check_vacuous_truth` screens only
+/// ASSUMPTION-level premises (`VerificationSlices::new(ctx, assumptions,
+/// broadcast, &[], &[], &[])` — empty goal slices) and additionally returns
+/// early when the assumption set is empty, so a setup-level axiom is never
+/// screened; and E-matching only instantiates the axiom once a ground
+/// `Trait__m(..)` term appears, which in this class comes from the GOAL. That
+/// is precisely why the check must run here, against the goal, rather than in
+/// the precheck. Nor does the conformance obligation cover it: with no impl in
+/// the file `list_trait_conformance_obligations` is EMPTY, and with an impl the
+/// caller's own verdict is still what is reported.
+///
+/// This probe is consulted whenever a goal transitions to `Verified` AND such a
+/// premise is in scope. It re-verifies the *negated* goal `¬G` in the
 /// identical context. If `¬G` ALSO verifies, then `assumptions ⊨ G` and
 /// `assumptions ⊨ ¬G` simultaneously, which is possible only if the assumptions
 /// are contradictory — so the original `G` was vacuously true. We then downgrade
@@ -145,7 +215,7 @@ fn negated_probe_obligation(assertion: &PreparedObligation) -> PreparedObligatio
 ///
 /// Returns `Some(Unknown(VacuousTruth))` when the goal is vacuous, `None`
 /// otherwise (the caller keeps the original `Verified`).
-pub(in crate::encoder) fn broadcast_vacuity_probe_result(
+pub(in crate::encoder) fn vacuity_probe_result(
     slices: &VerificationSlices<'_>,
     assertion: &PreparedObligation,
     extra_variables: &[VariableDecl],
@@ -155,9 +225,11 @@ pub(in crate::encoder) fn broadcast_vacuity_probe_result(
     if assertion.name.starts_with(VACUITY_PROBE_PREFIX) {
         return None;
     }
-    // Only run when a genuine broadcast lemma (not a definitional body axiom) is
-    // active — the only assumption class that can publish a contradiction.
-    if !context_has_broadcast_lemma(slices) {
+    // Only run when the context publishes a premise it did not verify — a
+    // genuine broadcast lemma (not a definitional body axiom) or a trait-method
+    // postcondition axiom. Those are the only premise classes that can be
+    // contradictory; definitional axioms are consistent by construction.
+    if !context_publishes_unverified_axiom(slices) {
         return None;
     }
 
@@ -198,20 +270,36 @@ pub(in crate::encoder) fn broadcast_vacuity_probe_result(
         goal_contains_quantifier(&assertion.expr) && !negation_also_verified;
 
     if negation_also_verified || quantified_goal_not_refuted {
+        // Name the class that is actually in scope so the diagnostic points at
+        // the premise the user must fix. Both may be present; report both.
+        let mut culprits: Vec<&str> = Vec::new();
+        if context_has_broadcast_lemma(slices) {
+            culprits.push(
+                "a #[broadcast] lemma whose `ensures!` is republished as a global axiom \
+                 without its body being verified to establish it",
+            );
+        }
+        if context_publishes_trait_postcondition_axiom(slices) {
+            culprits.push(
+                "a trait-method `ensures` published as a global axiom \
+                 `forall self, args. ensures[result := Trait__m(self, args)]` — check that \
+                 the contract is SATISFIABLE at all (e.g. `ensures(result > x)` over `u32` \
+                 has no solution at `x == u32::MAX`, so NO impl can ever satisfy it)",
+            );
+        }
+        let culprit_text = culprits.join("; and ");
         tracing::warn!(
             assertion = %assertion.name,
             negation_also_verified,
-            "broadcast-vacuity probe: the negated goal was not refuted under the \
-             #[broadcast] assumptions; downgrading the (potentially vacuous) Verified"
+            "vacuity probe: the negated goal was not refuted under the published \
+             axioms; downgrading the (potentially vacuous) Verified"
         );
         return Some(AssertionOutcome::unknown(
             format!(
-                "Goal '{}' may be vacuously true: a #[broadcast] lemma is in scope and \
-                 the negated goal could not be refuted (no consistency witness for the \
-                 assumptions). A broadcast lemma whose `ensures!` is not established by \
-                 its body publishes a contradictory assumption that makes every goal \
-                 trivially provable. Verify the broadcast lemma body actually \
-                 establishes its ensures clause.",
+                "Goal '{}' may be vacuously true: the negated goal could not be refuted, \
+                 so there is no consistency witness for this context's premises. In scope: \
+                 {culprit_text}. A contradictory premise makes every goal trivially \
+                 provable, so the proof is rejected rather than trusted.",
                 assertion.name
             ),
             Some(UnknownCategory::VacuousTruth),
@@ -221,12 +309,12 @@ pub(in crate::encoder) fn broadcast_vacuity_probe_result(
     None
 }
 
-/// Applies the broadcast-vacuity probe to a verification `result`, downgrading a
-/// vacuous `Verified` to `Unknown(VacuousTruth)`. A no-op for any non-`Verified`
+/// Applies the vacuity probe to a verification `result`, downgrading a vacuous
+/// `Verified` to `Unknown(VacuousTruth)`. A no-op for any non-`Verified`
 /// outcome or `Err`. Wired into every goal->Verified chokepoint
 /// (`finish_regular_assertion_step` and `verify_typed_step`). Part of the
-/// broadcast soundness gate.
-pub(in crate::encoder) fn apply_broadcast_vacuity_probe_to_result(
+/// unverified-axiom soundness gate.
+pub(in crate::encoder) fn apply_vacuity_probe_to_result(
     result: TrustVcResult<AssertionOutcome>,
     slices: &VerificationSlices<'_>,
     assertion: &PreparedObligation,
@@ -234,13 +322,12 @@ pub(in crate::encoder) fn apply_broadcast_vacuity_probe_to_result(
     post_loop_modified_vars: Option<&HashSet<String>>,
 ) -> TrustVcResult<AssertionOutcome> {
     match result {
-        Ok(AssertionOutcome::Verified) => Ok(broadcast_vacuity_probe_result(
-            slices,
-            assertion,
-            extra_variables,
-            post_loop_modified_vars,
-        )
-        .unwrap_or(AssertionOutcome::Verified)),
+        Ok(AssertionOutcome::Verified) => {
+            Ok(
+                vacuity_probe_result(slices, assertion, extra_variables, post_loop_modified_vars)
+                    .unwrap_or(AssertionOutcome::Verified),
+            )
+        }
         other => other,
     }
 }
@@ -715,18 +802,18 @@ fn verify_single_assertion_typed_inner(
             .expr
             .may_emit_overflow_checks(arith_overflow_enabled)
     {
-        let mut overflow_encoder =
-            match AYEncoder::setup_from_prepared_with_extra_variables_and_prune_plan(
-                slices,
-                use_int_for_measures,
-                post_loop_modified_vars,
-                extra_variables,
-                Some(assertion),
-                Some(&assertion_prune_plan),
-            ) {
-                Ok(enc) => enc,
-                Err(err) => return convert_setup_error(err),
-            };
+        let mut overflow_encoder = match AYEncoder::setup_overflow_from_prepared(
+            slices,
+            assertion,
+            use_int_for_measures,
+            post_loop_modified_vars,
+            extra_variables,
+            Some(assertion),
+            Some(&assertion_prune_plan),
+        ) {
+            Ok(enc) => enc,
+            Err(err) => return convert_setup_error(err),
+        };
         let overflow_outcome =
             check_overflow_predicates(&mut overflow_encoder, assertion, arith_overflow_enabled)?;
         run_diagnostics.merge(&overflow_encoder.state.diagnostics);
@@ -857,6 +944,101 @@ fn select_demand_inline_candidates_for_query(
     )
 }
 
+/// Whether a demand-inline retry is an exact enough transformation to adopt a
+/// SAT result as a counterexample to the ORIGINAL query.
+///
+/// `Verified` is safe even after bounded/truncated expansion because removing a
+/// defining axiom only weakens the assumptions and makes proof harder. A model
+/// is asymmetric: if a selected call survives the depth bound, that model may
+/// assign the residual UF a value incompatible with the dropped definition.
+/// Therefore Counterexample adoption requires (1) proof provenance for every
+/// recursive SCC selected and (2) complete elimination of selected calls from
+/// every expression the retry encodes. Dead arms pruned by exact static branch
+/// selection do not count as residuals.
+fn demand_inline_counterexample_retry_is_exact(
+    slices: &VerificationSlices<'_>,
+    assertion: &PreparedObligation,
+    catalog: &std::collections::HashMap<String, super::body_support::ExtractedBodyAxiom>,
+    candidates: &[String],
+) -> bool {
+    if !super::body_support::selected_recursive_cycles_are_admitted(
+        catalog,
+        candidates,
+        &slices.ctx.source_catalog_admitted_definitions,
+    ) {
+        return false;
+    }
+
+    let selected: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+    let mut inline_bodies = std::collections::HashMap::new();
+
+    // Mirror setup.rs's ordinary inline catalog first. Hidden inline functions
+    // are absent unless revealed; inline+opaque is rejected at extraction.
+    for broadcast in slices.broadcast_assumptions {
+        let Some(body) = super::body_support::extracted_inline_body_axiom(broadcast) else {
+            continue;
+        };
+        if super::body_support::fn_name_named_in(&body.function_name, &slices.ctx.hidden_fns)
+            && !super::body_support::fn_name_named_in(&body.function_name, &slices.ctx.revealed_fns)
+        {
+            continue;
+        }
+        inline_bodies.insert(
+            body.function_name,
+            (body.param_names, body.param_types, body.body),
+        );
+    }
+    // Then mirror the attempt-local demand-inline overrides.
+    for name in candidates {
+        let Some(body) = catalog.get(name) else {
+            return false;
+        };
+        inline_bodies.insert(
+            body.function_name.clone(),
+            (
+                body.param_names.clone(),
+                body.param_types.clone(),
+                body.body.clone(),
+            ),
+        );
+    }
+
+    let has_residual = |expr: &TrustVcExpr| {
+        let expanded = crate::encoder::eval::substitute_inline_calls(expr, &inline_bodies);
+        super::body_support::referenced_function_names(&expanded)
+            .iter()
+            .any(|name| selected.contains(name.as_str()))
+    };
+
+    if has_residual(&assertion.expr)
+        || slices
+            .assumptions
+            .iter()
+            .chain(slices.verified_invariants)
+            .chain(slices.verified_assert_by)
+            .chain(slices.scoped_assumptions)
+            .any(|obligation| has_residual(&obligation.expr))
+    {
+        return false;
+    }
+
+    // Candidate and ordinary-inline body axioms are omitted by setup; every
+    // other broadcast remains live and must also be completely transformed.
+    slices.broadcast_assumptions.iter().all(|broadcast| {
+        let extracted = super::body_support::extracted_body_axiom(broadcast);
+        let omitted = broadcast.is_inline
+            || extracted
+                .as_ref()
+                .is_some_and(|body| selected.contains(body.function_name.as_str()));
+        omitted
+            || (!has_residual(&broadcast.expr)
+                && broadcast
+                    .broadcast_guard
+                    .as_ref()
+                    .is_none_or(|guard| !has_residual(guard)))
+    })
+}
+
 pub(super) fn unknown_should_fall_back_to_demand_inline(
     slices: &VerificationSlices<'_>,
     assertion: &crate::prepared_context::PreparedObligation,
@@ -904,8 +1086,11 @@ pub(super) fn unknown_should_fall_back_to_demand_inline(
 /// (`substitute_inline_calls` runs inside `encode_condition_typed`, so every
 /// assumption, broadcast, and the goal see the substitution), which for a
 /// total, non-recursive definitional body is an exact, equisatisfiable
-/// transformation — `build_body_catalog` excludes recursive bodies and
-/// unrevealed opaque/hidden bodies up front. A `Counterexample` outcome from
+/// transformation. `build_body_catalog` excludes direct self-recursion and
+/// unrevealed opaque/hidden bodies; admitted mutual recursion is accepted only
+/// when static branch selection eliminates every selected call and the source
+/// catalog carries checked termination provenance for the whole SCC. A
+/// `Counterexample` outcome from
 /// the retry has already passed ay's own model validation
 /// (`sat_model_validated`, solve.rs) plus trust-vc's broadcast-premise
 /// revalidation, so it is a genuine countermodel of the original obligation.
@@ -956,6 +1141,9 @@ fn maybe_retry_with_demand_inlining(
         return Ok(None);
     }
 
+    let counterexample_retry_is_exact =
+        demand_inline_counterexample_retry_is_exact(slices, assertion, &catalog, &candidates);
+
     tracing::info!(
         assertion = %assertion.name,
         candidates = ?candidates,
@@ -1004,7 +1192,8 @@ fn maybe_retry_with_demand_inlining(
             Ok(Some(AssertionOutcome::Verified))
         }
         AssertionOutcome::Counterexample { .. }
-            if matches!(baseline_outcome, AssertionOutcome::Unknown { .. }) =>
+            if counterexample_retry_is_exact
+                && matches!(baseline_outcome, AssertionOutcome::Unknown { .. }) =>
         {
             // Definitional-unfolding refutation: the baseline was a
             // fail-closed Unknown; the exact inlined query produced a
@@ -1023,6 +1212,7 @@ fn maybe_retry_with_demand_inlining(
             tracing::debug!(
                 assertion = %assertion.name,
                 outcome = ?retry_outcome,
+                counterexample_retry_is_exact,
                 "Demand-inline retry did not improve result",
             );
             Ok(None)

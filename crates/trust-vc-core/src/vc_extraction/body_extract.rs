@@ -6984,8 +6984,30 @@ impl<'a> AssertionCollector<'a> {
     /// Every out-of-scope shape falls through with NO obligation
     /// (fail-closed/unchanged): a non-bare-ident receiver, a receiver whose
     /// resolved type is not a `TypeParam`, an absent `(type_param, method)` map
-    /// entry, a concrete receiver, etc. A missed obligation is conservative; a
-    /// guessed one is not.
+    /// entry, a concrete receiver, etc.
+    ///
+    /// CAREFUL — "a missed obligation is conservative" is TRUE FOR AN ASSUMPTION
+    /// AND FALSE FOR A `requires`, and this map is the only producer of
+    /// call-site precondition asserts. Dropping one does not weaken what the
+    /// caller may conclude — the trait postcondition axiom is itself
+    /// `requires ==> ensures`, so an unestablished precondition yields no
+    /// `ensures` either — but it does mean a precondition-VIOLATING call is
+    /// never flagged. That is a missed bug report, not a false proof; the two
+    /// are not interchangeable and the older phrasing of this comment invited
+    /// treating them as such.
+    ///
+    /// An unresolvable receiver — `self.inner.f(x)`, `v[0].f(x)`, `make().f(x)`,
+    /// or a bare ident whose type never resolved — therefore FAILS CLOSED rather
+    /// than falling through, but only when a same-named method with a non-empty
+    /// `requires` is actually in scope. Without that guard the rejection would
+    /// fire on every unresolvable receiver in the language; with it, a program is
+    /// only rejected when there is a real precondition that could have been
+    /// missed. See `tests/receiver_shape_precondition_drop_witness.rs`.
+    ///
+    /// Still open, same shape: the sibling ambiguity drop in `trait_contracts.rs`
+    /// removes the key for BOTH traits when two declare a same-named
+    /// requires-bearing method for one concrete type, and wants the disjunction
+    /// of candidate `requires`.
     fn record_trait_method_contract_call(&mut self, mc: &syn::ExprMethodCall) {
         if self.parse_error.is_some() {
             return;
@@ -7005,15 +7027,65 @@ impl<'a> AssertionCollector<'a> {
         self.recorded_concrete_method_contract_call_sites
             .insert(key);
 
-        // Receiver must be a bare identifier; anything else falls through.
-        let Some(receiver_name) = expr_path_ident(&mc.receiver) else {
-            return;
+        let method = mc.method.to_string();
+
+        // Receiver must be a bare identifier with a known type. Anything else —
+        // `o.inner.f(x)`, `v[0].f(x)`, `make().f(x)`, or a bare ident whose type
+        // never resolved — cannot be routed to a contract.
+        //
+        // SOUNDNESS: this arm used to `return` silently, which let a call that
+        // VIOLATES the callee's `requires` pass unflagged purely because of the
+        // receiver's syntactic shape (see
+        // `tests/receiver_shape_precondition_drop_witness.rs`). Silence is only
+        // safe when no requires-bearing method of this name is in scope; when one
+        // IS, the call must fail closed instead. That keeps the over-rejection as
+        // narrow as the evidence allows: a same-named contract with a non-empty
+        // `requires` has to exist before anything is rejected.
+        if let Some((receiver_name, receiver_ty)) = expr_path_ident(&mc.receiver).and_then(|name| {
+            self.vc
+                .get_variable_type(&name)
+                .cloned()
+                .map(|ty| (name, ty))
+        }) {
+            return self.dispatch_resolved_trait_method_call(mc, receiver_name, receiver_ty);
+        }
+
+        if self.method_name_has_requires_bearing_contract(&method) {
+            self.parse_error = Some(TrustVcError::Encoding {
+                context: "extract trait-bounded method call contracts",
+                detail: format!(
+                    "Cannot resolve the receiver of the call to `{method}`, and a trait method \
+                     named `{method}` declares a `requires` clause. Refusing to verify rather \
+                     than skip the call-site precondition check: bind the receiver to a local \
+                     first (`let r = <receiver>; r.{method}(..)`) so its type resolves."
+                ),
+            });
+        }
+    }
+
+    /// True when either contract map holds an entry for `method` whose `requires`
+    /// list is non-empty — i.e. dropping this call site could hide a real
+    /// precondition violation. A contract with no `requires` produces no call-site
+    /// obligation anyway, so dropping it is genuinely harmless and must NOT
+    /// trigger the fail-closed path.
+    fn method_name_has_requires_bearing_contract(&self, method: &str) -> bool {
+        let has = |map: Option<&BTreeMap<(String, String), TraitMethodCallContract>>| {
+            map.is_some_and(|m| {
+                m.iter()
+                    .any(|((_, name), contract)| name == method && !contract.requires.is_empty())
+            })
         };
-        // The receiver's resolved type must be known; otherwise (unknown type)
-        // emit nothing.
-        let Some(receiver_ty) = self.vc.get_variable_type(&receiver_name).cloned() else {
-            return;
-        };
+        has(self.trait_method_contracts) || has(self.concrete_method_contracts)
+    }
+
+    /// The resolved-receiver path, split out of `record_trait_method_contract_call`
+    /// so the unresolved path above reads as the single fail-closed decision.
+    fn dispatch_resolved_trait_method_call(
+        &mut self,
+        mc: &syn::ExprMethodCall,
+        receiver_name: String,
+        receiver_ty: TrustVcType,
+    ) {
         let method = mc.method.to_string();
 
         // Resolve the applicable contract: a `TypeParam` receiver routes to the
@@ -7182,9 +7254,9 @@ impl<'a> AssertionCollector<'a> {
         let Expr::Path(func_path) = &*call.func else {
             return;
         };
-        if func_path.qself.is_none() {
+        let Some(qself) = func_path.qself.as_ref() else {
             return;
-        }
+        };
         let key = call as *const syn::ExprCall as usize;
         if !self.recorded_qualified_trait_fn_call_sites.insert(key) {
             return;
@@ -7193,7 +7265,6 @@ impl<'a> AssertionCollector<'a> {
         // The concrete type `S` is named explicitly by `qself.ty`; key the
         // concrete map by its `to_type_string()` (the same normalization the
         // concrete builder uses, so they match; a mismatch fails closed).
-        let qself = func_path.qself.as_ref().expect("qself present");
         let type_name =
             TrustVcType::parse_or_opaque(&crate::local_vars::extract_type_string(&qself.ty))
                 .to_type_string();
@@ -8945,6 +9016,7 @@ impl<'a> AssertionCollector<'a> {
         }
         self.closure_reflection_contract_changes
             .last_mut()
+            // quality-audit: allow-expect — pushed-when-empty above; a missing journal must abort, not silently skip the undo record
             .expect("closure-reflection scope journal must exist")
             .entry(name.to_string())
             .or_insert(previous);
@@ -11303,12 +11375,15 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
                 .cloned()
                 .collect();
             self.invalidate_scoped_names(assigned_body);
-            if can_assume_normal_exit && guard.is_some() {
-                let guard_reads_undeclared_modified = closure_referenced_idents(&expr_while.cond)
-                    .iter()
-                    .any(|ident| undeclared_modified.contains(ident));
-                if !guard_reads_undeclared_modified {
-                    self.add_post_loop_assumption(format!("!({})", guard.unwrap()));
+            if can_assume_normal_exit {
+                if let Some(guard) = &guard {
+                    let guard_reads_undeclared_modified =
+                        closure_referenced_idents(&expr_while.cond)
+                            .iter()
+                            .any(|ident| undeclared_modified.contains(ident));
+                    if !guard_reads_undeclared_modified {
+                        self.add_post_loop_assumption(format!("!({guard})"));
+                    }
                 }
             }
         } else {
@@ -14868,27 +14943,22 @@ fn arm_pattern_match_condition(
         Pat::Wild(_) => ArmMatchCond::Always,
         Pat::Rest(_) => ArmMatchCond::Always,
         Pat::Ident(ident) => {
+            // `x @ subpat` — match condition is the subpattern's.
+            if let Some((_, subpat)) = &ident.subpat {
+                return arm_pattern_match_condition(subpat, scrutinee, scrutinee_ty);
+            }
             // A bare binding `x` is irrefutable UNLESS the scrutinee is an enum and
             // `x` names a zero-field variant (e.g. `None` parsed as an ident).
-            if ident.subpat.is_none() {
-                if let Some(ty) = scrutinee_ty {
-                    if datatype_variant(ty, &ident.ident.to_string()).is_some() {
-                        return ArmMatchCond::Refutable(variant_match_condition(
-                            scrutinee,
-                            ty,
-                            &ident.ident.to_string(),
-                        ));
-                    }
+            if let Some(ty) = scrutinee_ty {
+                if datatype_variant(ty, &ident.ident.to_string()).is_some() {
+                    return ArmMatchCond::Refutable(variant_match_condition(
+                        scrutinee,
+                        ty,
+                        &ident.ident.to_string(),
+                    ));
                 }
-                ArmMatchCond::Always
-            } else {
-                // `x @ subpat` — match condition is the subpattern's.
-                arm_pattern_match_condition(
-                    ident.subpat.as_ref().map(|(_, p)| p.as_ref()).unwrap(),
-                    scrutinee,
-                    scrutinee_ty,
-                )
             }
+            ArmMatchCond::Always
         }
         Pat::Lit(lit) => {
             let lit_str = lit.lit.to_token_stream().to_string();

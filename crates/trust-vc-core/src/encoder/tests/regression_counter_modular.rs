@@ -65,12 +65,39 @@ fn counter_stays_in_range() {
         "next_def",
         "next == if count + 1 < max_val { count + 1 } else { 0 }",
     ));
-    ctx.push_obligation(ProofObligation::assert(
-        "in_range",
-        "next >= 0 && next < 10",
-    ));
+    // This explicit Verus-style arithmetic tactic uses mathematical integers.
+    // `count < 10` makes that interpretation equivalent to u32 execution for
+    // this transition: `count + 1` is in 1..=10 and cannot wrap.
+    ctx.push_obligation(
+        ProofObligation::assert("in_range", "next >= 0 && next < 10")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "modular counter always in [0, 10)");
+}
+
+#[test]
+fn counter_range_nonlinear_rejects_stronger_false_bound() {
+    let mut ctx = VerificationContext::new();
+    for v in &["count", "max_val", "next"] {
+        ctx.declare_var_typed(v, u32_ty());
+    }
+    ctx.push_obligation(ProofObligation::assume("count_val", "count == 8"));
+    ctx.push_obligation(ProofObligation::assume("max_val", "max_val == 10"));
+    ctx.push_obligation(ProofObligation::assume(
+        "next_def",
+        "next == if count + 1 < max_val { count + 1 } else { 0 }",
+    ));
+    ctx.push_obligation(
+        ProofObligation::assert("false_bound", "next < 9")
+            .with_solver_mode(crate::vc::SolverMode::NonlinearArith),
+    );
+
+    let result = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &result,
+        "the nonlinear tactic must reject a stronger false counter bound",
+    );
 }
 
 #[test]
