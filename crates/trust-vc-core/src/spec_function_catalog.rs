@@ -482,6 +482,37 @@ impl SpecFunctionCatalog {
             );
         }
 
+        // SOUNDNESS (FV-A, bare-spelling half): the bare key above is keyed on the
+        // ident alone and answers a bare `v()` written ANYWHERE in the file — but
+        // a `mod inner { fn v() }` SHADOWS the top-level `v` for every call
+        // written inside `inner`, so the top-level spec's body/`ensures` were
+        // being applied to a call Rust routes elsewhere (a cardinal false-verify:
+        // `mod inner { spec fn v() -> bool { false } ... ensures(result) fn
+        // bare_shadow() -> bool { v() } }` verified).
+        //
+        // A spec's solver identity IS the bare spelling, and one verification
+        // context mixes the target's scope with every applied helper's scope, so
+        // there is no per-scope answer to install here — the two scopes would
+        // have to share the symbol. The colliding bare key is therefore struck
+        // and the name fails closed in BOTH scopes; a qualified spelling still
+        // resolves through the module-keyed entries above. Over-rejection, never
+        // a hole, and order-independent: the strike depends on the set of
+        // declarations, not on which one the file writes first.
+        let mut shadowing: Vec<(String, String)> = Vec::new();
+        collect_nested_fn_shadows(items, false, &mut shadowing);
+        for (name, tokens) in shadowing {
+            let Some(existing) = self.specs.get(&name) else {
+                continue;
+            };
+            // A token-identical re-declaration is not a collision: whichever one
+            // a use site means, the registered facts are the same.
+            let top_level = &existing.item_fn;
+            if quote::quote!(#top_level).to_string() == tokens {
+                continue;
+            }
+            self.specs.remove(&name);
+        }
+
         // Deliberately do not synthesize a bare key for a nested function. A bare
         // call is meaningful only when Rust name resolution puts that item in scope;
         // global uniqueness is not lexical import provenance. Qualified calls remain
@@ -2829,6 +2860,35 @@ fn collect_nested_pub_spec_fns(
                 let ident = item_fn.sig.ident.to_string();
                 let qualified_key = format!("{}::{}", prefix.join("::"), ident);
                 out.push((ident, qualified_key, item_fn.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect `(ident, token string)` for every `fn` declared inside an INLINE
+/// MODULE, at any depth.
+///
+/// Any such declaration — spec or exec, `pub` or private — shadows a top-level
+/// item of the same name for calls written inside that module, so it is exactly
+/// the set that can make the catalog's bare, ident-only key answer for the wrong
+/// function. Visibility is deliberately NOT filtered here (unlike
+/// [`collect_nested_pub_spec_fns`], which decides what may be REFERENCED from
+/// outside): a private nested fn is invisible to other modules but still shadows
+/// inside its own.
+fn collect_nested_fn_shadows(items: &[syn::Item], nested: bool, out: &mut Vec<(String, String)>) {
+    for item in items {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    collect_nested_fn_shadows(inner, true, out);
+                }
+            }
+            syn::Item::Fn(item_fn) if nested => {
+                out.push((
+                    item_fn.sig.ident.to_string(),
+                    quote::quote!(#item_fn).to_string(),
+                ));
             }
             _ => {}
         }

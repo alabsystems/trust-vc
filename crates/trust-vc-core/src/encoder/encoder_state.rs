@@ -327,6 +327,20 @@ pub(crate) struct VerificationState {
     /// lane (the F6-class `<= 0 len` poison; see
     /// docs/probes/2026-07-18-ay-lane/dump-smt2/RESULTS.txt).
     pub(crate) pinned_seq_lens: std::collections::HashMap<String, i64>,
+    /// Length terms that have been asserted `<= 2^pointer_width - 1` because
+    /// their variable is a genuinely `usize`-bounded EXEC collection
+    /// (`VariableDecl::bounded_len` — a `Vec`/slice/array). Recorded by
+    /// [`AYEncoder::assert_len_usize_bounded`](super::AYEncoder), which is the
+    /// SOLE emitter of that bound.
+    ///
+    /// This is the term-level recovery of a bit that is otherwise lost at the
+    /// encoder boundary: `TrustVcType` collapses an exec `Vec<T>` and a spec
+    /// `Seq<T>` into the same `TrustVcType::Seq(_)` (`ir.rs`), so a downstream
+    /// encoding site holding only a length `Term` cannot otherwise tell whether
+    /// that length is carrier-representable. Consumers must treat membership as
+    /// "in `[0, 2^pw - 1]` by an already-asserted fact" and NON-membership as
+    /// "unknown / possibly unbounded" — never the reverse.
+    pub(crate) usize_bounded_lens: std::collections::HashSet<ay_dpll::api::Term>,
 }
 
 impl VerificationState {
@@ -363,6 +377,7 @@ impl VerificationState {
             map_dom_bridges: std::collections::HashMap::new(),
             pure_collection_cache: std::collections::HashMap::new(),
             pinned_seq_lens: std::collections::HashMap::new(),
+            usize_bounded_lens: std::collections::HashSet::new(),
         }
     }
 }

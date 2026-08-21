@@ -22,7 +22,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alabsystems/trust-vc"
@@ -32,16 +32,39 @@ authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 [workspace.dependencies]
 # Owned dependency stack consumed as git deps so trust-vc builds standalone from
 # any location. A single git source per crate avoids duplicate package
-# identities; local sibling checkouts are picked up via an untracked
-# .cargo/config.toml [patch] override when present.
+# identities.
 #
-# The ay solver crates are pinned to an exact rev (not branch=main) so the
-# evidence gate's "common ay pin" + "latest private ay pin" checks can resolve a
-# single GitRev provenance. Bump this rev (all four together) to track latest ay.
-ay-core = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
-ay-dpll = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
-ay-frontend = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
-ay-sys = { version = "0.10.0", git = "https://github.com/alabsystems/ay.git", rev = "ac00c30a825721e7a6dd82043e43d01af35e7b60" }
+# ay pin — tiers. `alabsystems/ay` is the DEV tier (agents push it freely);
+# `alabsystems/ay` is the PUBLIC release tier, which only a human can write via
+# `pub promote`. alabsystems has published only up to v0.13.0's predecessor, so
+# the pin below names the dev tier. Flip the URL to
+# `https://github.com/alabsystems/ay.git` (same rev) once a human promotes
+# v0.13.0 there.
+#
+# Pinned to a 40-HEX SHA — never a tag, never branch=main. A tag is a MOVING
+# selector: the constellation's own gates reject it outright (ty's
+# `check_reproducible_git_pins.py`, trust-mc's `check_first_party_git_pins.py`,
+# clean's `check_ay_updates.py` and `publish/transform.py` all hard-require
+# `^[0-9a-fA-F]{40}$`). The sha below is ay tag v0.13.0.
+#
+# The `version` req must MOVE WITH ay on every bump: cargo checks a [patch]ed
+# source against it, and a stale req does NOT merely drift — cargo SILENTLY
+# DROPS the whole [patch] and resolves the git pin instead, emitting only
+# `warning: patch ... was not used in the crate graph` with exit 0. That is how
+# the 0.11.0 req survived ay's 0.11 -> 0.12 -> 0.13 releases while every local
+# gate secretly measured the pinned git source rather than `../ay`. Verify
+# after any bump: `targo metadata` must show the ay crates resolving to PATH
+# and print ZERO "was not used in the crate graph" warnings.
+# (`+g<sha>` build metadata does NOT help — cargo ignores build metadata when
+# matching versions; only a MINOR bump makes a mismatch fail loudly.)
+#
+# NOTE: `.cargo/config.toml` [patch]es all four to the sibling `../ay` checkout,
+# so this pin is NOT what local builds compile — it is what a standalone clone
+# would fetch. Bump all four together with ../ay's [workspace.package] version.
+ay-core = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
+ay-dpll = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
+ay-frontend = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
+ay-sys = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
 # ty and trust-ir are rev-pinned (not branch=main) for reproducible standalone
 # builds. ty's internal tla-ir -> trust-ir-build dependencies still name
 # trust-ir's main branch, so Cargo.lock must pin those branch sources to the
@@ -122,11 +145,13 @@ opt-level = 3
 [profile.release]
 strip = "debuginfo"
 
-# Local cross-repo co-development override: sibling [patch] redirects for the git
-# deps above live in an UNTRACKED .cargo/config.toml (not committed here), so
-# trust-vc builds standalone from any location while local sibling checkouts are
-# still picked up when present. Keep each override keyed to the exact git source
-# above so Cargo retains a single package identity per owned crate.
+# Local cross-repo co-development override: sibling [patch] redirects for the ay
+# git deps above live in `.cargo/config.toml`, which IS TRACKED and IS ACTIVE —
+# so a clone of trust-vc REQUIRES a sibling `../ay` checkout, and local builds
+# compile that working tree rather than the rev pinned above. Keep each override
+# keyed to the exact git source above, and keep the `version` reqs in step with
+# ../ay, so Cargo retains a single package identity per owned crate and does not
+# silently drop the patch. See that file's header for the full failure mode.
 
 [workspace.metadata.atpkg]
 # The user-facing commands here, both produced by crate cargo-trust-vc and both

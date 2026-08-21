@@ -379,6 +379,66 @@ impl VerificationContext {
         self.declare_var_parsed(name, ty);
     }
 
+    /// Detects a collision between a user variable and the `{name}_dom` domain
+    /// companion the encoder mints for every `Map` variable (#1966).
+    ///
+    /// SOUNDNESS/DETECTION-CRITICAL, and it must live HERE rather than at the
+    /// minting site. Three independent reasons:
+    ///
+    /// 1. **The encoder may never run.** Variable declaration is not eager:
+    ///    `verify` prunes to the obligations' reachable variables, and a context
+    ///    whose only obligation is trivially true declares nothing at all. A
+    ///    check at the minting site is therefore silently skippable, which is
+    ///    exactly how this collision became undetectable.
+    /// 2. **The solver cannot be delegated to.** `try_declare_const` rejects a
+    ///    redeclaration only when the SORTS DIFFER. A user variable
+    ///    `x_dom: Map<K, bool>` lowers to precisely the domain sort
+    ///    `Array(K, Bool)`, so ay accepts it as an idempotent redeclaration and
+    ///    the user's variable is silently conflated with `x`'s domain array.
+    /// 3. **`{name}_dom` is the only companion minted into the USER namespace.**
+    ///    The length companion (`__trust_vc_len_*`) and the native-seq shadow
+    ///    (`__trust_vc_native_seq_shadow_*`) both sit behind a reserved prefix
+    ///    and are unreachable by a legal Rust identifier; `{name}_dom` is not.
+    ///
+    /// Both declaration orders are rejected, because the encoder mints the
+    /// companion lazily and the user variable may be declared on either side of
+    /// the `Map`. The collision is an embedder mistake, so this fails CLOSED
+    /// with a `VerifyResult::Error` rather than picking a winner.
+    fn map_domain_companion_conflict(
+        &self,
+        name: &str,
+        ty: &crate::ir::TrustVcType,
+    ) -> Option<String> {
+        // Order A: the `Map` is declared second — its companion name is already
+        // taken by a previously declared user variable.
+        if matches!(ty, crate::ir::TrustVcType::Map(_, _)) {
+            let dom_name = format!("{name}_dom");
+            if self.variable_index.contains_key(&dom_name) {
+                return Some(format!(
+                    "Variable '{dom_name}' is already declared and collides with the \
+                     map domain companion minted for map '{name}'"
+                ));
+            }
+        }
+        // Order B: the `Map` is declared first — a later user variable lands on
+        // the companion name. Only a `Map` base can mint one, so a plain
+        // `foo_dom` alongside a non-`Map` `foo` stays legal.
+        if let Some(base) = name.strip_suffix("_dom") {
+            if self
+                .variable_index
+                .get(base)
+                .and_then(|idx| self.variables.get(*idx))
+                .is_some_and(|decl| matches!(decl.ty, crate::ir::TrustVcType::Map(_, _)))
+            {
+                return Some(format!(
+                    "Variable '{name}' collides with the map domain companion minted \
+                     for map '{base}', which is already declared"
+                ));
+            }
+        }
+        None
+    }
+
     /// Declares a variable with a fully-typed TrustVc type.
     ///
     /// The declared variable's length is left UNBOUNDED (spec-`Seq` default). Use
@@ -400,6 +460,10 @@ impl VerificationContext {
     ) {
         if self.variable_index.contains_key(name) {
             self.duplicate_var_error = Some(format!("Variable '{}' already declared", name));
+            return;
+        }
+        if let Some(conflict) = self.map_domain_companion_conflict(name, &ty) {
+            self.duplicate_var_error = Some(conflict);
             return;
         }
         let idx = self.variables.len();

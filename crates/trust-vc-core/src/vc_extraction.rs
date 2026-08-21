@@ -968,7 +968,8 @@ fn extract_verification_conditions_from_parts_inner(
     if let Some(err) = proof_note_at_most_one_error(&func.block) {
         return Err(err);
     }
-    let source_structs = file.map(SourceStructRegistry::from_file);
+    let source_structs =
+        file.map(|file| SourceStructRegistry::from_file(file, enclosing_inline_module.as_deref()));
     if let Some(registry) = &source_structs {
         registry.register_struct_defs(&mut vc);
         registry.register_type_aliases(&mut vc);
@@ -3925,25 +3926,178 @@ struct SourceTypeAliasTemplate {
 
 #[derive(Clone, Default)]
 struct SourceFunctionRegistry {
+    /// Inline-module-qualified path (`app::util::f`) → declaration.
     functions: BTreeMap<String, ItemFn>,
+    /// Qualified paths claimed by MORE THAN ONE structurally different
+    /// declaration — the `#[cfg]`-arm shape, which this per-file syn walk cannot
+    /// evaluate. They are struck from `functions` and fail closed.
+    ambiguous_paths: BTreeSet<String>,
+    /// Every inline-module path in the file, including the file root. Used to
+    /// resolve a call whose use-site scope could not be pinned down: only a
+    /// spelling that names the SAME declaration from every module resolves.
+    module_scopes: BTreeSet<Vec<String>>,
+}
+
+/// How a call path is ROOTED, read from the spelling at the use site.
+///
+/// `functions` is keyed by inline-module path, so a written spelling can only be
+/// matched against it once the module it is relative to is known.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+enum CallPathRoot {
+    /// A plain relative spelling (`f`, `util::f`, `super::f`), resolved against
+    /// the use site's own inline module.
+    #[default]
+    Relative,
+    /// `crate::`-rooted, or a spelling canonicalized through a block `use`
+    /// alias. Matched against the FILE root only: this walk cannot tell whether
+    /// the file it was handed IS the crate root, and an alias target is a
+    /// crate-relative `use` path, so file-root matching is the only reading
+    /// either one ever had.
+    FileRoot,
+    /// `self::`-rooted: the use site's own module and nothing else.
+    SelfModule,
+}
+
+/// `module::segments` joined into a `functions` key.
+fn qualified_function_key(module: &[String], segments: &[String]) -> String {
+    module
+        .iter()
+        .chain(segments.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 impl SourceFunctionRegistry {
     fn from_file(file: &File) -> Self {
-        let mut registry = Self::default();
-        collect_source_functions_from_items(&file.items, &mut Vec::new(), &mut registry.functions);
+        let mut collected = SourceFunctionCollection::default();
+        collect_source_functions_from_items(&file.items, &mut Vec::new(), &mut collected);
+        let mut registry = Self {
+            functions: collected.functions,
+            ambiguous_paths: collected.ambiguous,
+            module_scopes: collected.scopes,
+        };
+        for path in &registry.ambiguous_paths {
+            registry.functions.remove(path);
+        }
         registry
     }
 
     fn get(&self, path: &str) -> Option<&ItemFn> {
         self.functions.get(path)
     }
+
+    /// The declaration a call spelled `written` and rooted `root` names when it
+    /// is written inside inline module `scope`.
+    ///
+    /// SOUNDNESS (FV-A, the call-path twin of the FV-1 type-registry hole): the
+    /// registry has always been keyed by the DECLARATION's module path while the
+    /// lookup used the spelling as WRITTEN, i.e. read as file-root-relative. A
+    /// `util::f(x)` written inside `mod app` therefore resolved to a top-level
+    /// `mod util`'s `f` — a different body, a different `requires` and a
+    /// different `ensures` from the one Rust calls. Resolving against the use
+    /// site's own module, innermost first and then outward, is the walk Rust
+    /// does, restricted to what a per-file syn AST exposes; everything it cannot
+    /// see returns `None`, which every caller turns into an opaque call.
+    ///
+    /// Order-independence is by construction: scope decides, never source
+    /// position.
+    fn resolve_key(
+        &self,
+        written: &str,
+        root: CallPathRoot,
+        scope: Option<&[String]>,
+    ) -> Option<String> {
+        let mut segments = written
+            .split("::")
+            .map(str::to_string)
+            .collect::<Vec<String>>();
+        if segments.is_empty() || segments.iter().any(String::is_empty) {
+            return None;
+        }
+        let starts_with_super = segments.first().is_some_and(|segment| segment == "super");
+
+        match root {
+            CallPathRoot::FileRoot => {
+                if starts_with_super {
+                    return None;
+                }
+                let key = segments.join("::");
+                return self.functions.contains_key(&key).then_some(key);
+            }
+            CallPathRoot::SelfModule => {
+                if starts_with_super {
+                    return None;
+                }
+                let key = qualified_function_key(scope?, &segments);
+                return self.functions.contains_key(&key).then_some(key);
+            }
+            CallPathRoot::Relative => {}
+        }
+
+        if starts_with_super {
+            // `super::` names exactly as many levels up as there are `super`s;
+            // walking further outward would be a guess, so it fails closed.
+            let mut base = scope?.to_vec();
+            while segments.first().is_some_and(|segment| segment == "super") {
+                segments.remove(0);
+                base.pop()?;
+            }
+            if segments.is_empty() {
+                return None;
+            }
+            let key = qualified_function_key(&base, &segments);
+            return self.functions.contains_key(&key).then_some(key);
+        }
+
+        let Some(scope) = scope else {
+            // The use site's module could not be pinned down (no unique
+            // declaration site). Resolve only a spelling that names the SAME
+            // declaration from every module in the file — the reading is then
+            // scope-independent, so no scope needs to be known.
+            let mut candidates = BTreeSet::new();
+            for module in &self.module_scopes {
+                let key = qualified_function_key(module, &segments);
+                if self.functions.contains_key(&key) {
+                    candidates.insert(key);
+                }
+            }
+            return (candidates.len() == 1)
+                .then(|| candidates.into_iter().next().expect("one candidate"));
+        };
+
+        (0..=scope.len()).rev().find_map(|depth| {
+            let key = qualified_function_key(&scope[..depth], &segments);
+            self.functions.contains_key(&key).then_some(key)
+        })
+    }
+
+    fn resolve(
+        &self,
+        written: &str,
+        root: CallPathRoot,
+        scope: Option<&[String]>,
+    ) -> Option<(&ItemFn, String)> {
+        let key = self.resolve_key(written, root, scope)?;
+        let item_fn = self.functions.get(&key)?;
+        Some((item_fn, key))
+    }
+}
+
+/// One walk over a file's items: the module-qualified function map, the paths it
+/// could not settle, and every inline-module scope it saw.
+#[derive(Default)]
+struct SourceFunctionCollection {
+    functions: BTreeMap<String, ItemFn>,
+    ambiguous: BTreeSet<String>,
+    scopes: BTreeSet<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct SourceCallReference {
     source_path: String,
     call_symbol: String,
+    root: CallPathRoot,
 }
 
 /// Resolve one call edge through the aliases of the Rust block that CONTAINS
@@ -3956,6 +4110,10 @@ fn source_reference_with_aliases(
 ) -> SourceCallReference {
     if let Some(source_path) = aliases.get(&reference.source_path) {
         reference.source_path.clone_from(source_path);
+        // An alias target is a crate-relative `use` path, never a spelling
+        // relative to the calling module — keep it on the file-root reading it
+        // has always had rather than re-rooting it at the use site's scope.
+        reference.root = CallPathRoot::FileRoot;
     }
     reference
 }
@@ -3978,6 +4136,11 @@ fn source_call_reference_from_expr_path(path: &syn::ExprPath) -> Option<SourceCa
         .iter()
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
+    let root = match segments.first().map(String::as_str) {
+        Some("crate") => CallPathRoot::FileRoot,
+        Some("self") => CallPathRoot::SelfModule,
+        _ => CallPathRoot::Relative,
+    };
     while segments
         .first()
         .is_some_and(|segment| segment == "crate" || segment == "self")
@@ -3990,6 +4153,7 @@ fn source_call_reference_from_expr_path(path: &syn::ExprPath) -> Option<SourceCa
     Some(SourceCallReference {
         source_path: segments.join("::"),
         call_symbol,
+        root,
     })
 }
 
@@ -4000,21 +4164,38 @@ fn call_function_symbol(call: &syn::ExprCall) -> Option<String> {
 fn collect_source_functions_from_items(
     items: &[syn::Item],
     prefix: &mut Vec<String>,
-    functions: &mut BTreeMap<String, ItemFn>,
+    out: &mut SourceFunctionCollection,
 ) {
+    out.scopes.insert(prefix.clone());
     for item in items {
         match item {
             syn::Item::Fn(item_fn) => {
                 let mut path = prefix.clone();
                 path.push(item_fn.sig.ident.to_string());
-                functions
-                    .entry(path.join("::"))
-                    .or_insert_with(|| item_fn.clone());
+                let key = path.join("::");
+                match out.functions.entry(key.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(item_fn.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(existing) => {
+                        // One module path, two declarations: only a `#[cfg]` pair
+                        // can produce this in legal Rust, and which arm is live
+                        // is not decidable from the syn AST. First-declaration-
+                        // wins would pick a body/contract the compiler may not
+                        // have selected, so the path fails closed. A
+                        // token-identical re-declaration is not a collision:
+                        // either reading gives the same facts.
+                        let previous = existing.get();
+                        if quote!(#previous).to_string() != quote!(#item_fn).to_string() {
+                            out.ambiguous.insert(key);
+                        }
+                    }
+                }
             }
             syn::Item::Mod(module) => {
                 if let Some((_, inner_items)) = &module.content {
                     prefix.push(module.ident.to_string());
-                    collect_source_functions_from_items(inner_items, prefix, functions);
+                    collect_source_functions_from_items(inner_items, prefix, out);
                     prefix.pop();
                 }
             }
@@ -4032,19 +4213,143 @@ struct SourceStructRegistry {
     /// (a `#[derive(PartialEq)]` is NOT an `Item::Impl` in the syn AST, so only
     /// genuinely-custom impls land here). Their exec `==` may be non-structural.
     manual_partial_eq_types: BTreeSet<String>,
+    /// Bare type names declared MORE THAN ONCE in the file with structurally
+    /// different definitions (typically a nested `mod` type shadowing a
+    /// top-level one) that scope-relative resolution could NOT settle. These
+    /// names are struck from `structs`/`enums`/`type_aliases` and fail closed.
+    /// See `record_source_type_declaration`.
+    ambiguous_type_names: BTreeSet<String>,
+    /// Colliding bare names that scope-relative resolution DID settle, mapped to
+    /// the inline-module path of the winning declaration (the one installed in
+    /// the bare-keyed maps above). A use site that spells such a name with an
+    /// explicit qualifier must name that same module — otherwise it means the
+    /// other declaration, whose shape the bare carrier cannot represent, and
+    /// resolution declines. See `SourceStructRegistry::written_path_names_module`.
+    resolved_collision_modules: BTreeMap<String, Vec<String>>,
+    /// The inline-module path of the function under verification, i.e. the scope
+    /// a bare type name is written in. `None` when the caller could not pin it
+    /// down (no file, or `EnclosingModuleResolution::Ambiguous`), in which case
+    /// no collision is resolved at all.
+    use_site_scope: Option<Vec<String>>,
 }
 
 impl SourceStructRegistry {
-    fn from_file(file: &File) -> Self {
-        let mut registry = Self::default();
-        collect_source_types_from_items(
-            &file.items,
-            &mut registry.structs,
-            &mut registry.enums,
-            &mut registry.type_aliases,
-        );
+    /// Builds the registry for a use site in inline module `use_site_scope`.
+    ///
+    /// `use_site_scope` is `None` when the enclosing module of the verified
+    /// function could not be pinned down; every collision then fails closed,
+    /// which is the pre-resolution behaviour.
+    fn from_file(file: &File, use_site_scope: Option<&[String]>) -> Self {
+        let mut collected = SourceTypeCollection::default();
+        collect_source_types_from_items(&file.items, &mut Vec::new(), &mut collected);
+        let mut registry = Self {
+            structs: collected.structs,
+            enums: collected.enums,
+            type_aliases: collected.type_aliases,
+            ambiguous_type_names: collected.ambiguous,
+            use_site_scope: use_site_scope.map(<[String]>::to_vec),
+            ..Self::default()
+        };
+
+        // Resolution pass: a colliding bare name that EVERY code-bearing scope
+        // in the file agrees on is not a guess — scope, not declaration order,
+        // decides it, so both orders of the same two declarations answer the
+        // same way. The winner replaces whatever first-declaration-wins left in
+        // the bare-keyed maps (and clears the other two maps, so a struct/enum
+        // collision cannot be settled by map priority either).
+        if let Some(scope) = use_site_scope {
+            let mut scopes = collected.index.fn_scopes.clone();
+            scopes.insert(scope.to_vec());
+            for name in registry.ambiguous_type_names.clone() {
+                let Some(key) = collected.index.resolve_uniformly(&name, &scopes) else {
+                    continue;
+                };
+                let module = key
+                    .rsplit_once("::")
+                    .map(|(module, _)| module.split("::").map(str::to_string).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let winning_struct = collected.qualified_structs.get(&key);
+                let winning_enum = collected.qualified_enums.get(&key);
+                let winning_alias = collected.qualified_type_aliases.get(&key);
+                if winning_struct.is_none() && winning_enum.is_none() && winning_alias.is_none() {
+                    continue;
+                }
+                registry.structs.remove(&name);
+                registry.enums.remove(&name);
+                registry.type_aliases.remove(&name);
+                if let Some(template) = winning_struct {
+                    registry.structs.insert(name.clone(), template.clone());
+                }
+                if let Some(template) = winning_enum {
+                    registry.enums.insert(name.clone(), template.clone());
+                }
+                if let Some(template) = winning_alias {
+                    registry.type_aliases.insert(name.clone(), template.clone());
+                }
+                registry.ambiguous_type_names.remove(&name);
+                registry.resolved_collision_modules.insert(name, module);
+            }
+        }
+
+        // Fail closed on every bare name resolution could not settle: keeping
+        // either candidate would silently answer field/variant queries for a
+        // type the use site may not name. Removing it makes the type
+        // unrecognized, which the downstream lowering declines rather than
+        // guesses at.
+        for name in &registry.ambiguous_type_names {
+            registry.structs.remove(name);
+            registry.enums.remove(name);
+            registry.type_aliases.remove(name);
+        }
         collect_manual_partial_eq_impls(&file.items, &mut registry.manual_partial_eq_types);
         registry
+    }
+
+    /// True when the qualifier a use site actually WROTE names `module`, read
+    /// from the use site's own scope.
+    ///
+    /// Only consulted for a bare name whose collision was resolved by scope: the
+    /// bare-keyed maps hold exactly one of the two shapes, so a qualified
+    /// spelling that names the OTHER one must decline rather than silently
+    /// receive the winner's fields. `crate::`- and `::`-rooted spellings always
+    /// decline: this walk cannot tell whether the file it was handed is the
+    /// crate root, so it cannot confirm they name an inline module here.
+    fn written_path_names_module(&self, path: &syn::Path, module: &[String]) -> bool {
+        if path.leading_colon.is_some() {
+            return false;
+        }
+        let mut segments: Vec<String> = path
+            .segments
+            .iter()
+            .take(path.segments.len().saturating_sub(1))
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        let scope = self.use_site_scope.as_deref().unwrap_or(&[]);
+        match segments.first().map(String::as_str) {
+            Some("crate") => false,
+            Some("self") => {
+                segments.remove(0);
+                let mut base = scope.to_vec();
+                base.extend(segments);
+                base == module
+            }
+            Some("super") => {
+                let mut base = scope.to_vec();
+                while segments.first().is_some_and(|segment| segment == "super") {
+                    segments.remove(0);
+                    if base.pop().is_none() {
+                        return false;
+                    }
+                }
+                base.extend(segments);
+                base == module
+            }
+            _ => (0..=scope.len()).rev().any(|depth| {
+                let mut base = scope[..depth].to_vec();
+                base.extend(segments.iter().cloned());
+                base == module
+            }),
+        }
     }
 
     /// True when `method_name` is the name of an auto-generated datatype
@@ -4234,6 +4539,17 @@ impl SourceStructRegistry {
         }
         let segment = type_path.path.segments.last()?;
         let name = segment.ident.to_string();
+        // A bare name whose collision was settled by SCOPE holds exactly one of
+        // its two shapes here. A use site that wrote an explicit qualifier must
+        // therefore name the winning module; if it names the other declaration,
+        // the bare carrier cannot represent it and this fails closed.
+        if let Some(module) = self.resolved_collision_modules.get(&name) {
+            if (type_path.path.segments.len() > 1 || type_path.path.leading_colon.is_some())
+                && !self.written_path_names_module(&type_path.path, module)
+            {
+                return None;
+            }
+        }
         if let Some(substitution) = substitutions.get(&name) {
             return Some(substitution.clone());
         }
@@ -4834,34 +5150,485 @@ fn collect_manual_partial_eq_impls(items: &[syn::Item], out: &mut BTreeSet<Strin
     }
 }
 
+/// The registry key for a declaration of `name` inside inline module `module`
+/// (`[] , "S"` → `"S"`; `["helper"], "S"` → `"helper::S"`).
+fn qualified_type_key(module: &[String], name: &str) -> String {
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{}", module.join("::"), name)
+    }
+}
+
+/// One source-level declaration of a bare type name: which inline module it was
+/// written in, plus a token fingerprint used to tell "two spellings of the same
+/// shape" from "two genuinely different types".
+#[derive(Clone, Debug)]
+struct SourceTypeDeclSite {
+    module: Vec<String>,
+    fingerprint: String,
+}
+
+/// A single non-glob `use` binding written in one inline module.
+#[derive(Clone, Debug)]
+struct SourceUseBinding {
+    /// The name the binding introduces into its module (`use a::S as T` → `T`).
+    in_scope_name: String,
+    /// The path segments as written, MINUS the leaf.
+    module_segments: Vec<String>,
+    /// The last segment of the written path (`use a::S as T` → `S`).
+    leaf: String,
+    /// `use ::x::S` / `use crate::x::S` — rooted outside anything this
+    /// per-file walk can see, so the binding is unresolvable by construction.
+    out_of_file: bool,
+}
+
+/// A `use path::*` written in one inline module.
+#[derive(Clone, Debug)]
+struct SourceGlobImport {
+    module_segments: Vec<String>,
+    out_of_file: bool,
+}
+
+/// Scope facts about a file's type declarations: where each bare name was
+/// declared, what each module imports, and which modules hold code. This is the
+/// entire input to bare-name resolution — there is no `use` graph across files,
+/// no macro expansion and no crate graph, so anything not visible here fails
+/// closed rather than being guessed at.
+#[derive(Default, Clone, Debug)]
+struct SourceTypeScopeIndex {
+    /// Bare name → every declaration of it in the file, in source order.
+    declarations: BTreeMap<String, Vec<SourceTypeDeclSite>>,
+    /// Module path → the non-glob `use` bindings written there.
+    imports: BTreeMap<Vec<String>, Vec<SourceUseBinding>>,
+    /// Module path → the globs written there.
+    globs: BTreeMap<Vec<String>, Vec<SourceGlobImport>>,
+    /// Module paths holding code-bearing items (`fn` / `impl` / `trait`, plus
+    /// unexpanded item macros, whose contents this walk cannot see at all).
+    ///
+    /// These are exactly the scopes whose bodies, contracts and axioms can end
+    /// up in ONE verification context alongside the verified function's — source
+    /// functions, inherent impls and trait impls are all collected file-wide,
+    /// not scope-locally. The registry carries ONE shape per bare name (the
+    /// carrier name, the `StructDef` name and the SMT sort name are all the bare
+    /// name), so a name may only be resolved when EVERY such scope resolves it
+    /// identically; otherwise one scope's facts would be typed against the other
+    /// scope's shape. `const`/`static` are deliberately NOT code-bearing here:
+    /// `SourceConstRegistry` walks top-level items only and admits only scalar
+    /// and array-length types, so a module const can never carry a user datatype
+    /// into the context.
+    fn_scopes: BTreeSet<Vec<String>>,
+}
+
+/// Outcome of resolving a bare type name against one use-site scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScopeResolution {
+    /// The name resolves to exactly this declaration (a `qualified_type_key`).
+    Resolved(String),
+    /// No sound answer: nothing in scope, several candidates, a glob that could
+    /// supply a competing binding, or an import pointing out of this file.
+    Unresolvable,
+}
+
+impl SourceTypeScopeIndex {
+    /// The declaration of `leaf` in module `module`, when there is exactly one
+    /// shape there. Two structurally different declarations under one module
+    /// path (the `#[cfg]`-arm shape) resolve to nothing.
+    fn unique_declaration(&self, module: &[String], leaf: &str) -> Option<String> {
+        let sites = self.declarations.get(leaf)?;
+        let mut fingerprints = BTreeSet::new();
+        for site in sites {
+            if site.module.as_slice() == module {
+                fingerprints.insert(site.fingerprint.as_str());
+            }
+        }
+        if fingerprints.len() == 1 {
+            Some(qualified_type_key(module, leaf))
+        } else {
+            None
+        }
+    }
+
+    /// The absolute (file-relative) module path(s) a `use`/glob path written in
+    /// `module` could name. A plain-leading path is crate-root-relative under
+    /// the 2015 reading and current-module-relative under the uniform-path
+    /// reading; both are returned and the caller requires them to agree.
+    fn use_path_targets(
+        &self,
+        module_segments: &[String],
+        module: &[String],
+    ) -> Option<Vec<Vec<String>>> {
+        let mut segments = module_segments.to_vec();
+        match segments.first().map(String::as_str) {
+            Some("self") => {
+                segments.remove(0);
+                let mut base = module.to_vec();
+                base.extend(segments);
+                Some(vec![base])
+            }
+            Some("super") => {
+                let mut base = module.to_vec();
+                while segments.first().is_some_and(|segment| segment == "super") {
+                    segments.remove(0);
+                    base.pop()?;
+                }
+                base.extend(segments);
+                Some(vec![base])
+            }
+            // `crate::` was already classified `out_of_file`: this walk cannot
+            // tell whether the file it was handed IS the crate root, so a
+            // `crate::`-rooted path may name a module in a completely different
+            // file that happens to share a name with an inline one here.
+            Some(_) => {
+                let root_relative = segments.clone();
+                let mut module_relative = module.to_vec();
+                module_relative.extend(segments);
+                if root_relative == module_relative {
+                    Some(vec![root_relative])
+                } else {
+                    Some(vec![root_relative, module_relative])
+                }
+            }
+            None => Some(vec![module.to_vec()]),
+        }
+    }
+
+    /// The declaration a non-glob `use` binding names, or `None` when this file
+    /// cannot settle it (out-of-file root, target module not declared here, or
+    /// the two readings of a plain-leading path disagree).
+    fn resolve_use_binding(&self, binding: &SourceUseBinding, module: &[String]) -> Option<String> {
+        if binding.out_of_file {
+            return None;
+        }
+        let targets = self.use_path_targets(&binding.module_segments, module)?;
+        let mut resolved = BTreeSet::new();
+        for target in &targets {
+            // A target this file does not declare is an import from ANOTHER file
+            // or crate. Falling through to an in-file declaration of the same
+            // leaf would silently answer with a type the use site does not name.
+            resolved.insert(self.unique_declaration(target, &binding.leaf)?);
+        }
+        if resolved.len() == 1 {
+            resolved.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// True when a glob only re-imports an ANCESTOR of the importing module —
+    /// the `use super::*` shape. The scope walk already visits every ancestor,
+    /// so such a glob contributes no candidate the walk would otherwise miss.
+    fn glob_is_ancestor_only(&self, glob: &SourceGlobImport, module: &[String]) -> bool {
+        if glob.out_of_file {
+            return false;
+        }
+        let Some(targets) = self.use_path_targets(&glob.module_segments, module) else {
+            return false;
+        };
+        targets
+            .iter()
+            .all(|target| target.len() < module.len() && module.starts_with(target))
+    }
+
+    /// Resolves bare `name` as written at a use site in module `scope`, walking
+    /// the scope and its ancestors outward exactly as Rust does: an explicit
+    /// item or `use` in the innermost module that has one wins, and a glob is
+    /// only consulted where no explicit binding exists.
+    ///
+    /// This is deliberately NOT a Rust name resolver. Everything it cannot see —
+    /// out-of-line modules, macro-generated items, other files, other crates —
+    /// yields `Unresolvable`, which the caller turns into a decline.
+    fn resolve_bare_name(&self, name: &str, scope: &[String]) -> ScopeResolution {
+        for depth in (0..=scope.len()).rev() {
+            let module = &scope[..depth];
+            let mut candidates = BTreeSet::new();
+            let mut saw_binding = false;
+
+            if let Some(sites) = self.declarations.get(name) {
+                if sites.iter().any(|site| site.module.as_slice() == module) {
+                    saw_binding = true;
+                    match self.unique_declaration(module, name) {
+                        Some(key) => {
+                            candidates.insert(key);
+                        }
+                        None => return ScopeResolution::Unresolvable,
+                    }
+                }
+            }
+
+            for binding in self.imports.get(module).into_iter().flatten() {
+                if binding.in_scope_name != name {
+                    continue;
+                }
+                saw_binding = true;
+                match self.resolve_use_binding(binding, module) {
+                    Some(key) => {
+                        candidates.insert(key);
+                    }
+                    None => return ScopeResolution::Unresolvable,
+                }
+            }
+
+            if saw_binding {
+                return match candidates.len() {
+                    1 => ScopeResolution::Resolved(
+                        candidates.into_iter().next().expect("one candidate"),
+                    ),
+                    _ => ScopeResolution::Unresolvable,
+                };
+            }
+
+            for glob in self.globs.get(module).into_iter().flatten() {
+                if !self.glob_is_ancestor_only(glob, module) {
+                    return ScopeResolution::Unresolvable;
+                }
+            }
+        }
+        ScopeResolution::Unresolvable
+    }
+
+    /// The declaration `name` resolves to when EVERY scope in `scopes` agrees.
+    ///
+    /// Agreement is what makes one bare carrier sound: the verified function's
+    /// scope decides nothing on its own, because a contract or body from another
+    /// module in the same file can be lowered into the same verification context
+    /// against the same bare sort. Disagreement is a decline.
+    fn resolve_uniformly(&self, name: &str, scopes: &BTreeSet<Vec<String>>) -> Option<String> {
+        let mut agreed: Option<String> = None;
+        for scope in scopes {
+            match self.resolve_bare_name(name, scope) {
+                ScopeResolution::Resolved(key) => match &agreed {
+                    Some(previous) if *previous != key => return None,
+                    Some(_) => {}
+                    None => agreed = Some(key),
+                },
+                ScopeResolution::Unresolvable => return None,
+            }
+        }
+        agreed
+    }
+}
+
+/// Everything one walk over a file's items collects about its type
+/// declarations: the legacy bare-keyed maps (unchanged, first-declaration-wins)
+/// plus module-keyed copies and the scope index that lets a colliding bare name
+/// be resolved instead of struck.
+#[derive(Default)]
+struct SourceTypeCollection {
+    structs: BTreeMap<String, SourceStructTemplate>,
+    enums: BTreeMap<String, SourceEnumTemplate>,
+    type_aliases: BTreeMap<String, SourceTypeAliasTemplate>,
+    qualified_structs: BTreeMap<String, SourceStructTemplate>,
+    qualified_enums: BTreeMap<String, SourceEnumTemplate>,
+    qualified_type_aliases: BTreeMap<String, SourceTypeAliasTemplate>,
+    declared: BTreeMap<String, String>,
+    ambiguous: BTreeSet<String>,
+    index: SourceTypeScopeIndex,
+}
+
+/// Records one source-type declaration against its BARE identifier, marking the
+/// key AMBIGUOUS when a structurally different declaration already claimed it.
+///
+/// The bare-keyed maps have no module-path resolution — the carrier name, the
+/// `StructDef` name and the SMT sort name are all the bare name — so two
+/// declarations of one bare name are indistinguishable there. `.or_insert`
+/// therefore let the FIRST declaration win, and a nested
+/// `mod helper { struct S { x: u8 } }` silently supplied the field types for a
+/// top-level `struct S { x: u64 }`, verifying `s.x <= 255` for a `u64` field (a
+/// cardinal false-verify whose verdict flipped purely with declaration order).
+///
+/// Flagging the name here is step one. Step two is
+/// [`SourceTypeScopeIndex::resolve_uniformly`], which resolves the flagged name
+/// against the use site's module scope; only names it cannot settle are struck
+/// from the registry, and every use of a struck name resolves as an unrecognized
+/// type, which the downstream lowering already declines.
+///
+/// Token-identical re-declarations are NOT a collision: whichever one a use site
+/// means, the resolved shape is the same, so keeping one loses nothing.
+fn record_source_type_declaration(
+    name: &str,
+    fingerprint: String,
+    declared: &mut BTreeMap<String, String>,
+    ambiguous: &mut BTreeSet<String>,
+) {
+    match declared.get(name) {
+        None => {
+            declared.insert(name.to_string(), fingerprint);
+        }
+        Some(previous) if *previous == fingerprint => {}
+        Some(_) => {
+            ambiguous.insert(name.to_string());
+        }
+    }
+}
+
+/// Records the declaration site of `name` (module path + token fingerprint) for
+/// scope-relative resolution.
+fn record_source_type_decl_site(
+    index: &mut SourceTypeScopeIndex,
+    module: &[String],
+    name: &str,
+    fingerprint: String,
+) {
+    index
+        .declarations
+        .entry(name.to_string())
+        .or_default()
+        .push(SourceTypeDeclSite {
+            module: module.to_vec(),
+            fingerprint,
+        });
+}
+
+/// Flattens one `use` tree into the bindings and globs it introduces into
+/// `module`. `prefix` accumulates the path segments walked so far.
+fn collect_use_tree(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    out_of_file: bool,
+    module: &[String],
+    index: &mut SourceTypeScopeIndex,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree(&path.tree, prefix, out_of_file, module, index);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let leaf = name.ident.to_string();
+            index
+                .imports
+                .entry(module.to_vec())
+                .or_default()
+                .push(SourceUseBinding {
+                    in_scope_name: leaf.clone(),
+                    module_segments: prefix.clone(),
+                    leaf,
+                    out_of_file,
+                });
+        }
+        syn::UseTree::Rename(rename) => {
+            index
+                .imports
+                .entry(module.to_vec())
+                .or_default()
+                .push(SourceUseBinding {
+                    in_scope_name: rename.rename.to_string(),
+                    module_segments: prefix.clone(),
+                    leaf: rename.ident.to_string(),
+                    out_of_file,
+                });
+        }
+        syn::UseTree::Glob(_) => {
+            index
+                .globs
+                .entry(module.to_vec())
+                .or_default()
+                .push(SourceGlobImport {
+                    module_segments: prefix.clone(),
+                    out_of_file,
+                });
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree(item, prefix, out_of_file, module, index);
+            }
+        }
+    }
+}
+
 fn collect_source_types_from_items(
     items: &[syn::Item],
-    structs: &mut BTreeMap<String, SourceStructTemplate>,
-    enums: &mut BTreeMap<String, SourceEnumTemplate>,
-    type_aliases: &mut BTreeMap<String, SourceTypeAliasTemplate>,
+    prefix: &mut Vec<String>,
+    out: &mut SourceTypeCollection,
 ) {
     for item in items {
         match item {
             syn::Item::Struct(item_struct) => {
                 if let Some(template) = SourceStructTemplate::from_item_struct(item_struct) {
-                    structs.entry(template.name.clone()).or_insert(template);
+                    let fingerprint = item_struct.to_token_stream().to_string();
+                    record_source_type_declaration(
+                        &template.name,
+                        fingerprint.clone(),
+                        &mut out.declared,
+                        &mut out.ambiguous,
+                    );
+                    record_source_type_decl_site(
+                        &mut out.index,
+                        prefix,
+                        &template.name,
+                        fingerprint,
+                    );
+                    out.qualified_structs
+                        .entry(qualified_type_key(prefix, &template.name))
+                        .or_insert_with(|| template.clone());
+                    out.structs.entry(template.name.clone()).or_insert(template);
                 }
             }
             syn::Item::Enum(item_enum) => {
                 if let Some(template) = SourceEnumTemplate::from_item_enum(item_enum) {
-                    enums.entry(template.name.clone()).or_insert(template);
+                    let fingerprint = item_enum.to_token_stream().to_string();
+                    record_source_type_declaration(
+                        &template.name,
+                        fingerprint.clone(),
+                        &mut out.declared,
+                        &mut out.ambiguous,
+                    );
+                    record_source_type_decl_site(
+                        &mut out.index,
+                        prefix,
+                        &template.name,
+                        fingerprint,
+                    );
+                    out.qualified_enums
+                        .entry(qualified_type_key(prefix, &template.name))
+                        .or_insert_with(|| template.clone());
+                    out.enums.entry(template.name.clone()).or_insert(template);
                 }
             }
             syn::Item::Type(item_type) => {
                 if let Some(template) = SourceTypeAliasTemplate::from_item_type(item_type) {
-                    type_aliases
+                    let fingerprint = item_type.to_token_stream().to_string();
+                    record_source_type_declaration(
+                        &template.name,
+                        fingerprint.clone(),
+                        &mut out.declared,
+                        &mut out.ambiguous,
+                    );
+                    record_source_type_decl_site(
+                        &mut out.index,
+                        prefix,
+                        &template.name,
+                        fingerprint,
+                    );
+                    out.qualified_type_aliases
+                        .entry(qualified_type_key(prefix, &template.name))
+                        .or_insert_with(|| template.clone());
+                    out.type_aliases
                         .entry(template.name.clone())
                         .or_insert(template);
                 }
             }
+            syn::Item::Use(item_use) => {
+                let out_of_file = item_use.leading_colon.is_some()
+                    || matches!(&item_use.tree, syn::UseTree::Path(path) if path.ident == "crate");
+                collect_use_tree(
+                    &item_use.tree,
+                    &mut Vec::new(),
+                    out_of_file,
+                    prefix,
+                    &mut out.index,
+                );
+            }
+            syn::Item::Fn(_) | syn::Item::Impl(_) | syn::Item::Trait(_) | syn::Item::Macro(_) => {
+                out.index.fn_scopes.insert(prefix.clone());
+            }
             syn::Item::Mod(module) => {
                 if let Some((_, inner_items)) = &module.content {
-                    collect_source_types_from_items(inner_items, structs, enums, type_aliases);
+                    prefix.push(module.ident.to_string());
+                    collect_source_types_from_items(inner_items, prefix, out);
+                    prefix.pop();
                 }
             }
             _ => {}
@@ -5521,27 +6288,40 @@ fn collect_referenced_sibling_helper_contracts(
     // Resolve the target's aliases exactly once, at the root body edge. A
     // dependency found in a sibling helper belongs to that HELPER's lexical
     // scope and must never be resolved through the target's alias table.
+    // Every edge is read in the module its CALLER is written in: a spelling in a
+    // sibling helper means what Rust makes it mean THERE, not what the same
+    // spelling would mean at the target.
+    let target_scope = enclosing_module_scope(file, target_func);
     let mut pending = referenced_helper_calls(target_func)
         .into_iter()
-        .map(|reference| source_reference_with_aliases(reference, &aliases))
+        .map(|reference| {
+            (
+                source_reference_with_aliases(reference, &aliases),
+                target_scope.clone(),
+            )
+        })
         .collect::<BTreeSet<_>>();
     let no_aliases = BTreeMap::new();
     let mut visited = BTreeSet::new();
     let mut contracts = BTreeMap::new();
+    let mut symbol_bindings = BTreeMap::new();
 
-    while let Some(reference) = pending.iter().next().cloned() {
-        pending.remove(&reference);
-        if !visited.insert(reference.clone()) {
+    while let Some(edge) = pending.iter().next().cloned() {
+        pending.remove(&edge);
+        if !visited.insert(edge.clone()) {
             continue;
         }
-        let Some(helper) = resolve_non_spec_source_function(
+        let (reference, scope) = edge;
+        let Some((helper, key)) = resolve_non_spec_source_function(
             &source_functions,
             &no_aliases,
-            &reference.source_path,
+            &reference,
+            scope.as_deref(),
             target_func,
         ) else {
             continue;
         };
+        bind_call_symbol(&mut symbol_bindings, &reference.call_symbol, &key)?;
         if let Some(mut contract) = helper_call_contract_from_item_fn(helper)? {
             if ill_founded.contains(&helper.sig.ident.to_string()) {
                 contract.ensures.clear();
@@ -5551,12 +6331,17 @@ fn collect_referenced_sibling_helper_contracts(
             }
         }
         let helper_aliases = block_use_function_aliases(&helper.block);
+        let helper_scope = enclosing_module_scope(file, helper);
         for dependency in referenced_helper_calls(helper) {
-            let dependency = source_reference_with_aliases(dependency, &helper_aliases);
+            let dependency = (
+                source_reference_with_aliases(dependency, &helper_aliases),
+                helper_scope.clone(),
+            );
             if resolve_non_spec_source_function(
                 &source_functions,
                 &no_aliases,
-                &dependency.source_path,
+                &dependency.0,
+                dependency.1.as_deref(),
                 target_func,
             )
             .is_some()
@@ -5593,12 +6378,14 @@ fn collect_referenced_sibling_mut_ref_call_args(
 ) -> BTreeMap<String, Vec<bool>> {
     let aliases = block_use_function_aliases(&target_func.block);
     let source_functions = SourceFunctionRegistry::from_file(file);
+    let target_scope = enclosing_module_scope(file, target_func);
     let mut out = BTreeMap::new();
     for reference in referenced_helper_calls(target_func) {
-        let Some(helper) = resolve_non_spec_source_function(
+        let Some((helper, _)) = resolve_non_spec_source_function(
             &source_functions,
             &aliases,
-            &reference.source_path,
+            &reference,
+            target_scope.as_deref(),
             target_func,
         ) else {
             continue;
@@ -5623,21 +6410,67 @@ fn collect_referenced_sibling_mut_ref_call_args(
     out
 }
 
+/// The inline-module path `func` is declared in, or `None` when this file does
+/// not pin it down uniquely (two token-identical declarations in two modules).
+/// `None` makes every scope-relative call resolution fall back to the
+/// scope-independent reading, which fails closed on anything a scope would have
+/// been needed to settle.
+fn enclosing_module_scope(file: &File, func: &ItemFn) -> Option<Vec<String>> {
+    match function_discovery::enclosing_inline_module_path(file, func) {
+        function_discovery::EnclosingModuleResolution::Unique(path) => Some(path),
+        function_discovery::EnclosingModuleResolution::Ambiguous => None,
+    }
+}
+
+/// Resolve one call edge to a non-spec source function, reading its spelling
+/// from the module `scope` the edge is WRITTEN in (see
+/// [`SourceFunctionRegistry::resolve_key`]). Returns the declaration together
+/// with its module-qualified key, which callers use to detect two different
+/// callees claiming one call symbol.
 fn resolve_non_spec_source_function<'a>(
     source_functions: &'a SourceFunctionRegistry,
     aliases: &BTreeMap<String, String>,
-    source_path: &str,
+    reference: &SourceCallReference,
+    scope: Option<&[String]>,
     target_func: &ItemFn,
-) -> Option<&'a ItemFn> {
-    let resolved_path = aliases
-        .get(source_path)
-        .map(String::as_str)
-        .unwrap_or(source_path);
-    let helper = source_functions.get(resolved_path)?;
+) -> Option<(&'a ItemFn, String)> {
+    let reference = source_reference_with_aliases(reference.clone(), aliases);
+    let (helper, key) = source_functions.resolve(&reference.source_path, reference.root, scope)?;
     if helper.sig.ident == target_func.sig.ident || has_spec_attr(&helper.attrs) {
         return None;
     }
-    Some(helper)
+    Some((helper, key))
+}
+
+/// Record that call symbol `symbol` resolved to declaration `key`, failing
+/// closed when a symbol already bound to a DIFFERENT declaration.
+///
+/// The call symbol is the spelling, and the spelling is the solver identity of
+/// the body axiom and the call-site contract. Once calls resolve against their
+/// own module, two scopes in one file can spell the same path (`util::f`) and
+/// mean two different functions; registering both under one symbol would put
+/// one function's body axiom on the other's calls. Neither answer is safe, so
+/// the extraction fails rather than picking one.
+fn bind_call_symbol(
+    bindings: &mut BTreeMap<String, String>,
+    symbol: &str,
+    key: &str,
+) -> TrustVcResult<()> {
+    match bindings.get(symbol) {
+        Some(previous) if previous != key => Err(TrustVcError::Encoding {
+            context: "resolve sibling helper call",
+            detail: format!(
+                "call symbol `{symbol}` names `{previous}` in one module and `{key}` in \
+                 another; the source lane has one solver symbol per spelling, so TrustVc \
+                 fails closed instead of conflating the two functions"
+            ),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            bindings.insert(symbol.to_string(), key.to_string());
+            Ok(())
+        }
+    }
 }
 
 fn reject_helper_contract_calls_in_target_contracts(
@@ -5683,12 +6516,14 @@ fn apply_when_used_as_spec_contract_functions(
     // live outside the target BODY. Neither may resolve through its block-local
     // imports.
     let no_aliases = BTreeMap::new();
+    let target_scope = enclosing_module_scope(file, target_func);
 
     for reference in referenced_target_contract_calls(target_func)? {
-        let Some(exec_helper) = resolve_non_spec_source_function(
+        let Some((exec_helper, _)) = resolve_non_spec_source_function(
             &source_functions,
             &no_aliases,
-            &reference.source_path,
+            &reference,
+            target_scope.as_deref(),
             target_func,
         ) else {
             continue;
@@ -9843,32 +10678,41 @@ fn apply_sibling_helper_functions(
     // transitive edge is canonicalized below with the declaring helper's own
     // block aliases; reusing `aliases` there would leak the target import into a
     // different Rust scope and can bind a body axiom to the wrong function.
+    // As above: each edge carries the module its CALLER is written in, so a
+    // spelling is read in its own Rust scope rather than at the target's.
+    let target_scope = enclosing_module_scope(file, target_func);
     let mut pending = referenced_helper_calls(target_func)
         .into_iter()
-        .map(|reference| source_reference_with_aliases(reference, &aliases))
+        .map(|reference| {
+            (
+                source_reference_with_aliases(reference, &aliases),
+                target_scope.clone(),
+            )
+        })
         .collect::<BTreeSet<_>>();
     let no_aliases = BTreeMap::new();
     let mut applied = BTreeSet::new();
+    let mut symbol_bindings = BTreeMap::new();
 
-    while let Some(reference) = pending.iter().next().cloned() {
-        pending.remove(&reference);
-        if !applied.insert(reference.clone()) {
+    while let Some(edge) = pending.iter().next().cloned() {
+        pending.remove(&edge);
+        if !applied.insert(edge.clone()) {
             continue;
         }
-        let Some(helper) = resolve_non_spec_source_function(
+        let (reference, scope) = edge;
+        let Some((helper, key)) = resolve_non_spec_source_function(
             &source_functions,
             &no_aliases,
-            &reference.source_path,
+            &reference,
+            scope.as_deref(),
             target_func,
         ) else {
             continue;
         };
+        bind_call_symbol(&mut symbol_bindings, &reference.call_symbol, &key)?;
         // Register spec functions the helper's body calls (transitively) so the
         // helper body axiom below can lower their applications.
-        let helper_module = match function_discovery::enclosing_inline_module_path(file, helper) {
-            function_discovery::EnclosingModuleResolution::Unique(path) => Some(path),
-            function_discovery::EnclosingModuleResolution::Ambiguous => None,
-        };
+        let helper_module = enclosing_module_scope(file, helper);
         let alias_validation = validate_block_use_alias_resolution(
             file,
             helper,
@@ -9917,11 +10761,15 @@ fn apply_sibling_helper_functions(
         }
         let helper_aliases = block_use_function_aliases(&helper.block);
         for dependency in referenced_helper_calls(helper) {
-            let dependency = source_reference_with_aliases(dependency, &helper_aliases);
+            let dependency = (
+                source_reference_with_aliases(dependency, &helper_aliases),
+                helper_module.clone(),
+            );
             if resolve_non_spec_source_function(
                 &source_functions,
                 &no_aliases,
-                &dependency.source_path,
+                &dependency.0,
+                dependency.1.as_deref(),
                 target_func,
             )
             .is_some()

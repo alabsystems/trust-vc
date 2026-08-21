@@ -213,6 +213,115 @@ fn test_duplicate_variable_same_type_rejected() {
 }
 
 #[test]
+fn test_map_dom_name_collision_reverse_order_is_error() {
+    // The Map is declared FIRST. Its `{name}_dom` companion is minted lazily by
+    // the encoder, so it is NOT in `variable_index` when `x_dom` is declared —
+    // the plain duplicate check cannot see it. The companion-collision check
+    // must therefore inspect the BASE name's type, in this order too.
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed(
+        "x",
+        crate::ir::TrustVcType::parse_or_opaque("Map<i32, i32>"),
+    );
+    ctx.declare_var_typed("x_dom", crate::ir::TrustVcType::parse_or_opaque("bool"));
+    ctx.push_obligation(ProofObligation::assert("dummy", "true"));
+
+    match AYEncoder::verify(&ctx) {
+        VerifyResult::Error { message } => {
+            assert!(
+                message.contains("map domain") && message.contains("already declared"),
+                "Error should surface the map-domain collision: {}",
+                message
+            );
+        }
+        other => panic!("Expected Error for reverse-order map-dom collision, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_map_dom_name_collision_same_sort_is_error() {
+    // The case the SOLVER cannot catch: `x_dom: Map<i32, bool>` lowers to
+    // exactly the domain sort `Array(BitVec32, Bool)` that `x: Map<i32, i32>`
+    // mints. ay's `try_declare_const` treats an identical-sort redeclaration as
+    // idempotent and returns Ok, so relying on the solver would silently rebind
+    // the user's `x_dom` to `x`'s domain array. Must fail closed on the NAME.
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed(
+        "x_dom",
+        crate::ir::TrustVcType::parse_or_opaque("Map<i32, bool>"),
+    );
+    ctx.declare_var_typed(
+        "x",
+        crate::ir::TrustVcType::parse_or_opaque("Map<i32, i32>"),
+    );
+    ctx.push_obligation(ProofObligation::assert("dummy", "true"));
+
+    match AYEncoder::verify(&ctx) {
+        VerifyResult::Error { message } => {
+            assert!(
+                message.contains("map domain") && message.contains("already declared"),
+                "Error should surface the same-sort map-domain collision: {}",
+                message
+            );
+        }
+        other => panic!("Expected Error for same-sort map-dom collision, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_encoder_level_map_dom_collision_fails_closed() {
+    // Pins the DEFENSE-IN-DEPTH arm inside `declare_variable` on its own. The
+    // context-level gate makes this unreachable through the normal
+    // `VerificationContext` route, but `declare_variable` is also called
+    // directly by frame-state, ground-seeding and extra-variable setup, so the
+    // guard has to hold without the context gate in front of it.
+    //
+    // The sorts here COINCIDE deliberately: `x_dom: Map<i32, bool>` lowers to
+    // exactly the `Array(BitVec32, Bool)` domain sort minted for `x`, so ay's
+    // `try_declare_const` accepts it as an IDEMPOTENT redeclaration and returns
+    // Ok. Delegating to the solver therefore cannot catch this case — only the
+    // NAME check can.
+    let mut encoder = AYEncoder::new();
+    encoder
+        .declare_variable(&VariableDecl {
+            bounded_len: false,
+            name: "x_dom".to_string(),
+            ty: crate::ir::TrustVcType::parse_or_opaque("Map<i32, bool>"),
+        })
+        .expect("first declaration should succeed");
+    let err = encoder
+        .declare_variable(&VariableDecl {
+            bounded_len: false,
+            name: "x".to_string(),
+            ty: crate::ir::TrustVcType::parse_or_opaque("Map<i32, i32>"),
+        })
+        .expect_err("map domain companion collision must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("map domain") && message.contains("already declared"),
+        "encoder guard should surface the collision: {message}"
+    );
+}
+
+#[test]
+fn test_dom_suffix_without_map_base_is_not_rejected() {
+    // NARROWNESS PIN for the companion-collision gate. Only a `Map` base mints a
+    // `{name}_dom` companion, so a `_dom`-suffixed variable sitting beside a
+    // NON-Map base is perfectly legal and must still verify. Without this pin
+    // the gate could be widened to reject every `_dom` name and nothing would
+    // notice.
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("i32"));
+    ctx.declare_var_typed("x_dom", crate::ir::TrustVcType::parse_or_opaque("bool"));
+    ctx.push_obligation(ProofObligation::assert("dummy", "true"));
+
+    match AYEncoder::verify(&ctx) {
+        VerifyResult::Verified => {}
+        other => panic!("`x_dom` beside a non-Map `x` must stay legal, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_map_dom_name_collision_is_error_not_panic() {
     // A user variable occupying a Map's internal `{name}_dom` companion name
     // bypasses the `self.variables` duplicate check when the Map is declared

@@ -431,6 +431,19 @@ pub struct AstExpressionParser<'a> {
     /// collide with (and thus never conflate with) user functions.
     /// Redeclaration across parser instances is idempotent in ay.
     pub(super) euclid_ufs: Option<(FuncDecl, FuncDecl)>,
+    /// Collection length terms already asserted `<= 2^pointer_width - 1` at
+    /// declaration time because their variable is a `usize`-bounded EXEC
+    /// collection (`VariableDecl::bounded_len` — `Vec`/slice/array). Mirrored
+    /// from `VerificationState::usize_bounded_lens` by the production encode
+    /// entry point (`eval::condition`); left EMPTY by the bare constructors, so
+    /// a direct parser test simply sees every length as possibly-unbounded.
+    ///
+    /// The empty default is the FAIL-CLOSED direction on purpose: a consumer
+    /// reads membership as "carrier-representable by a fact already on the
+    /// assertion stack", so a missing entry costs completeness (an encoding
+    /// declines to assume boundedness) while a spurious entry would cost
+    /// soundness. Never insert here from anywhere but the mirror.
+    pub(super) usize_bounded_lens: std::collections::HashSet<Term>,
 }
 
 impl<'a> AstExpressionParser<'a> {
@@ -666,6 +679,7 @@ impl<'a> AstExpressionParser<'a> {
             euclid_div_mod_aliases: std::collections::HashMap::new(),
             euclid_guarded_lemma_pairs: std::collections::HashSet::new(),
             euclid_ufs: None,
+            usize_bounded_lens: std::collections::HashSet::new(),
         }
     }
 

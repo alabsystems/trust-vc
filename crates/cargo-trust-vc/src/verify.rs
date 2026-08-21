@@ -187,16 +187,13 @@ pub fn verify_one(func: &AnnotatedFunction) -> FunctionVerdict {
         };
     }
 
-    // Hold the pointer-width guard across extraction (load_context) AND the
-    // ctx.verify() below, so directive-pinned `usize` reasoning is consistent.
-    let _width_guard = install_pointer_width_for(&func.file_path);
+    // `verify_result_for` holds the pointer-width guard across extraction AND
+    // verification, and runs the unit at EVERY width its `WidthPlan` requires,
+    // so this path agrees with `verify_one_detailed` and with the library's
+    // `verify_function_from_file`.
     let start = Instant::now();
-    let (result_kind, detail, cx_bindings) = match load_context(&func.file_path, &func.name) {
-        Ok(ctx) => {
-            let result = ctx.verify();
-            let (kind, detail, bindings) = verdict_from_result(&result);
-            (kind, detail, bindings)
-        }
+    let (result_kind, detail, cx_bindings) = match verify_result_for(&func.file_path, &func.name) {
+        Ok(result) => verdict_from_result(&result),
         Err(err) => (VerdictKind::Error, Some(err), Vec::new()),
     };
 
@@ -353,22 +350,166 @@ fn install_pointer_width_for(file_path: &Path) -> Option<trust_vc_core::ir::Poin
         .flatten()
 }
 
+/// The pointer width(s) a unit must be verified at.
+///
+/// This mirrors, one for one, the dispatch that `trust_vc_core`'s
+/// `verify_function_from_file` performs (`vc_extraction.rs`, #2778 dual-arch).
+/// Before this existed the CLI ran exactly ONE width — the host's — so a
+/// width-polymorphic unit that is true on a 64-bit `usize` and FALSE on a
+/// 32-bit `usize` came back `verified` from `cargo trust-vc check` while the
+/// library entry point reported a counterexample for the same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WidthPlan {
+    /// No `global size_of usize` directive and nothing width-dependent in the
+    /// unit: verify once at the host width, with no override installed. This is
+    /// byte-identical to the pre-dual-width behavior (one solve, no guard).
+    Host,
+    /// A `global size_of usize == N` directive pins the target architecture:
+    /// verify exactly once, at that width.
+    Pinned(u32),
+    /// No directive, but the unit's proof depends on the pointer width. Rust
+    /// permits both a 32-bit and a 64-bit `usize`, so the proof is sound only
+    /// if it discharges at BOTH.
+    Dual,
+}
+
+/// Decides the [`WidthPlan`] for `func` in `file_path`.
+///
+/// A pinned directive wins. Otherwise the decision is the same conservative
+/// syntactic over-approximation the library uses: any unit that *names*
+/// `usize`/`isize` is treated as width-polymorphic. Over-approximating is sound
+/// (a width-invariant unit simply verifies identically at both widths, at the
+/// cost of one extra solver pass); under-approximating is NOT (a genuinely
+/// width-dependent proof would be verified at only one width), so we err toward
+/// inclusion.
+///
+/// A malformed directive yields [`WidthPlan::Host`] deliberately: that is the
+/// pre-existing fail-closed route, where the unstripped directive line survives
+/// into the parse and surfaces as an error verdict rather than a proof.
+fn width_plan_for(file_path: &Path, func: &syn::ItemFn) -> WidthPlan {
+    let pinned = fs::read_to_string(file_path)
+        .ok()
+        .and_then(|source| trust_vc_core::ir::scan_pointer_width_directive(&source).ok())
+        .and_then(trust_vc_core::ir::pinned_width_from_guard);
+    match pinned {
+        Some(width) => WidthPlan::Pinned(width),
+        None if unit_is_pointer_width_polymorphic(func) => WidthPlan::Dual,
+        None => WidthPlan::Host,
+    }
+}
+
+/// Conservatively decides whether verifying `func` depends on the target
+/// pointer width, i.e. whether it mentions `usize`/`isize` (including
+/// `usize::BITS`). Scans the function's own token stream — signature, contract
+/// attributes and body — so the decision is independent of how widths are later
+/// baked into the IR. Mirrors `unit_is_pointer_width_polymorphic` in
+/// `trust-vc-core`'s `vc_extraction.rs`; the two must stay in step or the two
+/// entry points diverge again.
+fn unit_is_pointer_width_polymorphic(func: &syn::ItemFn) -> bool {
+    fn tokens_mention_pointer_width(tokens: proc_macro2::TokenStream) -> bool {
+        use proc_macro2::TokenTree;
+        for tree in tokens {
+            match tree {
+                TokenTree::Ident(ident) => {
+                    let name = ident.to_string();
+                    if name == "usize" || name == "isize" {
+                        return true;
+                    }
+                }
+                TokenTree::Group(group) if tokens_mention_pointer_width(group.stream()) => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    tokens_mention_pointer_width(quote::ToTokens::to_token_stream(func))
+}
+
+/// Runs `pass` once per pointer width required by `plan`, holding the matching
+/// [`trust_vc_core::ir::PointerWidthGuard`] across the WHOLE pass (extraction
+/// bakes usize/isize widths into the IR, and verification reads them back — the
+/// two must agree).
+///
+/// For [`WidthPlan::Dual`] a `Verified` outcome requires BOTH widths to
+/// discharge: the 32-bit pass runs first and, if it does not verify, its
+/// outcome is returned as-is (fail-closed short circuit); only when 32-bit
+/// verifies does the 64-bit pass decide. So this can only ever ADD rejections
+/// relative to a single host-width run — it can never turn a non-verifying unit
+/// into a verified one.
+///
+/// The surfaced outcome is the failing width's own, UNTAGGED. `trust-vc-core`
+/// additionally suffixes the obligation name with `_32bit`/`_64bit`; the CLI
+/// cannot do the same for the report path because `VerificationReport` is not
+/// constructible outside its crate. Tagging is a reporting nicety, not a
+/// soundness property, and is left as a follow-up.
+fn run_under_width_plan<T>(
+    plan: WidthPlan,
+    mut pass: impl FnMut() -> Result<T, String>,
+    is_verified: impl Fn(&T) -> bool,
+) -> Result<T, String> {
+    match plan {
+        WidthPlan::Host => pass(),
+        WidthPlan::Pinned(width) => {
+            let _guard = trust_vc_core::ir::PointerWidthGuard::install(width);
+            pass()
+        }
+        WidthPlan::Dual => {
+            let at_32 = {
+                let _guard = trust_vc_core::ir::PointerWidthGuard::install(32);
+                pass()?
+            };
+            if !is_verified(&at_32) {
+                return Ok(at_32);
+            }
+            let _guard = trust_vc_core::ir::PointerWidthGuard::install(64);
+            pass()
+        }
+    }
+}
+
 fn load_context_and_report(
     file_path: &Path,
     func_name: &str,
 ) -> Result<(VerificationContext, VerificationReport), String> {
-    // Hold the pointer-width guard across extraction AND verification.
-    let _width_guard = install_pointer_width_for(file_path);
-    let ctx = load_context(file_path, func_name)?;
-    let report = ctx.verify_with_report(VerificationReportOptions::new());
-    Ok((ctx, report))
+    let ast = load_ast(file_path)?;
+    let func = find_target_function(&ast, file_path, func_name)?;
+    run_under_width_plan(
+        width_plan_for(file_path, func),
+        || {
+            let ctx = context_from_func(&ast, file_path, func)?;
+            let report = ctx.verify_with_report(VerificationReportOptions::new());
+            Ok((ctx, report))
+        },
+        |(_, report)| report.result().is_verified(),
+    )
 }
 
-fn load_context(file_path: &Path, func_name: &str) -> Result<VerificationContext, String> {
+/// Verifies `func_name` in `file_path` under its [`WidthPlan`], returning the
+/// raw [`VerifyResult`]. The result-only twin of [`load_context_and_report`];
+/// both must route through [`run_under_width_plan`] or the CLI's two entry
+/// points disagree with each other as well as with the library.
+fn verify_result_for(file_path: &Path, func_name: &str) -> Result<VerifyResult, String> {
+    let ast = load_ast(file_path)?;
+    let func = find_target_function(&ast, file_path, func_name)?;
+    run_under_width_plan(
+        width_plan_for(file_path, func),
+        || Ok(context_from_func(&ast, file_path, func)?.verify()),
+        VerifyResult::is_verified,
+    )
+}
+
+/// Reads, directive-strips, parses and sibling-augments `file_path`.
+///
+/// Parsing is pointer-width INDEPENDENT, so a dual-width verification parses
+/// once and re-extracts per width; only extraction and verification sit inside
+/// a [`trust_vc_core::ir::PointerWidthGuard`].
+fn load_ast(file_path: &Path) -> Result<syn::File, String> {
     let source = fs::read_to_string(file_path).map_err(|err| err.to_string())?;
     // Strip the `global size_of usize == N` directive before parsing (it is not
     // valid Rust at item position); the width it declares is installed by the
-    // caller's `install_pointer_width_for` guard. Offsets are preserved.
+    // caller's width guard. Offsets are preserved.
     let source = trust_vc_core::ir::strip_pointer_width_directives(&source);
     let mut ast = parse_file_allow_tracked(&source).map_err(|err| err.to_string())?;
     // The verifier resolves user datatypes (enums/structs/type aliases) from the
@@ -380,13 +521,32 @@ fn load_context(file_path: &Path, func_name: &str) -> Result<VerificationContext
     // it enriches the type environment, never the proof obligation — and the
     // function's own file keeps precedence on name collisions.
     augment_with_sibling_type_defs(file_path, &mut ast);
-    let func = find_function(&ast, func_name).ok_or_else(|| {
+    Ok(ast)
+}
+
+fn find_target_function<'a>(
+    ast: &'a syn::File,
+    file_path: &Path,
+    func_name: &str,
+) -> Result<&'a syn::ItemFn, String> {
+    find_function(ast, func_name).ok_or_else(|| {
         format!(
             "Function '{func_name}' not found in {}",
             file_path.display()
         )
-    })?;
-    let mut ctx = extract_verification_conditions_with_file_context(&ast, func)
+    })
+}
+
+/// Extracts the verification context for an already-located `func`.
+///
+/// Width-DEPENDENT: `usize`/`isize` bounds are baked into the IR here, so this
+/// must run under the same guard as the `verify()` that consumes it.
+fn context_from_func(
+    ast: &syn::File,
+    file_path: &Path,
+    func: &syn::ItemFn,
+) -> Result<VerificationContext, String> {
+    let mut ctx = extract_verification_conditions_with_file_context(ast, func)
         .map_err(|err| err.to_string())?;
     dependency_specs::import_dependency_spec_signatures(file_path, func, &mut ctx)?;
     Ok(ctx)
@@ -901,6 +1061,86 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Writes `source` to a fresh temp file and returns its path.
+    fn temp_source(label: &str, source: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trust_vc_width_plan_{}_{label}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(format!("{label}.rs"));
+        std::fs::write(&path, source).expect("write temp source");
+        path
+    }
+
+    fn plan_for(label: &str, source: &str, func_name: &str) -> WidthPlan {
+        let path = temp_source(label, source);
+        let ast = load_ast(&path).expect("temp source should parse");
+        let func = find_target_function(&ast, &path, func_name).expect("target fn should be found");
+        let plan = width_plan_for(&path, func);
+        let _ = std::fs::remove_file(&path);
+        plan
+    }
+
+    /// NARROWNESS PIN (FV-3): a unit that names neither `usize` nor `isize` is
+    /// width-invariant, so it must stay on the single-solve host-width path —
+    /// no guard installed, no second solve, verdict byte-identical to the
+    /// pre-dual-width CLI. This is the pin that stops the dual-width fix from
+    /// degenerating into "solve everything twice".
+    #[test]
+    fn non_width_polymorphic_unit_plans_a_single_host_solve() {
+        assert_eq!(
+            plan_for(
+                "invariant",
+                "#[trust_vc::ensures(result >= x)]\nfn dbl_u64(x: u64) -> u64 { x * 2 }\n",
+                "dbl_u64",
+            ),
+            WidthPlan::Host,
+        );
+    }
+
+    /// The reproducer's shape: naming `usize` anywhere in the unit (signature,
+    /// contract attributes or body) forces BOTH widths.
+    #[test]
+    fn width_polymorphic_unit_plans_both_widths() {
+        assert_eq!(
+            plan_for(
+                "polymorphic",
+                "#[trust_vc::ensures(result >= x)]\nfn dbl(x: usize) -> usize { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+        // `isize` counts too, and so does a mention that appears only in the
+        // contract attribute rather than the signature.
+        assert_eq!(
+            plan_for(
+                "isize_body",
+                "#[trust_vc::ensures(result >= x)]\nfn widen(x: i32) -> i64 { x as isize as i64 }\n",
+                "widen",
+            ),
+            WidthPlan::Dual,
+        );
+    }
+
+    /// An explicit `global size_of usize == N` directive pins the target arch,
+    /// so a width-polymorphic unit is verified ONCE at the declared width. The
+    /// dual path must not override the directive.
+    #[test]
+    fn pinned_directive_overrides_the_dual_plan() {
+        assert_eq!(
+            plan_for(
+                "pinned",
+                "global size_of usize == 4;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: usize) -> usize { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Pinned(32),
+        );
+        // Reading the directive must not leak an override past the scan.
+        assert_eq!(trust_vc_core::ir::pointer_width(), usize::BITS);
+    }
+
     #[cfg(feature = "named-assertions")]
     use std::sync::MutexGuard;
     #[cfg(feature = "named-assertions")]

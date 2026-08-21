@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Author: Andrew Yates <andrewyates.name@gmail.com>
 #
-# RUSTC_WRAPPER shim for trybuild scratch builds: appends `-Zno-trust-verify`
+# RUSTC_WRAPPER shim for trybuild scratch builds: appends `-Ztrust-verify=off`
 # to EVERY rustc invocation, host and target units alike.
 #
 # Why rustflags are not enough: trybuild passes `--target <host-triple>` to its
@@ -21,4 +21,4 @@
 # RUSTFLAGS, so the wrapper set in the test process is inherited.
 #
 # Invoked by cargo as: $RUSTC_WRAPPER <rustc> <args...>
-exec "$@" -Zno-trust-verify
+exec "$@" -Ztrust-verify=off

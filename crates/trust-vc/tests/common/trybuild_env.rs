@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
-//! Keep `-Zno-trust-verify` pinned in trybuild scratch builds.
+//! Keep `-Ztrust-verify=off` pinned in trybuild scratch builds.
 //!
 //! trybuild (1.0.116, `src/cargo.rs`) launches its scratch `cargo` with
 //! `--config=build.rustflags=[..]` and `--config=target.<triple>.rustflags=[..]`.
 //! Those CLI config overrides outrank this repo's committed
-//! `.cargo/config.toml` `[build] rustflags = ["-Zno-trust-verify"]`, so the
-//! scratch build silently drops `-Zno-trust-verify` and the Trust toolchain
+//! `.cargo/config.toml` `[build] rustflags = ["-Ztrust-verify=off"]`, so the
+//! scratch build silently drops `-Ztrust-verify=off` and the Trust toolchain
 //! runs its verification pass over the scratch project's entire dependency
 //! graph — which can hang `trustc` at 100% CPU for hours on large deps.
 //!
@@ -20,7 +20,7 @@
 //! overrides. The flag list below replicates trybuild's own rustflags exactly
 //! (`src/rustflags.rs` base set + the `--diagnostic-width=140` extra used on
 //! the stderr-compared `build_test`/`build_all_tests` legs) so expected-stderr
-//! fixtures stay byte-identical; the only addition is `-Zno-trust-verify`.
+//! fixtures stay byte-identical; the only addition is `-Ztrust-verify=off`.
 //!
 //! Rustflags alone are NOT enough: trybuild passes `--target <host-triple>`
 //! to its scratch cargo, and with `--target` set cargo applies NO extra
@@ -32,10 +32,10 @@
 //! mechanism that reaches EVERY rustc invocation on both sides, so
 //! [`pin_no_trust_verify`] additionally points it at the committed
 //! `rustc_no_trust_verify.sh` shim (`.bat` twin on Windows), which appends
-//! `-Zno-trust-verify` to each compiler command line. `-Zno-trust-verify` emits no diagnostics, so
+//! `-Ztrust-verify=off` to each compiler command line. `-Ztrust-verify=off` emits no diagnostics, so
 //! expected-stderr fixtures are unaffected.
 
-/// Pin `-Zno-trust-verify` for trybuild scratch builds
+/// Pin `-Ztrust-verify=off` for trybuild scratch builds
 /// (`CARGO_ENCODED_RUSTFLAGS` for target units + `RUSTC_WRAPPER` shim so host
 /// units — proc macros, build scripts, and their deps — are covered too).
 ///
@@ -61,7 +61,7 @@ pub fn pin_no_trust_verify() {
     // The one addition: keep the Trust toolchain's verification pass OFF for
     // scratch builds, exactly as the committed `[build] rustflags` does for
     // the main workspace build (trust-vc is the verifier, not a target).
-    flags.push("-Zno-trust-verify");
+    flags.push("-Ztrust-verify=off");
     trust_vc_core::env::set_persistent_env_var("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
 
     // Host units (proc macros, build scripts, and their deps) receive NO

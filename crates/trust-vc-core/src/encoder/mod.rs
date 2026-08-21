@@ -894,6 +894,26 @@ impl AYEncoder {
                 element_sort: Sort::Bool,
             }));
             let dom_name = format!("{}_dom", var.name);
+            // Do NOT delegate this collision check to the solver. ay's
+            // `try_declare_const` rejects a redeclaration only when the SORTS
+            // DIFFER, and a user variable `x_dom: Map<K, bool>` lowers to
+            // exactly this domain sort `Array(K, Bool)` — ay then accepts it as
+            // an idempotent redeclaration and the `insert` below silently
+            // rebinds the user's variable to `x`'s domain array. Check the NAME,
+            // which is the actual invariant. `VerificationContext` rejects this
+            // earlier (see `map_domain_companion_conflict`); this is the
+            // defense-in-depth arm for contexts assembled by other routes
+            // (extra variables, ground seeding, frame state).
+            if self.variables.contains_key(&dom_name) {
+                return Err(TrustVcError::Encoding {
+                    context: "declare variable",
+                    detail: format!(
+                        "Variable '{dom_name}' is already declared and collides with the \
+                         map domain companion minted for map '{}'",
+                        var.name
+                    ),
+                });
+            }
             let dom_term = self
                 .solver
                 .try_declare_const(&dom_name, dom_sort)
@@ -921,6 +941,14 @@ impl AYEncoder {
     /// is set — i.e. for a genuine `Vec`/slice/array, NEVER for a spec `Seq<T>`.
     /// Asserting this for an unbounded spec `Seq` would make every
     /// huge-length (`len >= 2^64`) guard's context UNSAT and vacuously verify.
+    ///
+    /// Every accepted length term is also RECORDED in
+    /// `VerificationState::usize_bounded_lens`, so a downstream encoding site
+    /// that holds only the length `Term` (and cannot see `bounded_len`, because
+    /// `TrustVcType` conflates exec `Vec<T>` with spec `Seq<T>`) can tell
+    /// carrier-representable lengths apart from possibly-unbounded ones instead
+    /// of assuming boundedness. This being the sole emitter of the bound is what
+    /// makes the set exactly the bound's extent.
     fn assert_len_usize_bounded(&mut self, name: &str, len_term: Term) -> TrustVcResult<()> {
         let pw = crate::ir::pointer_width();
         let max = (num_bigint::BigInt::from(1u8) << pw) - 1;
@@ -937,7 +965,9 @@ impl AYEncoder {
             .map_err(|e| TrustVcError::Encoding {
                 context: "declare variable",
                 detail: format!("Failed to assert usize length bound for '{name}': {e}"),
-            })
+            })?;
+        self.state.usize_bounded_lens.insert(len_term);
+        Ok(())
     }
 
     fn assert_fixed_array_int_length(

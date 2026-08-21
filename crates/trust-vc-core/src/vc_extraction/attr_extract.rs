@@ -686,6 +686,130 @@ fn with_ambient_solver_mode(
     }
 }
 
+/// Every attribute name that may legally appear under an explicit `trust_vc::`
+/// namespace on a function the file-VC lane verifies.
+///
+/// SOUNDNESS (FV-2): the outer attribute match below is an ALLOWLIST of the
+/// clauses this pass consumes, and it used to end in `_ => {}`. That arm also
+/// swallowed `trust_vc::`-namespaced attributes it did not recognize — so
+/// `#[trust_vc::ghost_ensures(result > 100)]` or a bare typo like
+/// `#[trust_vc::ensurez(..)]` DISAPPEARED, and a function whose only
+/// postcondition was the dropped clause verified vacuously. Inside a grouped
+/// `#[contract(..)]` the identical unknown clause was already a hard error
+/// (`extract_contract_clause`'s `other =>` arm), so the two paths disagreed.
+/// The one structural floor, `ValidationError::OnlyAssumptions`, is
+/// per-CONTEXT — it fires only when EVERY assertion lane is empty — so a
+/// dropped clause sitting next to a surviving `#[ensures(..)]` was invisible.
+///
+/// The compiled lane is not exposed: an attribute that is not one of the 27
+/// real `#[proc_macro_attribute]` exports is a rustc error long before
+/// extraction. The file-VC lane (`verify_function_from_file` /
+/// `cargo trust-vc check`, the corpus evidence channel) never compiles the
+/// source, so this list is the only thing standing between a misspelled clause
+/// and a silent proof hole.
+///
+/// Membership means "a name the toolchain recognizes somewhere", NOT "consumed
+/// here" — most entries are read by other passes (`mode_attrs`, `spec_expand`,
+/// `trait_contracts`, …) or are inert markers, and they must keep passing
+/// through this pass untouched. Names that are deliberately ABSENT are the
+/// unsupported spellings the toolchain already documents as such:
+/// `verified`, `ghost`, `lemma_cache`, `loop_invariant`, `invariant`,
+/// `rational`, `trace_encoding` (the exact forbidden set asserted by
+/// `crates/trust-vc/tests/doc_api_syntax.rs`), plus `no_unwind` and `safe_api`,
+/// whose capability-audit rows record them as MISSING with enforcement
+/// undetermined — precisely the "silently dropped looks identical to enforced"
+/// hazard this gate closes.
+///
+/// Adding a name here is a soundness decision: do it only when the attribute is
+/// genuinely honoured by some pass.
+const KNOWN_TRUST_VC_ATTRIBUTES: &[&str] = &[
+    // --- clause attributes consumed by this pass ---
+    "requires",
+    "ensures",
+    "recommends",
+    "returns",
+    "contract",
+    // --- the 27 real `#[proc_macro_attribute]` exports (crates/trust-vc) ---
+    "action",
+    "all_triggers",
+    "allow_in_spec",
+    "auto_trigger",
+    "broadcast",
+    "broadcast_group",
+    "decreases",
+    "external",
+    "external_body",
+    "inline",
+    "liveness",
+    "memoize",
+    "opaque",
+    "opens_invariants",
+    "proof",
+    "protocol",
+    "safety",
+    "spec",
+    "spec_mode",
+    "trait_impl",
+    "trait_spec",
+    "trigger",
+    "verifier",
+    "via_fn",
+    "when_used_as_spec",
+    // --- names honoured by other passes / injected by desugarings ---
+    // `default_ensures` — trait-method defaulted postcondition (trait_contracts,
+    // `extern_spec_helpers::forbid_default_ensures` rejects it off-trait).
+    "default_ensures",
+    // `proof_note` / `custom_err` — clause labels (crate::proof_note).
+    "proof_note",
+    "custom_err",
+    // `rlimit` — per-function solver budget (crate::mode_attrs).
+    "rlimit",
+    // `uninterp` — injected by `crate::tracked_syntax` via `parse_quote!`.
+    "uninterp",
+];
+
+/// True when `path` explicitly names the `trust_vc` namespace ahead of its
+/// final segment — `#[trust_vc::foo]`, `#[::trust_vc::foo]`,
+/// `#[crate::trust_vc::foo]`.
+///
+/// NARROWNESS: a single-segment path (`#[test]`, `#[inline]`, `#[derive]`, the
+/// `#[doc = ".."]` a doc comment lowers to) is never namespaced, and neither is
+/// a foreign namespace (`#[verifier::external_body]`, `#[serde(..)]`,
+/// `#[tokio::main]`). Those keep falling through silently, exactly as before.
+/// Only an author who reached for `trust_vc::` and misspelled the clause is
+/// caught.
+fn is_trust_vc_namespaced(path: &syn::Path) -> bool {
+    let n = path.segments.len();
+    n >= 2
+        && path
+            .segments
+            .iter()
+            .take(n - 1)
+            .any(|s| s.ident == "trust_vc")
+}
+
+/// Reject an unrecognized `trust_vc::`-namespaced attribute instead of dropping
+/// it. See [`KNOWN_TRUST_VC_ATTRIBUTES`] for why silence is unsound here.
+fn reject_unknown_trust_vc_attribute(attr: &syn::Attribute) -> TrustVcResult<()> {
+    if !is_trust_vc_namespaced(attr.path()) {
+        return Ok(());
+    }
+    let Some(name) = super::path_last_segment(attr.path()) else {
+        return Ok(());
+    };
+    if KNOWN_TRUST_VC_ATTRIBUTES.contains(&name.as_str()) {
+        return Ok(());
+    }
+    Err(TrustVcError::Encoding {
+        context: "extract contract attributes",
+        detail: format!(
+            "unknown trust_vc attribute `#[trust_vc::{name}]` — declining rather \
+             than silently dropping it, because a discarded clause would leave \
+             the function with no obligation and verify vacuously"
+        ),
+    })
+}
+
 /// Extract standalone and grouped contract attributes.
 pub(super) fn extract_contract_attributes(
     attrs: &[syn::Attribute],
@@ -807,7 +931,13 @@ pub(super) fn extract_contract_attributes(
                     extract_contract_clause(clause, vc, ambient_solver_mode)?;
                 }
             }
-            _ => {}
+            // FV-2: this arm used to be a bare `_ => {}`. It is the fall-through
+            // for every attribute this pass does not consume — which is correct
+            // for ordinary Rust and foreign namespaces, but was a silent DROP
+            // for an unrecognized `trust_vc::` clause. Make the standalone path
+            // agree with the grouped `#[contract(..)]` path, which already
+            // hard-errors on an unknown clause name.
+            _ => reject_unknown_trust_vc_attribute(attr)?,
         }
     }
 

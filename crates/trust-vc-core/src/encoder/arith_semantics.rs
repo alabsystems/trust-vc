@@ -71,6 +71,20 @@ impl ArithSemantics {
     }
 }
 
+/// True for the sorts whose values are mathematically unbounded and therefore
+/// must NEVER be reduced modulo any bit width: Verus's `int` (`MathInt`),
+/// `nat`, and spec-level `Real`.
+///
+/// This is the same set `ir_encoder/arith/int_arith.rs::is_math_integer` and
+/// `ir_encoder/logic.rs`'s `is_math_typed` guard on, kept here so the wrap
+/// resolver can decline instead of guessing.
+fn is_unbounded_math_sort(ty: &TrustVcType) -> bool {
+    matches!(
+        ty,
+        TrustVcType::MathInt | TrustVcType::Nat | TrustVcType::Real
+    )
+}
+
 /// Resolve wrapping context for a specific expression within a quantifier body.
 ///
 /// Prefers the per-expression `TrustVcType` width when available (e.g., the
@@ -78,13 +92,50 @@ impl ArithSemantics {
 /// scope's wrap context. This implements the "per-expression type > scope"
 /// priority already present in `ir_encoder/arith.rs:260-264` but makes it
 /// explicit and reusable.
+///
+/// # The scope fallback must DECLINE for `int`/`nat`/`Real` (FV-C)
+///
+/// `TrustVcType::bit_width()` returns `None` for two distinct reasons, and
+/// collapsing them was a cardinal false-verify:
+///
+/// * *"this expression has no width I could determine"* — the historical
+///   motivation for the fallback: inside a quantifier body a fixed-width
+///   operand may reach the encoder with an imprecise IR type, and the binder's
+///   width is the best available reconstruction of the machine semantics.
+/// * *"this expression is mathematically unbounded"* — `MathInt`, `Nat` and
+///   `Real` have no width **by construction**. Adopting the binder's width
+///   here does not reconstruct anything; it fabricates a modulus that the
+///   source never had.
+///
+/// Because `QuantifierScope::wrap_semantics` is SCOPE-WIDE, the second case
+/// silently reduced *every* `+`/`-`/`*` in a quantifier body mod 2^(binder
+/// width) — including `int`-typed arithmetic that never mentions the binder.
+/// `forall(|a: u8, b: u8| (a as int) + (b as int) <= 255)` therefore reported
+/// `verified` even though `a == b == 200` refutes it, and the lie escaped
+/// through `ensures`, so it crossed module boundaries.
+///
+/// Declining is the fail-closed answer: with no wrap context the operation
+/// keeps faithful unbounded-integer semantics, which is exactly what `int` and
+/// `nat` mean. The narrow reconstruction case is untouched — a genuinely
+/// fixed-width expression still wraps, and so does an expression whose type is
+/// merely unknown.
+///
+/// The two neighbours that already got this right and pin the intent:
+/// `use_int_arithmetic` short-circuits to `None`
+/// (`ir_encoder/arith/int_arith.rs`), and `QuantifierScope::from_bound_vars`
+/// gates on the same `bit_width()`, so an `int`/`nat` BINDER contributes no
+/// wrap. Only the expression-side test was missing.
 pub(super) fn resolve_expr_wrap(
     ty: &TrustVcType,
     scope_wrap: Option<ArithSemantics>,
 ) -> Option<(u32, bool)> {
-    ty.bit_width()
-        .map(|w| (w, ty.is_unsigned()))
-        .or_else(|| scope_wrap.map(|s| s.as_wrap_tuple()))
+    if let Some(w) = ty.bit_width() {
+        return Some((w, ty.is_unsigned()));
+    }
+    if is_unbounded_math_sort(ty) {
+        return None;
+    }
+    scope_wrap.map(ArithSemantics::as_wrap_tuple)
 }
 
 #[cfg(test)]
@@ -189,5 +240,41 @@ mod tests {
     fn test_resolve_expr_wrap_none_when_both_missing() {
         let result = resolve_expr_wrap(&TrustVcType::Bool, None);
         assert_eq!(result, None);
+    }
+
+    /// FV-C: `int`/`nat`/`Real` are unbounded BY CONSTRUCTION, so a `None`
+    /// `bit_width()` here is not "width unknown" and must NOT be filled in
+    /// from the enclosing quantifier binder.
+    #[test]
+    fn test_resolve_expr_wrap_declines_scope_for_unbounded_math_sorts() {
+        let scope = Some(ArithSemantics {
+            width: 8,
+            is_unsigned: true,
+        });
+        for ty in [TrustVcType::MathInt, TrustVcType::Nat, TrustVcType::Real] {
+            assert_eq!(
+                resolve_expr_wrap(&ty, scope),
+                None,
+                "{ty:?} must never adopt the binder's modulus"
+            );
+        }
+    }
+
+    /// Narrowness pin for the same fix: a genuinely fixed-width expression
+    /// still wraps, and a merely width-LESS non-math type still falls back.
+    #[test]
+    fn test_resolve_expr_wrap_still_wraps_fixed_width_under_scope() {
+        let scope = Some(ArithSemantics {
+            width: 8,
+            is_unsigned: true,
+        });
+        assert_eq!(
+            resolve_expr_wrap(&TrustVcType::Uint { width: 8 }, scope),
+            Some((8, true))
+        );
+        assert_eq!(
+            resolve_expr_wrap(&TrustVcType::Bool, scope),
+            Some((8, true))
+        );
     }
 }

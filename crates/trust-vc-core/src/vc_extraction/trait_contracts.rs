@@ -1185,10 +1185,59 @@ fn register_exec_callee_postcondition_axioms(
     }
     let trigger = format!("{name}({})", bound_vars.join(", "));
 
+    // SOUNDNESS-CRITICAL (cardinal false-verify, FV-4). The callee's `#[ensures]`
+    // is a CLAIM, not a fact, at this point: nothing here has checked that the
+    // callee's BODY establishes it. Publishing it as a global axiom therefore
+    // consumed the postcondition BEFORE it was discharged — the same shape as the
+    // unchecked broadcast lemma fixed at `63ac39c0`:
+    //
+    //     #[trust_vc::ensures(result == 100u32)] fn liar(a: u32) -> u32 { 3u32 }
+    //     #[trust_vc::trait_spec] trait Tr {
+    //         #[trust_vc::returns(result)] #[trust_vc::ensures(result == 100u32)]
+    //         fn dm(&self) -> u32 { liar(7u32) } }
+    //     pub fn consumer<T: Tr>(t: T) { trust_vc::assert!(t.dm() == 100u32); }
+    //
+    // published `forall a. liar(a) == 100`, which is FALSE of the body (`3`), so
+    // `consumer` Verified while `t.dm()` really is `3`. That the callee fails its
+    // OWN verification does not save the caller: each function is verified as its
+    // own query, and this one reported `Verified`.
+    //
+    // THE FIX — publish only a BODY-JUSTIFIED axiom. `body_definitional_expr`
+    // returns the callee's single tail expression (the value it definitionally
+    // returns), and a clause is carried only when that expression IS the clause's
+    // `rhs`. The published `forall params. <callee>(params) == <rhs>` is then the
+    // callee's DEFINITION — true by construction, exactly like a spec fn's body
+    // axiom — instead of an unchecked contract. `liar`'s body (`3u32`) is not its
+    // `rhs` (`100u32`), so no axiom is published and `consumer` fails CLOSED.
+    //
+    // WHY NOT "VERIFY THE CALLEE IN A DISCARDED CHILD" (the broadcast-lemma
+    // mechanism). MEASURED, and the measurement rejected it: the honest, already
+    // pinned callee `#[ensures(result == a + b)] fn add(a: u32, b: u32) -> u32
+    // { a + b }` does NOT verify on its own — its postcondition obligation carries
+    // a `possible addition overflow` side condition and Counterexamples at
+    // `a = b = u32::MAX`. Gating on the callee's verdict would therefore drop the
+    // axiom for a callee whose postcondition is its own definition, taking
+    // `conforming_default_calling_free_exec_fn_with_args_still_verifies` (and the
+    // whole parameterised lane) red. The definitional check keeps that lane: the
+    // callee's overflow/panic obligations stay the CALLEE's to discharge, reported
+    // where Verus reports them, and are not laundered into a caller's proof.
+    //
+    // STRICTLY A NARROWING of an existing publish site: every axiom published
+    // after this gate was published before it, so it cannot open a new hole. Any
+    // shape it cannot judge (a `let`-carrying body, a computed body that is only
+    // semantically equal to the `rhs`) leaves the callee OPAQUE — over-rejection,
+    // never a hole.
+    let body_value = body_definitional_expr(&item_fn.block);
+
     for (idx, clause) in ensures.iter().enumerate() {
         let Some(rhs) = postcondition_definitional_rhs(&clause.condition, &binding) else {
             continue;
         };
+        // The body-justification gate. `None` (no single definitional tail
+        // expression) declines every clause.
+        if !body_value.is_some_and(|body| exprs_definitionally_identical(body, rhs)) {
+            continue;
+        }
         // Fail SAFE: only carry a `rhs` whose every free ident is a callee
         // parameter (renamed below) and which makes no function/method call. This
         // guarantees the axiom lowers against the conformance context — an `rhs`
@@ -1223,6 +1272,98 @@ fn register_exec_callee_postcondition_axioms(
                 .with_bound_vars(bound_vars.clone())
                 .with_trigger_patterns(vec![vec![trigger.clone()]]),
         );
+    }
+}
+
+/// The single tail expression a body definitionally returns, if it has one.
+///
+/// Accepts exactly two shapes, both of which make the returned expression THE
+/// value of every terminating call:
+///  * a lone tail expression — `{ a + b }`;
+///  * a lone `return <expr>;` — `{ return a + b; }`.
+///
+/// Nested blocks and parentheses are transparent (`{ { (a + b) } }`). Anything
+/// else — a `let`, a statement sequence, a conditional, an empty body — returns
+/// `None`, which declines the postcondition axiom (fail closed).
+fn body_definitional_expr(block: &syn::Block) -> Option<&Expr> {
+    fn unwrap_expr(expr: &Expr) -> Option<&Expr> {
+        match expr {
+            Expr::Paren(paren) => unwrap_expr(&paren.expr),
+            Expr::Group(group) => unwrap_expr(&group.expr),
+            Expr::Block(inner) if inner.label.is_none() => body_definitional_expr(&inner.block),
+            other => Some(other),
+        }
+    }
+    let [stmt] = block.stmts.as_slice() else {
+        return None;
+    };
+    match stmt {
+        // `return <expr>` — the sole statement, so it always fires. Matched
+        // before the tail-expression arm, which would otherwise hand back the
+        // `return` expression itself.
+        syn::Stmt::Expr(Expr::Return(ret), _) => ret.expr.as_deref().and_then(unwrap_expr),
+        // A tail expression (no trailing semicolon) IS the body's value.
+        syn::Stmt::Expr(expr, None) => unwrap_expr(expr),
+        _ => None,
+    }
+}
+
+/// True iff `body` and `rhs` are THE SAME expression, so that a postcondition
+/// `result == rhs` is established by construction by a body returning `body`.
+///
+/// Compares rendered token streams after normalising away the two differences
+/// that are pure notation and never change the value:
+///  * parenthesis/group wrappers (`(a + b)` vs `a + b`);
+///  * integer/float literal spelling — suffix and digit separators (`7u32` vs
+///    `7`, `1_000` vs `1000`), compared on `base10_digits`.
+///
+/// Deliberately SYNTACTIC. Two expressions that merely evaluate to the same
+/// value (`3u32 + 4u32` vs `7u32`) are NOT identical here and the callee stays
+/// opaque: judging that needs the solver, and the whole point of this gate is to
+/// publish only what is true by construction.
+fn exprs_definitionally_identical(body: &Expr, rhs: &Expr) -> bool {
+    fn normalized(expr: &Expr) -> String {
+        let mut expr = expr.clone();
+        syn::visit_mut::VisitMut::visit_expr_mut(&mut LiteralNormalizer, &mut expr);
+        expr.to_token_stream().to_string()
+    }
+    normalized(body) == normalized(rhs)
+}
+
+/// Strips parenthesis/group wrappers and re-spells numeric literals in their
+/// canonical, suffix-free `base10_digits` form, so that notation-only
+/// differences do not defeat [`exprs_definitionally_identical`].
+struct LiteralNormalizer;
+
+impl syn::visit_mut::VisitMut for LiteralNormalizer {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        // Unwrap notation-only wrappers first, then normalise what is inside.
+        loop {
+            let inner = match expr {
+                Expr::Paren(paren) => (*paren.expr).clone(),
+                Expr::Group(group) => (*group.expr).clone(),
+                _ => break,
+            };
+            *expr = inner;
+        }
+        if let Expr::Lit(lit) = expr {
+            match &lit.lit {
+                syn::Lit::Int(int) => {
+                    if let Ok(canonical) = syn::parse_str::<Expr>(int.base10_digits()) {
+                        *expr = canonical;
+                        return;
+                    }
+                }
+                syn::Lit::Float(float) => {
+                    if let Ok(canonical) = syn::parse_str::<Expr>(float.base10_digits()) {
+                        *expr = canonical;
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        syn::visit_mut::visit_expr_mut(self, expr);
     }
 }
 

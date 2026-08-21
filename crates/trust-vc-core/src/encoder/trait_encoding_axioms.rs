@@ -826,6 +826,12 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = true;
+        // See `eval::condition` — every parser that can encode a collection
+        // length must agree about which lengths are `usize`-bounded, or two
+        // encodings of the same proposition mint unrelated length companions.
+        ast_parser
+            .usize_bounded_lens
+            .clone_from(&self.state.usize_bounded_lens);
 
         let local_type_map: HashMap<&str, &TrustVcType> = local_types
             .iter()

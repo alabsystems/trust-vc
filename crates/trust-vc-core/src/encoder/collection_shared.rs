@@ -985,7 +985,41 @@ impl<'a> AstExpressionParser<'a> {
     /// DECLARED spec-collection length (`__trust_vc_len_{var}`, unbounded
     /// nonneg Int under Route A) — keeps the explicit obligation: that is
     /// exactly the NC4 huge-length regime.
+    ///
+    /// `use_declared_bounds` adds shape 3: a length term recorded in
+    /// [`AstExpressionParser::usize_bounded_lens`] — an EXEC `Vec`/slice/array
+    /// length that `assert_len_usize_bounded` already asserted
+    /// `<= 2^pw - 1` — is treated as a `[0, 2^pw - 1]` leaf, so DERIVED views
+    /// (`end - start`, `len - 1`) of an exec collection inherit boundedness
+    /// through the arithmetic arms.
+    ///
+    /// That shape is DELIBERATELY opt-in rather than always-on, and every
+    /// [`Self::push_index_representability_check`] caller passes `false`. Those
+    /// callers use this predicate to SUPPRESS an obligation, and while the
+    /// suppression would be semantically valid here (the bound really is on the
+    /// assertion stack), dropping the obligation measurably changes what ay
+    /// proves for `Vec == Vec` — the trivially-valid
+    /// `requires(a == b) |- assert!(a == b)` regressed to a counterexample.
+    /// This predicate's other use is a soundness GATE that must not be widened
+    /// by an unrelated encoding decision, so the two uses are kept separate:
+    /// `false` preserves the obligation set byte-for-byte.
     fn int_value_statically_carrier_representable(&mut self, value: Term) -> bool {
+        self.int_value_carrier_representable_inner(value, false)
+    }
+
+    /// [`Self::int_value_statically_carrier_representable`] with the declared
+    /// exec-collection length bounds (`usize_bounded_lens`) admitted as leaves.
+    /// Used by soundness GATES that must decide "is this length representable in
+    /// the carrier at all", never to suppress an obligation.
+    pub(super) fn len_is_carrier_bounded(&mut self, value: Term) -> bool {
+        self.int_value_carrier_representable_inner(value, true)
+    }
+
+    fn int_value_carrier_representable_inner(
+        &mut self,
+        value: Term,
+        use_declared_bounds: bool,
+    ) -> bool {
         // BigInt INTERVAL ARITHMETIC — deliberately not mere leaf
         // classification, which is unsound for this discharge: a `+`/`*` of
         // individually-bounded leaves can exceed the carrier (two
@@ -1034,12 +1068,26 @@ impl<'a> AstExpressionParser<'a> {
             slf: &AstExpressionParser<'_>,
             t: Term,
             budget: &mut u32,
+            use_declared_bounds: bool,
         ) -> Option<(BigInt, BigInt)> {
             if *budget == 0 {
                 return None;
             }
             *budget -= 1;
             let pw = crate::ir::pointer_width();
+            // Declared EXEC-collection length leaf: `Vec`/slice/array lengths
+            // carry an ASSERTED `0 <= len <= 2^pw - 1` from `declare_variable`
+            // (`assert_len_usize_bounded`, gated on `VariableDecl::bounded_len`),
+            // which is the only emitter of that bound and never fires for a spec
+            // `Seq<T>`. Taking the interval from a fact already on the assertion
+            // stack — rather than from the term's shape — is what lets DERIVED
+            // views inherit it: `end - start`, `len - 1`, `len - n` all reduce
+            // through the `+`/`-`/`*` arm below to a hull inside the carrier.
+            // Checked BEFORE the shape arms so a bare `__trust_vc_len_v` Var (no
+            // recognizable shape) still resolves.
+            if use_declared_bounds && slf.usize_bounded_lens.contains(&t) {
+                return Some((BigInt::from(0u32), (BigInt::from(1u32) << pw) - 1));
+            }
             // Safe bv2nat leaf: range [0, 2^w - 1] by construction.
             if let ay_dpll::api::TermKind::App {
                 ref name,
@@ -1080,9 +1128,9 @@ impl<'a> AstExpressionParser<'a> {
                         return None;
                     }
                     let children = slf.solver.term_children(t);
-                    let mut acc = interval(slf, *children.first()?, budget)?;
+                    let mut acc = interval(slf, *children.first()?, budget, use_declared_bounds)?;
                     for &c in &children[1..] {
-                        let (clo, chi) = interval(slf, c, budget)?;
+                        let (clo, chi) = interval(slf, c, budget, use_declared_bounds)?;
                         acc = match name.as_str() {
                             "+" => (acc.0 + clo, acc.1 + chi),
                             "-" => (acc.0 - chi, acc.1 - clo),
@@ -1102,8 +1150,10 @@ impl<'a> AstExpressionParser<'a> {
                     // The ite VALUE is the hull of its branches; the
                     // condition does not contribute to the range.
                     let children = slf.solver.term_children(t);
-                    let (a_lo, a_hi) = interval(slf, *children.get(1)?, budget)?;
-                    let (b_lo, b_hi) = interval(slf, *children.get(2)?, budget)?;
+                    let (a_lo, a_hi) =
+                        interval(slf, *children.get(1)?, budget, use_declared_bounds)?;
+                    let (b_lo, b_hi) =
+                        interval(slf, *children.get(2)?, budget, use_declared_bounds)?;
                     Some((a_lo.min(b_lo), a_hi.max(b_hi)))
                 }
                 _ => None,
@@ -1111,7 +1161,7 @@ impl<'a> AstExpressionParser<'a> {
         }
         let pw = crate::ir::pointer_width();
         let mut budget = 512u32;
-        let Some((lo, hi)) = interval(self, value, &mut budget) else {
+        let Some((lo, hi)) = interval(self, value, &mut budget, use_declared_bounds) else {
             return false;
         };
         if hi >= (BigInt::from(1u32) << pw) {
@@ -1376,45 +1426,37 @@ impl<'a> AstExpressionParser<'a> {
     /// for the whole query — see `len_as_index_bv`).
     ///
     /// Soundness: `bv2int(companion) == int_len` asserts the length is in
-    /// `[0, 2^pw)`. This is exactly the set of lengths the `Array(BV(pw), T)`
-    /// carrier can index — a sequence longer than `2^pw` is not representable in
-    /// this model at all — so the constraint adds no assumption the carrier did
-    /// not already make. It is applied to OPERAND lengths only; the result
-    /// length of a length-increasing op (concat/push) is kept as a pure Int
-    /// (NOT bridged to BV), so e.g. `len(a)+len(b)` is never forced below
-    /// `2^pw` — that would reintroduce the unsound route-B no-wrap assumption.
+    /// `[0, 2^pw)`. For a length the carrier can index that is no assumption at
+    /// all. For an UNBOUNDED spec `Seq<T>` length it is a real one, and a
+    /// FALSE-VERIFYING one: `bv2int(companion) <= 2^pw - 1` holds by SORT, so
+    /// the bridge entails the standalone fact `len <= 2^pw - 1` in the enclosing
+    /// context — exactly what
+    /// [`AYEncoder::assert_len_usize_bounded`](crate::encoder) documents as
+    /// SOUNDNESS-CRITICAL to emit ONLY for a `bounded_len` exec `Vec`/slice/
+    /// array, because it "would make every huge-length guard's context UNSAT and
+    /// vacuously verify". Measured through the production CLI: with the bridge
+    /// unconditional, `requires(a.add(b).len() == a.len() + b.len())` (and the
+    /// `filter`/`map_values`/`fold_left` analogues) made
+    /// `assert!(a.len() <= u64::MAX)` VERIFY on `a: Seq<i32>`, while the same
+    /// assertion without the operand op was correctly refuted.
+    ///
+    /// So the bridge is delivered UNCONDITIONALLY only for a length already
+    /// established carrier-bounded ([`Self::len_is_carrier_bounded`] — an exec
+    /// `Vec`/slice/array length, a concrete or pinned length, or a derived view
+    /// of one), where it restates a fact already on the assertion stack. For any
+    /// other length it is delivered under the representability ANTECEDENT
+    /// `0 <= len <= 2^pw - 1`, which is satisfied — and so propagates the
+    /// equality unchanged — in every model where the carrier could index the
+    /// sequence at all, and is simply inert in the huge-length regime instead of
+    /// ruling it out. The antecedent is not derivable from the consequent, so
+    /// nothing bounds `len` any more.
+    ///
+    /// This is applied to OPERAND lengths only; the result length of a
+    /// length-increasing op (concat/push) is kept as a pure Int (NOT bridged to
+    /// BV), so e.g. `len(a)+len(b)` is never forced below `2^pw` — that would
+    /// reintroduce the unsound route-B no-wrap assumption.
     pub(super) fn len_index_companion(&mut self, len: Term) -> TrustVcResult<Term> {
-        let pw = crate::ir::pointer_width();
-        match self.solver.term_sort(len) {
-            Sort::BitVec(_) => self.coerce_to_len_width(len),
-            Sort::Int => {
-                // F3 point-interval fold: a concrete in-carrier length gets
-                // the BV LITERAL as its companion (with the bridge collapsed
-                // to a ground Int fact) instead of a fresh var bridged via
-                // `bv2int` — the mixed bridge is undecidable for ay even at
-                // pinned values (probe_B1/M1d), while literal companions
-                // make quantifier guards ground BV (probe_M2, ~20ms UNSAT).
-                if let Some(bv) = self.concrete_len_companion_fold(len)? {
-                    return Ok(bv);
-                }
-                let bv = self
-                    .solver
-                    .fresh_var("__trust_vc_len_idx", Sort::bitvec(pw));
-                self.term_widths.insert(bv, (pw, false));
-                let bv_as_int = self.solver.try_bv2int(bv).map_err(|e| e.to_string())?;
-                let bridge = self
-                    .solver
-                    .try_eq(bv_as_int, len)
-                    .map_err(|e| e.to_string())?;
-                self.solver
-                    .try_assert_term(bridge)
-                    .map_err(|e| e.to_string())?;
-                Ok(bv)
-            }
-            other => {
-                Err(format!("length index companion requires numeric sort, got {other:?}").into())
-            }
-        }
+        self.len_index_companion_inner(len, false)
     }
 
     /// Like [`len_index_companion`], but for a length that may be NEGATIVE —
@@ -1444,19 +1486,43 @@ impl<'a> AstExpressionParser<'a> {
     /// `len_index_companion`) so the unconditional bridge — load-bearing for
     /// OPERAND lengths where `len >= 0` is not always syntactically derivable
     /// (filter/ext_eq/quantifier-body index carriers) — is left untouched.
+    ///
+    /// The `len >= 0` antecedent is WIDENED to the full representability range
+    /// `0 <= len <= 2^pw - 1` for a length not established carrier-bounded; see
+    /// [`Self::len_index_companion`] for why the bare `len >= 0` form leaked
+    /// `len <= 2^pw - 1` into the enclosing context and false-verified. The
+    /// negative-length behaviour this method exists for is unchanged: `len < 0`
+    /// still falsifies the antecedent, leaving the bridge inert.
     pub(super) fn len_index_companion_maybe_negative(&mut self, len: Term) -> TrustVcResult<Term> {
+        self.len_index_companion_inner(len, true)
+    }
+
+    /// Shared body of the two companion constructors.
+    ///
+    /// `guard_nonneg` selects the `maybe_negative` variant's `len >= 0`
+    /// antecedent. Independently of it, a length that is NOT
+    /// [`Self::len_is_carrier_bounded`] gets the representability antecedent
+    /// `0 <= len <= 2^pw - 1` — which subsumes `len >= 0`, so the two combine to
+    /// a single conjunction rather than nesting.
+    fn len_index_companion_inner(&mut self, len: Term, guard_nonneg: bool) -> TrustVcResult<Term> {
         let pw = crate::ir::pointer_width();
         match self.solver.term_sort(len) {
             Sort::BitVec(_) => self.coerce_to_len_width(len),
             Sort::Int => {
-                // F3 point-interval fold (see `len_index_companion`). The
-                // fold's range gate only accepts `n >= 0`, so a concrete
-                // NEGATIVE length (violated view precondition) falls through
-                // to the guarded symbolic bridge below — the inert-bridge
-                // refutation path is byte-identical to before.
+                // F3 point-interval fold: a concrete in-carrier length gets the
+                // BV LITERAL as its companion (with the bridge collapsed to a
+                // ground Int fact) instead of a fresh var bridged via `bv2int` —
+                // the mixed bridge is undecidable for ay even at pinned values
+                // (probe_B1/M1d), while literal companions make quantifier
+                // guards ground BV (probe_M2, ~20ms UNSAT). The fold's range
+                // gate only accepts `n >= 0`, so a concrete NEGATIVE length (a
+                // violated view precondition) falls through to the guarded
+                // bridge below and the inert-bridge refutation path is
+                // byte-identical to before.
                 if let Some(bv) = self.concrete_len_companion_fold(len)? {
                     return Ok(bv);
                 }
+                let carrier_bounded = self.len_is_carrier_bounded(len);
                 let bv = self
                     .solver
                     .fresh_var("__trust_vc_len_idx", Sort::bitvec(pw));
@@ -1466,12 +1532,33 @@ impl<'a> AstExpressionParser<'a> {
                     .solver
                     .try_eq(bv_as_int, len)
                     .map_err(|e| e.to_string())?;
-                let zero = self.solver.int_const(0);
-                let nonneg = self.solver.try_ge(len, zero).map_err(|e| e.to_string())?;
-                let bridge = self
-                    .solver
-                    .try_implies(nonneg, eq)
-                    .map_err(|e| e.to_string())?;
+                let mut antecedent: Option<Term> = None;
+                if guard_nonneg || !carrier_bounded {
+                    let zero = self.solver.int_const(0);
+                    antecedent = Some(self.solver.try_ge(len, zero).map_err(|e| e.to_string())?);
+                }
+                if !carrier_bounded {
+                    let max = (BigInt::from(1u8) << pw) - 1;
+                    let max_term = self.solver.int_const_bigint(&max);
+                    let le_max = self
+                        .solver
+                        .try_le(len, max_term)
+                        .map_err(|e| e.to_string())?;
+                    antecedent = Some(match antecedent {
+                        Some(nonneg) => self
+                            .solver
+                            .try_and(nonneg, le_max)
+                            .map_err(|e| e.to_string())?,
+                        None => le_max,
+                    });
+                }
+                let bridge = match antecedent {
+                    Some(guard) => self
+                        .solver
+                        .try_implies(guard, eq)
+                        .map_err(|e| e.to_string())?,
+                    None => eq,
+                };
                 self.solver
                     .try_assert_term(bridge)
                     .map_err(|e| e.to_string())?;

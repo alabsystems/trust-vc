@@ -15,13 +15,18 @@ use std::time::Duration;
 /// verification always terminates by running `check_sat()` in a separate thread
 /// and joining with a deadline.
 ///
-/// Set to 10s rather than 30s to prevent timeout accumulation across the full test
-/// suite (#1682). With ~870 solver invocations across ~1,045 individual assertions
-/// in the test suite, a 30s timeout causes worst-case accumulation far exceeding
-/// the 600s cargo test timeout. 10s is sufficient for all solvable BV problems
-/// (most complete in <1s; the hardest — modulo identities — need ~5-8s). Problems
-/// that don't finish in 10s are stuck in exponential BV DPLL search.
-pub(in crate::encoder) const BV_HARD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Set well below the old 30s to prevent timeout accumulation across the full
+/// test suite (#1682): with ~870 solver invocations across ~1,045 individual
+/// assertions, a large cap accumulates only on the (few) deliberately-stuck
+/// cases, but those exist. The cap must still clear the HARDEST solvable
+/// problems on the SLOWEST supported host: the unsigned div/rem identity
+/// proofs measure ~40s each in an unloaded DEBUG build on a Grace GB10
+/// (Linux/aarch64, 2026-08-19), where the old 10s cap — tuned to the ~5-8s
+/// the same proofs need on an M-series mac — failed genuinely-verifying
+/// cases (bitvector_rs_verified_subset red on the first clean-build sweep).
+/// 60s clears the measured worst case with headroom; a problem that has not
+/// finished in 60s is stuck in exponential BV DPLL search.
+pub(in crate::encoder) const BV_HARD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default nominal solver budget handed to ay via `with_limits()` when the
 /// verification context carries no explicit `rlimit_ms`. Single source of

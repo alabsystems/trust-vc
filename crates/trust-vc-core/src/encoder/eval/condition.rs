@@ -129,6 +129,16 @@ impl AYEncoder {
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
+        // Which collection lengths already carry an asserted `<= usize::MAX`
+        // (exec `Vec`/slice/array only — see `assert_len_usize_bounded`). Read
+        // by carrier-representability gates that hold a length `Term` but not
+        // the `bounded_len` bit. EVERY parser built here must be seeded: two
+        // encodings of the SAME proposition that disagree about boundedness
+        // produce two different (and unrelated) length companions, which showed
+        // up as a `Vec == Vec` pin regressing to a counterexample.
+        ast_parser
+            .usize_bounded_lens
+            .clone_from(&self.state.usize_bounded_lens);
         // Seed the parser with persisted ground element aliases from prior
         // encoding rounds (assumptions → assertions). Part of #2680.
         #[cfg(feature = "native-seq")]
@@ -217,6 +227,10 @@ impl AYEncoder {
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
+        // Length-boundedness view — see the note at the first parser site.
+        ast_parser
+            .usize_bounded_lens
+            .clone_from(&self.state.usize_bounded_lens);
         #[cfg(feature = "native-seq")]
         {
             ast_parser
@@ -294,6 +308,10 @@ impl AYEncoder {
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
+        // Length-boundedness view — see the note at the first parser site.
+        ast_parser
+            .usize_bounded_lens
+            .clone_from(&self.state.usize_bounded_lens);
         #[cfg(feature = "native-seq")]
         {
             ast_parser
@@ -432,6 +450,10 @@ impl AYEncoder {
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
+        // Length-boundedness view — see the note at the first parser site.
+        ast_parser
+            .usize_bounded_lens
+            .clone_from(&self.state.usize_bounded_lens);
         #[cfg(feature = "native-seq")]
         {
             ast_parser
