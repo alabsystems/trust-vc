@@ -96,6 +96,27 @@ impl AYEncoder {
         invariant: &PreparedObligation,
         verified_invariants: &[&PreparedObligation],
     ) -> TrustVcResult<AssertionOutcome> {
+        // REFLEXIVE-DISEQUALITY REFUTATION (see
+        // `typed_assertions::reflexive_disequality_refutation`). This is the
+        // FIFTH verdict-producing lane: the loop-invariant INDUCTIVE step and
+        // the `loop_decreases!` WF2 strict-descent step both land here without
+        // passing through `typed::verify_typed_step`, and neither
+        // `run_inductive_verification` nor `demote_verified_inductive_result`
+        // carries the demote (the latter only downgrades a `Verified` on an
+        // ENCODING approximation).
+        //
+        // For a loop invariant the lane is already guarded transitively — the
+        // BASE case runs first through `verify_typed_step` and a failure there
+        // is terminal, so an invariant can never be exported into
+        // `verified_invariant_obligations` without having passed this test.
+        // Guarding here as well removes the reliance on that ordering and covers
+        // the WF2 measure lane, which has no base case at all. Fail-closed by
+        // construction: the helper returns a Counterexample or nothing.
+        if let Some(outcome) =
+            super::typed_assertions::reflexive_disequality_refutation(invariant)
+        {
+            return Ok(outcome);
+        }
         let modified_vars = ctx.loop_modified_vars.get(&invariant.name);
         let loop_guard = ctx.loop_guards.get(&invariant.name);
 

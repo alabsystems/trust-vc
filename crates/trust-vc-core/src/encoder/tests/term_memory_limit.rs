@@ -138,7 +138,11 @@ fn test_with_limits_reports_expected_term_memory_limit_helper() {
         .parse::<usize>()
         .expect("process-memory MB env var should parse as usize");
 
-    let encoder = AYEncoder::new().with_limits(30_000, process_memory_mb);
+    let encoder = AYEncoder::new().with_limits(
+        30_000,
+        crate::solver_budget::ConflictBudget::bounded(400_000),
+        process_memory_mb,
+    );
     let term_limit = encoder.solver.term_memory_limit();
     assert_eq!(
         term_limit, expected_limit,
@@ -189,7 +193,11 @@ fn test_new_encoder_defaults_to_readable_counterexample_style() {
 /// `instance_term_bytes()` is queryable on an encoder with limits.
 #[test]
 fn test_instance_term_bytes_queryable() {
-    let encoder = AYEncoder::new().with_limits(30_000, 512);
+    let encoder = AYEncoder::new().with_limits(
+        30_000,
+        crate::solver_budget::ConflictBudget::bounded(400_000),
+        512,
+    );
 
     // Even with no solving, the counter should be queryable (returns 0 or small).
     // Just verify it doesn't panic — the exact value depends on ay internals.
@@ -205,11 +213,19 @@ fn test_instance_term_bytes_queryable() {
 #[test]
 fn test_instance_term_bytes_reset_for_fresh_encoder() {
     let baseline = AYEncoder::new()
-        .with_limits(30_000, 512)
+        .with_limits(
+            30_000,
+            crate::solver_budget::ConflictBudget::bounded(400_000),
+            512,
+        )
         .solver
         .instance_term_bytes();
 
-    let mut populated = AYEncoder::new().with_limits(30_000, 512);
+    let mut populated = AYEncoder::new().with_limits(
+        30_000,
+        crate::solver_budget::ConflictBudget::bounded(400_000),
+        512,
+    );
     for i in 0..256 {
         populated
             .declare_variable(&VariableDecl {
@@ -228,7 +244,11 @@ fn test_instance_term_bytes_reset_for_fresh_encoder() {
     );
 
     let fresh_bytes = AYEncoder::new()
-        .with_limits(30_000, 512)
+        .with_limits(
+            30_000,
+            crate::solver_budget::ConflictBudget::bounded(400_000),
+            512,
+        )
         .solver
         .instance_term_bytes();
     assert!(

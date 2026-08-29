@@ -232,7 +232,14 @@ impl<'a> AstExpressionParser<'a> {
             // Skip wrapping in pure math-int mode (termination proofs).
             // (ir_ty already computed above for the sort-based guard.)
             let scope_sem = self.current_quantifier_wrap_semantics();
-            let wrap_ctx = if self.use_int_arithmetic {
+            // `quantifier_depth > 0`: spec negation inside a quantifier body is
+            // MATHEMATICAL, same rule (and same cardinal false verify) as the
+            // `+`/`-`/`*` arms in `encode_int_arith` — see the long note there.
+            // `forall|x: i8| 0 - x <= 127` and `forall|x: i8| -x <= 127` both
+            // reported `verified` while `x == i8::MIN` refutes them, because
+            // `-(-128)` wrapped back to `-128` and the negation-overflow
+            // obligation below is structurally unavailable under a binder (#2557).
+            let wrap_ctx = if self.use_int_arithmetic || self.quantifier_depth > 0 {
                 None
             } else {
                 resolve_expr_wrap(&ir_ty, scope_sem)

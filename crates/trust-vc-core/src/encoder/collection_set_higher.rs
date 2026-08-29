@@ -83,6 +83,13 @@ impl<'a> AstExpressionParser<'a> {
                     dom_term: Some(receiver),
                 },
             );
+            if set_len.is_none() {
+                // The source set declined its cardinality (e.g. `s.filter(p)`),
+                // so the map built over it has none either — propagate the
+                // decline instead of letting the name fallback resolve the
+                // ORIGINAL set's length through the chained receiver name.
+                self.decline_collection_len(finite_result);
+            }
             return Ok(finite_result);
         }
 
@@ -98,6 +105,11 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: Some(receiver),
             },
         );
+        if set_len.is_none() {
+            // See the finite-chain arm above: a declined source cardinality must
+            // not be re-acquired through the chained receiver name.
+            self.decline_collection_len(result);
+        }
 
         // Safe quantification via helper — native-sorted bound var (#2531)
         let elem_ty_resolved = self.set_element_trust_vc_type(receiver, receiver_name)?;

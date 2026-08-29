@@ -1,5 +1,17 @@
 # Design: Verus differential oracle + ay native theories (Hybrid accelerants)
 
+> **SUPERSEDED IN PART (2026-08-28) — both levers have since been built, and §A's
+> deliverable is no longer trust-vc's.** The differential oracle of §A lives in
+> **ay**, as its `ay-z3-parity classify` subcommand; it was given that neutral
+> home at R1 and extracted out of this repo (see
+> `crates/cargo-trust-vc/src/lib.rs:50-53`), so the `--run-differential-oracle`
+> wiring proposed in §A step 4 is not work to schedule here. On the §B side, ay's
+> native Seq and String solvers shipped and are wired through
+> `encoder/collection_seq_native/` behind the opt-in `native-seq` /
+> `native-strings` features (`default = []`), so the remaining task there is
+> adoption, not construction. The present-tense "building now" markers below are
+> from 2026-06-02 and are retained as the original plan of record.
+
 Concrete build plans for the two top levers of the internal grand-strategy-ay notes
 (DECISION: Hybrid). From a pure-read design swarm (2026-06-02), grounded in the
 actual Verus/ay/trust-vc code. **Soundness tripwire for both:** ay disagreeing with

@@ -235,6 +235,7 @@ fn test_default_body_axiom_assertion_count() {
         .insert("MyType__label".to_string(), vec![TrustVcType::Bool]);
 
     let impl_decl = TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -289,6 +290,7 @@ fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
 
     // Register impl with only `label` binding — `is_labeled` is inherited default
     let impl_decl = TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -364,6 +366,7 @@ fn test_explicit_override_skips_default_body_axiom() {
     }
 
     let impl_decl = TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![
@@ -407,6 +410,7 @@ fn test_explicit_override_skips_default_body_axiom() {
         .insert("MyType__label".to_string(), vec![TrustVcType::Bool]);
 
     let impl_decl_no_override = TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -468,6 +472,7 @@ fn trait_with_raw_default_body(
         generics: Vec::new(),
     };
     let impl_decl = TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: trait_name.to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],

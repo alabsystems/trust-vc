@@ -56,19 +56,33 @@ pub fn fv_int_cast_diff_nonneg() {}
 pub fn control_nat_binder_never_wrapped() {}
 
 // ---------------------------------------------------------------------------
-// NARROWNESS PINS — genuine FIXED-WIDTH arithmetic under a binder must STILL
-// wrap, because that is correct Rust machine semantics. Each of these is TRUE
-// and must keep verifying; a blanket "never wrap inside a quantifier" fix
-// would break the first two.
-
-// TRUE ONLY UNDER WRAPPING: `a + b` on `u8` operands is a `u8`, so the result
-// is reduced mod 256 and can never exceed 255.
+// SUPERSEDED BY FV-B (quantifier-body arithmetic is MATHEMATICAL).
+//
+// These two used to be NARROWNESS PINS asserting that fixed-width arithmetic
+// under a binder must STILL wrap ("correct Rust machine semantics"). That
+// premise was wrong for a QUANTIFIER BODY, which is SPEC code: Verus types
+// `u8 + u8` in spec position as `int`, not `u8`, so there is no modulus and no
+// overflow. `forall|a: u8, b: u8| a + b <= 255` is refuted by `a == b == 200`
+// (400), and reporting `verified` was a cardinal false verify of exactly the
+// same family this fixture already guards — the FV-C fix removed the modulus
+// for `int`/`nat` EXPRESSIONS, FV-B removes it for fixed-width expressions in
+// a quantifier body as well.
+//
+// They stay in the fixture, with their verdicts INVERTED, because they are the
+// sharpest available discriminator: only a wrapping body can make them true.
 #[trust_vc::ensures(forall(|a: u8, b: u8| a + b <= 255))]
-pub fn pin_u8_add_wraps_into_range() {}
+pub fn fv_u8_add_wraps_into_range() {}
 
-// TRUE ONLY UNDER WRAPPING: same for `*`.
+// FALSE for the same reason: `200 * 200 == 40000`, not `64`.
 #[trust_vc::ensures(forall(|a: u8, b: u8| a * b <= 255))]
-pub fn pin_u8_mul_wraps_into_range() {}
+pub fn fv_u8_mul_wraps_into_range() {}
+
+// NARROWNESS PIN replacing them: an EXPLICIT `wrapping_*` op is *defined* as
+// finite-width truncation and must keep wrapping even inside a quantifier body,
+// so this stays TRUE and must keep verifying. Without it, "quantifier bodies
+// never wrap" would degenerate into erasing `wrapping_add` too.
+#[trust_vc::ensures(forall(|a: u8, b: u8| a.wrapping_add(b) <= 255))]
+pub fn pin_u8_wrapping_add_still_wraps() {}
 
 // TRUE MATHEMATICALLY: 255 + 255 == 510. This is the bound the defect's
 // modulus was hiding, and it must verify once `int` arithmetic is faithful.

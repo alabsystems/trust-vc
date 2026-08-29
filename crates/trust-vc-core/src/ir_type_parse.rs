@@ -41,6 +41,20 @@ impl TrustVcType {
         if let Some(inner) = strip_reference_type(ty) {
             return Self::parse_inner(inner, strict);
         }
+        // A `TrustVcUnmodeledConstPat_` marker can only have been stamped onto
+        // this name by `const_pattern_desugar`'s R5 token salvage, which
+        // substitutes registry names in EVERY token position of a stream it
+        // cannot parse — including TYPE ASCRIPTIONS such as the `int` in
+        // `assert_forall_by!(assert forall|x: int| ...)` when the file holds
+        // `use trust_vc_types::int;` (an EXTERNAL import, which the file-local
+        // resolver must classify Unmodeled). A const cannot syntactically
+        // occupy type position, so the marker's fail-closed pattern reading
+        // has no work to do here: strip it and resolve the original spelling,
+        // exactly as the pre-salvage extraction did. Pattern lanes keep
+        // failing closed on the marker (`arm_pattern_match_condition`), and a
+        // marker over a genuinely unknown type still falls through to the
+        // Opaque rejection below under the ORIGINAL name.
+        let ty = crate::const_pattern_desugar::unmodeled_const_pat_name(ty).unwrap_or(ty);
         match ty {
             "()" => Ok(TrustVcType::Unit),
             "bool" => Ok(TrustVcType::Bool),

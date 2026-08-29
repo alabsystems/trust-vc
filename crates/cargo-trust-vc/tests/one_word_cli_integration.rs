@@ -131,13 +131,22 @@ fn example_then_verify_is_a_working_first_run() {
         code, 0,
         "the sample must verify out of the box: stdout={stdout} stderr={stderr}"
     );
+    // The sample declares TWO functions: the contracted `increment` and a `main`
+    // that runs it. Since the report's buckets became a partition of the scanned
+    // set, `main` is reported too — as `NotAnalyzed`, which is the honest answer
+    // for an uncontracted helper and is deliberately not a failure. Asserting a
+    // count of one was asserting that the report still hid it.
     assert!(
-        stdout.contains("1 function found"),
-        "single-file verification should find the sample's function: {stdout}"
+        stdout.contains("2 functions found"),
+        "single-file verification should report every scanned function: {stdout}"
     );
     assert!(
-        stdout.contains("Verified"),
+        stdout.contains("increment") && stdout.contains("Verified"),
         "the sample's contract should be proven: {stdout}"
+    );
+    assert!(
+        stdout.contains("main") && stdout.contains("NotAnalyzed"),
+        "the sample's uncontracted `main` must be reported, not dropped: {stdout}"
     );
     assert!(
         stdout.contains("demo.rs"),

@@ -37,12 +37,30 @@
 //!
 //! Adding the type boundaries / premise constants only *enlarges* the witness
 //! set; soundness is unchanged because every added instance is still a universal
-//! instantiation of the asserted `forall` at a value of the bound variable's
-//! sort (integer literals re-wrap to each bound variable's bitvector width;
-//! `nat` instances are restricted to non-negative literals so they stay within
-//! the non-negative sort). Each instance is therefore a logical consequence and
-//! a genuine counterexample satisfies all of them — it can never be flipped to
-//! UNSAT, so genuine refutations are still preserved.
+//! instantiation of the asserted `forall` **at a value of the bound variable's
+//! sort** — enforced by `encoder::witness_sort::instantiate_bound_vars_in_sort`,
+//! the single gate every witness source in the encoder now routes through, which
+//! refuses to substitute any witness outside that sort. Each surviving instance
+//! is therefore a logical consequence and a genuine counterexample satisfies all
+//! of them — it can never be flipped to UNSAT, so genuine refutations are still
+//! preserved.
+//!
+//! That range filter is load-bearing, not hygiene. Integer literals do NOT
+//! re-wrap to the bound variable's width: `encode_int_lit` deliberately widens
+//! an out-of-range literal instead of wrapping it (wrapping would silently
+//! redefine the constant — the casts-bitvec cluster). So a `u64`-derived model
+//! witness `2^64-1` substituted into a `u8` bound variable turned `x <= 255u8`
+//! into the 64-bit comparison `2^64-1 <= 255` — a FALSE ground fact asserted
+//! into the query, making the context contradictory and every obligation
+//! `Verified`. That was a cardinal false verify; the gate closes it.
+//!
+//! **This module is only ONE of the witness sources.** The witnesses built here
+//! are literals, so a value-range filter sufficed for them — but broadcast
+//! premises are also instantiated at witness EXPRESSIONS harvested from the goal
+//! (`verification/broadcast.rs`) and from the ground pool
+//! (`encoder/ground_pool.rs`), where the same class of defect appears with a
+//! consistent-but-unjustified fact instead of a visibly false one. See
+//! `encoder::witness_sort` for the full source inventory and the shared rule.
 //!
 //! Residual (documented) incompleteness: a model that violates the premise only
 //! at a witness value that is neither in the model's scalars, nor a type
@@ -54,14 +72,12 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
-use std::collections::HashMap;
-
 use ay_dpll::api::Model;
 use num_bigint::BigInt;
 
 use super::solve::try_check_sat_with_details;
 use crate::encoder::encoder_state::BroadcastForallPremise;
-use crate::encoder::eval::substitute_vars_in_expr;
+use crate::encoder::witness_sort::{instantiate_bound_vars_in_sort, value_inhabits_int_type};
 use crate::encoder::AYEncoder;
 use crate::ir::{TrustVcExpr, TrustVcType};
 use crate::ir_expr_traversal::{walk_expr, TrustVcExprVisitor};
@@ -201,14 +217,33 @@ impl AYEncoder {
                     for value in int_witnesses {
                         push_unique(&mut values, *value, usize::MAX);
                     }
-                    // `nat`'s sort is the NON-negative integers; a negative
-                    // literal is not a value of that sort, so substituting it
-                    // would not be a sound universal instantiation of the
-                    // asserted `forall`. Drop negatives so every instance stays
-                    // entailed (soundness over completeness).
-                    if matches!(ty, TrustVcType::Nat) {
-                        values.retain(|value| *value >= 0);
-                    }
+                    // SOUNDNESS (cardinal): only values that actually INHABIT the
+                    // bound variable's sort may be substituted. An instance is a
+                    // logical consequence of the asserted `forall` only when the
+                    // substituted literal is a value of the quantified sort — a
+                    // model witness harvested from an unrelated `u64` term
+                    // (2^64-1, or its signed reading -1) is NOT a `u8`, and
+                    // likewise a literal constant harvested from the premise text
+                    // may exceed the bound variable's width.
+                    //
+                    // Substituting an out-of-sort value does not merely lose
+                    // completeness: `encode_int_lit` deliberately does NOT wrap
+                    // an out-of-range literal (wrapping would silently redefine
+                    // the constant — the casts-bitvec cluster), it WIDENS to the
+                    // smallest width that preserves the value. So `x <= 255u8`
+                    // instantiated at 2^64-1 encodes as the 64-bit unsigned
+                    // comparison `2^64-1 <= 255`, i.e. a FALSE ground fact
+                    // asserted into the query context. A false premise entails
+                    // everything, so the negated goal goes UNSAT and the
+                    // obligation is reported Verified — a cardinal false verify.
+                    //
+                    // This `retain` is an EFFICIENCY pre-filter only: it keeps
+                    // out-of-sort values from consuming the cartesian-product
+                    // cap. The AUTHORITATIVE check is the shared gate applied at
+                    // substitution time below (`instantiate_bound_vars_in_sort`),
+                    // so removing this line cannot reopen the hole — and a new
+                    // witness source added here inherits the gate for free.
+                    values.retain(|value| value_inhabits_int_type(*value, &ty));
                     values
                         .into_iter()
                         .map(|value| TrustVcExpr::IntLit {
@@ -247,18 +282,24 @@ impl AYEncoder {
         let mut instances: Vec<TrustVcExpr> = Vec::with_capacity(cap);
         let mut indices = vec![0usize; per_var.len()];
         for _ in 0..cap {
-            // `substitute_vars_in_expr` is scope-aware and recurses into *all*
-            // subexpressions (function-call arguments, indexing, etc.) while
-            // respecting nested quantifier binders — unlike the arithmetic-only
-            // `normalize::substitute_vars`, which leaves `FnCall` args untouched
-            // and would yield unsound partial instances like `g(x, y) == 60`.
-            let bindings: HashMap<&str, &TrustVcExpr> = premise
-                .bound_vars
-                .iter()
-                .enumerate()
-                .map(|(position, name)| (name.as_str(), &per_var[position][indices[position]]))
+            // `instantiate_bound_vars_in_sort` applies the shared sort gate and
+            // then substitutes via `substitute_vars_in_expr`, which is
+            // scope-aware and recurses into *all* subexpressions (function-call
+            // arguments, indexing, etc.) while respecting nested quantifier
+            // binders — unlike the arithmetic-only `normalize::substitute_vars`,
+            // which leaves `FnCall` args untouched and would yield unsound
+            // partial instances like `g(x, y) == 60`.
+            let witnesses: Vec<TrustVcExpr> = (0..per_var.len())
+                .map(|position| per_var[position][indices[position]].clone())
                 .collect();
-            instances.push(substitute_vars_in_expr(&full, &bindings));
+            if let Some(instance) = instantiate_bound_vars_in_sort(
+                &full,
+                &premise.bound_vars,
+                &witnesses,
+                &self.var_types,
+            ) {
+                instances.push(instance);
+            }
 
             // Advance the mixed-radix odometer to the next witness combination.
             let mut position = 0;
@@ -311,12 +352,15 @@ fn push_unique(out: &mut Vec<i128>, value: i128, cap: usize) {
 /// that is false at `n = -1`) is detected even when the candidate model never
 /// assigned that boundary value. Every value returned is a legal value of the
 /// type's SMT sort: signed/unsigned bitvector literals re-wrap to the bound
-/// variable's width in the `IntLit` encoder, and `MathInt`/`nat` are unbounded
-/// `Int`. For `nat` only non-negative boundaries are returned because its sort
-/// excludes negative values (the caller also filters, defensively). Boundaries
-/// that are not representable as `i128` (e.g. `u128::MAX`) are simply omitted —
-/// this affects completeness only, never soundness.
-fn int_type_boundaries(ty: &TrustVcType) -> Vec<i128> {
+/// variable's own width, and `MathInt`/`nat` are unbounded `Int`. For `nat` only
+/// non-negative boundaries are returned because its sort excludes negative
+/// values. Boundaries that are not representable as `i128` (e.g. `u128::MAX`)
+/// are simply omitted — this affects completeness only, never soundness.
+///
+/// Every candidate additionally passes through the shared witness-sort gate;
+/// `every_type_boundary_survives_the_gate` (in `encoder::witness_sort`) pins that
+/// this battery is never emptied by it.
+pub(in crate::encoder) fn int_type_boundaries(ty: &TrustVcType) -> Vec<i128> {
     match ty {
         TrustVcType::Int { width } => {
             let width = *width;
@@ -406,4 +450,47 @@ fn bv_to_signed_i128(value: &BigInt, width: u32) -> Option<i128> {
         unsigned
     };
     i128::try_from(&signed).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    //! The value-membership pins that used to live here moved to
+    //! `encoder::witness_sort` together with `value_inhabits_int_type` itself,
+    //! because that check is now shared by every witness source rather than
+    //! owned by this module. `every_type_boundary_survives_the_gate` there still
+    //! cross-checks `int_type_boundaries` from this file, so the battery cannot
+    //! silently empty out.
+    use super::{bv_to_signed_i128, bv_to_unsigned_i128, int_type_boundaries};
+    use crate::ir::TrustVcType;
+    use num_bigint::BigInt;
+
+    /// `int_type_boundaries` must always offer at least the zero-neighbourhood,
+    /// or a premise contradicted at a boundary yields no instance at all.
+    #[test]
+    fn boundaries_are_never_empty_for_integer_sorts() {
+        for ty in [
+            TrustVcType::Uint { width: 8 },
+            TrustVcType::Uint { width: 128 },
+            TrustVcType::Int { width: 8 },
+            TrustVcType::Int { width: 128 },
+            TrustVcType::MathInt,
+            TrustVcType::Nat,
+        ] {
+            assert!(
+                !int_type_boundaries(&ty).is_empty(),
+                "no boundaries for {ty:?}"
+            );
+        }
+        // Non-integer sorts contribute no integer boundaries.
+        assert!(int_type_boundaries(&TrustVcType::Bool).is_empty());
+    }
+
+    /// Both readings of a model bitvector are harvested; the sort gate — not
+    /// this harvest — decides which may be substituted.
+    #[test]
+    fn bitvector_witnesses_expose_both_readings() {
+        let value = BigInt::from(255);
+        assert_eq!(bv_to_unsigned_i128(&value, 8), Some(255));
+        assert_eq!(bv_to_signed_i128(&value, 8), Some(-1));
+    }
 }

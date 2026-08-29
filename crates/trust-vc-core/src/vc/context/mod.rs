@@ -12,6 +12,7 @@ pub use behaviors::{BitshiftBehavior, Div0Behavior, OverflowBehavior, Verificati
 use super::obligation::{InvariantMask, ProofObligation, TypedProofObligation};
 use crate::counterexample_names::CounterexampleVarMeta;
 use crate::ir::{TraitDecl, TraitImplDecl};
+use crate::solver_budget::ConflictBudget;
 use std::collections::{HashMap, HashSet};
 
 /// Typed helper function signature: (return_type, params, trait_bounds).
@@ -103,6 +104,15 @@ impl FunctionContext {
     #[must_use]
     pub fn params(&self) -> &[(String, crate::ir::TrustVcType)] {
         &self.params
+    }
+
+    /// Returns just the parameter NAMES.
+    ///
+    /// Used by encoder setup to tell a parameter (a value the CALLER built, so
+    /// its type invariant may be assumed) from a local (a value this function
+    /// built, whose invariant nothing has established).
+    pub fn param_names(&self) -> impl Iterator<Item = &str> {
+        self.params.iter().map(|(name, _)| name.as_str())
     }
 
     /// Returns the function's return type.
@@ -288,7 +298,8 @@ pub struct VerificationContext {
     /// function never references the impl method (so no body axiom is otherwise
     /// in scope). Populated from source by trait-impl extraction; empty for
     /// directly-constructed contexts (which keep the prior body-axiom path).
-    pub(crate) trait_impl_method_bodies: HashMap<String, crate::ir::ConformanceMethodBody>,
+    pub(crate) trait_impl_method_bodies:
+        HashMap<crate::ir::ImplMethodKey, crate::ir::ConformanceMethodBody>,
     /// The impl method's OWN declared `#[trust_vc::ensures(..)]` postconditions,
     /// keyed by the concrete UF name (`Type__method`). Populated ONLY for
     /// non-exempt impl methods whose single-pure-return body was ALSO captured
@@ -298,7 +309,7 @@ pub struct VerificationContext {
     /// conformance-extension (assert) and the impl-postcondition propagation
     /// axiom. Empty for impls that declare no own `ensures`. Part of the
     /// impl-ensures conformance-extension + propagation (traits_extend_ensures).
-    pub(crate) trait_impl_method_ensures: HashMap<String, Vec<String>>,
+    pub(crate) trait_impl_method_ensures: HashMap<crate::ir::ImplMethodKey, Vec<String>>,
     /// Concrete UF names (`Type__method`) of trait-impl methods that are BLOCKED
     /// by a dedicated ill-formedness error — an impl method declaring its own
     /// `requires`, or its own `returns` while the trait also declares `returns`
@@ -327,6 +338,20 @@ pub struct VerificationContext {
     /// unless the method is a universally-pure read (`is_known_pure_struct_method`).
     /// The user-struct analog of the collection-mutator detection (#62/#63).
     pub(crate) struct_self_receiver_kinds: HashMap<(String, String), SelfReceiverKind>,
+    /// How each TRAIT-DECLARED method takes its `self` receiver, keyed by
+    /// `(declaring_trait_name, method_name)`. Populated from every `trait` item
+    /// in the source file, independent of `#[trust_vc::trait_spec]`.
+    ///
+    /// SOUNDNESS-CRITICAL. This is the GENERIC-receiver analog of
+    /// `struct_self_receiver_kinds`: a receiver whose declared type is a
+    /// `TypeParam` (`fn g<T: Tr>(t: &mut T)`, or its `&mut impl Tr` sugar) has
+    /// NO `Datatype`, so the struct registry can never classify `t.bump()` and
+    /// the receiver was silently left intact across an `&mut self` call — the
+    /// two `t.a()` reads around it collapsed to the same `Tr__a(t)` term and a
+    /// FALSE claim about the difference verified. Keyed by the DECLARING trait
+    /// so a supertrait method resolves through the same closure the caller-side
+    /// `requires` discharge uses.
+    pub(crate) trait_method_self_receiver_kinds: HashMap<(String, String), SelfReceiverKind>,
     /// User-defined struct types registered via `#[trust_vc::struct_spec]`.
     /// Each struct is encoded as a single-variant datatype with constructor,
     /// selectors, and tester axioms. Part of #2419 Slice 1.
@@ -354,10 +379,21 @@ pub struct VerificationContext {
     /// Recorded for mode checking: tracked params carry proof-mode ownership
     /// and should not be duplicated in spec expressions. Part of #2427 Slice 3.
     pub(crate) tracked_params: HashSet<String>,
-    /// Per-function solver timeout override in milliseconds.
-    /// When `Some(ms)`, overrides the default 30,000ms solver timeout.
-    /// Set by `#[trust_vc::rlimit(N)]`. Part of #2489.
+    /// Per-function WALL-CLOCK backstop override, in milliseconds.
+    ///
+    /// This is the liveness backstop, NOT the work budget — see
+    /// `rlimit_conflicts`. Set by the legacy proc-macro-path
+    /// `#[trust_vc::rlimit(N)]` (whose `N` is, and stays, milliseconds —
+    /// `spec_expand.rs`, #2489) and raised as a floor by
+    /// `#[verifier::rlimit(N)]` so that asking for more work never yields
+    /// less wall.
     pub(crate) rlimit_ms: Option<u64>,
+    /// Per-function DETERMINISTIC solver work budget, in SAT conflicts.
+    ///
+    /// `None` means "use the calibrated default"; it does NOT mean "no
+    /// budget" (`ConflictBudget::AyDefault` is the explicit spelling for
+    /// declining to install one). Set by `#[verifier::rlimit(N)]`.
+    pub(crate) rlimit_conflicts: Option<ConflictBudget>,
     /// Demand-driven body-inlining retry policy for contract-insufficient
     /// assertion recovery. Part of #2655.
     pub(crate) demand_inline: DemandInlineConfig,
@@ -635,6 +671,39 @@ impl VerificationContext {
         self.struct_self_receiver_kinds.clone()
     }
 
+    /// Resolves how a TRAIT-DECLARED method takes its `self` receiver.
+    /// `None` means the trait/method pair is not declared in scope — callers
+    /// must then leave the existing (fail-closed-at-lowering) model alone
+    /// rather than invent a mutation model. See
+    /// [`Self::trait_method_self_receiver_kinds`].
+    pub(crate) fn trait_method_self_receiver_kind(
+        &self,
+        trait_name: &str,
+        method: &str,
+    ) -> Option<SelfReceiverKind> {
+        self.trait_method_self_receiver_kinds
+            .get(&(trait_name.to_string(), method.to_string()))
+            .copied()
+    }
+
+    /// Clones the file-wide trait-declared `self`-receiver-kind registry, so a
+    /// standalone visitor (the loop modified-var collector, the return-render
+    /// lane) can classify generic-receiver mutation without borrowing.
+    pub(crate) fn trait_method_self_receiver_kinds_clone(
+        &self,
+    ) -> HashMap<(String, String), SelfReceiverKind> {
+        self.trait_method_self_receiver_kinds.clone()
+    }
+
+    /// Borrowing view of the same registry, for enumeration on a hot path (the
+    /// per-loop/per-branch modified-set rebuild) where a clone would be paid
+    /// once per bound.
+    pub(crate) fn trait_method_self_receiver_kinds(
+        &self,
+    ) -> &HashMap<(String, String), SelfReceiverKind> {
+        &self.trait_method_self_receiver_kinds
+    }
+
     /// Returns the loop-body transitions keyed by invariant name. Each value
     /// maps a modified variable to the scoped-value string for its post-body
     /// value over loop-head variables. Part of M4 loop-body transition.
@@ -890,5 +959,228 @@ impl VerificationContext {
     pub fn push_assume(&mut self, name: &str, condition: &str) {
         self.obligations
             .push(ProofObligation::assume(name, condition));
+    }
+
+    /// Canonical, SOLVER-INPUT-COMPLETE cache key for this context.
+    ///
+    /// Used by the isolated per-edge `decreases` memo
+    /// (`spec_function_catalog::verify_isolated_termination_query`), which
+    /// discharges a freshly-built `VerificationContext::new()` and reuses the
+    /// verdict for a byte-identical repeat. Rendered from the BUILT context, so
+    /// it is a same-input/same-output memo key, never a verdict reused across
+    /// contexts.
+    ///
+    /// COMPLETE BY CONSTRUCTION, NOT BY AUDIT (amendment, 2026-08-25). The
+    /// destructure below is EXHAUSTIVE and carries NO `..` rest pattern, and
+    /// every bound field is rendered. Two consequences, both deliberate:
+    ///
+    /// * adding a field to `VerificationContext` BREAKS THE BUILD here until
+    ///   someone decides how it is keyed — it cannot silently escape the key and
+    ///   turn the memo into cross-context verdict reuse (the cardinal
+    ///   direction). This is the `DemandInlineConfig::cache_key_parts` rule
+    ///   ("adding a policy field must force callers to decide whether it changes
+    ///   verification semantics") applied to the whole context;
+    /// * a NEW MUTATOR added to a caller — a `register_struct_type`, a
+    ///   `source_type_aliases` entry, an `overflow_behavior` — needs no
+    ///   follow-up at all: the field it writes is already in the key, so two
+    ///   semantically different queries separate instead of colliding.
+    ///
+    /// `Debug` is used deliberately rather than hand-written renderings: it is
+    /// derived throughout, so a field added to `VariableDecl` / `ProofObligation`
+    /// / `TrustVcType` enters the key automatically. Hash-ordered containers are
+    /// rendered through the local `render_sorted`, which sorts the per-ENTRY renderings,
+    /// so `HashMap`/`HashSet` iteration order cannot make an identical context
+    /// miss its own entry. A rendering that is nonetheless unstable could only
+    /// ever cause a MISS (a fresh solve) — never a false hit, since a hit
+    /// requires string equality of the whole 50-field rendering.
+    ///
+    /// Field separators are `U+0001`, which Rust's `Debug` for `str` escapes as
+    /// the six characters `\u{1}`, so no separator can be injected from source
+    /// text.
+    ///
+    /// TARGET POINTER WIDTH is part of the key (SOUNDNESS-CRITICAL) even though
+    /// it is not a field. `crate::ir::pointer_width()` is a THREAD-LOCAL
+    /// override read at ENCODE time — `encoder::types` builds a `Seq`'s index
+    /// sort as `Sort::bitvec(pointer_width())` — so two contexts whose
+    /// `TrustVcType`s render IDENTICALLY still produce different solver queries
+    /// at 32 and 64 bits, and the dual-width lane runs the same unit at both.
+    /// Without this component a `Proven` established at 64 bits could be served
+    /// to the 32-bit pass, admitting a body axiom whose measure does not
+    /// actually shrink there.
+    #[must_use]
+    pub(crate) fn isolated_query_key(&self) -> String {
+        use std::fmt::Write as _;
+
+        // EXHAUSTIVE — no `..`. See the doc comment above: a new field must
+        // break this line, not slip past it.
+        let Self {
+            obligations,
+            warnings,
+            variables,
+            variable_index,
+            erased_shared_ref_vars,
+            erased_ghost_vars,
+            function_context,
+            verification_mode,
+            overflow_behavior,
+            div0_behavior,
+            bitshift_behavior,
+            overflow_behavior_explicit,
+            div0_behavior_explicit,
+            bitshift_behavior_explicit,
+            broadcast_use_groups,
+            hidden_fns,
+            assert_by_scopes,
+            loop_entry_scopes,
+            forall_bound_vars,
+            prophecy_bindings,
+            source_type_aliases,
+            loop_guards,
+            loop_modified_vars,
+            loop_body_transitions,
+            helper_functions,
+            trait_decls,
+            trait_impl_decls,
+            trait_impl_method_bodies,
+            trait_impl_method_ensures,
+            conformance_exempt_methods,
+            helper_functions_typed,
+            inherent_methods,
+            struct_self_receiver_kinds,
+            trait_method_self_receiver_kinds,
+            struct_types,
+            derived_partial_eq_types,
+            derived_clone_types,
+            manual_partial_eq_types,
+            type_invariants,
+            invariant_mask,
+            tracked_params,
+            rlimit_ms,
+            rlimit_conflicts,
+            demand_inline,
+            counterexample_var_meta,
+            duplicate_var_error,
+            generic_instantiation_conflict,
+            source_catalog_termination_failure,
+            source_catalog_admitted_definitions,
+            skip_retry_cascade,
+            closure_def_side_failure,
+        } = self;
+
+        /// Renders a hash-ordered container canonically: each entry is rendered
+        /// with `Debug` and the resulting strings are sorted, so iteration order
+        /// cannot change the key.
+        fn render_sorted<T: std::fmt::Debug>(
+            out: &mut String,
+            label: &str,
+            items: impl IntoIterator<Item = T>,
+        ) {
+            let mut rendered: Vec<String> =
+                items.into_iter().map(|item| format!("{item:?}")).collect();
+            rendered.sort_unstable();
+            let _ = write!(out, "{label}={rendered:?}\u{1}");
+        }
+
+        let mut key = String::with_capacity(4096);
+        // Not a field: read at ENCODE time, soundness-critical. See above.
+        let _ = write!(key, "pointer_width={}\u{1}", crate::ir::pointer_width());
+
+        // Ordered containers and scalars: `Debug` directly.
+        let _ = write!(key, "obligations={obligations:?}\u{1}");
+        let _ = write!(key, "warnings={warnings:?}\u{1}");
+        let _ = write!(key, "variables={variables:?}\u{1}");
+        let _ = write!(key, "function_context={function_context:?}\u{1}");
+        let _ = write!(key, "verification_mode={verification_mode:?}\u{1}");
+        let _ = write!(key, "overflow_behavior={overflow_behavior:?}\u{1}");
+        let _ = write!(key, "div0_behavior={div0_behavior:?}\u{1}");
+        let _ = write!(key, "bitshift_behavior={bitshift_behavior:?}\u{1}");
+        let _ = write!(
+            key,
+            "overflow_behavior_explicit={overflow_behavior_explicit:?}\u{1}"
+        );
+        let _ = write!(key, "div0_behavior_explicit={div0_behavior_explicit:?}\u{1}");
+        let _ = write!(
+            key,
+            "bitshift_behavior_explicit={bitshift_behavior_explicit:?}\u{1}"
+        );
+        let _ = write!(key, "broadcast_use_groups={broadcast_use_groups:?}\u{1}");
+        let _ = write!(key, "trait_decls={trait_decls:?}\u{1}");
+        let _ = write!(key, "trait_impl_decls={trait_impl_decls:?}\u{1}");
+        let _ = write!(key, "struct_types={struct_types:?}\u{1}");
+        let _ = write!(key, "invariant_mask={invariant_mask:?}\u{1}");
+        let _ = write!(key, "rlimit_ms={rlimit_ms:?}\u{1}");
+        // Semantically load-bearing, exactly like `rlimit_ms`: the conflict
+        // budget decides where the solver gives up, so a verdict established
+        // under one budget must not be served to a query running another.
+        let _ = write!(key, "rlimit_conflicts={rlimit_conflicts:?}\u{1}");
+        let _ = write!(key, "demand_inline={:?}\u{1}", demand_inline.cache_key_parts());
+        let _ = write!(key, "duplicate_var_error={duplicate_var_error:?}\u{1}");
+        let _ = write!(
+            key,
+            "generic_instantiation_conflict={generic_instantiation_conflict:?}\u{1}"
+        );
+        let _ = write!(
+            key,
+            "source_catalog_termination_failure={source_catalog_termination_failure:?}\u{1}"
+        );
+        let _ = write!(key, "skip_retry_cascade={skip_retry_cascade:?}\u{1}");
+        let _ = write!(
+            key,
+            "closure_def_side_failure={closure_def_side_failure:?}\u{1}"
+        );
+
+        // Hash-ordered containers: canonicalised.
+        render_sorted(&mut key, "variable_index", variable_index);
+        render_sorted(&mut key, "erased_shared_ref_vars", erased_shared_ref_vars);
+        render_sorted(&mut key, "erased_ghost_vars", erased_ghost_vars);
+        render_sorted(&mut key, "hidden_fns", hidden_fns);
+        render_sorted(&mut key, "assert_by_scopes", assert_by_scopes);
+        render_sorted(&mut key, "loop_entry_scopes", loop_entry_scopes);
+        render_sorted(&mut key, "forall_bound_vars", forall_bound_vars);
+        render_sorted(&mut key, "prophecy_bindings", prophecy_bindings);
+        render_sorted(&mut key, "source_type_aliases", source_type_aliases);
+        render_sorted(&mut key, "loop_guards", loop_guards);
+        render_sorted(&mut key, "loop_modified_vars", loop_modified_vars);
+        render_sorted(&mut key, "loop_body_transitions", loop_body_transitions);
+        render_sorted(&mut key, "helper_functions", helper_functions);
+        render_sorted(&mut key, "trait_impl_method_bodies", trait_impl_method_bodies);
+        render_sorted(
+            &mut key,
+            "trait_impl_method_ensures",
+            trait_impl_method_ensures,
+        );
+        render_sorted(
+            &mut key,
+            "conformance_exempt_methods",
+            conformance_exempt_methods,
+        );
+        render_sorted(&mut key, "helper_functions_typed", helper_functions_typed);
+        render_sorted(&mut key, "inherent_methods", inherent_methods);
+        render_sorted(
+            &mut key,
+            "struct_self_receiver_kinds",
+            struct_self_receiver_kinds,
+        );
+        render_sorted(
+            &mut key,
+            "trait_method_self_receiver_kinds",
+            trait_method_self_receiver_kinds,
+        );
+        render_sorted(
+            &mut key,
+            "derived_partial_eq_types",
+            derived_partial_eq_types,
+        );
+        render_sorted(&mut key, "derived_clone_types", derived_clone_types);
+        render_sorted(&mut key, "manual_partial_eq_types", manual_partial_eq_types);
+        render_sorted(&mut key, "type_invariants", type_invariants);
+        render_sorted(&mut key, "tracked_params", tracked_params);
+        render_sorted(&mut key, "counterexample_var_meta", counterexample_var_meta);
+        render_sorted(
+            &mut key,
+            "source_catalog_admitted_definitions",
+            source_catalog_admitted_definitions,
+        );
+        key
     }
 }

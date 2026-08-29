@@ -33,10 +33,26 @@ pub(super) fn try_check_sat_with_details(solver: &mut Solver) -> Result<SolveDet
         .map_err(|e| SolverError::SolverPanic(extract_panic_reason(&*e)))
 }
 
+/// Render an ay `UnknownReason` for a user-facing message.
+///
+/// THE TWO BUDGET EXHAUSTIONS MUST NOT READ ALIKE. trust-vc bounds every
+/// solve twice — a DETERMINISTIC conflict budget (`:rlimit`) and a
+/// WALL-CLOCK liveness backstop (`set_timeout`) — and a user debugging a
+/// failure needs to know which one fired, because the remedies are opposite:
+/// "raise `#[verifier::rlimit]`, this proof genuinely needs more work" versus
+/// "your machine was too slow / something is hanging, and the verdict you got
+/// is not a property of your program". ay's own Display already separates
+/// them (`resourceout` vs `timeout`); this expands `resourceout` so the
+/// distinction survives into the message a user actually reads.
 pub(super) fn format_unknown_reason(reason: Option<UnknownReason>) -> String {
-    reason
-        .map(|reason| reason.to_string())
-        .unwrap_or_else(|| "unspecified".to_string())
+    match reason {
+        Some(UnknownReason::ResourceLimit) => {
+            "resourceout — deterministic conflict budget exhausted (#[verifier::rlimit])"
+                .to_string()
+        }
+        Some(reason) => reason.to_string(),
+        None => "unspecified".to_string(),
+    }
 }
 
 /// True iff a candidate SAT model pins NO concrete-sorted value — every

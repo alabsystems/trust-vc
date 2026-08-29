@@ -46,8 +46,28 @@ impl<'a> AstExpressionParser<'a> {
                 return Some(len);
             }
         }
+        // Derived collections that explicitly DECLINED a cardinality must not
+        // reach the name fallback. `s.filter(p)` / `s.map(f)` / `s.union(t)` are
+        // anonymous results, so `receiver_name` is the *source* collection's
+        // name (`lowered_receiver_name` walks a chained `CollectionOp` down to
+        // its base receiver). Falling back would answer `s.filter(p).len()` with
+        // `s.len()` — the source's cardinality, which is not the derived one's.
+        if self.len_declined_terms.contains(&receiver) {
+            return None;
+        }
         // Name fallback: covers declared variables during migration.
         receiver_name.and_then(|name| self.collection_lengths.get(name).copied())
+    }
+
+    /// Mark `term` as a derived collection with no known cardinality.
+    ///
+    /// Pairs with every `register_collection_meta` call that passes
+    /// `len_term: None` because the length genuinely cannot be computed (as
+    /// opposed to "not filled in yet"). Sound by construction: it only ever
+    /// removes a length answer, so `.len()`/`.is_empty()` fail closed instead of
+    /// silently reading the source collection's length.
+    pub(super) fn decline_collection_len(&mut self, term: Term) {
+        self.len_declined_terms.insert(term);
     }
 
     /// Register term-keyed metadata for a collection value.

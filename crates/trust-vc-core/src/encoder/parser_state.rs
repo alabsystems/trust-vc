@@ -248,6 +248,11 @@ pub struct AstExpressionParser<'a> {
     /// a real `solver.forall()` quantifier to preserve universal strength.
     /// Skolemization is only correct for assertions (negated by refutation).
     pub(super) in_assumption_context: bool,
+    /// Mirror of `EncoderState::pending_universal_closure`: the expression being
+    /// encoded will be universally closed over its free variables once encoding
+    /// returns. Top-level `try_assert_term` of any fact mentioning them would be
+    /// captured by that binder, so such hoists must be declined.
+    pub(super) pending_universal_closure: bool,
     /// When true, a TOP-LEVEL positive assumption existential is eager-Skolemized
     /// to fresh consts at ENCODE time (pre-watermark) rather than emitted as a
     /// real `try_exists` (whose Skolem witness is minted during solving,
@@ -271,6 +276,25 @@ pub struct AstExpressionParser<'a> {
     /// `collection_lengths` remains for backward compatibility during migration;
     /// new code should prefer `lookup_collection_len()` which resolves here first.
     pub(super) collection_meta_by_term: std::collections::HashMap<Term, CollectionMeta>,
+    /// Derived-collection terms whose cardinality is DELIBERATELY unconstrained.
+    ///
+    /// `CollectionMeta::len_term == None` is ambiguous: for a declared variable
+    /// it means "the length is only in the name-keyed `collection_lengths` map",
+    /// while for a derived result (`Set::filter`, `Set::map`, `Set::new`,
+    /// `Set::union`/`intersect`/`difference`, `Map::filter_keys`,
+    /// `Seq::to_set`) it means "this collection's cardinality is NOT known".
+    /// `lookup_collection_len`'s name fallback resolved the *source* collection's
+    /// length for the second case, so `s.filter(p).len()` returned `s.len()` —
+    /// a cardinality that is FALSE in general (a filtered set is smaller), which
+    /// let a false `f.len() == s.len()` verify.
+    ///
+    /// Membership of this set is the authoritative "no length" answer: the name
+    /// fallback is skipped and `.len()`/`.is_empty()` fail closed. It is only
+    /// ever inserted into by `decline_collection_len`, called from the derived
+    /// encoders that already document "no len metadata (fail-closed on
+    /// cardinality)" — declared variables never enter it, so the migration
+    /// fallback they depend on is untouched.
+    pub(super) len_declined_terms: std::collections::HashSet<Term>,
     /// Same-index read-back provenance for `Seq::push` result terms (see
     /// [`PushReadback`]). Keyed by the push result (`store(..)`) term.
     pub(super) push_readback_by_term: std::collections::HashMap<Term, PushReadback>,
@@ -370,6 +394,11 @@ pub struct AstExpressionParser<'a> {
     /// where BV-length overflow obligations cannot be decided (regression).
     /// Defaults false; flipping it is monotone within one query.
     pub(super) map_subset_seen: bool,
+    /// Mirror of `VerificationState::seq_element_model_demanded`. When `false`,
+    /// `encode_index_shifted_seq` / `encode_seq_concat` mint their result
+    /// carrier and its LENGTH metadata but emit no element axioms.
+    /// Defaults to `true` (full model) for every parser that is not seeded.
+    pub(super) seq_element_model_demanded: bool,
     /// Memoizes pure, deterministic spec-collection constructors
     /// (`Set::new`/`Set::map`/`Set::filter`) within one verification query.
     ///
@@ -648,9 +677,11 @@ impl<'a> AstExpressionParser<'a> {
             overflow_checks: Vec::new(),
             const_fold_overflow_verdicts: Vec::new(),
             in_assumption_context: false,
+            pending_universal_closure: false,
             skolemize_top_level_assumption_exists: false,
             preserve_assumption_quantifier_sorts: false,
             collection_meta_by_term,
+            len_declined_terms: std::collections::HashSet::new(),
             push_readback_by_term: std::collections::HashMap::new(),
             #[cfg(feature = "native-seq")]
             native_seq_ground_element_aliases: std::collections::HashMap::new(),
@@ -675,6 +706,7 @@ impl<'a> AstExpressionParser<'a> {
             nat_cast_aliases: std::collections::HashMap::new(),
             map_dom_bridges: std::collections::HashMap::new(),
             map_subset_seen: false,
+            seq_element_model_demanded: true,
             pure_collection_cache: std::collections::HashMap::new(),
             euclid_div_mod_aliases: std::collections::HashMap::new(),
             euclid_guarded_lemma_pairs: std::collections::HashSet::new(),

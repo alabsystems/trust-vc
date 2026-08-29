@@ -50,7 +50,10 @@ expect_verified(&result, "description");
 Available result oracles: expect_verified, expect_not_verified, expect_counterexample, expect_error, expect_unknown, expect_fail_closed, expect_verified_or_unknown.
 
 ## Code Style
-- Follow Rust standard formatting (targo fmt)
+- Follow Rust standard formatting — run it as `scripts/rust_frontend.sh fmt --all`
+  (`--check` to gate). Never bare `cargo fmt` or `targo fmt`: the pinned `trust`
+  toolchain ships no `cargo-fmt`, and off the rustup shim the spelling silently
+  falls through to a stock rustfmt. The script refuses instead.
 - 500 line max per file
 - pub(crate) by default; pub only for crate API
 - Use thiserror for error types

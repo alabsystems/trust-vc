@@ -188,6 +188,16 @@ pub(crate) struct VerificationState {
     /// must NOT be Skolemized — use `solver.forall()` to preserve universal
     /// strength. Set by `parse_and_add_assumption()`. #2187.
     pub(crate) in_assumption_context: bool,
+    /// True while encoding an expression whose FREE variables are about to be
+    /// universally closed by the caller *after* encoding — the
+    /// `add_typed_broadcast` shape, which encodes `f(x) == body` with `x` bound
+    /// to an ordinary top-level term and only then wraps the result in
+    /// `try_forall`. No `real_quantifier_depth` is live during that encode, so
+    /// nothing else in the encoder can tell that a binder is coming. Any helper
+    /// that would hoist a fact mentioning those variables to the SOLVER TOP
+    /// LEVEL must decline while this is set, or the binder captures and the
+    /// axiom degenerates. See `bind_datatype_match_result`.
+    pub(crate) pending_universal_closure: bool,
     /// When true, a TOP-LEVEL positive assumption existential `exists v. P(v)`
     /// is eager-Skolemized to fresh consts `c` asserting `P(c)` at ENCODE time
     /// (pre-quantifier-loop-watermark), instead of emitting a real `try_exists`
@@ -341,6 +351,23 @@ pub(crate) struct VerificationState {
     /// "in `[0, 2^pw - 1]` by an already-asserted fact" and NON-membership as
     /// "unknown / possibly unbounded" — never the reverse.
     pub(crate) usize_bounded_lens: std::collections::HashSet<ay_dpll::api::Term>,
+    /// Whether this query's Seq element models must be encoded in full.
+    ///
+    /// `true` (the fail-closed default) means every derived Seq carrier
+    /// (`__seq_shifted`, `__seq_concat`) gets its defining `forall`, its ground
+    /// instances and the pure-BV length companions that keep that `forall`
+    /// model-validatable. `false` is installed by
+    /// `bootstrap_prepared_encoder_with_prune_plan` only when
+    /// `pruning::context_element_demand` proves that NOTHING in the whole query
+    /// — no obligation, assumption, invariant, broadcast or type invariant —
+    /// reads an element or a membership, so the derived carriers keep only
+    /// their length metadata.
+    ///
+    /// SOUNDNESS: clearing this drops solver ASSERTIONS only, never proof
+    /// obligations, so the context strictly weakens and a verdict can only move
+    /// from `Verified` toward `Counterexample`/`Unknown`. See
+    /// `pruning::context_element_demand`.
+    pub(crate) seq_element_model_demanded: bool,
 }
 
 impl VerificationState {
@@ -352,6 +379,7 @@ impl VerificationState {
             interpreted_trigger_ground_replays: 0,
             ground_pool: ground_pool::GroundTermPool::default(),
             in_assumption_context: false,
+            pending_universal_closure: false,
             skolemize_top_level_assumption_exists: false,
             preserve_assumption_quantifier_sorts: false,
             active_solver_mode: None,
@@ -378,6 +406,7 @@ impl VerificationState {
             pure_collection_cache: std::collections::HashMap::new(),
             pinned_seq_lens: std::collections::HashMap::new(),
             usize_bounded_lens: std::collections::HashSet::new(),
+            seq_element_model_demanded: true,
         }
     }
 }

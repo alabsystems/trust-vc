@@ -237,3 +237,178 @@ fn no_leak(mut i: i32) {
          got: {result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FRESH IMMUTABLE `let` IN THE LOOP BODY.
+//
+// A `let x = <pure-arith>;` binds a NEW name and re-invalidates nothing, so the
+// body stays a flat straight line and every modified var still ends with an
+// EXACT scoped value. Admitting it is a capability gain: the shape used to fall
+// back to pure havoc and over-reject. The SHADOW pin below is what keeps that
+// admission sound and is the load-bearing half of this block.
+// ---------------------------------------------------------------------------
+
+/// POSITIVE: a fresh `let` the transition never reads must not knock the body
+/// out of exact transition capture. Same program as
+/// `test_count_up_invariant_on_modified_var_verifies` plus one dead binding.
+#[test]
+fn test_fresh_let_unused_still_captures_transition() {
+    let code = r#"
+#[trust_vc::proof]
+#[trust_vc::requires(i <= 10)]
+fn let_unused(mut i: i32) {
+    while i < 10 {
+        trust_vc::invariant!(i <= 10);
+        let x: i32 = 999;
+        i = i + 1;
+    }
+    trust_vc::assert!(i == 10);
+}
+"#;
+    let result = verify("let_unused", code, "let_unused");
+    assert!(
+        result.is_verified(),
+        "a fresh immutable pure-arith `let` re-invalidates nothing, so the exact \
+         single-iteration transition must still be captured, got: {result:?}"
+    );
+}
+
+/// POSITIVE: a fresh `let` READ by the transition — the bound value must be
+/// value-numbered into the assignment, giving the exact transition `i' = i + 1`.
+#[test]
+fn test_fresh_let_used_by_transition_verifies() {
+    let code = r#"
+#[trust_vc::proof]
+#[trust_vc::requires(i <= 10)]
+fn let_used(mut i: i32) {
+    while i < 10 {
+        trust_vc::invariant!(i <= 10);
+        let step: i32 = 1;
+        i = i + step;
+    }
+    trust_vc::assert!(i == 10);
+}
+"#;
+    let result = verify("let_used", code, "let_used");
+    assert!(
+        result.is_verified(),
+        "a fresh `let` read by the assignment must be value-numbered into the \
+         transition, got: {result:?}"
+    );
+}
+
+/// LIAR of the same shape: the `let` binds `2`, so `i` steps past `10` and the
+/// invariant `i <= 10` is NOT preserved. Must be refuted — this is what proves
+/// the two positives above are not a blanket accept of anything with a `let`.
+#[test]
+fn test_fresh_let_used_liar_fails_closed() {
+    let code = r#"
+#[trust_vc::proof]
+#[trust_vc::requires(i <= 10)]
+fn let_used_liar(mut i: i32) {
+    while i < 10 {
+        trust_vc::invariant!(i <= 10);
+        let step: i32 = 2;
+        i = i + step;
+    }
+    trust_vc::assert!(i == 10);
+}
+"#;
+    let result = verify("let_used_liar", code, "let_used_liar");
+    assert!(
+        !result.is_verified(),
+        "a `let`-carried step of 2 breaks the invariant, so this must be refuted, \
+         got: {result:?}"
+    );
+}
+
+/// NARROWNESS PIN #1 — THE FALSE-VERIFY GUARD.
+///
+/// `let i` shadows the loop-MODIFIED `i`. This is legal Rust: the shadow dies at
+/// block end, so the real `i` really is incremented every iteration and reaches
+/// `10`, making the post-loop `assert!(i <= 0)` FALSE. The guard is on `n`, so
+/// the exit fact `n >= 10` says nothing about `i` — the assumption set stays
+/// satisfiable and the vacuous-truth detector cannot mask the outcome.
+///
+/// If a shadowing `let` were admitted, the end-of-body capture would read
+/// `lookup_scoped("i") == "0"` and pin the transition to `i' = 0`, making the
+/// false invariant `i <= 0` "preserved" and PROVING the false assertion.
+/// MEASURED: with the shadow pin disabled this program VERIFIES.
+#[test]
+fn test_let_shadowing_modified_var_fails_closed() {
+    let code = r#"
+#[trust_vc::proof]
+#[trust_vc::requires(n <= 10)]
+#[trust_vc::requires(i <= 0)]
+fn let_shadow_modified(mut i: i32, mut n: i32) {
+    while n < 10 {
+        trust_vc::invariant!(i <= 0);
+        n = n + 1;
+        i = i + 1;
+        let i: i32 = 0;
+    }
+    trust_vc::assert!(i <= 0);
+}
+"#;
+    let result = verify("let_shadow_modified", code, "let_shadow_modified");
+    assert!(
+        !result.is_verified(),
+        "a `let` shadowing a loop-modified var must NOT be admitted into exact \
+         transition capture — the capture would read the shadow, which Rust \
+         reverts at block end (a WRONG transition, i.e. a false Verified), \
+         got: {result:?}"
+    );
+}
+
+/// NARROWNESS PIN #2: `let mut` is re-assignable, so it is not a one-shot
+/// definition and stays out of the gate. Conservative — this program is TRUE
+/// and is over-rejected, which is the safe direction.
+#[test]
+fn test_let_mut_stays_out_of_exact_capture() {
+    let code = r#"
+#[trust_vc::proof]
+#[trust_vc::requires(i <= 10)]
+fn let_mut_body(mut i: i32) {
+    while i < 10 {
+        trust_vc::invariant!(i <= 10);
+        let mut t: i32 = 0;
+        i = i + 1;
+    }
+    trust_vc::assert!(i == 10);
+}
+"#;
+    let result = verify("let_mut_body", code, "let_mut_body");
+    assert!(
+        !result.is_verified(),
+        "`let mut` can be re-assigned later in the body, so it must not be \
+         admitted into exact transition capture (fail-closed), got: {result:?}"
+    );
+}
+
+/// NARROWNESS PIN #3: a call initializer is exactly what `expr_is_pure_arith`
+/// exists to exclude — it need not be a total, side-effect-free function of the
+/// loop-head state. Conservative over-rejection.
+#[test]
+fn test_let_with_call_initializer_stays_out_of_exact_capture() {
+    let code = r#"
+#[trust_vc::proof]
+fn ident(x: i32) -> i32 { x }
+
+#[trust_vc::proof]
+#[trust_vc::requires(i <= 10)]
+fn let_call_body(mut i: i32) {
+    while i < 10 {
+        trust_vc::invariant!(i <= 10);
+        let t: i32 = ident(3);
+        i = i + 1;
+    }
+    trust_vc::assert!(i == 10);
+}
+"#;
+    let result = verify("let_call_body", code, "let_call_body");
+    assert!(
+        !result.is_verified(),
+        "a call initializer is not pure arithmetic and must keep the body out of \
+         exact transition capture (fail-closed), got: {result:?}"
+    );
+}

@@ -12,6 +12,7 @@
 
 use crate::error::{TrustVcError, TrustVcResult};
 use crate::mode::FunctionMode;
+use crate::solver_budget::{ConflictBudget, RLIMIT_UNIT_CONFLICTS};
 use crate::vc::SolverMode;
 use syn::punctuated::Punctuated;
 use syn::Token;
@@ -100,9 +101,9 @@ pub(crate) fn extract_function_solver_mode(
                     // closed on malformed input, matching the upstream
                     // attribute error) so EVERY caller of this extractor
                     // rejects a bad rlimit; the value itself is consumed by
-                    // `extract_function_rlimit_ms` on the verified function.
+                    // `extract_function_rlimit` on the verified function.
                     syn::Meta::List(list) if is_rlimit_path(&list.path) => {
-                        parse_rlimit_ms(list.tokens.clone())?;
+                        parse_rlimit_units(list.tokens.clone())?;
                     }
                     // Prover-shape directives that trust-vc already honors by
                     // default — accepted as NO-OPS so they stop over-rejecting.
@@ -165,35 +166,84 @@ fn is_ignored_verifier_option(path: &syn::Path) -> bool {
     })
 }
 
-/// Sentinel for `#[verifier::rlimit(infinity)]`: effectively unlimited (one
-/// year of nominal solver budget) while staying safe for `Instant + Duration`
+/// Wall-clock floor for `#[verifier::rlimit(infinity)]`: effectively
+/// unlimited (one year) while staying safe for `Instant + Duration`
 /// arithmetic in the watchdog derivations (`u64::MAX` milliseconds would
 /// overflow the monotonic clock's nanosecond representation).
-pub(crate) const RLIMIT_INFINITY_MS: u64 = 31_536_000_000;
+///
+/// This is the LIVENESS backstop only. The work budget for `infinity` is
+/// [`ConflictBudget::AyDefault`], which is the bound that actually carries
+/// the attribute's meaning.
+pub(crate) const RLIMIT_INFINITY_WALL_MS: u64 = 31_536_000_000;
+
+/// The per-function budget requested by an `rlimit` attribute.
+///
+/// TWO NUMBERS, BECAUSE THE ATTRIBUTE MEANS TWO THINGS NOW. `conflicts` is
+/// the deterministic work grant — the faithful reading of upstream's resource
+/// budget. `wall_floor_ms` exists only so that raising `N` can never make a
+/// function's envelope SMALLER on any axis: it floors the wall backstop at
+/// the number of milliseconds the pre-migration mapping would have granted,
+/// and is discarded when it is below the default backstop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FunctionRlimit {
+    /// Deterministic work budget.
+    pub(crate) conflicts: ConflictBudget,
+    /// Wall-clock floor in milliseconds. Never lowers the default backstop.
+    pub(crate) wall_floor_ms: u64,
+}
 
 /// Extracts the per-function solver budget from Verus-style
 /// `#[verifier::rlimit(N)]` / `#[verifier::rlimit(infinity)]` attributes
 /// (path form) and `#[verifier(rlimit(N))]` (list form), plus the same
 /// spellings under `trust_vc::`.
 ///
-/// Upstream semantics (rust_verify `verifier.rs::set_rlimit`, `attributes.rs::
-/// get_rlimit_arg`): `rlimit(N)` grants `N × RLIMIT_PER_SECOND` Z3 resource
-/// units — i.e. roughly N SECONDS of reference solver work — and `infinity`
-/// (or `0`, which Z3 reads as unlimited) disables the budget. Faithful
-/// mapping onto trust-vc's per-obligation `rlimit_ms` nominal solver budget:
+/// UPSTREAM SEMANTICS (rust_verify `verifier.rs::set_rlimit`,
+/// `attributes.rs::get_rlimit_arg`): `rlimit(N)` grants
+/// `N × RLIMIT_PER_SECOND` Z3 RESOURCE UNITS — a DETERMINISTIC work budget —
+/// and `infinity` (or `0`, which Z3 reads as unlimited) disables it.
+///
+/// WHAT THIS USED TO DO, AND WHY IT WAS WRONG. The previous mapping sent
+/// `rlimit(N)` to `N × 1000` MILLISECONDS of wall clock. That is only a
+/// faithful translation on an unloaded reference machine: under load the same
+/// attribute silently buys LESS work, and the verdict moves with it. Measured
+/// in this repo (2026-08-20): one query, one process, a 1450ms wall deadline
+/// — `unknown` at 1466ms and `unsat` at 1386ms with every search counter
+/// byte-identical. A budget whose meaning depends on who else is using the
+/// CPU is not a budget.
+///
+/// WHAT IT DOES NOW:
 ///
 /// * `rlimit(N)` (integer or float, matching upstream `f32` parsing) →
-///   `N × 1000` ms.
-/// * `rlimit(infinity)` and `rlimit(0)` → [`RLIMIT_INFINITY_MS`].
+///   `N × RLIMIT_UNIT_CONFLICTS` SAT conflicts of deterministic work, plus a
+///   wall FLOOR of `N × 1000` ms so no function's envelope shrinks relative
+///   to the old mapping.
+/// * `rlimit(infinity)` and `rlimit(0)` → [`ConflictBudget::AyDefault`] with
+///   the [`RLIMIT_INFINITY_WALL_MS`] wall floor. This is a DELIBERATE
+///   departure from a literal reading of upstream: `:rlimit 0` would be the
+///   literal translation, and in ay it additionally disables ay's own default
+///   ground allowance on both the conflict and decision axes. Paired with the
+///   ~1-year wall floor `infinity` also installs, that combination has no
+///   termination bound left — a diverging query would hang the verifier
+///   instead of failing closed. Declining to install a budget keeps ay's
+///   calibrated default in force, which at 400k conflicts is ~1,260x the
+///   heaviest solve ever measured here: practically unlimited, still bounded.
 /// * malformed arguments fail closed with the verbatim upstream message
 ///   "expected number, or `infinity` for rlimit".
 /// * duplicate rlimit attributes: the last one wins (upstream `parse_attrs`
 ///   overwrites `vs.rlimit`).
 ///
-/// This is deliberately distinct from the legacy proc-macro-path
-/// `#[trust_vc::rlimit(N)]` attribute, whose N is already in milliseconds
-/// (`spec_expand.rs`, #2489) and which is left untouched.
-pub(crate) fn extract_function_rlimit_ms(attrs: &[syn::Attribute]) -> TrustVcResult<Option<u64>> {
+/// THE LEGACY PROC-MACRO ATTRIBUTE IS DELIBERATELY NOT CONVERGED. The
+/// proc-macro-path `#[trust_vc::rlimit(N)]` (`spec_expand.rs`, #2489) takes N
+/// in MILLISECONDS and emits `set_rlimit(N)`, which still sets the wall
+/// backstop. It STAYS in milliseconds: it is trust-vc's own knob for the
+/// liveness bound, it has never claimed Verus parity, and silently
+/// reinterpreting an existing millisecond argument as a conflict count would
+/// change every existing use of it by a factor of 40 with no diagnostic.
+/// The two attributes now name two genuinely different bounds, which is the
+/// honest state of affairs rather than an accident.
+pub(crate) fn extract_function_rlimit(
+    attrs: &[syn::Attribute],
+) -> TrustVcResult<Option<FunctionRlimit>> {
     let mut rlimit = None;
 
     for attr in attrs {
@@ -215,7 +265,7 @@ pub(crate) fn extract_function_rlimit_ms(attrs: &[syn::Attribute]) -> TrustVcRes
             for meta in args {
                 if let syn::Meta::List(list) = &meta {
                     if is_rlimit_path(&list.path) {
-                        rlimit = Some(parse_rlimit_ms(list.tokens.clone())?);
+                        rlimit = Some(parse_rlimit_units(list.tokens.clone())?);
                     }
                 }
             }
@@ -224,7 +274,7 @@ pub(crate) fn extract_function_rlimit_ms(attrs: &[syn::Attribute]) -> TrustVcRes
                 // Bare `#[verifier::rlimit]` with no argument.
                 return Err(rlimit_arg_error());
             };
-            rlimit = Some(parse_rlimit_ms(list.tokens.clone())?);
+            rlimit = Some(parse_rlimit_units(list.tokens.clone())?);
         }
     }
 
@@ -240,13 +290,18 @@ fn rlimit_arg_error() -> TrustVcError {
     }
 }
 
-/// Parse the argument tokens of an `rlimit(...)` attribute to a millisecond
-/// budget. Accepts exactly one token: an unsuffixed integer or float literal
-/// (upstream parses the text as `f32`), or the ident `infinity`.
-fn parse_rlimit_ms(tokens: proc_macro2::TokenStream) -> TrustVcResult<u64> {
+/// Parse the argument tokens of an `rlimit(...)` attribute into a
+/// deterministic conflict budget plus a wall-clock floor. Accepts exactly one
+/// token: an unsuffixed integer or float literal (upstream parses the text as
+/// `f32`), or the ident `infinity`.
+fn parse_rlimit_units(tokens: proc_macro2::TokenStream) -> TrustVcResult<FunctionRlimit> {
+    let unbounded = FunctionRlimit {
+        conflicts: ConflictBudget::AyDefault,
+        wall_floor_ms: RLIMIT_INFINITY_WALL_MS,
+    };
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     match trees.as_slice() {
-        [proc_macro2::TokenTree::Ident(ident)] if ident == "infinity" => Ok(RLIMIT_INFINITY_MS),
+        [proc_macro2::TokenTree::Ident(ident)] if ident == "infinity" => Ok(unbounded),
         [proc_macro2::TokenTree::Literal(literal)] => {
             let value: f64 = literal
                 .to_string()
@@ -257,14 +312,30 @@ fn parse_rlimit_ms(tokens: proc_macro2::TokenStream) -> TrustVcResult<u64> {
             }
             if value == 0.0 {
                 // Upstream forwards 0 to Z3, which reads a zero rlimit as
-                // unlimited (verifier.rs::set_rlimit).
-                return Ok(RLIMIT_INFINITY_MS);
+                // unlimited (verifier.rs::set_rlimit). ay agrees: `:rlimit 0`
+                // is "no limit".
+                return Ok(unbounded);
             }
-            let ms = (value * 1000.0).round();
-            if ms >= RLIMIT_INFINITY_MS as f64 {
-                return Ok(RLIMIT_INFINITY_MS);
-            }
-            Ok((ms as u64).max(1))
+            let conflicts = (value * RLIMIT_UNIT_CONFLICTS as f64).round();
+            // Saturate rather than wrap: an absurd `rlimit(1e30)` asked for
+            // MORE work, so it must not land on a small budget.
+            let conflicts = if conflicts >= u64::MAX as f64 {
+                ConflictBudget::AyDefault
+            } else {
+                // `bounded` floors at 1 conflict; a rounded-to-zero grant must
+                // never widen into AyDefault, which would mean the opposite.
+                ConflictBudget::bounded(conflicts as u64)
+            };
+            let wall = (value * 1000.0).round();
+            let wall_floor_ms = if wall >= RLIMIT_INFINITY_WALL_MS as f64 {
+                RLIMIT_INFINITY_WALL_MS
+            } else {
+                (wall as u64).max(1)
+            };
+            Ok(FunctionRlimit {
+                conflicts,
+                wall_floor_ms,
+            })
         }
         _ => Err(rlimit_arg_error()),
     }

@@ -1452,11 +1452,91 @@ fn member_edges_decrease(
         ));
     }
 
-    match ctx.verify() {
+    verify_isolated_termination_query(&ctx)
+}
+
+thread_local! {
+    /// Memo for [`verify_isolated_termination_query`], keyed by
+    /// [`VerificationContext::isolated_query_key`].
+    ///
+    /// ONE recursive cycle is Stage-2 re-proved by several independent
+    /// extraction stages, each of which discharges the SAME isolated query.
+    /// `vc_extraction::ill_founded_recursive_function_names` is called from five
+    /// separate places (`collect_referenced_sibling_helper_contracts`,
+    /// `collect_source_broadcast_lemmas`, `apply_inherent_impl_methods`,
+    /// `apply_sibling_helper_functions`, `apply_block_use_alias_helper_functions`)
+    /// and its Stage-2 cache is a LOCAL `BTreeMap` that dies with each call, so
+    /// it deduplicates only within one call; `SpecFunctionCatalog::
+    /// cycle_termination_check` then runs the same cycle again behind its own
+    /// per-catalog cache, and the catalog is rebuilt per verified function.
+    ///
+    /// Measured on `crates/trust-vc-core/tests/data/datatype_self_neq_probe.rs`
+    /// at ay f1f93ed25: the one `dbl` `decreases(n)` query — 4 assertions, ~1.1 kB
+    /// — is solved FOUR times per verified function at 10-19 s each, because a
+    /// datatype measure routes every `check_sat` through ay's deferred-trust
+    /// re-solve. It is charged even for functions that never call `dbl`.
+    ///
+    /// Thread-local, not a `static`: `pointer_width()` is itself a thread-local
+    /// override and the parallel verification bridge gives each thread its own
+    /// target width, so a cross-thread memo could serve a 64-bit verdict to a
+    /// 32-bit pass. (The width is in the key as well; the thread-local is the
+    /// belt to that suspenders.)
+    static TERMINATION_QUERY_MEMO: RefCell<HashMap<String, TerminationCheck>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Upper bound on retained memo entries. One verification pass needs a handful;
+/// the cap only stops an unbounded batch run (`cargo trust-vc check` over a whole
+/// crate) from retaining every cycle it has ever seen.
+///
+/// At the cap the memo STOPS ACCEPTING new entries rather than clearing itself:
+/// clearing would give a large crate a refill cliff where the entries in active
+/// use are dropped wholesale and every cycle is re-solved. Retaining what is
+/// already proven and declining to grow is strictly better and equally bounded.
+const TERMINATION_QUERY_MEMO_CAP: usize = 4096;
+
+/// Discharge the isolated per-edge decrease query, reusing a verdict already
+/// obtained for a byte-identical query on this thread.
+///
+/// SOUNDNESS: this is a memo, not a heuristic. The key is complete for the
+/// solver input (see [`VerificationContext::isolated_query_key`], which is an
+/// EXHAUSTIVE destructure of the context — a new field breaks the build there
+/// rather than silently escaping the key), so a hit returns the verdict
+/// `ctx.verify()` itself produced for this exact query. It cannot admit a
+/// definition that a fresh solve would refuse, and it cannot refuse one that a
+/// fresh solve would admit — it only removes repetitions. It also makes the
+/// per-run answer MORE stable, not less: `verify()` on this shape is observably
+/// nondeterministic near its deadline (the same query has returned both a
+/// decided verdict and `Unknown` across runs), and proving it once per key
+/// removes the chance that two stages of one run disagree about the same cycle.
+///
+/// ONLY DECIDED VERDICTS ARE RETAINED (amendment, 2026-08-25).
+/// `TerminationCheck::Inconclusive` carries a watchdog timeout / resource
+/// refusal, which is a property of the RUN, not of the query. Memoizing it would
+/// make one transient flake STICKY for the rest of the thread —
+/// `source_cycle_terminates` maps `Inconclusive` to `Some(false)` (suppress), so
+/// a single flaky solve would suppress that cycle for every subsequent function
+/// in the run instead of one. That is fail-closed but converts a per-function
+/// flake into a run-wide one, so an inconclusive result is re-solved next time.
+fn verify_isolated_termination_query(ctx: &VerificationContext) -> TerminationCheck {
+    let key = ctx.isolated_query_key();
+    if let Some(hit) = TERMINATION_QUERY_MEMO.with(|memo| memo.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let verdict = match ctx.verify() {
         VerifyResult::Verified => TerminationCheck::Proven,
         VerifyResult::Counterexample { .. } => TerminationCheck::NotAdmitted,
         inconclusive => TerminationCheck::Inconclusive(inconclusive),
+    };
+    if !matches!(verdict, TerminationCheck::Inconclusive(_)) {
+        TERMINATION_QUERY_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.len() < TERMINATION_QUERY_MEMO_CAP {
+                memo.insert(key, verdict.clone());
+            }
+        });
     }
+    verdict
 }
 
 /// Whether a block introduces a pattern binding with one of `names`.
@@ -2464,6 +2544,7 @@ fn reveal_target_name(path: &syn::Path) -> Option<String> {
 }
 
 fn spec_params(sig: &syn::Signature, ctx: &VerificationContext) -> TrustVcResult<Vec<SpecParam>> {
+    let sig_type_params = sig_type_param_names(sig);
     sig.inputs
         .iter()
         .map(|arg| match arg {
@@ -2477,7 +2558,7 @@ fn spec_params(sig: &syn::Signature, ctx: &VerificationContext) -> TrustVcResult
                         ),
                     });
                 };
-                let ty = source_type_from_context(ctx, &pat_type.ty);
+                let ty = source_type_from_context(ctx, &pat_type.ty, &sig_type_params);
                 Ok(SpecParam {
                     name: pat_ident.ident.to_string(),
                     ty,
@@ -2501,6 +2582,7 @@ fn member_value_params(
     sig: &syn::Signature,
     ctx: &VerificationContext,
 ) -> TrustVcResult<Vec<SpecParam>> {
+    let sig_type_params = sig_type_param_names(sig);
     let mut params = Vec::new();
     for arg in &sig.inputs {
         let syn::FnArg::Typed(pat_type) = arg else {
@@ -2515,7 +2597,7 @@ fn member_value_params(
                 ),
             });
         };
-        let ty = source_type_from_context(ctx, &pat_type.ty);
+        let ty = source_type_from_context(ctx, &pat_type.ty, &sig_type_params);
         params.push(SpecParam {
             name: pat_ident.ident.to_string(),
             ty,
@@ -2526,7 +2608,11 @@ fn member_value_params(
 
 fn spec_return_type(sig: &syn::Signature, ctx: &VerificationContext) -> TrustVcResult<TrustVcType> {
     match &sig.output {
-        syn::ReturnType::Type(_, ty) => Ok(source_type_from_context(ctx, ty)),
+        syn::ReturnType::Type(_, ty) => Ok(source_type_from_context(
+            ctx,
+            ty,
+            &sig_type_param_names(sig),
+        )),
         syn::ReturnType::Default => Err(TrustVcError::Encoding {
             context: "source spec function catalog",
             detail: format!("spec function '{}' has no return type", sig.ident),
@@ -2534,7 +2620,28 @@ fn spec_return_type(sig: &syn::Signature, ctx: &VerificationContext) -> TrustVcR
     }
 }
 
-fn source_type_from_context(ctx: &VerificationContext, ty: &syn::Type) -> TrustVcType {
+/// The generic type-parameter names declared by `sig` itself.
+///
+/// These are the names that genuinely denote an erased `Poly` inside this
+/// signature, and they SHADOW any same-named user struct/enum per Rust name
+/// resolution. Used as the narrowness pin on the `TypeParam` leaf resolution in
+/// [`resolve_opaque_leaves`].
+fn sig_type_param_names(sig: &syn::Signature) -> BTreeSet<String> {
+    sig.generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(type_param) => Some(type_param.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn source_type_from_context(
+    ctx: &VerificationContext,
+    ty: &syn::Type,
+    sig_type_params: &BTreeSet<String>,
+) -> TrustVcType {
     let ty_str = extract_type_string(ty);
     let base = ctx
         .source_type_aliases()
@@ -2551,14 +2658,18 @@ fn source_type_from_context(ctx: &VerificationContext, ty: &syn::Type) -> TrustV
     // can take a `Vec<PbTerm>` / `&[PbTerm]` / `&PbConstraint` parameter or a
     // `Result<i128, ObjectiveEvalError>` return exactly as the verified function
     // body resolves them — the body<->spec carrier identity congruence requires.
-    resolve_opaque_leaves(base, ctx)
+    resolve_opaque_leaves(base, ctx, sig_type_params)
 }
 
 /// Replaces every `Opaque(name)` leaf in `ty` whose `name` is a user struct or
 /// enum registered in `ctx` with that type's registered `Datatype` carrier,
 /// recursing structurally through containers and datatype fields. Leaves an
 /// `Opaque` whose name is genuinely unknown untouched (so it still fails closed).
-fn resolve_opaque_leaves(ty: TrustVcType, ctx: &VerificationContext) -> TrustVcType {
+fn resolve_opaque_leaves(
+    ty: TrustVcType,
+    ctx: &VerificationContext,
+    sig_type_params: &BTreeSet<String>,
+) -> TrustVcType {
     match ty {
         TrustVcType::Opaque(name) => {
             if let Some(alias) = ctx.source_type_aliases().get(&name) {
@@ -2569,23 +2680,60 @@ fn resolve_opaque_leaves(ty: TrustVcType, ctx: &VerificationContext) -> TrustVcT
             }
             TrustVcType::Opaque(name)
         }
-        TrustVcType::Seq(inner) => TrustVcType::Seq(Box::new(resolve_opaque_leaves(*inner, ctx))),
-        TrustVcType::Array(inner, len) => {
-            TrustVcType::Array(Box::new(resolve_opaque_leaves(*inner, ctx)), len)
+        // A user struct/enum whose name is 1-2 uppercase letters (`SP`, `Id`,
+        // `T`) never reaches the `Opaque` arm above: the flat string parser's
+        // short-uppercase-identifier convention (`ir_type_parse.rs`) classifies
+        // it as `TypeParam` FIRST, and a `TypeParam` erases to the uninterpreted
+        // `Poly` sort. The spec fn's body axiom then binds its quantified var at
+        // `Poly` while the verified caller — whose own params DO go through the
+        // struct registry — applies the helper at the concrete datatype carrier,
+        // so encoding aborts with `sort mismatch in apply: ... got Poly`.
+        //
+        // Resolve the same way the `Opaque` arm does, so the spec fn and the
+        // body it is compared against agree on one carrier. NARROWNESS PIN: skip
+        // any name the signature itself declares as a generic parameter — inside
+        // `fn f<T>(x: T)` the `T` denotes the erased poly var and SHADOWS a
+        // same-named struct per Rust name resolution, so pinning it to a
+        // concrete carrier would monomorphize a polymorphic axiom. A name that
+        // is neither a registered type nor resolvable stays `TypeParam` and
+        // keeps its existing erased behaviour.
+        TrustVcType::TypeParam(name) if !sig_type_params.contains(&name) => {
+            if let Some(alias) = ctx.source_type_aliases().get(&name) {
+                return alias.clone();
+            }
+            if let Some(def) = ctx.struct_types.iter().find(|def| def.name == name) {
+                return def.to_datatype_type();
+            }
+            TrustVcType::TypeParam(name)
         }
-        TrustVcType::Set(inner) => TrustVcType::Set(Box::new(resolve_opaque_leaves(*inner, ctx))),
-        TrustVcType::Multiset(inner) => {
-            TrustVcType::Multiset(Box::new(resolve_opaque_leaves(*inner, ctx)))
-        }
+        TrustVcType::Seq(inner) => TrustVcType::Seq(Box::new(resolve_opaque_leaves(
+            *inner,
+            ctx,
+            sig_type_params,
+        ))),
+        TrustVcType::Array(inner, len) => TrustVcType::Array(
+            Box::new(resolve_opaque_leaves(*inner, ctx, sig_type_params)),
+            len,
+        ),
+        TrustVcType::Set(inner) => TrustVcType::Set(Box::new(resolve_opaque_leaves(
+            *inner,
+            ctx,
+            sig_type_params,
+        ))),
+        TrustVcType::Multiset(inner) => TrustVcType::Multiset(Box::new(resolve_opaque_leaves(
+            *inner,
+            ctx,
+            sig_type_params,
+        ))),
         TrustVcType::Map(key, value) => TrustVcType::Map(
-            Box::new(resolve_opaque_leaves(*key, ctx)),
-            Box::new(resolve_opaque_leaves(*value, ctx)),
+            Box::new(resolve_opaque_leaves(*key, ctx, sig_type_params)),
+            Box::new(resolve_opaque_leaves(*value, ctx, sig_type_params)),
         ),
         TrustVcType::SpecFn(args, ret) => TrustVcType::SpecFn(
             args.into_iter()
-                .map(|arg| resolve_opaque_leaves(arg, ctx))
+                .map(|arg| resolve_opaque_leaves(arg, ctx, sig_type_params))
                 .collect(),
-            Box::new(resolve_opaque_leaves(*ret, ctx)),
+            Box::new(resolve_opaque_leaves(*ret, ctx, sig_type_params)),
         ),
         TrustVcType::Datatype { name, variants } => TrustVcType::Datatype {
             name,
@@ -2597,7 +2745,9 @@ fn resolve_opaque_leaves(ty: TrustVcType, ctx: &VerificationContext) -> TrustVcT
                         variant
                             .fields
                             .into_iter()
-                            .map(|(field, field_ty)| (field, resolve_opaque_leaves(field_ty, ctx)))
+                            .map(|(field, field_ty)| {
+                                (field, resolve_opaque_leaves(field_ty, ctx, sig_type_params))
+                            })
                             .collect(),
                     )
                 })
@@ -3545,5 +3695,330 @@ mod tests {
         assert!(normalized.contains("pub fn double"));
         assert!(normalized.contains("-> int"));
         syn::parse_file(&normalized).expect("normalized open spec should parse as Rust");
+    }
+
+    // ── Isolated termination-query memo key ──────────────────────────────────
+    //
+    // These pin the SOUNDNESS property of the memo added in
+    // `verify_isolated_termination_query`: the key must SEPARATE any two
+    // isolated queries that could receive different verdicts, and must AGREE for
+    // two identically-built ones (otherwise the memo silently never hits and the
+    // repeated-solve cost it exists to remove comes back unannounced).
+
+    fn termination_key_probe_context(
+        vars: &[(&str, TrustVcType)],
+        helpers: &[(&str, TrustVcType)],
+        obligations: &[(&str, &str)],
+    ) -> VerificationContext {
+        let mut ctx = VerificationContext::new();
+        for (name, ty) in vars {
+            ctx.declare_var_typed(name, ty.clone());
+        }
+        for (name, return_ty) in helpers {
+            ctx.declare_helper_function_typed(name, return_ty.clone(), vec![]);
+        }
+        for (name, condition) in obligations {
+            ctx.push_obligation(ProofObligation::assert((*name).to_string(), *condition));
+        }
+        ctx
+    }
+
+    #[test]
+    fn termination_query_key_agrees_for_identically_built_contexts() {
+        let build = || {
+            termination_key_probe_context(
+                &[("n", TrustVcType::Nat)],
+                &[("dbl", TrustVcType::Nat)],
+                &[("__termination_dbl_0", "0 <= n")],
+            )
+        };
+        assert_eq!(
+            build().isolated_query_key(),
+            build().isolated_query_key(),
+            "two identically-built isolated queries must share a memo key,              otherwise the memo never hits"
+        );
+    }
+
+    #[test]
+    fn termination_query_key_separates_different_obligation_text() {
+        let left = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_dbl_0", "0 <= n")],
+        );
+        let right = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_dbl_0", "0 < n")],
+        );
+        assert_ne!(
+            left.isolated_query_key(),
+            right.isolated_query_key()
+        );
+    }
+
+    #[test]
+    fn termination_query_key_separates_different_variable_types() {
+        let left =
+            termination_key_probe_context(&[("n", TrustVcType::Nat)], &[], &[("t", "0 <= n")]);
+        let right =
+            termination_key_probe_context(&[("n", TrustVcType::MathInt)], &[], &[("t", "0 <= n")]);
+        assert_ne!(
+            left.isolated_query_key(),
+            right.isolated_query_key(),
+            "a measure over `int` is not the measure over `nat`: `nat` carries the              global `0 <= n` that the decrease proof may be resting on"
+        );
+    }
+
+    #[test]
+    fn termination_query_key_separates_different_helper_signatures() {
+        let left = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[("f", TrustVcType::Nat)],
+            &[("t", "0 <= n")],
+        );
+        let right = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[("f", TrustVcType::MathInt)],
+            &[("t", "0 <= n")],
+        );
+        assert_ne!(
+            left.isolated_query_key(),
+            right.isolated_query_key()
+        );
+    }
+
+    #[test]
+    fn termination_query_key_separates_target_pointer_widths() {
+        // CARDINAL direction. A `Seq` renders identically in `TrustVcType` at 32
+        // and 64 bits, but the query ay receives does not: `encoder::types`
+        // builds the sequence's index sort as `Sort::bitvec(pointer_width())` at
+        // ENCODE time, and the dual-width lane runs the same unit at both
+        // widths. A shared key would serve a 64-bit `Proven` to the 32-bit pass.
+        let build = || {
+            termination_key_probe_context(
+                &[("s", TrustVcType::Seq(Box::new(TrustVcType::MathInt)))],
+                &[],
+                &[("t", "0 <= s.len()")],
+            )
+        };
+        let at_64 = {
+            let _guard = crate::ir::PointerWidthGuard::install(64);
+            build().isolated_query_key()
+        };
+        let at_32 = {
+            let _guard = crate::ir::PointerWidthGuard::install(32);
+            build().isolated_query_key()
+        };
+        assert_ne!(at_64, at_32);
+    }
+    // ── Isolated termination-query MEMO (not just its key) ───────────────────
+    //
+    // The key tests above pin `isolated_query_key`. These pin
+    // `verify_isolated_termination_query` itself: that a HIT returns the verdict
+    // the solve produced, that two different queries do not share an entry, that
+    // a 32-bit pass cannot consume a 64-bit entry AT THE MEMO LEVEL (not merely
+    // that the keys differ), and that an Inconclusive verdict is not retained.
+
+    fn termination_verdict_tag(verdict: &TerminationCheck) -> String {
+        match verdict {
+            TerminationCheck::Proven => "Proven".to_string(),
+            TerminationCheck::NotAdmitted => "NotAdmitted".to_string(),
+            TerminationCheck::Inconclusive(inner) => format!("Inconclusive({inner:?})"),
+        }
+    }
+
+    fn termination_memo_snapshot() -> Vec<(String, TerminationCheck)> {
+        TERMINATION_QUERY_MEMO.with(|memo| {
+            memo.borrow()
+                .iter()
+                .map(|(key, verdict)| (key.clone(), verdict.clone()))
+                .collect()
+        })
+    }
+
+    fn termination_memo_reset() {
+        TERMINATION_QUERY_MEMO.with(|memo| memo.borrow_mut().clear());
+    }
+
+    #[test]
+    fn termination_memo_hit_returns_the_verdict_the_solve_produced() {
+        termination_memo_reset();
+        let build = || {
+            termination_key_probe_context(
+                &[("n", TrustVcType::Nat)],
+                &[],
+                &[("__termination_memo_probe_0", "0 <= n")],
+            )
+        };
+        let first = verify_isolated_termination_query(&build());
+        let after_first = termination_memo_snapshot();
+        let second = verify_isolated_termination_query(&build());
+        let after_second = termination_memo_snapshot();
+
+        assert_eq!(
+            termination_verdict_tag(&first),
+            termination_verdict_tag(&second),
+            "a memo HIT must return the verdict the solve itself produced"
+        );
+        // A decided verdict is retained and the repeat adds no second entry (it
+        // hit). An Inconclusive one is deliberately not retained (see
+        // `verify_isolated_termination_query`), in which case the memo stays
+        // empty and BOTH calls solved — still the same verdict, still sound.
+        if matches!(first, TerminationCheck::Inconclusive(_)) {
+            assert!(after_second.is_empty());
+        } else {
+            assert_eq!(after_first.len(), 1);
+            assert_eq!(
+                after_second.len(),
+                1,
+                "an identical repeat must HIT, not add a second entry"
+            );
+            assert_eq!(
+                termination_verdict_tag(&after_second[0].1),
+                termination_verdict_tag(&first),
+                "the retained verdict must be the one the solve produced"
+            );
+        }
+        termination_memo_reset();
+    }
+
+    #[test]
+    fn termination_memo_does_not_share_an_entry_between_distinct_queries() {
+        termination_memo_reset();
+        let left = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_memo_probe_1", "0 <= n")],
+        );
+        let right = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_memo_probe_2", "0 <= n")],
+        );
+        let left_verdict = verify_isolated_termination_query(&left);
+        let right_verdict = verify_isolated_termination_query(&right);
+        let snapshot = termination_memo_snapshot();
+        if !matches!(left_verdict, TerminationCheck::Inconclusive(_))
+            && !matches!(right_verdict, TerminationCheck::Inconclusive(_))
+        {
+            assert_eq!(
+                snapshot.len(),
+                2,
+                "two DIFFERENT isolated queries must occupy two memo entries; \
+                 sharing one is cross-context verdict reuse"
+            );
+        }
+        termination_memo_reset();
+    }
+
+    #[test]
+    fn termination_memo_does_not_serve_a_64_bit_entry_to_a_32_bit_pass() {
+        // CARDINAL direction, at the MEMO level rather than the key level: run
+        // the SAME query under both target widths in the same thread and assert
+        // the second one did not consume the first one's entry.
+        termination_memo_reset();
+        let build = || {
+            termination_key_probe_context(
+                &[("s", TrustVcType::Seq(Box::new(TrustVcType::MathInt)))],
+                &[],
+                &[("__termination_memo_width_probe", "0 <= s.len()")],
+            )
+        };
+        let at_64 = {
+            let _guard = crate::ir::PointerWidthGuard::install(64);
+            verify_isolated_termination_query(&build())
+        };
+        let at_32 = {
+            let _guard = crate::ir::PointerWidthGuard::install(32);
+            verify_isolated_termination_query(&build())
+        };
+        if !matches!(at_64, TerminationCheck::Inconclusive(_))
+            && !matches!(at_32, TerminationCheck::Inconclusive(_))
+        {
+            assert_eq!(
+                termination_memo_snapshot().len(),
+                2,
+                "the 32-bit pass must MISS the 64-bit entry — a shared entry \
+                 would serve a `Proven` established at 64 bits to a width where \
+                 the measure may not shrink"
+            );
+        }
+        termination_memo_reset();
+    }
+
+    #[test]
+    fn isolated_query_key_separates_fields_no_current_mutator_writes() {
+        // AMENDMENT REGRESSION (2026-08-25). The key used to hand-pick five
+        // fields out of ~50, so a NEW mutation added to `member_edges_decrease`
+        // — a `source_type_aliases` entry, an `overflow_behavior`, a `hide!` —
+        // would have left two semantically different queries sharing one key,
+        // with no compile error and no test failure. `isolated_query_key` is now
+        // an EXHAUSTIVE destructure, so these separate today even though nothing
+        // on the isolated path writes them yet.
+        let base = || {
+            termination_key_probe_context(
+                &[("n", TrustVcType::Nat)],
+                &[],
+                &[("__termination_dbl_0", "0 <= n")],
+            )
+        };
+        let baseline = base().isolated_query_key();
+
+        let mut with_alias = base();
+        with_alias
+            .source_type_aliases
+            .insert("Alias".to_string(), TrustVcType::Nat);
+        assert_ne!(baseline, with_alias.isolated_query_key(), "source_type_aliases");
+
+        let mut with_overflow = base();
+        with_overflow.overflow_behavior = crate::vc::OverflowBehavior::Truncate;
+        assert_ne!(baseline, with_overflow.isolated_query_key(), "overflow_behavior");
+
+        let mut with_hidden = base();
+        with_hidden.hidden_fns.insert("dbl".to_string());
+        assert_ne!(baseline, with_hidden.isolated_query_key(), "hidden_fns");
+
+        let mut with_warning = base();
+        with_warning.warnings.push("w".to_string());
+        assert_ne!(baseline, with_warning.isolated_query_key(), "warnings");
+
+        let mut with_rlimit = base();
+        with_rlimit.rlimit_ms = Some(1234);
+        assert_ne!(baseline, with_rlimit.isolated_query_key(), "rlimit_ms");
+
+        let mut with_skip_retry = base();
+        with_skip_retry.skip_retry_cascade = true;
+        assert_ne!(baseline, with_skip_retry.isolated_query_key(), "skip_retry_cascade");
+    }
+
+    #[test]
+    fn isolated_query_key_is_stable_under_hash_iteration_order() {
+        // A `HashMap`/`HashSet` renders in hash order; `isolated_query_key`
+        // sorts the per-entry renderings so an identical context can never miss
+        // its own memo entry. Insert the same entries in two different orders.
+        let mut forward = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_dbl_0", "0 <= n")],
+        );
+        let mut reverse = termination_key_probe_context(
+            &[("n", TrustVcType::Nat)],
+            &[],
+            &[("__termination_dbl_0", "0 <= n")],
+        );
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            forward.hidden_fns.insert(name.to_string());
+            forward
+                .source_type_aliases
+                .insert(name.to_string(), TrustVcType::Nat);
+        }
+        for name in ["h", "g", "f", "e", "d", "c", "b", "a"] {
+            reverse.hidden_fns.insert(name.to_string());
+            reverse
+                .source_type_aliases
+                .insert(name.to_string(), TrustVcType::Nat);
+        }
+        assert_eq!(forward.isolated_query_key(), reverse.isolated_query_key());
     }
 }

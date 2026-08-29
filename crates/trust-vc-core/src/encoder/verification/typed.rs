@@ -795,6 +795,23 @@ impl AYEncoder {
                     &verified_post_loop_facts,
                     &[],
                 );
+                // A closed-ground datatype (dis)equality goal that the concrete
+                // evaluator reduces to `false` is REFUTED: it cannot verify, so
+                // it must not be forwarded. Deciding that here rather than by
+                // solving is fail-closed twice over — it only ever REMOVES a
+                // candidate assumption (the postcondition is then proved under a
+                // strictly weaker context, so nothing can newly verify), and it
+                // closes the hazard that ay's unsound depth-1 datatype-`eq`
+                // UNSAT hands this pre-pass a `Verified` for a FALSE fact which
+                // is then forwarded as a true hypothesis — the pre-pass runs
+                // through `verify_typed_step`, where neither the datatype-`!=`
+                // re-validation nor the reflexive demote applies.
+                if super::typed_assertions::closed_ground_datatype_goal_computes_false(
+                    &candidate_slices,
+                    candidate,
+                ) {
+                    continue;
+                }
                 let verified = verification_report::with_capture_suppressed(|| {
                     matches!(
                         Self::verify_typed_step(
@@ -1103,6 +1120,40 @@ impl AYEncoder {
         assertion: &PreparedObligation,
         post_loop_modified_vars: Option<&HashSet<String>>,
     ) -> TrustVcResult<AssertionOutcome> {
+        // REFLEXIVE-DISEQUALITY REFUTATION (SOUNDNESS-CRITICAL on this lane).
+        //
+        // `verify_typed_step` is the shared lane for every obligation that is
+        // NOT a regular assertion: the loop-invariant base case, loop `ensures`,
+        // `assert ... by` conclusions AND their scoped assertions, the
+        // postcondition-forwarding pre-pass, `recommends`, and the WF1
+        // non-negativity floor. Its whole post-processing is
+        // `apply_vacuity_probe_to_result` — the hypothesis-robust demote that
+        // `typed_assertions::finish_regular_assertion_step` applies to the
+        // regular lane never ran here. A DIRECT, unsound `Verified` for
+        // `a != a` (the datatype-eq depth-1 UNSAT hole) was therefore taken at
+        // face value on all of them, and on four of them a `Verified` is
+        // EXPORTED as an assumption for every later obligation — an injected
+        // contradiction with a wider blast radius than the pre-pass hole.
+        //
+        // Deciding it here, BEFORE the solver, closes all of those lanes with
+        // one guard and simultaneously deletes the solve (this shape is the most
+        // expensive obligation in the unit — ay does not converge on the negated
+        // goal and the retry cascade runs it three times). It cannot make
+        // anything verify: `reflexive_disequality_refutation` returns a
+        // Counterexample or nothing at all.
+        //
+        // `by(compute)` keeps its own path: an assert_by conclusion in compute
+        // mode is dispatched by the CALLER (`verify_compute_mode_obligation`)
+        // and a compute-mode regular assert never reaches this function at all
+        // (`verify_regular_assertions` handles `SolverMode::Compute` itself).
+        // For the one shape that DOES reach here in compute mode — a compute
+        // scoped assertion inside an assert_by, which has no caller-side
+        // dispatch today — concrete evaluation of `a != a` returns `false`, i.e.
+        // the same refutation, so no verdict moves.
+        if let Some(outcome) = super::typed_assertions::reflexive_disequality_refutation(assertion)
+        {
+            return Ok(outcome);
+        }
         let result = verify_single_assertion_typed_with_extra_variables(
             slices,
             assertion,

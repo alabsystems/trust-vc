@@ -40,6 +40,7 @@ pub(crate) use flag_macro::with_flag_unwind_safe;
 
 mod arith_semantics;
 mod array_axioms;
+mod binder_capture;
 mod binding_scope;
 mod collection_axioms;
 mod collection_map;
@@ -63,11 +64,13 @@ pub(crate) mod polymorphism;
 mod quantifier_scope;
 mod quantifiers;
 pub(crate) mod trait_encoding;
+pub(crate) mod trait_self_fields;
 pub(crate) mod types;
 mod unicode;
 pub(crate) mod unit;
 mod verification;
 mod width_coercion;
+pub(crate) mod witness_sort;
 
 pub(crate) use ir_encoder::normalize::normalize_int_expr;
 #[cfg(feature = "native-seq")]
@@ -77,6 +80,16 @@ pub use types::VerifyResult;
 pub(crate) use verification::outcome::AssertionOutcome;
 pub use verification::unknown_category::UnknownCategory;
 
+/// The default WALL-CLOCK liveness backstop, in milliseconds.
+///
+/// Exposed so extraction can compare a `#[verifier::rlimit(N)]` wall FLOOR
+/// against the default without duplicating the constant — a duplicated
+/// backstop that drifts would silently make the attribute tighten the
+/// envelope it is supposed to widen.
+pub(crate) fn verification_wall_backstop_default_ms() -> u64 {
+    verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS
+}
+
 pub use encoder_state::BatchVerifyResult;
 use encoder_state::FeatureRegistries;
 pub(crate) use encoder_state::{EncoderFunctionContext, VerificationState, BROADCAST_INSTANCE_CAP};
@@ -85,6 +98,7 @@ use crate::counterexample_names::CounterexampleVarMeta;
 use crate::encoder::types::sort_for_type;
 use crate::error::{TrustVcError, TrustVcResult};
 use crate::prepared_context::{prepare_context, PreparedVerificationContext};
+use crate::solver_budget::ConflictBudget;
 use crate::vc::{VariableDecl, VerificationContext};
 use ay_dpll::api::{ArraySort, Logic, Solver, Sort, Term};
 // FuncDecl re-imported for test modules that rely on `use super::*`.
@@ -234,9 +248,57 @@ impl AYEncoder {
         self.solver.set_ematching_round_limit(n);
     }
 
-    pub fn with_limits(mut self, timeout_ms: u64, memory_mb: usize) -> Self {
+    /// Install this encoder's resource envelope.
+    ///
+    /// TWO BOUNDS, DIFFERENT JOBS, AND THE ORDER MATTERS FOR READING A
+    /// FAILURE:
+    ///
+    /// * `conflict_budget` is the DETERMINISTIC one — a SAT-conflict
+    ///   allowance, identical work on every machine under every load. This is
+    ///   the bound that is meant to stop a runaway solve. Exhausting it
+    ///   surfaces as `UnknownReason::ResourceLimit`, rendered `resourceout`.
+    /// * `wall_backstop_ms` is a LIVENESS backstop only. A conflict budget
+    ///   cannot see a solve that spins in preprocessing or in a theory loop
+    ///   without accruing conflicts, so a wall is still required — but it is
+    ///   set far above the work budget so that it fires only pathologically.
+    ///   Exhausting it surfaces as `UnknownReason::Timeout`, rendered
+    ///   `timeout`. The two reasons are distinct strings and distinct
+    ///   `UnknownCategory`s precisely so a user debugging a failure can tell
+    ///   "I ran out of work" from "the box was too slow".
+    ///
+    /// BOTH FAIL CLOSED. Neither bound can produce `Verified`: ay reports
+    /// exhaustion as `Unknown`, and trust-vc maps both to a non-`Verified`
+    /// outcome. See `UnknownCategory::from_unknown_reason`.
+    pub fn with_limits(
+        mut self,
+        wall_backstop_ms: u64,
+        conflict_budget: ConflictBudget,
+        memory_mb: usize,
+    ) -> Self {
         self.solver
-            .set_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
+            .set_timeout(Some(std::time::Duration::from_millis(wall_backstop_ms)));
+        // There is no typed `set_resource_limit` on ay's `Solver`; the option
+        // handler is the whole public route
+        // (`executor.rs`, `key == "rlimit"` -> `Executor::set_resource_limit`).
+        // `try_set_option` rather than `set_option`: the latter panics, and a
+        // solver that will not accept a budget must not take the whole
+        // verification down — it must be reported, because a solve running
+        // WITHOUT the deterministic budget is exactly the machine-dependent
+        // configuration this call exists to remove.
+        //
+        // `option_value()` returning `None` means "do not install a budget";
+        // it never means "install zero". See `ConflictBudget::AyDefault`.
+        if let Some(value) = conflict_budget.option_value() {
+            if let Err(error) = self.solver.try_set_option("rlimit", &value) {
+                tracing::warn!(
+                    %error,
+                    budget = ?conflict_budget,
+                    "ay rejected the deterministic conflict budget; this solve is \
+                     bounded by the wall backstop alone and its verdict is \
+                     machine-dependent"
+                );
+            }
+        }
         self.solver
             .set_memory_limit(process_memory_limit_bytes(memory_mb));
         // Per-instance term_memory_limit is opt-in via TRUST_VC_TERM_MEMORY_MB

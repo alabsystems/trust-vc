@@ -96,6 +96,12 @@ pub(in crate::encoder) fn interpreted_dead_trigger_patterns(
 /// kept only when every binding's free root names are declared encoder
 /// variables — i.e. the instance is ground in the current scope (a goal
 /// quantifier's binder is not, so its occurrences are skipped).
+///
+/// Groundness is NOT sortedness. A tuple that passes the scope check can still
+/// bind a `u8` bound variable to a `u64` expression, because `match_trigger_expr`
+/// compares operators and names but never types. The caller must therefore pass
+/// every tuple through `witness_sort::instantiate_bound_vars_in_sort` before
+/// substituting; see `replay_interpreted_trigger_broadcast_ground`.
 fn collect_interpreted_trigger_binding_tuples(
     sources: &[TrustVcExpr],
     patterns: &[TrustVcExpr],
@@ -376,11 +382,20 @@ impl AYEncoder {
                 value: i128::from(i),
                 ty: concrete_idx_ty,
             };
-            let substitutions =
-                std::collections::HashMap::from([(bound_name.as_str(), &concrete_idx)]);
-            let grounded_instance = fold_grounded_concrete_ints(
-                crate::encoder::eval::substitute_vars_in_expr(&grounded_expr, &substitutions),
-            );
+            // Same shared sort gate as every other witness source: an index
+            // literal outside the bound variable's sort is not an instantiation.
+            // (In practice `concrete_idx` is built AT the bound variable's own
+            // type and is small, so this passes — the point is that no
+            // substitution site is exempt from the check.)
+            let Some(substituted) = crate::encoder::witness_sort::instantiate_bound_vars_in_sort(
+                &grounded_expr,
+                std::slice::from_ref(bound_name),
+                std::slice::from_ref(&concrete_idx),
+                &self.var_types,
+            ) else {
+                continue;
+            };
+            let grounded_instance = fold_grounded_concrete_ints(substituted);
             let instance =
                 crate::encoder::with_flag_unwind_safe!(self.state.in_assumption_context, true, {
                     self.resolve_condition_typed(&grounded_instance)
@@ -431,8 +446,18 @@ impl AYEncoder {
     /// un-asserted `forall` would have provided.
     ///
     /// SOUNDNESS: every asserted term is a universal instantiation of a
-    /// conformance-checked lemma — always sound to assert; omitting the
-    /// `forall` itself can only lose completeness (fail-closed).
+    /// conformance-checked lemma; omitting the `forall` itself can only lose
+    /// completeness (fail-closed).
+    ///
+    /// That first clause used to read "— always sound to assert", and that was
+    /// FALSE. An instantiation is only sound when the substituted witness is a
+    /// value of the bound variable's sort, and source (2) supplies arbitrary
+    /// goal subexpressions of arbitrary type. A `u8`-bound lemma matched against
+    /// a `u64` product asserted `w <= 255` for an arbitrary `u64` — consistent,
+    /// unjustified, and a cardinal false verify (regression:
+    /// `broadcast_goal_witness_sort_soundness`). Both sources now pass through
+    /// `witness_sort::instantiate_bound_vars_in_sort`, which declines any
+    /// out-of-sort tuple.
     fn replay_interpreted_trigger_broadcast_ground(
         &mut self,
         obligation: &PreparedObligation,
@@ -465,15 +490,24 @@ impl AYEncoder {
             obligation.expr.clone()
         };
         for tuple in binding_tuples {
-            let substitutions: std::collections::HashMap<&str, &TrustVcExpr> = bound_names
-                .iter()
-                .map(String::as_str)
-                .zip(tuple.iter())
-                .collect();
-            instances.push(crate::encoder::eval::substitute_vars_in_expr(
+            // SOUNDNESS (cardinal, sibling of the model-witness defect). A
+            // trigger match against the goal binds a bound variable to an
+            // arbitrary goal SUBEXPRESSION, whose type need not be the bound
+            // variable's. Substituting a wider-typed expression does not produce
+            // a visibly false fact — it produces a consistent, unjustified one:
+            // `forall|x: u8| x <= 255u8` matched against `w * w` for a `u64 w`
+            // asserted `w <= 255`, so `fn f(w: u64) -> u64 { w }` verified
+            // `ensures result <= 255u64`. The vacuity guard cannot see it
+            // (nothing is contradictory). Route every tuple through the shared
+            // sort gate; an out-of-sort tuple is DECLINED, not substituted.
+            if let Some(instance) = crate::encoder::witness_sort::instantiate_bound_vars_in_sort(
                 &full,
-                &substitutions,
-            ));
+                &bound_names,
+                &tuple,
+                &self.var_types,
+            ) {
+                instances.push(instance);
+            }
         }
 
         for instance in instances {
@@ -524,10 +558,46 @@ impl AYEncoder {
         obligation: &PreparedObligation,
         all_var_terms: &[Term],
     ) -> TrustVcResult<()> {
-        let body =
-            crate::encoder::with_flag_unwind_safe!(self.state.in_assumption_context, true, {
-                self.resolve_condition_typed(&obligation.expr)
-            });
+        // BINDER CAPTURE (CARDINAL). This function encodes the axiom body FIRST,
+        // with every bound variable resolved as an ordinary top-level term out of
+        // `self.variables`, and only closes the `forall` over those terms further
+        // down. During the encode there is therefore no live binder for the
+        // encoder to see (`real_quantifier_depth` is 0), yet a binder IS coming.
+        // Any encoder helper that hoists a derived fact to the solver top level
+        // with `try_assert_term` would have that fact's variables captured by the
+        // `forall` built below — the fact stays at the top level while the
+        // occurrence inside the axiom becomes bound, so the axiom silently loses
+        // its dependence on the bound variable. Measured instance: the spec-fn
+        // defining axiom for `tests/data/datatype_ne_refutation.rs::dbl` came out
+        // as `(forall ((n Nat)) (= (dbl n) __trust_vc_match_dt_4))` — "dbl is a
+        // CONSTANT function" — because `bind_datatype_match_result` hoisted the
+        // datatype match's ITE binding. Announce the pending closure so those
+        // helpers can decline; see `bind_datatype_match_result`.
+        //
+        // That flag is a per-site OPT-IN and only two sites take it. 47 helpers
+        // on `AstExpressionParser` have the same shape, so the CLASS is closed
+        // below instead, at this closure boundary, by the assertion watermark:
+        // see `crate::encoder::binder_capture`.
+        let will_universally_close = match obligation.bound_vars.as_deref() {
+            Some(names) => !names.is_empty(),
+            None => !all_var_terms.is_empty(),
+        };
+        // GENERAL BACKSTOP for the same defect class. `pending_universal_closure`
+        // lets the handful of helpers we have inlined decline their hoist; this
+        // watermark catches every helper we have NOT — including ones added
+        // later — by asking, at the closure boundary itself, whether anything
+        // hoisted during the encode mentions a term the `forall` is about to
+        // bind. See `crate::encoder::binder_capture`.
+        let capture_watermark = self.assertion_watermark();
+        let body = crate::encoder::with_flag_unwind_safe!(
+            self.state.pending_universal_closure,
+            will_universally_close,
+            {
+                crate::encoder::with_flag_unwind_safe!(self.state.in_assumption_context, true, {
+                    self.resolve_condition_typed(&obligation.expr)
+                })
+            }
+        );
         let body = body.map_err(|e| {
             encoding_error(
                 "encode typed broadcast",
@@ -543,10 +613,17 @@ impl AYEncoder {
         // Skolemized. The guarded body is used for both the quantified axiom
         // and the ground-pool replay path.
         let body = if let Some(ref guard_expr) = obligation.broadcast_guard {
-            let guard =
-                crate::encoder::with_flag_unwind_safe!(self.state.in_assumption_context, true, {
-                    self.resolve_condition_typed(guard_expr)
-                });
+            let guard = crate::encoder::with_flag_unwind_safe!(
+                self.state.pending_universal_closure,
+                will_universally_close,
+                {
+                    crate::encoder::with_flag_unwind_safe!(
+                        self.state.in_assumption_context,
+                        true,
+                        { self.resolve_condition_typed(guard_expr) }
+                    )
+                }
+            );
             let guard = guard.map_err(|e| {
                 encoding_error(
                     "encode typed broadcast",
@@ -669,49 +746,81 @@ impl AYEncoder {
                 }
             }
 
-            let quantified = if parsed_groups.is_empty() {
-                self.solver.try_forall(&var_terms, body)
-            } else {
-                let trigger_refs: Vec<&[Term]> =
-                    parsed_groups.iter().map(|g| g.as_slice()).collect();
-                self.solver
-                    .try_forall_with_triggers(&var_terms, body, &trigger_refs)
-            }
-            .map_err(|e| {
-                encoding_error(
-                    "encode typed broadcast",
-                    format!(
-                        "Failed to create forall for broadcast '{}': {}",
-                        obligation.name, e
-                    ),
-                )
-            })?;
-            self.solver.try_assert_term(quantified).map_err(|e| {
-                encoding_error(
-                    "encode typed broadcast",
-                    format!(
-                        "Failed to assert broadcast forall '{}': {}",
-                        obligation.name, e
-                    ),
-                )
-            })?;
+            // A fact hoisted to the solver TOP LEVEL during this encode that
+            // mentions a variable this `forall` would bind means the axiom
+            // would be CAPTURED and collapse the lemma (measured:
+            // `forall c. next(c) == __trust_vc_match_dt_4`). Decline the axiom
+            // — the symbol stays uninterpreted, which is strictly weaker.
+            // The broadcast PREMISE is withheld along with the axiom: the
+            // model-revalidation lane (solve.rs) instantiates premises at a
+            // candidate SAT model's witnesses and promotes an UNSAT re-check
+            // to Verified, which is sound ONLY because those instances are
+            // consequences of an ASSERTED forall. With the forall declined
+            // they would be fresh assumptions on the one path that upgrades a
+            // counterexample to Verified — the exact inversion this backstop
+            // exists to prevent. Ground-pool replay (re-encoded per concrete
+            // instance, never captured) is unaffected.
+            match self.binder_capture_since(capture_watermark, &var_terms) {
+                Some(capture) => {
+                    let site = format!("broadcast:{}", obligation.name);
+                    self.record_binder_capture(&site, &capture);
+                }
+                None => {
+                    let quantified = if parsed_groups.is_empty() {
+                        self.solver.try_forall(&var_terms, body)
+                    } else {
+                        let trigger_refs: Vec<&[Term]> =
+                            parsed_groups.iter().map(|g| g.as_slice()).collect();
+                        self.solver
+                            .try_forall_with_triggers(&var_terms, body, &trigger_refs)
+                    }
+                    .map_err(|e| {
+                        encoding_error(
+                            "encode typed broadcast",
+                            format!(
+                                "Failed to create forall for broadcast '{}': {}",
+                                obligation.name, e
+                            ),
+                        )
+                    })?;
+                    self.solver.try_assert_term(quantified).map_err(|e| {
+                        encoding_error(
+                            "encode typed broadcast",
+                            format!(
+                                "Failed to assert broadcast forall '{}': {}",
+                                obligation.name, e
+                            ),
+                        )
+                    })?;
 
-            // Record this live `forall` premise so a candidate SAT counterexample
-            // can be re-validated against it. ay's model validation skips
-            // quantified assertions (it trusts E-matching/CEGQI), so an
-            // un-instantiated broadcast `forall` can be silently violated by a
-            // SAT model that is still reported as `sat_model_validated`. Only the
-            // quantified branch needs this — the ground/cap/type-param branches
-            // assert their body directly and are validated by ay. Soundness fix #1.
-            if let Some(ref bound_names) = obligation.bound_vars {
-                if !bound_names.is_empty() {
-                    self.state.broadcast_premises.push(
-                        crate::encoder::encoder_state::BroadcastForallPremise {
-                            bound_vars: bound_names.clone(),
-                            body: obligation.expr.clone(),
-                            guard: obligation.broadcast_guard.clone(),
-                        },
-                    );
+                    // Record this live `forall` premise so a candidate SAT
+                    // counterexample can be re-validated against it. ay's model
+                    // validation skips quantified assertions (it trusts
+                    // E-matching/CEGQI), so an un-instantiated broadcast
+                    // `forall` can be silently violated by a SAT model that is
+                    // still reported as `sat_model_validated`. Only the
+                    // quantified branch needs this — the ground/cap/type-param
+                    // branches assert their body directly and are validated by
+                    // ay. Soundness fix #1.
+                    //
+                    // The push lives INSIDE this arm on purpose: the
+                    // revalidation promotion (solve.rs) is sound only for
+                    // premises whose `forall` is actually IN the solver. A
+                    // premise recorded for a declined axiom would let the
+                    // model-revalidation lane assert fresh, never-asserted
+                    // instances on the one path that upgrades a SAT
+                    // counterexample to Verified.
+                    if let Some(ref bound_names) = obligation.bound_vars {
+                        if !bound_names.is_empty() {
+                            self.state.broadcast_premises.push(
+                                crate::encoder::encoder_state::BroadcastForallPremise {
+                                    bound_vars: bound_names.clone(),
+                                    body: obligation.expr.clone(),
+                                    guard: obligation.broadcast_guard.clone(),
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }

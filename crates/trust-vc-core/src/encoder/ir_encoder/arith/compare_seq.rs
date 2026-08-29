@@ -430,10 +430,51 @@ impl<'a> AstExpressionParser<'a> {
                     .solver
                     .try_implies(in_bounds, elem_eq)
                     .map_err(|e| e.to_string())?;
-                let pointwise = self
-                    .solver
-                    .try_forall_with_triggers(&[bound_idx], body, &[&[left_elem], &[right_elem]])
-                    .map_err(|e| e.to_string())?;
+                // DEGENERATE-QUANTIFIER GUARD. ay terms are HASH-CONSED and
+                // `mk_eq` folds `x = x` to the constant `true`, after which
+                // `mk_implies(_, true)` folds to `true` as well. So whenever
+                // both sides reduce to the SAME select term — same backing
+                // array AND same carrier offset — `body` is literally
+                // `bool_const(true)` and the quantifier below would be the
+                // vacuous `(forall ((__trust_vc_seq_eq_idx_N (_ BitVec 64)))
+                // true)`. The SYNTACTICALLY reflexive case short-circuits at
+                // the top of this function; this is the STRUCTURALLY reflexive
+                // one, where two DISTINCT operand expressions lower to the same
+                // term (`s == s__trust_vc_pre`, `a == a.subrange(0, k)`).
+                //
+                // Emitting it is pure waste and an active landmine: ay's
+                // conservative `quantified_proof_translation_incomplete` marker
+                // fired on this exact shape and its read site downgraded a
+                // COMPUTED UNSAT to `Unknown(UnhandledQuantifier)`, starving the
+                // deferred-trust corroboration re-solve and rotating four
+                // trust-vc soundness tests pass/fail. ay stopped withholding the
+                // UNSAT at `35a1ee861`; this is the other half of that fix and
+                // does not lean on it.
+                //
+                // SOUNDNESS: dropping a `true` conjunct removes no constraint,
+                // and the test is EXACT equality with `bool_const(true)` (the
+                // `collection_shared::push_index_representability_check` idiom) —
+                // never a heuristic "looks trivial" check — so a body that is
+                // not the folded constant always keeps its quantifier. The
+                // constant flows into `pointwise_parts` unchanged and `mk_and`
+                // filters it out, leaving the load-bearing `len_eq` (and the
+                // tail seed) exactly as before.
+                //
+                // `bound_idx` stays DECLARED — it is needed to build the selects
+                // that reveal the collapse. A declared BV constant that appears
+                // in no assertion constrains nothing (its sort is inhabited), so
+                // leaving it is strictly better than emitting the quantifier.
+                let pointwise = if body == self.solver.bool_const(true) {
+                    body
+                } else {
+                    self.solver
+                        .try_forall_with_triggers(
+                            &[bound_idx],
+                            body,
+                            &[&[left_elem], &[right_elem]],
+                        )
+                        .map_err(|e| e.to_string())?
+                };
                 pointwise_parts = Some((len_eq, pointwise));
 
                 // No representable ground tail index (an unbounded operand): the

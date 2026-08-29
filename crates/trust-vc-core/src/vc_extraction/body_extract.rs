@@ -60,22 +60,179 @@ pub(super) struct MutRefPostState {
     pub(super) escapes_in_body: BTreeSet<String>,
 }
 
+/// The caller-supplied state an `AssertionCollector` needs BEYOND what
+/// `AssertionCollector::new` establishes — the seed that the IN-BODY obligation
+/// lane and the RETURN-VALUE render lane must apply IDENTICALLY.
+///
+/// SOUNDNESS-CRITICAL, and it exists because forgetting one of these fields in
+/// the return lane has now been a cardinal false verify TWICE.
+///
+/// `4ee6d1d4` fixed the return lane's throwaway `VerificationContext` (it
+/// carried the struct registry and nothing else, so every mutation test
+/// answered "unknown" for a parameter). It seeded the CONTEXT and left the
+/// COLLECTOR at `AssertionCollector::new(..)` defaults, so `mut_ref_call_args`
+/// stayed empty and `havoc_mut_ref_call_arg_referents` — which opens with
+/// `if self.mut_ref_call_args.is_empty() { return }` — never fired in the
+/// return lane. One hop away from the receiver call it had just fixed:
+///
+///     pub fn bump(c: &mut C) { c.n = c.n + 1; }
+///     #[requires(t.n == 0)] pub fn g(t: &mut C) { bump(t); assert!(t.n == 0); }   // refuted
+///     #[requires(t.n == 0)] #[ensures(result == 0)]
+///     pub fn g(t: &mut C) -> u64 { bump(t); t.n }                                 // VERIFIED, false
+///
+/// Both lanes now go through [`AssertionCollector::apply_lane_seed`] with a
+/// value of THIS type, and this type is constructed only by exhaustive struct
+/// literal (no `Default`, no `..rest`), so adding a fourth seeded field is a
+/// COMPILE ERROR at every construction site rather than a silent third
+/// instalment. The lanes are NOT identical — see
+/// [`CollectorLaneSeed::return_lane_view`] for the one field the return lane
+/// deliberately withholds — but the difference is written down in one place and
+/// a new field cannot dodge it.
+///
+/// WHAT IS DELIBERATELY *NOT* HERE, and why the return lane does not need it —
+/// the full audit of everything `AssertionCollector::new` leaves defaulted:
+///
+/// * `helper_contracts` / `trait_method_contracts` / `concrete_method_contracts`
+///   — a resolved contract only ever ADDS facts: a callee `ensures` assumption
+///   over the post-call state, and `requires` obligations that this throwaway
+///   collector discards (only its rendered STRING escapes). Absent, the havoc'd
+///   root simply stays unconstrained, which is strictly WEAKER — an
+///   over-rejection, never a false `Verified`. They are also `&'a`-borrowed from
+///   the caller's own maps, so threading them is a lifetime change, not a seed.
+///   Sound to omit; a capability opportunity, not a hole.
+/// * `ambient_solver_mode` / `next_assertion_index` — both name or route
+///   OBLIGATIONS, and this lane's obligations are thrown away with its context.
+///   No effect on the rendered value.
+/// * `next_struct_havoc_index` — deliberately caller-controlled, not seeded:
+///   `extract_scoped_return_expression` sets it from `havoc_index_base` so two
+///   renders combined into one model cannot mint the same name for two
+///   unrelated arbitrary states.
+/// * every remaining field (`scopes`, `path_conditions`, `loop_contexts`, the
+///   depth counters, the dedup/journal sets, `pre_havoc_call_args`,
+///   `exec_closure_defs`, `closure_reflection_contracts`, `loop_body_havoc`, …)
+///   is per-visit working state whose correct initial value IS the default:
+///   seeding them from another visit would import a foreign scope stack.
+pub(super) struct CollectorLaneSeed<'s> {
+    /// `&mut` scalar parameters with a clean erased-reference target. Seeds
+    /// scope 0's `erased_mut_ref_aliases` / `erased_mut_ref_targets`.
+    ///
+    /// IN-BODY LANE ONLY — see [`CollectorLaneSeed::return_lane_view`] for the
+    /// measured reason and the test that pins it. This is not framing state: it
+    /// changes how `*p` is ERASED, and granting it to the return lane cost a
+    /// fail-closed rejection without buying any soundness.
+    pub(super) supported_mut_ref_param_targets: &'s BTreeSet<String>,
+    /// Callee-signature `&mut` argument positions per free-call symbol. THE
+    /// field whose omission was the false verify: it is the sole enable of
+    /// `havoc_mut_ref_call_arg_referents`, and it is also what keeps that havoc
+    /// PRECISE — a `&`-shared read (`read(v)`) is spelled identically at the
+    /// call site and must NOT havoc.
+    pub(super) mut_ref_call_args: &'s BTreeMap<String, Vec<bool>>,
+    /// Per-ARGUMENT `&mut` positions of every method NAME the file declares
+    /// (receiver excluded). `mut_ref_call_args` is keyed on `ExprCall` symbols
+    /// and structurally cannot see `h.hit(t)`, so a `&mut` NON-self parameter of
+    /// an inherent or trait method was framed nowhere. Same lane discipline as
+    /// `mut_ref_call_args`: seeded into BOTH lanes.
+    pub(super) method_arg_mut_flags: &'s BTreeMap<String, Vec<bool>>,
+    /// Bindings of the function under extraction whose own type is `&mut T`.
+    /// The fallback that makes an UNRESOLVABLE callee fail closed instead of
+    /// reading as "no mutable arguments" — see
+    /// `super::mut_ref_reborrowable_bindings`. Seeded into BOTH lanes.
+    pub(super) mut_ref_reborrowable_bindings: &'s BTreeSet<String>,
+    /// `Fn`-bound `SpecFn` value parameters. Gates a conditional call-site
+    /// ASSUME, so omitting it is weaker (sound); seeded for lane parity.
+    pub(super) fn_bound_spec_fn_params: &'s BTreeSet<String>,
+}
+
+impl CollectorLaneSeed<'_> {
+    /// The seed for a lane that has no caller state to supply — the
+    /// definitional-body-axiom / conformance-capture renders, which run over a
+    /// SIBLING's body rather than the function under extraction.
+    ///
+    /// READ THIS BEFORE REUSING IT. An empty seed here is NOT self-evidently
+    /// safe, and assuming it was is how a second false verify got written into
+    /// this fix's first draft. Those lanes drop their axiom on a non-empty
+    /// `havoc_dependencies`, and it is tempting to argue that an empty seed can
+    /// only produce FEWER havocs and therefore never publishes an axiom the
+    /// populated seed would have dropped. That argument is exactly backwards:
+    /// fewer havocs means fewer dependencies means the drop does NOT fire, and
+    /// `fn via(mut c: C) -> u64 { bump(&mut c); c.n }` published `via(c) == c.n`
+    /// against the ENTRY `c` — a false premise (probed: `via(C{n:0})` proved
+    /// `result == 0`; every execution returns 1).
+    ///
+    /// What actually makes these lanes safe is a GATE AT THE PUBLISHER
+    /// (`body_has_unframeable_mutation`, applied by both
+    /// `SiblingHelperDef::from_item_fn_with_name` and
+    /// `InherentMethodDef::from_impl_method`), which drops the axiom when the
+    /// body passes a `&mut` argument or calls a `&mut self` method. Seeding the
+    /// render could not have fixed it: the body's own PARAMETERS are declared in
+    /// neither this throwaway scope stack nor the target's context, so
+    /// `havoc_mut_ref_call_arg_referents` has no tracked root to rebind.
+    /// `{sibling_helper,inherent_method}_body_axiom_is_dropped_when_*` in
+    /// `crates/trust-vc/tests/mut_ref_free_call_return_lane.rs` pin both
+    /// directions, with `a_pure_*_keeps_its_body_axiom` as the narrowness pins.
+    pub(super) const EMPTY: CollectorLaneSeed<'static> = CollectorLaneSeed {
+        supported_mut_ref_param_targets: &BTreeSet::new(),
+        mut_ref_call_args: &BTreeMap::new(),
+        method_arg_mut_flags: &BTreeMap::new(),
+        mut_ref_reborrowable_bindings: &BTreeSet::new(),
+        fn_bound_spec_fn_params: &BTreeSet::new(),
+    };
+
+    /// The subset of this seed that the RETURN-VALUE render lane applies.
+    ///
+    /// There is exactly ONE deliberate difference between the lanes, and it is
+    /// here rather than at the call site so that it is reviewed rather than
+    /// forgotten: the exhaustive destructure below means a future seed field
+    /// cannot compile until someone decides, in writing, which lanes get it.
+    /// That is the whole point of routing both lanes through one type — the two
+    /// cardinal false verifies in this area were both "the return lane was given
+    /// SOME of the caller's state and nobody noticed which".
+    ///
+    /// `supported_mut_ref_param_targets` is WITHHELD. It is not framing state:
+    /// it installs scope-0 erased-reference TARGETS, which change how `*p` is
+    /// ERASED in the rendered value — a modelling change, not a mutation-framing
+    /// one. Measured consequence of granting it:
+    /// `#[trust_vc::spec] fn f(x: &mut u64) -> u64 { *old(x) }` stopped failing
+    /// closed on "Unsupported old-state expression `old(...)`" and instead
+    /// reached the solver with no obligations at all
+    /// ("nothing to prove") — pinned by
+    /// `mut_refs_old_rs_snapshot_boundaries_fail_closed_from_file`, which the
+    /// granting version turned red. Both outcomes are Errors, so nothing became
+    /// unsound, but the render lost a rejection it is supposed to make, and this
+    /// field's absence is fail-closed by construction (an unresolved `*p` simply
+    /// does not render). The two fields that DO decide whether a call may have
+    /// changed a binding — `mut_ref_call_args` and `fn_bound_spec_fn_params` —
+    /// are granted, and `mut_ref_call_args` is the one this whole fix is about.
+    fn return_lane_view(&self) -> CollectorLaneSeed<'_> {
+        let CollectorLaneSeed {
+            supported_mut_ref_param_targets: _withheld,
+            mut_ref_call_args,
+            method_arg_mut_flags,
+            mut_ref_reborrowable_bindings,
+            fn_bound_spec_fn_params,
+        } = self;
+        CollectorLaneSeed {
+            supported_mut_ref_param_targets: &EMPTY_MUT_REF_PARAM_TARGETS,
+            mut_ref_call_args,
+            method_arg_mut_flags,
+            mut_ref_reborrowable_bindings,
+            fn_bound_spec_fn_params,
+        }
+    }
+}
+
+/// Backing storage for [`CollectorLaneSeed::return_lane_view`]'s withheld field.
+static EMPTY_MUT_REF_PARAM_TARGETS: BTreeSet<String> = BTreeSet::new();
+
 pub(super) fn extract_body_assertions_with_mut_ref_param_targets(
     block: &syn::Block,
     vc: &mut VerificationContext,
     ambient_solver_mode: Option<SolverMode>,
-    supported_mut_ref_param_targets: &BTreeSet<String>,
-    mut_ref_call_args: &BTreeMap<String, Vec<bool>>,
-    fn_bound_spec_fn_params: &BTreeSet<String>,
+    seed: &CollectorLaneSeed<'_>,
 ) -> TrustVcResult<MutRefPostState> {
-    let mut collector = AssertionCollector::new_with_mut_ref_param_targets(
-        vc,
-        0,
-        ambient_solver_mode,
-        supported_mut_ref_param_targets,
-    );
-    collector.mut_ref_call_args = mut_ref_call_args.clone();
-    collector.fn_bound_spec_fn_params = fn_bound_spec_fn_params.clone();
+    let supported_mut_ref_param_targets = seed.supported_mut_ref_param_targets;
+    let mut collector = AssertionCollector::new(vc, 0, ambient_solver_mode);
+    collector.apply_lane_seed(seed);
     let clean_finals = collector.visit_function_body_capturing_mut_ref_finals(block);
     collector.finish()?;
     Ok(MutRefPostState {
@@ -99,10 +256,9 @@ pub(super) fn extract_body_assertions_with_helper_and_trait_method_contracts(
     helper_contracts: Option<&BTreeMap<String, HelperCallContract>>,
     trait_method_contracts: Option<&BTreeMap<(String, String), TraitMethodCallContract>>,
     concrete_method_contracts: Option<&BTreeMap<(String, String), TraitMethodCallContract>>,
-    supported_mut_ref_param_targets: &BTreeSet<String>,
-    mut_ref_call_args: &BTreeMap<String, Vec<bool>>,
-    fn_bound_spec_fn_params: &BTreeSet<String>,
+    seed: &CollectorLaneSeed<'_>,
 ) -> TrustVcResult<MutRefPostState> {
+    let supported_mut_ref_param_targets = seed.supported_mut_ref_param_targets;
     let mut collector = AssertionCollector::new_with_helper_and_trait_method_contracts(
         vc,
         0,
@@ -110,10 +266,8 @@ pub(super) fn extract_body_assertions_with_helper_and_trait_method_contracts(
         helper_contracts,
         trait_method_contracts,
         concrete_method_contracts,
-        supported_mut_ref_param_targets,
     );
-    collector.mut_ref_call_args = mut_ref_call_args.clone();
-    collector.fn_bound_spec_fn_params = fn_bound_spec_fn_params.clone();
+    collector.apply_lane_seed(seed);
     let clean_finals = collector.visit_function_body_capturing_mut_ref_finals(block);
     collector.finish()?;
     Ok(MutRefPostState {
@@ -137,11 +291,78 @@ pub(super) fn extract_expr_assertions(
     collector.finish()
 }
 
+/// Outcome of a scoped return-value render.
+///
+/// `rendered` is `None` when the collector could not locate the target
+/// expression (or hit a parse error first) — nothing was rewritten, so the
+/// caller's raw-source fallback is as good a model as it ever was.
+///
+/// `havoc_dependencies` are the fresh symbols an UNMODELLED-MUTATION havoc
+/// minted that the rendered value actually READS (`t.bump(); t.a()` renders
+/// `t__havoc_0.a()`). They are minted inside this render's throwaway context, so
+/// a caller that uses `rendered` MUST declare them in its own context — binding
+/// `result` to an expression over an undeclared symbol is not a model. A caller
+/// that cannot declare them (a definitional body axiom, whose binder set is
+/// fixed) must drop its axiom instead.
+///
+/// Emitting them rather than declining is what keeps this fix from being a
+/// blanket rejection: the fresh symbol is exactly "arbitrary post-mutation
+/// state", so `fn g(t: &mut impl Ctr) -> int { t.bump(); t.a() }` still proves
+/// `result >= 2` from the trait's `ensures` (which holds of EVERY receiver)
+/// while `result == 0` is refuted with a model.
+pub(super) struct ScopedReturnRender {
+    pub(super) rendered: Option<String>,
+    pub(super) havoc_dependencies: Vec<(String, TrustVcType)>,
+    /// One past the highest havoc index this render consumed. Feed it back as
+    /// the next render's `havoc_index_base` when two renders of the SAME body
+    /// are combined into one model (the `let … else` then/else pair), so the two
+    /// cannot mint the same name for two different arbitrary states. Identifying
+    /// them would remove models in which they differ, which NARROWS the value
+    /// bound to `result` — the unsound direction.
+    pub(super) next_havoc_index: usize,
+    /// SOUNDNESS-CRITICAL: the caller MUST NOT substitute a raw token rendering
+    /// of the return expression when `rendered` is `None`.
+    ///
+    /// `scoped_return_expression` in the parent module used to do exactly that —
+    /// `render.rendered.unwrap_or_else(|| extract_expr_string(return_expr))` —
+    /// which threw away every fail-closed decision this render made and put back
+    /// the very string the decision rejected. That is how
+    /// `fn a1(f: bool, t: &mut C) -> u64 { if f { bump(t); t.n } else { bump(t); t.n } }`
+    /// kept proving `result == 0`: the collector correctly declined, and the
+    /// caller silently answered for it with the raw tokens, in which the encoder
+    /// has no statement semantics and reads each branch tail against the ENTRY
+    /// state.
+    ///
+    /// Set when a raw rendering of THIS return expression would drop a
+    /// statement-position mutation (see
+    /// [`AssertionCollector::raw_fallback_dropped_mutations`]) — narrow on
+    /// purpose, so the long-standing benign uses of that fallback (a target the
+    /// walk simply did not reach, in a body with nothing to drop) are untouched.
+    pub(super) raw_fallback_unsound: bool,
+}
+
+/// SOUNDNESS-CRITICAL (return-lane mutation framing). The `ctx` seed is
+/// load-bearing, not a convenience.
+///
+/// This render runs on its OWN collector over a throwaway context. That context
+/// used to carry the struct-type registry and nothing else — no variable
+/// declarations, no receiver-kind registries, no function context — so every
+/// mutation-framing test the collector performs answered "unknown" for a
+/// PARAMETER: `receiver_struct_type_name` and `receiver_is_collection_like` both
+/// read declared types, and both were `None`. The result was that the in-body
+/// lane correctly havoced `t` across `t.bump()` and fail-closed an
+/// `assert!(t.n == 0)`, while the RETURN lane rendered the very same body's tail
+/// `t.n` against the ENTRY symbol and false-`Verified` `ensures(result == 0)`.
+/// The two lanes must see the same facts or they decide the same program
+/// differently.
 pub(super) fn extract_scoped_return_expression(
     block: &syn::Block,
     return_expr: &Expr,
     struct_types: &[StructDef],
-) -> Option<String> {
+    ctx: Option<&VerificationContext>,
+    havoc_index_base: usize,
+    seed: &CollectorLaneSeed<'_>,
+) -> ScopedReturnRender {
     // SOUNDNESS-CRITICAL (returned owned-local field write): the scoped
     // return-expression render threads straight-line field writes via
     // `assign_direct_field_expr`, which needs the OWNING struct/enum `Datatype`
@@ -158,8 +379,121 @@ pub(super) fn extract_scoped_return_expression(
     for def in struct_types {
         dummy.register_struct_type(def.clone());
     }
+    if let Some(ctx) = ctx {
+        // Declared types: what `receiver_struct_type_name` /
+        // `receiver_is_collection_like` classify a PARAMETER receiver by.
+        for decl in ctx.variables() {
+            dummy.declare_var_typed_bounded(&decl.name, decl.ty.clone(), decl.bounded_len);
+        }
+        // The two receiver-kind registries. Seeding these is what keeps the
+        // framing PRECISE rather than blanket: a `&self` reader resolves to
+        // `Ref` and is left alone, so `let n = t.peek(); n` still renders.
+        for ((self_type, method), kind) in ctx.struct_self_receiver_kinds_clone() {
+            dummy.register_struct_self_receiver_kind(self_type, method, kind);
+        }
+        for ((trait_name, method), kind) in ctx.trait_method_self_receiver_kinds_clone() {
+            dummy.register_trait_method_self_receiver_kind(trait_name, method, kind);
+        }
+        // Trait bounds + declarations: the generic-receiver classifier resolves
+        // a `TypeParam` receiver through the function context's bounds and the
+        // supertrait closure.
+        if let Some(function_context) = ctx.function_context() {
+            dummy.set_function_context(function_context.clone());
+        }
+        for decl in ctx.trait_decls() {
+            dummy.register_trait_decl(decl.clone());
+        }
+    }
     let mut collector = AssertionCollector::new(&mut dummy, 0, None);
-    collector.scoped_return_expression(block, return_expr)
+    // SOUNDNESS-CRITICAL: the SAME seed the in-body obligation lane applies.
+    // Seeding the CONTEXT (above) and leaving the COLLECTOR at its defaults is
+    // exactly how the free-call `&mut`-argument havoc went missing here —
+    // `havoc_mut_ref_call_arg_referents` returns immediately on an empty
+    // `mut_ref_call_args`, so `bump(t); t.n` rendered `t`'s ENTRY symbol and
+    // `ensures(result == 0)` false-`Verified` while the identical body's
+    // `assert!(t.n == 0)` was correctly refuted. See [`CollectorLaneSeed`].
+    collector.apply_lane_seed(&seed.return_lane_view());
+    collector.next_struct_havoc_index = havoc_index_base;
+    let rendered = collector.scoped_return_expression(block, return_expr);
+    // Report ONLY the havoc symbols the rendered value actually reads, so a body
+    // that mutates a binding it does not return (`t.bump(); 42`) costs nothing.
+    let havoc_dependencies = match &rendered {
+        Some(rendered) => collector
+            .havoc_minted_symbols
+            .iter()
+            .filter(|symbol| string_contains_whole_word(rendered, symbol))
+            .filter_map(|symbol| {
+                collector
+                    .vc
+                    .get_variable_type(symbol)
+                    .map(|ty| (symbol.clone(), ty.clone()))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let raw_fallback_unsound = rendered.is_none()
+        && !collector
+            .raw_fallback_dropped_mutations(return_expr)
+            .is_empty();
+    ScopedReturnRender {
+        rendered,
+        havoc_dependencies,
+        next_havoc_index: collector.next_struct_havoc_index,
+        raw_fallback_unsound,
+    }
+}
+
+/// The match condition for the TAIL `let PAT = SCRUTINEE else { return … };` of
+/// `block` (`local`), rendered in the same scoped-value vocabulary as
+/// [`extract_scoped_return_expression`]. `None` means "not modelable".
+///
+/// SOUNDNESS-CRITICAL. The caller's `ReturnValue::Conditional` model is
+/// `if COND { then } else { else }`. A `COND` of `"true"` for a REFUTABLE
+/// pattern makes the ELSE value unreachable and discharges the postcondition
+/// against the then-value alone — a cardinal false verify (`enum E { V{a}, W }`,
+/// `let E::V { a } = e else { return 0 }; 7` proved `result == 7`). `"false"` is
+/// exactly as wrong in the other direction: it would drop the THEN value. There
+/// is no safe placeholder, so an unmodelable pattern returns `None` and the
+/// caller must DECLINE the conditional model entirely. An unmodelled return
+/// leaves `result` unconstrained, which is an over-rejection — a capability
+/// cost, not a hole.
+///
+/// This deliberately routes to the obligation collector's OWN let-else handler
+/// ([`AssertionCollector::local_let_else_match_condition`] ->
+/// [`pattern_match_condition_for_scoped_value`]) instead of re-deriving the
+/// condition. The return lane previously carried a hand-copied predicate that
+/// had drifted away from this one on every axis that matters: it returned a bare
+/// `String` whose unrecognized arms all yielded `"true"`, it applied the
+/// `Some`/`None` spelling without checking the type was an `Option`, and it had
+/// neither the `Pat::Struct` refutability gate nor the refinement-drop guards.
+/// Deriving the condition in one place is what keeps the two lanes from drifting
+/// again.
+///
+/// `ctx` is the caller's verification context, needed for the scrutinee's TYPE:
+/// the declared variable types decide whether a variant tester is even
+/// applicable, and `Option`'s `Some`/`None` spell differently from a user enum's
+/// same-named variants. Pass `None` only where no context exists (the
+/// conformance-method-body capture); the resolution then fails and the caller
+/// declines, which is sound.
+pub(super) fn extract_tail_let_else_match_condition(
+    block: &syn::Block,
+    local: &syn::Local,
+    ctx: Option<&VerificationContext>,
+) -> Option<String> {
+    let mut dummy = VerificationContext::new();
+    if let Some(ctx) = ctx {
+        for def in &ctx.struct_types {
+            dummy.register_struct_type(def.clone());
+        }
+        for (name, ty) in ctx.source_type_aliases() {
+            dummy.register_source_type_alias(name, ty.clone());
+        }
+        for decl in ctx.variables() {
+            dummy.declare_var_typed_bounded(&decl.name, decl.ty.clone(), decl.bounded_len);
+        }
+    }
+    let mut collector = AssertionCollector::new(&mut dummy, 0, None);
+    collector.tail_let_else_match_condition(block, local)
 }
 
 /// The WRITTEN contract of a known local `trust_vc::closure!` literal, keyed by
@@ -213,6 +547,25 @@ struct AssertionCollector<'a> {
     /// site, so the callee signature carried here is what tells the two apart and
     /// keeps the havoc free of over-rejection.
     mut_ref_call_args: BTreeMap<String, Vec<bool>>,
+    /// Per-ARGUMENT `&mut` positions of every method NAME the file declares
+    /// (receiver EXCLUDED, so positions align with `ExprMethodCall::args`).
+    /// SOUNDNESS-CRITICAL and the METHOD-call twin of `mut_ref_call_args`:
+    /// `impl H { fn hit(&self, c: &mut C) }` called `h.hit(t)` never reached the
+    /// `ExprCall` havoc at all, so the mutation of `t` was dropped outright.
+    /// Absence means the file declares no method of that name — an UNKNOWN, which
+    /// routes to `mut_ref_reborrowable_bindings` rather than to a silent "no".
+    method_arg_mut_flags: BTreeMap<String, Vec<bool>>,
+    /// Bindings whose OWN declared type is `&mut T` (the enclosing function's
+    /// `&mut` parameters and a `&mut self` receiver).
+    ///
+    /// SOUNDNESS-CRITICAL — this is the answer for a callee the file cannot
+    /// resolve. Passing one of these bare REBORROWS the mutable reference into
+    /// the call, so whoever the callee is may write through it; no resolution is
+    /// required to know that. It is consulted ONLY when the callee is
+    /// unresolved: a resolved signature is authoritative and can legitimately say
+    /// NO (`read(c: &C)` called `read(t)` with `t: &mut C` is a reborrow-coercion
+    /// to `&C` and must not havoc — `shared_ref_argument_does_not_havoc_the_return_value`).
+    mut_ref_reborrowable_bindings: BTreeSet<String>,
     unsupported_index_receivers: Vec<BTreeSet<String>>,
     local_macros: Vec<BTreeMap<String, LocalMacroDefinition>>,
     macro_expansion_depth: usize,
@@ -359,6 +712,17 @@ struct AssertionCollector<'a> {
     /// enum receiver is mutated in place by a `&mut self` (or unresolved non-pure)
     /// method call. See `havoc_struct_receiver`.
     next_struct_havoc_index: usize,
+    /// Every fresh symbol minted by an UNMODELLED-MUTATION havoc
+    /// (`havoc_struct_receiver` / `havoc_declared_binding_to_fresh`). Each one
+    /// means "arbitrary post-mutation state of this binding".
+    ///
+    /// Read only by the return-value render lane
+    /// ([`extract_scoped_return_expression`]), which reports the ones the
+    /// rendered value actually READS as that render's `havoc_dependencies` so the
+    /// caller can declare them. Recording is unconditional (the in-body lane
+    /// simply never reads the set) so the two lanes cannot drift apart about
+    /// which calls mutate.
+    havoc_minted_symbols: BTreeSet<String>,
     /// Exec closures bound to a local (`let g = |..| ..;`), keyed by the local
     /// name. At an exec call site `g(args)` (or an immediately-invoked
     /// `(|..| ..)(args)`), the closure body's checked arithmetic / index accesses
@@ -612,24 +976,6 @@ impl<'a> AssertionCollector<'a> {
             None,
             None,
             None,
-            BTreeSet::new(),
-        )
-    }
-
-    fn new_with_mut_ref_param_targets(
-        vc: &'a mut VerificationContext,
-        next_assertion_index: usize,
-        ambient_solver_mode: Option<SolverMode>,
-        supported_mut_ref_param_targets: &BTreeSet<String>,
-    ) -> Self {
-        Self::new_inner(
-            vc,
-            next_assertion_index,
-            ambient_solver_mode,
-            None,
-            None,
-            None,
-            supported_mut_ref_param_targets.clone(),
         )
     }
 
@@ -640,7 +986,6 @@ impl<'a> AssertionCollector<'a> {
         helper_contracts: Option<&'a BTreeMap<String, HelperCallContract>>,
         trait_method_contracts: Option<&'a BTreeMap<(String, String), TraitMethodCallContract>>,
         concrete_method_contracts: Option<&'a BTreeMap<(String, String), TraitMethodCallContract>>,
-        supported_mut_ref_param_targets: &BTreeSet<String>,
     ) -> Self {
         Self::new_inner(
             vc,
@@ -649,8 +994,36 @@ impl<'a> AssertionCollector<'a> {
             helper_contracts,
             trait_method_contracts,
             concrete_method_contracts,
-            supported_mut_ref_param_targets.clone(),
         )
+    }
+
+    /// Apply the caller-state seed. THE single place either lane installs it —
+    /// see [`CollectorLaneSeed`] for why "either lane" is soundness-critical and
+    /// for the per-field audit of what is deliberately left at its default.
+    ///
+    /// Destructured exhaustively on purpose: a new seed field is a compile error
+    /// here until it is actually installed, not a silently-dropped one.
+    fn apply_lane_seed(&mut self, seed: &CollectorLaneSeed<'_>) {
+        let CollectorLaneSeed {
+            supported_mut_ref_param_targets,
+            mut_ref_call_args,
+            method_arg_mut_flags,
+            mut_ref_reborrowable_bindings,
+            fn_bound_spec_fn_params,
+        } = seed;
+        self.method_arg_mut_flags = (*method_arg_mut_flags).clone();
+        self.mut_ref_reborrowable_bindings = (*mut_ref_reborrowable_bindings).clone();
+        self.supported_mut_ref_param_targets = (*supported_mut_ref_param_targets).clone();
+        // Scope 0 is the collector's outermost scope and is present from
+        // construction, so this installs the erased-reference targets exactly
+        // where `new_inner` used to.
+        self.erased_mut_ref_aliases[0] = (*supported_mut_ref_param_targets).clone();
+        self.erased_mut_ref_targets[0] = supported_mut_ref_param_targets
+            .iter()
+            .map(|name| (name.clone(), ErasedMutRefTarget::Local(name.clone())))
+            .collect();
+        self.mut_ref_call_args = (*mut_ref_call_args).clone();
+        self.fn_bound_spec_fn_params = (*fn_bound_spec_fn_params).clone();
     }
 
     fn new_inner(
@@ -660,13 +1033,11 @@ impl<'a> AssertionCollector<'a> {
         helper_contracts: Option<&'a BTreeMap<String, HelperCallContract>>,
         trait_method_contracts: Option<&'a BTreeMap<(String, String), TraitMethodCallContract>>,
         concrete_method_contracts: Option<&'a BTreeMap<(String, String), TraitMethodCallContract>>,
-        supported_mut_ref_param_targets: BTreeSet<String>,
     ) -> Self {
-        let seeded_mut_ref_aliases = supported_mut_ref_param_targets.clone();
-        let seeded_mut_ref_targets = supported_mut_ref_param_targets
-            .iter()
-            .map(|name| (name.clone(), ErasedMutRefTarget::Local(name.clone())))
-            .collect::<BTreeMap<_, _>>();
+        // The `&mut`-param targets are no longer a construction argument: they
+        // are part of `CollectorLaneSeed` and are installed by `apply_lane_seed`
+        // so the return lane cannot get a differently-seeded collector than the
+        // in-body lane. Construction starts them empty.
         Self {
             vc,
             next_assertion_index,
@@ -677,10 +1048,12 @@ impl<'a> AssertionCollector<'a> {
             ghost_collection_scopes: vec![BTreeSet::new()],
             scoped_struct_types: vec![BTreeMap::new()],
             erased_shared_ref_aliases: vec![BTreeSet::new()],
-            erased_mut_ref_aliases: vec![seeded_mut_ref_aliases],
-            erased_mut_ref_targets: vec![seeded_mut_ref_targets],
-            supported_mut_ref_param_targets,
+            erased_mut_ref_aliases: vec![BTreeSet::new()],
+            erased_mut_ref_targets: vec![BTreeMap::new()],
+            supported_mut_ref_param_targets: BTreeSet::new(),
             mut_ref_call_args: BTreeMap::new(),
+            method_arg_mut_flags: BTreeMap::new(),
+            mut_ref_reborrowable_bindings: BTreeSet::new(),
             unsupported_index_receivers: vec![BTreeSet::new()],
             local_macros: vec![BTreeMap::new()],
             macro_expansion_depth: 0,
@@ -704,6 +1077,7 @@ impl<'a> AssertionCollector<'a> {
             recorded_concrete_method_contract_call_sites: BTreeSet::new(),
             recorded_qualified_trait_fn_call_sites: BTreeSet::new(),
             next_struct_havoc_index: 0,
+            havoc_minted_symbols: BTreeSet::new(),
             exec_closure_defs: HashMap::new(),
             closure_reflection_contracts: HashMap::new(),
             closure_reflection_contract_changes: vec![HashMap::new()],
@@ -1616,6 +1990,8 @@ impl<'a> AssertionCollector<'a> {
             erased_shared_ref_params: &erased_shared_ref_params,
             old_substitutions: &old_substitutions,
             erased_mut_ref_value_params: &erased_mut_ref_value_params,
+            binder_scopes: Vec::new(),
+            unscopable_binder: false,
         }
         .visit_expr_mut(&mut rewritten);
         self.expr_to_scoped_string(&rewritten)
@@ -1892,6 +2268,8 @@ impl<'a> AssertionCollector<'a> {
             erased_shared_ref_params,
             old_substitutions,
             erased_mut_ref_value_params,
+            binder_scopes: Vec::new(),
+            unscopable_binder: false,
         }
         .visit_expr_mut(&mut rewritten);
         // Collect `.requires`/`.ensures` reflection uses over REGISTERED closure
@@ -3847,8 +4225,49 @@ impl<'a> AssertionCollector<'a> {
     fn local_let_else_match_condition(&mut self, local: &syn::Local) -> Option<String> {
         let init = local.init.as_ref()?;
         init.diverge.as_ref()?;
+        // An IRREFUTABLE binder matches every scrutinee, so its condition is
+        // `true` regardless of the scrutinee's shape or whether its type
+        // resolves. Answering that before `local_pattern_base` keeps a
+        // `let x = f() else { … }` (non-path scrutinee, hence no resolvable
+        // base) modelable instead of needlessly declining. `pattern_is_
+        // irrefutable_binder` is the SAME predicate the type-aware arms below
+        // reduce to, so this is a short-circuit, not a second opinion.
+        if pattern_is_irrefutable_binder(&local.pat) {
+            return Some("true".to_string());
+        }
         let (base, base_ty) = self.local_pattern_base(&init.expr)?;
         pattern_match_condition_for_scoped_value(&local.pat, &base, &base_ty)
+    }
+
+    /// Walks `block` up to the tail let-else statement `local` so every binding
+    /// introduced BEFORE it is in scope, then defers to
+    /// [`Self::local_let_else_match_condition`]. The let-else statement itself is
+    /// deliberately NOT visited: the match condition is evaluated in the state
+    /// before the pattern binds.
+    fn tail_let_else_match_condition(
+        &mut self,
+        block: &syn::Block,
+        local: &syn::Local,
+    ) -> Option<String> {
+        self.push_scope();
+        let mut condition = None;
+        for stmt in &block.stmts {
+            if self.parse_error.is_some() {
+                break;
+            }
+            if let Stmt::Local(candidate) = stmt {
+                if std::ptr::eq(candidate, local) {
+                    condition = self.local_let_else_match_condition(local);
+                    break;
+                }
+            }
+            self.visit_stmt(stmt);
+        }
+        self.pop_scope();
+        if self.parse_error.is_some() {
+            return None;
+        }
+        condition
     }
 
     fn local_init_scoped_value(&mut self, local: &syn::Local) -> Option<String> {
@@ -4206,6 +4625,131 @@ impl<'a> AssertionCollector<'a> {
         }
     }
 
+    /// SOUNDNESS-CRITICAL (generic-receiver mutation framing). True when
+    /// `recv.method(..)` — where `recv`'s DECLARED type is a bare type parameter
+    /// (`fn g<T: Tr>(t: &mut T)`, or its `fn g(t: &mut impl Tr)` sugar, which
+    /// desugars to exactly that) — is resolved to a `&mut self` trait method and
+    /// therefore mutates the caller's binding.
+    ///
+    /// This is the shape `struct_method_mutates_caller` structurally cannot
+    /// reach: a `TypeParam` receiver has no `Datatype`, so
+    /// `receiver_struct_type_name` is `None` and the struct branch never fires.
+    /// Before this, `t.bump()` on such a receiver was a NO-OP — the two `t.a()`
+    /// reads bracketing it lowered to the SAME `Tr__a(t)` term (the trait-bound
+    /// method UF is a function OF the receiver term), so `y - x == 0` verified
+    /// even though every real impl with a mutating `bump` refutes it.
+    ///
+    /// Resolution reuses the SAME start-first supertrait BFS that registers the
+    /// bound methods (`supertrait_closure_methods`) so the mutation classifier
+    /// and the method-resolution closure cannot drift, and additionally consults
+    /// the DIRECT bound so a trait declared without `#[trust_vc::trait_spec]`
+    /// (absent from `trait_decls`) is still classified.
+    ///
+    /// FAIL DIRECTION (no over-rejection): an UNRESOLVED `(trait, method)` pair
+    /// returns `false` and leaves the receiver intact. That is safe here — and
+    /// only here — because a method that resolves to no in-scope trait
+    /// declaration also gets no bound-method registration, so a call on it
+    /// cannot be lowered at all and already fails closed. A `&self` / by-value
+    /// trait method resolves to `Ref`/`Value` and is likewise left alone, so a
+    /// true fact carried across a pure generic read still verifies.
+    fn type_param_method_mutates_caller(&self, name: &str, method: &str) -> bool {
+        // A scoped struct-type inference wins over the declared type (the struct
+        // branch already handled that case); only classify a receiver whose
+        // declared type is a bare type parameter.
+        if self.scoped_struct_type_name(name).is_some() {
+            return false;
+        }
+        let Some(TrustVcType::TypeParam(type_param)) = self.vc.get_variable_type(name) else {
+            return false;
+        };
+        self.type_param_mut_self_methods(&type_param.clone())
+            .contains(method)
+    }
+
+    /// Every method name a `TypeParam`-typed receiver bound by `type_param` can
+    /// be called with that the in-scope trait declarations resolve to
+    /// `&mut self`. The single authority behind both consumers of the
+    /// generic-receiver mutation framing: the straight-line havoc
+    /// ([`Self::type_param_method_mutates_caller`]) and the loop / branch
+    /// modified-set collector, which must agree or a receiver havoced in one
+    /// lane stays frame-pinned in the other.
+    fn type_param_mut_self_methods(&self, type_param: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let Some(function_context) = self.vc.function_context() else {
+            return out;
+        };
+        let trait_decls = self.vc.trait_decls();
+        for bound in function_context.trait_bounds() {
+            if bound.type_param != type_param {
+                continue;
+            }
+            // The bound trait itself, plus every (transitive) supertrait, via the
+            // SAME start-first BFS that registers the callable bound methods —
+            // so the mutation classifier and the method-resolution closure cannot
+            // drift. `supertrait_closure_methods` applies Rust's shadowing rule,
+            // so the nearest declaration of a name wins.
+            let mut declaring: Vec<(String, String)> = Vec::new();
+            for (declaring_trait, decl) in
+                crate::vc_extraction::trait_contracts::supertrait_closure_methods(
+                    trait_decls,
+                    &bound.trait_name,
+                )
+            {
+                declaring.push((declaring_trait, decl.name.clone()));
+            }
+            // Also consult the DIRECT bound by name, so a trait declared without
+            // `#[trust_vc::trait_spec]` (absent from `trait_decls`, hence from the
+            // closure above) is still classified.
+            for (trait_name, method) in self.vc.trait_method_self_receiver_kinds().keys() {
+                if trait_name == &bound.trait_name {
+                    declaring.push((trait_name.clone(), method.clone()));
+                }
+            }
+            for (trait_name, method) in declaring {
+                if self
+                    .vc
+                    .trait_method_self_receiver_kind(&trait_name, &method)
+                    == Some(SelfReceiverKind::RefMut)
+                {
+                    out.insert(method);
+                }
+            }
+        }
+        out
+    }
+
+    /// Per-receiver `&mut self` method names for every declared `TypeParam`
+    /// binding, in the shape the loop / branch modified-set collector consumes.
+    ///
+    /// SOUNDNESS-CRITICAL (generic receiver × loop frame). The modified-set
+    /// collector classifies a method receiver through `struct_receivers` (a
+    /// `Datatype` map) and `collection_receivers`; a `TypeParam` receiver is in
+    /// NEITHER, so `t.bump()` inside a loop body left `t` out of the modified
+    /// set, the loop frame pinned `t == t_pre`, and a FALSE invariant about
+    /// `t.a()` was trivially "preserved" — the loop sibling of the straight-line
+    /// hole, live on its own.
+    fn type_param_mut_methods_by_receiver(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if self.vc.function_context().is_none() {
+            return out;
+        }
+        for decl in self.vc.variables() {
+            let TrustVcType::TypeParam(type_param) = &decl.ty else {
+                continue;
+            };
+            // A nearer `let` binding of the same name may shadow the declared
+            // parameter, exactly as `struct_typed_receiver_names` handles.
+            if self.has_scoped_name(&decl.name) {
+                continue;
+            }
+            let methods = self.type_param_mut_self_methods(type_param);
+            if !methods.is_empty() {
+                out.insert(decl.name.clone(), methods);
+            }
+        }
+        out
+    }
+
     /// Havocs a struct/enum receiver after an in-place mutation by a `&mut self`
     /// (or unresolved non-pure) method call: rebinds `name`'s scoped value to a
     /// FRESH, unconstrained variable of the same `Datatype` type. Subsequent reads
@@ -4240,6 +4784,7 @@ impl<'a> AssertionCollector<'a> {
             self.next_struct_havoc_index += 1;
         }
         self.vc.declare_var_typed(&fresh, ty);
+        self.havoc_minted_symbols.insert(fresh.clone());
         // Rebind `name` (and any mut-ref aliases pointing at it) to the fresh,
         // unconstrained symbol so later reads see arbitrary state.
         self.assign_scoped(name, fresh.clone());
@@ -4496,6 +5041,7 @@ impl<'a> AssertionCollector<'a> {
             self.next_struct_havoc_index += 1;
         }
         self.vc.declare_var_typed(&fresh, ty.clone());
+        self.havoc_minted_symbols.insert(fresh.clone());
         // Forget every auxiliary scoped fact about `name` (struct type, ghost
         // collection, mut-ref aliases, concrete flag, ...) exactly as the
         // invalidate path does, then rebind the scoped value to the fresh,
@@ -4604,35 +5150,92 @@ impl<'a> AssertionCollector<'a> {
     /// snapshot of the argument renderings is needed for the call-site
     /// `requires` substitution.
     fn call_havocs_mut_ref_args(&self, call: &syn::ExprCall) -> bool {
-        if self.mut_ref_call_args.is_empty() {
-            return false;
-        }
-        let Some(symbol) = super::call_function_symbol(call) else {
-            return false;
-        };
-        let Some(mut_flags) = self.mut_ref_call_args.get(&symbol) else {
-            return false;
-        };
-        call.args.iter().zip(mut_flags.iter()).any(|(arg, is_mut)| {
-            *is_mut
+        let resolved = self.resolved_call_arg_mut_flags(call);
+        call.args.iter().enumerate().any(|(index, arg)| {
+            self.call_arg_may_be_written_through(resolved.as_deref(), index, arg)
                 && !mut_ref_arg_is_shared_ref_temporary(arg)
                 && field_index_projection_root(arg)
                     .is_some_and(|root| self.has_scoped_name(&root) || self.vc.has_variable(&root))
         })
     }
 
-    fn havoc_mut_ref_call_arg_referents(&mut self, call: &syn::ExprCall) {
-        if self.mut_ref_call_args.is_empty() {
-            return;
+    /// The callee-signature `&mut` flags for `call`, or `None` when this file
+    /// cannot resolve the callee at all.
+    ///
+    /// `None` is a genuine UNKNOWN and is reported as one — it is NOT the empty
+    /// vector. `collect_referenced_sibling_mut_ref_call_args` records an
+    /// all-`false` vector for a resolved pure reader precisely so the two can be
+    /// told apart here; conflating them is what let `use m::bump2; bump2(t)`
+    /// read as "no mutable arguments".
+    fn resolved_call_arg_mut_flags(&self, call: &syn::ExprCall) -> Option<Vec<bool>> {
+        let symbol = super::call_function_symbol(call)
+            .or_else(|| super::qualified_ufcs_call_symbol(call))?;
+        self.mut_ref_call_args.get(&symbol).cloned()
+    }
+
+    /// Whether the callee may WRITE THROUGH argument `index` of a call.
+    ///
+    /// SOUNDNESS-CRITICAL, and THE place the two independent sources of the
+    /// answer are reconciled:
+    ///
+    /// 1. `resolved` — the callee SIGNATURE, when this file resolves the callee.
+    ///    This is the precise answer and the only one allowed to say NO: a
+    ///    `&`-shared parameter is spelled IDENTICALLY at the call site
+    ///    (`read(t)` vs `bump(t)`), so nothing but the signature separates them
+    ///    and this is what keeps the framing free of over-rejection.
+    /// 2. The ARGUMENT's own declared type, when the callee is UNKNOWN. A
+    ///    binding of type `&mut T` passed bare is REBORROWED into the call, so
+    ///    whoever the callee is may write through it. This needs no resolution,
+    ///    which is exactly why it is the right fallback: the previous model
+    ///    answered "no mutable arguments" for every spelling it could not
+    ///    resolve — a file-level `use m::bump2;`, an inherent associated fn
+    ///    `H::zap(t)`, a method argument `h.hit(t)`, an item from another crate
+    ///    — and each of those was a live cardinal false verify.
+    ///
+    /// Restricted to a BARE path argument in the fallback: `o.c` passed by value
+    /// is a copy, and `&mut o.c` is a borrow the general borrow-escape havoc
+    /// (`havoc_mut_borrow_escaped_binding`) already owns.
+    fn call_arg_may_be_written_through(
+        &self,
+        resolved: Option<&[bool]>,
+        index: usize,
+        arg: &Expr,
+    ) -> bool {
+        if let Some(flags) = resolved {
+            return flags.get(index).copied().unwrap_or(false);
         }
-        let Some(symbol) = super::call_function_symbol(call) else {
-            return;
-        };
-        let Some(mut_flags) = self.mut_ref_call_args.get(&symbol).cloned() else {
-            return;
-        };
-        for (arg, is_mut) in call.args.iter().zip(mut_flags.iter()) {
-            if !is_mut {
+        expr_path_ident(arg).is_some_and(|name| self.mut_ref_reborrowable_bindings.contains(&name))
+    }
+
+    fn havoc_mut_ref_call_arg_referents(&mut self, call: &syn::ExprCall) {
+        let resolved = self.resolved_call_arg_mut_flags(call);
+        self.havoc_written_through_call_args(&call.args, resolved.as_deref());
+    }
+
+    /// The METHOD-call twin of [`Self::havoc_mut_ref_call_arg_referents`].
+    ///
+    /// SOUNDNESS-CRITICAL: `havoc_mut_ref_call_arg_referents` is reached only
+    /// from `visit_expr_call`, so a `&mut` NON-self parameter of an inherent or
+    /// trait method — `impl H { fn hit(&self, c: &mut C) }` called `h.hit(t)`,
+    /// and `impl B for H { fn bump(&self, c: &mut C) }` called `h.bump(t)` — was
+    /// framed by nothing at all. Both were live cardinal false verifies in the
+    /// return lane AND the in-body `assert!` lane. The RECEIVER is not touched
+    /// here: `visit_expr_method_call`'s own receiver-mutation machinery owns it.
+    fn havoc_mut_ref_method_call_args(&mut self, call: &syn::ExprMethodCall) {
+        let resolved = self
+            .method_arg_mut_flags
+            .get(&call.method.to_string())
+            .cloned();
+        self.havoc_written_through_call_args(&call.args, resolved.as_deref());
+    }
+
+    fn havoc_written_through_call_args(
+        &mut self,
+        args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>,
+        resolved: Option<&[bool]>,
+    ) {
+        for (index, arg) in args.iter().enumerate() {
+            if !self.call_arg_may_be_written_through(resolved, index, arg) {
                 continue;
             }
             // `&mut &x` passes a mutable reference TO A TEMPORARY shared
@@ -4849,6 +5452,14 @@ impl<'a> AssertionCollector<'a> {
             }
             return;
         }
+        // (1b) GENERIC receiver: the UFCS spelling of the `TypeParam`-receiver
+        // `&mut self` trait call (`Tr::bump(t)` for `t: &mut T`). Same framing as
+        // the method-call path — without it the UFCS spelling reopens exactly the
+        // hole `type_param_method_mutates_caller` closes.
+        if self.type_param_method_mutates_caller(&root, &method) {
+            self.havoc_declared_binding_to_fresh(&root);
+            return;
+        }
         // (2) std-collection mutator UFCS (`Vec::push(v, ..)`). The receiver is
         // modeled as a ghost `Seq`/`Set`/`Map` (so it has no `Datatype` type and
         // the struct branch above did not fire). Gate on the path's type segment
@@ -4869,11 +5480,9 @@ impl<'a> AssertionCollector<'a> {
     /// closure, rebinding within the caller's (already-isolated) scope. See the
     /// `#74` soundness note in `visit_expr_closure`. A captured var is a
     /// single-ident reference in the body that is neither a closure parameter nor
-    /// re-bound inside the body, and that names a DECLARED variable (a function
-    /// parameter / declared outer local whose bare symbol carries entry /
-    /// `requires` / `assume` facts that could otherwise leak across closures).
-    /// Undeclared scoped-only locals carry no entry facts to leak, so they are
-    /// left at their existing scoped value.
+    /// lexically bound before that use. Both declared variables and scoped-only
+    /// locals are freshened: a scoped local can alias a declared, fact-bearing
+    /// symbol (`let n = p`) even though the local itself has no VC declaration.
     ///
     /// WHICH captures are freshened is governed by `freshen_all` / `targets`:
     /// * `freshen_all` (an `assume!`-bearing closure): EVERY captured var — the
@@ -4892,24 +5501,14 @@ impl<'a> AssertionCollector<'a> {
         freshen_all: bool,
         targets: &BTreeSet<String>,
     ) {
-        let mut bound = closure_body_bound_idents(&expr_closure.body);
-        for input in &expr_closure.inputs {
-            bound.extend(bound_idents_from_pat(input));
-        }
-        // Collect identifiers from the body's RAW token stream — not via a syn
-        // visitor — because the captured free var of interest (`n`) typically
-        // appears only INSIDE an `assume!` / `assert!` macro's tokens (the
-        // `trust_vc::closure!` `requires` / body relation), which a syn `Visit`
-        // treats as an opaque token blob and never descends. The over-collection
-        // (type / method idents) is harmless: only names that are DECLARED
-        // variables, not bound by the closure, and selected by `freshen_all` /
-        // `targets` are freshened.
-        let mut referenced = BTreeSet::new();
-        collect_token_stream_idents(expr_closure.body.to_token_stream(), &mut referenced);
+        // Collect lexical FREE-identifier candidates, including identifiers in
+        // opaque macro token streams. Binding order matters: in
+        // `{ assume!(n == 7); let n = 0; }`, the first `n` is the outer capture;
+        // subtracting every binding that appears anywhere in the body would miss
+        // it and leak the assumption. The collector tracks block scope in source
+        // order and stops at nested closures, which isolate their own captures.
+        let referenced = closure_free_ident_candidates(expr_closure);
         for name in referenced {
-            if bound.contains(&name) {
-                continue;
-            }
             if !freshen_all && !targets.contains(&name) {
                 continue;
             }
@@ -4919,7 +5518,51 @@ impl<'a> AssertionCollector<'a> {
                 // isolated closure scope, this rebinding is reverted on scope
                 // restore, so the OUTER reading of `name` is unaffected.
                 self.havoc_declared_binding_to_fresh(&name);
+            } else if self.has_scoped_name(&name) {
+                // CAPTURED SCOPED-LOCAL (round-10 be-2 findings 12-16): a
+                // `let n = p;` alias local is NOT a declared `vc` variable, so the
+                // branch above skips it — but it resolves THROUGH the scoped
+                // substitution map to a fact-bearing symbol (the aliased parameter
+                // `p`, a `let m = q` chain, …). An in-closure `assume!(n == 7)` is
+                // then emitted over that underlying symbol and, because the
+                // isolated-scope visit rolls back SCOPES but NOT emitted
+                // obligations, leaks as a flat global hypothesis discharging a
+                // sibling closure's / the enclosing body's `assert!` or a
+                // postcondition / a div-by-zero check — even when the closure is
+                // never called. Re-point the local's scoped value to a fresh,
+                // unconstrained symbol for this isolated visit so the hypothesis
+                // is scoped to the closure (the `let`-local sibling of the #74
+                // captured-PARAM freshening). Reverted on scope restore, so an
+                // outer TRUE fact about the local (`n == p`) still holds (NO
+                // over-rejection).
+                self.freshen_scoped_local_capture(&name);
             }
+        }
+    }
+
+    /// Re-point a CAPTURED scoped-only local (`let n = p`) to a fresh,
+    /// unconstrained symbol within the (already-isolated) closure scope, so an
+    /// in-closure `assume!`/relation about it cannot leak through the alias to the
+    /// underlying parameter symbol. See the call site in
+    /// `freshen_closure_captured_free_vars`.
+    ///
+    /// When the local's scalar type is known, a fresh typed symbol is declared
+    /// and bound (the precise model). Otherwise the scoped alias is dropped so the
+    /// local resolves to its own bare (undeclared, unconstrained) symbol — still
+    /// disjoint from the aliased value, so no hypothesis about it leaks.
+    fn freshen_scoped_local_capture(&mut self, name: &str) {
+        if let Some(ty) = self.modified_var_scalar_type(name) {
+            let mut fresh = format!("{name}__closurecap_{}", self.next_struct_havoc_index);
+            self.next_struct_havoc_index += 1;
+            while self.vc.get_variable_type(&fresh).is_some() || self.has_scoped_name(&fresh) {
+                fresh = format!("{name}__closurecap_{}", self.next_struct_havoc_index);
+                self.next_struct_havoc_index += 1;
+            }
+            self.vc.declare_var_typed(&fresh, ty);
+            self.assign_scoped(name, fresh);
+            self.set_concrete_scoped_nearest(name, false);
+        } else {
+            self.invalidate_scoped(name);
         }
     }
 
@@ -5713,8 +6356,116 @@ impl<'a> AssertionCollector<'a> {
     }
 
     fn expr_to_scoped_string(&mut self, expr: &Expr) -> String {
-        self.expr_to_scoped_string_inner(expr)
-            .unwrap_or_else(|| super::extract_expr_string(expr))
+        if let Some(rendered) = self.expr_to_scoped_string_inner(expr) {
+            return rendered;
+        }
+        // FAIL CLOSED before handing back the raw token fallback. See
+        // `raw_fallback_dropped_mutations`: the fallback re-emits the
+        // expression VERBATIM, which is correct for a pure expression the
+        // encoder can re-parse and CATASTROPHIC for one whose nested blocks
+        // carry statement-position mutations — the encoder has no statement
+        // semantics, so it reads each block's tail against the ENTRY state.
+        if self.parse_error.is_none() {
+            let dropped = self.raw_fallback_dropped_mutations(expr);
+            if !dropped.is_empty() {
+                self.parse_error = Some(raw_fallback_dropped_mutation_error(expr, &dropped));
+            }
+        }
+        super::extract_expr_string(expr)
+    }
+
+    /// The bindings whose mutation a RAW token rendering of `expr` would
+    /// silently drop.
+    ///
+    /// SOUNDNESS-CRITICAL. `expr_to_scoped_string`'s fallback re-emits the
+    /// expression verbatim when no arm models it. For an expression containing a
+    /// STATEMENT-position side effect the encoder loses it entirely and reads the
+    /// container's tail against the ENTRY state. Three live cardinal false
+    /// verifies, differing from the already-pinned straight-line form ONLY in
+    /// which syntactic container the returned expression sat in:
+    ///
+    ///     pub fn a1(f: bool, t: &mut C) -> u64 { if f { bump(t); t.n } else { bump(t); t.n } }
+    ///     pub fn a5(t: &mut C) -> u64        { let x = { bump(t); t.n }; x }
+    ///     pub fn p1(k: bool, t: &mut C) -> u64 { match k { true => { bump(t); t.n } false => { bump(t); t.n } } }
+    ///
+    /// each proving `result == 0` while every execution returns 1. The root
+    /// itself WAS havoced — `assert!(t.n == 0)` after the same `let` is correctly
+    /// refuted — so the defect is precisely "the value carried out of the
+    /// container was rendered against a state the container had already left",
+    /// not a missing havoc.
+    ///
+    /// NARROW ON PURPOSE, and this is what a blunter "decline every unmodelled
+    /// container" implementation fails: only the statements a raw rendering
+    /// DROPS are examined (a trailing tail expression is kept, so it is not
+    /// dropped), and only a MUTATION counts. `if c { let y = t.n; y } else { 0 }`
+    /// and every statement-free container keep the existing rendering untouched.
+    /// Closure bodies are excluded — they are not evaluated at this site and the
+    /// Phase-C closure lane models them itself.
+    fn raw_fallback_dropped_mutations(&self, expr: &Expr) -> BTreeSet<String> {
+        #[derive(Default)]
+        struct NestedBlocks<'ast> {
+            blocks: Vec<&'ast syn::Block>,
+        }
+        impl<'ast> Visit<'ast> for NestedBlocks<'ast> {
+            fn visit_block(&mut self, block: &'ast syn::Block) {
+                self.blocks.push(block);
+                visit::visit_block(self, block);
+            }
+            fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+        }
+        let mut nested = NestedBlocks::default();
+        nested.visit_expr(expr);
+        let mut dropped = BTreeSet::new();
+        for block in nested.blocks {
+            // The trailing tail expression IS carried by the raw rendering; only
+            // the statements in front of it are lost.
+            let non_tail = match block.stmts.last() {
+                Some(Stmt::Expr(_, None)) => &block.stmts[..block.stmts.len() - 1],
+                _ => &block.stmts[..],
+            };
+            // MIRROR `eval_scoped_stmts` EXACTLY, and this is load-bearing: it
+            // models `Stmt::Expr(Expr::Assign, Some(_))` and the compound-assign
+            // form itself (`assign_expr` / `assign_compound_expr` rewrite the
+            // scoped value) and declines ONLY on a discarded-value expression
+            // statement that externally assigns. Counting an assignment
+            // statement here rejected `let _ = (ar[{ j = i; j }], 0usize);` —
+            // a side-effecting index whose write IS applied, by the dedicated
+            // once-only index machinery, and whose rejection was pure
+            // over-rejection (`exec_index_bounds_faithful`
+            // `nested_side_effecting_index_{bounded_read_verifies,
+            // unbounded_read_is_rejected}` both went red). The two functions
+            // must agree on what "unmodelable" means or this gate rejects
+            // programs the renderer handles.
+            let unmodelable: Vec<Stmt> = non_tail
+                .iter()
+                .filter(|stmt| {
+                    matches!(stmt, Stmt::Expr(expr, Some(_))
+                        if !matches!(expr, Expr::Assign(_))
+                            && !matches!(expr, Expr::Binary(binary) if is_assignment_binop(&binary.op)))
+                })
+                .cloned()
+                .collect();
+            if unmodelable.is_empty() {
+                continue;
+            }
+            dropped.extend(self.externally_assigned_in_stmts(&unmodelable));
+        }
+        dropped
+    }
+
+    fn externally_assigned_in_stmts(&self, stmts: &[Stmt]) -> BTreeSet<String> {
+        let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
+        collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
+        collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
+        for stmt in stmts {
+            collector.visit_stmt(stmt);
+        }
+        collector.external_assignments
     }
 
     /// Slice B of the mut-ref two-state keystone: `old(P)` / `old(*P)` /
@@ -6057,6 +6808,8 @@ impl<'a> AssertionCollector<'a> {
             erased_shared_ref_params: &erased_shared_ref_params,
             old_substitutions: &old_substitutions,
             erased_mut_ref_value_params: &erased_mut_ref_value_params,
+            binder_scopes: Vec::new(),
+            unscopable_binder: false,
         }
         .visit_expr_mut(&mut rewritten);
         denormalize_spec_markers(&mut rewritten);
@@ -8563,20 +9316,93 @@ impl<'a> AssertionCollector<'a> {
 
     fn externally_assigned_in_expr(&self, expr: &Expr) -> BTreeSet<String> {
         let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
-        collector.collection_receivers = self.collection_typed_variable_names();
-        collector.struct_receivers = self.struct_typed_variable_names();
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
         collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
         collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
         collector.visit_expr(expr);
         collector.external_assignments
     }
 
     fn externally_assigned_in_block(&self, block: &syn::Block) -> BTreeSet<String> {
         let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
-        collector.collection_receivers = self.collection_typed_variable_names();
-        collector.struct_receivers = self.struct_typed_variable_names();
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
         collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
         collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
+        collector.visit_block(block);
+        collector.external_assignments
+    }
+
+    /// `externally_assigned_in_block` for a JOIN consumer (the `then` branch of
+    /// an `if`): deref roots EXCLUDED — see `externally_assigned_in_join_expr`.
+    fn externally_assigned_in_join_block(&self, block: &syn::Block) -> BTreeSet<String> {
+        let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
+        collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
+        collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
+        collector.include_deref_roots = false;
+        collector.visit_block(block);
+        collector.external_assignments
+    }
+
+    /// `externally_assigned_in_expr` for a JOIN consumer (an `else` branch
+    /// expression, a `match` arm body): deref roots EXCLUDED, exactly like
+    /// `externally_assigned_in_block` for the `then` branch — see
+    /// `externally_assigned_in_loop_body` for why joins must not see them.
+    /// The plain `externally_assigned_in_expr` keeps them because its other
+    /// callers are the side-effecting index/RHS evaluation checks, where a
+    /// deref write must fail closed (exec_index_bounds_faithful
+    /// `bounded_deref_aliasing_side_effecting_index_compound_write_fails_closed`).
+    fn externally_assigned_in_join_expr(&self, expr: &Expr) -> BTreeSet<String> {
+        let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
+        collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
+        collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
+        collector.include_deref_roots = false;
+        collector.visit_expr(expr);
+        collector.external_assignments
+    }
+
+    /// `externally_assigned_in_block` for a LOOP body: KEEPS the root of every
+    /// bare external deref write (`*p = v` / `*p op= v`) in the set so the
+    /// loop frame (`frame_loop_modified_vars`, invariant preservation) havocs
+    /// it — the 1c0cfb56 soundness intent. Block JOINS (`if`/`else` branches,
+    /// plain `{ .. }` / `unsafe` blocks via `externally_assigned_in_block`)
+    /// must NOT get the roots: there the #83 skip holds and the slice-C region
+    /// machinery (`deref_written_region_roots`: exact in-region SSA +
+    /// region-exit havoc) already covers them. Feeding a deref root into a
+    /// join's modified set invalidates the alias's scoped target at the join,
+    /// after which the next `*x = ..` resolves to no erased target and fails
+    /// closed — the 1c0cfb56 regression (bisected: good d255c1c3, bad
+    /// 1c0cfb56) that turned the mut_ref_control_flow_gate /
+    /// mut_ref_old_body_asserts branch ports into `assignment through a
+    /// dereferenced reference is unsupported` Errors on BOTH the Verified and
+    /// the Counterexample direction.
+    fn externally_assigned_in_loop_body(&self, block: &syn::Block) -> BTreeSet<String> {
+        let mut collector = ExternalAssignmentCollector::with_macro_scopes(&self.local_macros);
+        collector.collection_receivers = self.collection_typed_receiver_names();
+        collector.struct_receivers = self.struct_typed_receiver_names();
+        collector.struct_self_receiver_kinds = self.vc.struct_self_receiver_kinds_clone();
+        collector.type_param_mut_methods = self.type_param_mut_methods_by_receiver();
+        collector.mut_ref_call_args = self.mut_ref_call_args.clone();
+        collector.method_arg_mut_flags = self.method_arg_mut_flags.clone();
+        collector.mut_ref_reborrowable_bindings = self.mut_ref_reborrowable_bindings.clone();
+        collector.include_deref_roots = true;
         collector.visit_block(block);
         collector.external_assignments
     }
@@ -8615,6 +9441,78 @@ impl<'a> AssertionCollector<'a> {
                 )
             })
             .map(|decl| decl.name.clone())
+            .collect()
+    }
+
+    /// The struct/enum-typed receivers the loop modified-set collector must
+    /// consult: the declared `vc` variables (`struct_typed_variable_names`) PLUS
+    /// the in-scope `let`-bound LOCAL struct/enum bindings.
+    ///
+    /// SOUNDNESS (round-10 be-2 findings 6-7): the loop-frame modified-set
+    /// collector classifies a method-call receiver as a possibly-mutated struct
+    /// ONLY when it appears in `struct_receivers`. Seeding it solely from
+    /// `vc.variables()` (params / declared vars) left a `let mut c = Counter{..}`
+    /// local mutated by a `&mut self` method (`c.bump()`) inside a loop OUT of the
+    /// modified set, so the frame pinned `c == c_pre` and a post-loop `assert!`
+    /// over the frozen entry value falsely `Verified`. The let-local's scoped
+    /// struct type is recorded in `scoped_struct_types`; surfacing it here lets
+    /// the collector record the receiver exactly as it does for a `&mut S`
+    /// parameter. A pure `&self`/by-value reader is still NOT recorded by the
+    /// collector (`struct_method_mutates_caller`), so an only-read let-local
+    /// struct stays framed (NO over-rejection).
+    fn struct_typed_receiver_names(&self) -> BTreeMap<String, String> {
+        let mut receivers = self.struct_typed_variable_names();
+        for name in self.scoped_binding_names() {
+            if let Some(struct_type) = self.scoped_struct_type_name(&name) {
+                receivers.insert(name, scoped_struct_type_base_name(&struct_type));
+            } else {
+                // A nearer non-struct `let` may shadow a same-named declared
+                // struct parameter. The source binding, not the stale VC-table
+                // entry, controls receiver classification in this scope.
+                receivers.remove(&name);
+            }
+        }
+        receivers
+    }
+
+    /// The collection-typed receivers the loop modified-set collector must
+    /// consult: the declared `vc` collection variables
+    /// (`collection_typed_variable_names`) PLUS the in-scope `let`-bound LOCAL
+    /// bindings that model a collection (a ghost `Set`/`Seq`/`Map` local, or any
+    /// scoped local the extractor recognizes as collection-like).
+    ///
+    /// SOUNDNESS (round-10 be-2 findings 8-11): the conservative loop-frame
+    /// collection-mutation default fires only for a receiver in
+    /// `collection_receivers`. Seeding it solely from `vc.variables()` left a
+    /// `let`-local collection mutated by an unrecognized non-pure method OUT of
+    /// the modified set. Surfacing the let-local collection makes the existing
+    /// typed conservative default record an UNlisted non-pure method without
+    /// relying on a method-name guess. A pure `&self` read
+    /// (`len`/`index`/`contains`/…) is excluded by the collector
+    /// (`is_pure_collection_read_method`), so an only-read let-local collection
+    /// stays framed (NO over-rejection).
+    fn collection_typed_receiver_names(&self) -> BTreeSet<String> {
+        let mut receivers = self.collection_typed_variable_names();
+        for name in self.scoped_binding_names() {
+            if self.receiver_is_collection_like(&name) {
+                receivers.insert(name);
+            } else {
+                // A nearer non-collection `let` may shadow a same-named
+                // collection parameter. Do not let the stale VC-table type
+                // classify a user struct's method by a collection method name.
+                receivers.remove(&name);
+            }
+        }
+        receivers
+    }
+
+    /// Every name currently bound in some scoped value-numbering frame — the
+    /// candidate set of in-scope `let`-locals (plus reassigned params) for the
+    /// let-local receiver-seeding above.
+    fn scoped_binding_names(&self) -> BTreeSet<String> {
+        self.scopes
+            .iter()
+            .flat_map(|scope| scope.keys().cloned())
             .collect()
     }
 
@@ -8739,6 +9637,23 @@ impl<'a> AssertionCollector<'a> {
         if self.is_ghost_collection_name(name) {
             return true;
         }
+        // `let`-bound exec collections are scoped value-numbering bindings, not
+        // VC declarations. Recognize the sequence models the extractor itself
+        // creates (`Vec::new`, array literals, and update/push/subrange chains),
+        // so the loop modified-set collector can apply its conservative
+        // non-pure-method rule to a local receiver. This is deliberately based on
+        // known collection-producing models, never on a method name alone.
+        let scoped_model = self.scopes.iter().rev().find_map(|scope| scope.get(name));
+        if scoped_model.is_some_and(|value| {
+            is_scoped_vec_receiver_model(value) || is_scoped_sequence_shaped_model(value)
+        }) {
+            return true;
+        }
+        // A scoped non-collection binding shadows any same-named parameter in
+        // the flat VC declaration table. Do not fall through to that stale type.
+        if scoped_model.is_some() {
+            return false;
+        }
         matches!(
             self.vc.get_variable_type(name),
             Some(
@@ -8774,6 +9689,38 @@ impl<'a> AssertionCollector<'a> {
     /// Bind-time inference: does `expr` evaluate to an immutable ghost
     /// collection? Used to mark let-locals (which carry no declared type) so a
     /// reused `let s = Set::new(..)` survives a later `s.filter(..)`/`s.map(..)`.
+    /// True when `name` denotes an IMMUTABLE ghost collection value: a let-local
+    /// inferred to model one (`ghost_collection_scopes`), or — absent any scoped
+    /// model — a declared variable of collection type. This is the ghost-decline
+    /// predicate the exec `Vec` method models (`assign_local_vec_insert_method_call`
+    /// & co.) consult through `expr_models_ghost_collection`; it must NOT be
+    /// `receiver_is_collection_like`, which since 998c65c7 ALSO recognizes the
+    /// extractor's own exec `Vec` models (`Vec::new`/push/update chains) so the
+    /// loop modified-set collector can frame a let-local `Vec`. Routing the
+    /// ghost-decline through that widened predicate classified every let-local
+    /// exec `Vec` as ghost, so `v.insert(..)` / `v.remove(..)` declined their
+    /// exact models, fell through to the conservative receiver invalidation, and
+    /// the next `v.len()` lowered to an unresolved `v`
+    /// (map_letlocal_value_capability `vec_insert_still_models` /
+    /// `vec_remove_still_models`; bisected good 7711d988, bad 998c65c7).
+    fn receiver_models_ghost_collection(&self, name: &str) -> bool {
+        if self.is_ghost_collection_name(name) {
+            return true;
+        }
+        if self.scopes.iter().any(|scope| scope.contains_key(name)) {
+            return false;
+        }
+        matches!(
+            self.vc.get_variable_type(name),
+            Some(
+                TrustVcType::Set(_)
+                    | TrustVcType::Seq(_)
+                    | TrustVcType::Map(_, _)
+                    | TrustVcType::Multiset(_)
+            )
+        )
+    }
+
     fn expr_models_ghost_collection(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Paren(paren) => self.expr_models_ghost_collection(&paren.expr),
@@ -8781,9 +9728,8 @@ impl<'a> AssertionCollector<'a> {
             Expr::Reference(reference) if reference.mutability.is_none() => {
                 self.expr_models_ghost_collection(&reference.expr)
             }
-            Expr::Path(_) => {
-                expr_path_ident(expr).is_some_and(|name| self.receiver_is_collection_like(&name))
-            }
+            Expr::Path(_) => expr_path_ident(expr)
+                .is_some_and(|name| self.receiver_models_ghost_collection(&name)),
             // A ghost-collection constructor such as `Set::new(..)`/`Seq::empty()`.
             Expr::Call(call) => ghost_collection_constructor_path(&call.func),
             // A pure combinator (`s.filter(..)`) OR a value-producing builder
@@ -10338,6 +11284,12 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
                 self.visit_expr(arg);
             }
         }
+        // SOUNDNESS-CRITICAL: a `&mut` NON-self ARGUMENT of a method call
+        // (`h.hit(t)`, `h.bump(t)`) is framed by nothing else — the free-call
+        // havoc keys on `ExprCall`. Runs after the argument sub-visits so their
+        // own renderings still see the pre-call state, and BEFORE the receiver
+        // mutation block below, which owns the receiver and only the receiver.
+        self.havoc_mut_ref_method_call_args(method_call);
         if let Some(name) = expr_path_ident(&method_call.receiver) {
             // GAP2: a pure ghost-collection combinator (e.g. `s.filter(..)`,
             // `s.map(..)`) does not mutate its receiver, so the binding must
@@ -10383,9 +11335,24 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
                 let mutated_collection = mutated_struct.is_none()
                     && self.receiver_is_collection_like(&name)
                     && !is_pure_collection_read_method(&method);
+                // GENERIC-RECEIVER mutation (`fn g<T: Tr>(t: &mut T)`, and its
+                // `&mut impl Tr` sugar): the receiver is a bare `TypeParam`, so
+                // neither the struct nor the collection branch above can see it,
+                // and an `&mut self` trait call was a NO-OP on the caller's
+                // binding — the bound-method UF `Tr__a(t)` is a function OF the
+                // receiver term, so two reads bracketing `t.bump()` collapsed to
+                // one term and a false claim about their difference verified.
+                // `havoc_declared_binding_to_fresh` mints a fresh symbol of the
+                // receiver's own declared type, which is exactly what makes the
+                // post-call `Tr__a(t')` an independent, unconstrained term.
+                let mutated_type_param = mutated_struct.is_none()
+                    && !mutated_collection
+                    && self.type_param_method_mutates_caller(&name, &method);
                 self.invalidate_scoped(&name);
                 if mutated_struct.is_some() {
                     self.havoc_struct_receiver(&name);
+                } else if mutated_type_param {
+                    self.havoc_declared_binding_to_fresh(&name);
                 } else if mutated_collection {
                     // `havoc_declared_binding_to_fresh` mints a fresh symbol of the
                     // receiver's declared collection type and rebinds the scoped
@@ -10471,8 +11438,17 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
                 self.pre_havoc_call_args
                     .insert(call as *const syn::ExprCall as usize, pre_args);
             }
-            self.havoc_mut_ref_call_arg_referents(call);
         }
+        // SOUNDNESS-CRITICAL: the argument havoc runs for the QUALIFIED-UFCS
+        // spelling too. It used to sit inside the `!call_func_is_qualified_path`
+        // arm above, so `<H as B>::tb(&h, t)` — a trait method with a `&mut`
+        // non-self parameter — was framed by nothing and proved `result == 0`
+        // for a body that returns 1. Only the CONTRACT routing differs between
+        // the two spellings; which arguments the callee may write through does
+        // not. `resolved_call_arg_mut_flags` reads the qualified spelling's
+        // `Type::method` key, so the framing stays signature-precise rather than
+        // falling back to the argument type.
+        self.havoc_mut_ref_call_arg_referents(call);
         // A qualified-UFCS call `<S as T>::f(s, args)` routes to the unit-4
         // discharge and must NOT consume the helper-call dedup set (its `func`
         // path has a `qself`, so `record_helper_contract_call` would bail with
@@ -10721,11 +11697,11 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
             BTreeSet::new()
         };
 
-        let mut assigned_outer = self.externally_assigned_in_block(&expr_if.then_branch);
+        let mut assigned_outer = self.externally_assigned_in_join_block(&expr_if.then_branch);
         let assigned_else = expr_if
             .else_branch
             .as_ref()
-            .map(|(_, else_branch)| self.externally_assigned_in_expr(else_branch));
+            .map(|(_, else_branch)| self.externally_assigned_in_join_expr(else_branch));
         if let Some(assigned_else) = &assigned_else {
             assigned_outer.extend(assigned_else.clone());
         }
@@ -10908,7 +11884,7 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
         self.enter_deref_write_region();
         for arm in &expr_match.arms {
             let arm_bindings = bound_idents_from_pat(&arm.pat);
-            let assigned_arm = self.externally_assigned_in_expr(&arm.body);
+            let assigned_arm = self.externally_assigned_in_join_expr(&arm.body);
             assigned_outer.extend(assigned_arm);
             if let Some((_, guard)) = &arm.guard {
                 assigned_outer.extend(self.externally_assigned_in_expr(guard));
@@ -11106,7 +12082,7 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
         if self.parse_error.is_some() {
             return;
         }
-        let assigned_body = self.externally_assigned_in_block(&expr_loop.body);
+        let assigned_body = self.externally_assigned_in_loop_body(&expr_loop.body);
         // Slice-C remediation: a PLAIN single deref write in the loop body
         // keeps the pre-existing (base) modeling — per-iteration
         // value-numbering, rolled back by the isolated visit — but its root
@@ -11140,7 +12116,7 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
         if self.parse_error.is_some() {
             return;
         }
-        let assigned_body = self.externally_assigned_in_block(&expr_while.body);
+        let assigned_body = self.externally_assigned_in_loop_body(&expr_while.body);
         let has_invariant = block_has_loop_invariant(&expr_while.body);
         let mut loop_entry_bindings = if has_invariant {
             self.materialize_loop_snapshot_aliases(&assigned_body)
@@ -11190,7 +12166,21 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
         // pin a later var's transition to a stale loop-head value — masking a
         // true post-state (a false Verified). When the body is not flat we
         // capture nothing and fall back to pure havoc. Part of M4.
-        let capture_transitions = loop_body_transition_is_exact(&expr_while.body);
+        //
+        // A fresh immutable pure-arith `let` in the body is admitted (it defines
+        // a NEW name and re-invalidates nothing). The shadow predicate below is
+        // the narrowness pin that keeps that admission sound: a `let` may not
+        // re-bind a loop-MODIFIED var (the transition capture would read the
+        // shadow, which Rust reverts at block end — a WRONG transition), nor a
+        // declared VC variable (a param / declared local, whose later reads and
+        // whose `invariant!` occurrences would silently re-point), nor an outer
+        // scoped let-local (`lookup_scoped` resolving to something other than the
+        // bare name means the name already denotes a value here).
+        let capture_transitions = loop_body_transition_is_exact(&expr_while.body, &|name| {
+            assigned_body.contains(name)
+                || self.vc.get_variable_type(name).is_some()
+                || self.lookup_scoped(name) != name
+        });
         let modified_vars = assigned_body.iter().cloned().collect::<Vec<_>>();
         // SOUNDNESS-CRITICAL (while-guard arithmetic / index panic-freedom): a
         // boolean `while` guard is evaluated UNCONDITIONALLY before the first
@@ -11444,7 +12434,28 @@ impl<'ast> Visit<'ast> for AssertionCollector<'_> {
             return;
         }
         self.visit_expr(&expr_for_loop.expr);
-        let assigned_body = self.externally_assigned_in_block(&expr_for_loop.body);
+        // SOUNDNESS-CRITICAL (for-loop range-bound arithmetic / index panic-freedom):
+        // the iterator expression of a `for` loop is evaluated UNCONDITIONALLY,
+        // exactly once, BEFORE the first iteration — just like a `while` guard, an
+        // `if` condition, or a `match` scrutinee. In particular a `Range` /
+        // `RangeInclusive` bound (`0..(a / b)`, `(a / b)..n`, `0..(a + b)`,
+        // `0..=(a + b)`) constructs the range value by EAGERLY evaluating each
+        // present bound, so a checked-arith / shift / negation site or an OOB index
+        // in either bound carries a real exec panic obligation. The value-numbering
+        // visit above never emitted it (the bare `a / b` binop falls through), so
+        // div-by-zero / overflow / signed-MIN-÷-1 / shift-bounds / OOB in a range
+        // bound silently `Verified`. Emit BOTH the index-bounds and arithmetic-safety
+        // obligations on the iterator expression HERE — at the pre-loop program
+        // point, before the loop context / body havoc is pushed — so they are checked
+        // against pre-loop variable values under the enclosing path conditions only,
+        // mirroring the `while`-guard block (see `visit_expr_while`). A SAFE range
+        // (`0..n`, `(a / b)..n` under `requires(b != 0)`, `0..(a + b)` under
+        // `requires(a < 100 && b < 100)`) still verifies — no over-rejection. The
+        // collectors descend through `Expr::Range` into both bounds; the loop BODY's
+        // own obligations are owned by the loop-body machinery and are unchanged.
+        self.emit_exec_index_bounds_checks_in_expr(&expr_for_loop.expr);
+        self.emit_exec_arith_safety_checks_in_expr(&expr_for_loop.expr);
+        let assigned_body = self.externally_assigned_in_loop_body(&expr_for_loop.body);
         let loop_bindings = bound_idents_from_pat(&expr_for_loop.pat);
         // Slice-C remediation: see `visit_expr_loop` — plain single deref
         // writes keep base modeling, roots are havocked at the loop join;
@@ -11617,40 +12628,16 @@ fn is_supported_body_macro(mac: &Macro) -> bool {
         .is_some_and(is_supported_body_macro_name)
 }
 
+/// The names this lane routes, derived from the ONE canonical list of macro
+/// names trust-vc decides the meaning of from the name alone
+/// (`crate::macro_scope::SPEC_MACRO_NAMES`).
+///
+/// It is derived rather than repeated so that the scope pass which resolves
+/// those names and this dispatch cannot drift apart: a name dispatched below
+/// but missing from the canonical list stops being routed here at all — a loud
+/// failure — instead of quietly escaping the resolution check.
 fn is_supported_body_macro_name(name: &str) -> bool {
-    matches!(
-        name,
-        "assert"
-            | "trust_vc_assert"
-            | "assume"
-            | "trust_vc_assume"
-            | "reveal"
-            | "trust_vc_reveal"
-            | "hide"
-            | "trust_vc_hide"
-            | "invariant"
-            | "trust_vc_invariant"
-            | "invariant_except_break"
-            | "trust_vc_invariant_except_break"
-            | "loop_ensures"
-            | "trust_vc_loop_ensures"
-            | "loop_decreases"
-            | "trust_vc_loop_decreases"
-            | "broadcast_use"
-            | "trust_vc_broadcast_use"
-            | "assert_eq"
-            | "assert_ne"
-            | "assert_seqs_equal"
-            | "calc"
-            | "assert_forall_by"
-            | "assert_by_nonlinear"
-            | "assert_by_bit_vector"
-            | "assert_by_compute"
-            | "assert_by_contradiction"
-            | "debug_assert"
-            | "debug_assert_eq"
-            | "debug_assert_ne"
-    )
+    crate::macro_scope::is_body_lane_supported_macro_name(name)
 }
 
 fn reveal_target_name(path: &syn::Path) -> Option<String> {
@@ -11741,6 +12728,21 @@ fn unsupported_old_state_call_error(call: &syn::ExprCall) -> TrustVcError {
              unsupported old-state expressions are rejected to avoid reasoning about \
              current state as pre-state.",
             call.to_token_stream()
+        ),
+    }
+}
+
+/// The fail-closed rejection for [`AssertionCollector::raw_fallback_dropped_mutations`].
+fn raw_fallback_dropped_mutation_error(expr: &Expr, dropped: &BTreeSet<String>) -> TrustVcError {
+    TrustVcError::Encoding {
+        context: "extract body assertions",
+        detail: format!(
+            "expression `{}` is not modeled by vc_extraction and its raw rendering would \
+             DROP the statement-position mutation of `{}`; the value carried out of the \
+             container would be read against the pre-mutation state, so TrustVc rejects it \
+             instead of proving a claim about a state the program has already left.",
+            expr.to_token_stream(),
+            dropped.iter().cloned().collect::<Vec<_>>().join("`, `")
         ),
     }
 }
@@ -12455,21 +13457,64 @@ fn contains_break(block: &syn::Block) -> bool {
 /// read would silently pin a later var's transition to the loop-head value,
 /// missing a real post-state and risking a FALSE Verified. Such bodies fail
 /// this gate and fall back to pure havoc (sound, incomplete).
-fn loop_body_transition_is_exact(block: &syn::Block) -> bool {
+///
+/// A FRESH immutable `let` binding over pure arithmetic is admitted too (see
+/// `stmt_is_flat_scalar_assignment_or_spec`): it introduces a NEW name and
+/// re-invalidates nothing, so every modified var still ends the body with an
+/// exact scoped value. `binds_existing_name` is the load-bearing narrowness pin
+/// — it must report `true` for any name that already denotes something in this
+/// scope (a loop-modified var, a declared VC variable, or an outer scoped
+/// let-local). Shadowing a loop-MODIFIED var is the cardinal hazard: the
+/// end-of-body transition capture reads `lookup_scoped(var)` and would pick up
+/// the shadow's value, while Rust reverts the real var at block end — a WRONG
+/// transition, i.e. a false `Verified`.
+fn loop_body_transition_is_exact(
+    block: &syn::Block,
+    binds_existing_name: &dyn Fn(&str) -> bool,
+) -> bool {
     block
         .stmts
         .iter()
-        .all(stmt_is_flat_scalar_assignment_or_spec)
+        .all(|stmt| stmt_is_flat_scalar_assignment_or_spec(stmt, binds_existing_name))
 }
 
 /// True for a single statement that is either a total scalar assignment over
 /// pure arithmetic, a side-effect-free spec assertion macro, or a flat
 /// collection `push` re-binding (`db.push(<pure-arith>)`) — the accumulate
-/// shape of the cutting-planes `replay_derivation` loop. Anything else
-/// (let-bindings, items, nested control flow, other bare expressions)
-/// disqualifies the body from exact transition capture.
-fn stmt_is_flat_scalar_assignment_or_spec(stmt: &Stmt) -> bool {
+/// shape of the cutting-planes `replay_derivation` loop, or a FRESH immutable
+/// `let` binding over pure arithmetic. Anything else (items, nested control
+/// flow, other bare expressions) disqualifies the body from exact transition
+/// capture.
+fn stmt_is_flat_scalar_assignment_or_spec(
+    stmt: &Stmt,
+    binds_existing_name: &dyn Fn(&str) -> bool,
+) -> bool {
     match stmt {
+        // A fresh immutable `let x = <pure-arith>;`. Sound under this gate's own
+        // argument: the binding introduces a NEW name, so it re-invalidates no
+        // existing var, and its RHS is the same total, side-effect-free function
+        // of the already-exact scoped state that the assignment arm requires.
+        // Every read after it therefore still sees the exact sequential value,
+        // and every modified var still ends with an exact scoped value.
+        //
+        // NARROWNESS PINS, all load-bearing:
+        //   * `binds_existing_name` — a shadow of a loop-MODIFIED var would make
+        //     the end-of-body transition capture read the SHADOW instead of the
+        //     real var (which Rust reverts at block end): a wrong transition and
+        //     a false `Verified`. A shadow of any other in-scope name likewise
+        //     re-points later reads (including a textually later `invariant!`),
+        //     so those are rejected as well.
+        //   * `mutability` — a `let mut` can be re-assigned later in the body;
+        //     only an immutable binding is a one-shot definition.
+        //   * `diverge` (`let ... else { ... }`) — a divergent arm is branching
+        //     control flow, exactly what this gate excludes.
+        //   * `by_ref` / `subpat` / non-ident patterns — not a flat scalar bind.
+        Stmt::Local(local) => {
+            let Some(name) = flat_scalar_local_binding_name(local) else {
+                return false;
+            };
+            !binds_existing_name(&name)
+        }
         // Spec assertion macros (`invariant!`, `assert!`, `assume!`, …) never
         // mutate exec scalars, so they do not perturb the value-numbering.
         Stmt::Macro(stmt_macro) => is_spec_assertion_macro_path(&stmt_macro.mac.path),
@@ -12501,6 +13546,42 @@ fn stmt_is_flat_scalar_assignment_or_spec(stmt: &Stmt) -> bool {
         },
         _ => false,
     }
+}
+
+/// The bound name of a `let` statement that is a FLAT SCALAR BINDING: a simple,
+/// immutable, non-`ref`, sub-pattern-free ident initialized from a pure
+/// arithmetic expression, with no `else` arm and no attributes. `None` for
+/// every other `let`, which keeps the loop body out of exact transition capture.
+///
+/// A type annotation is optional: the binding never becomes a VC variable — it
+/// is value-numbered and substituted into the reads that follow — so its width
+/// is carried by the pure-arith RHS it was defined from.
+fn flat_scalar_local_binding_name(local: &syn::Local) -> Option<String> {
+    if !local.attrs.is_empty() {
+        return None;
+    }
+    let init = local.init.as_ref()?;
+    // `let ... else { ... }` is branching control flow.
+    if init.diverge.is_some() {
+        return None;
+    }
+    if !expr_is_pure_arith(&init.expr) {
+        return None;
+    }
+    let pat_ident = match &local.pat {
+        Pat::Ident(pat_ident) => pat_ident,
+        Pat::Type(pat_type) => match &*pat_type.pat {
+            Pat::Ident(pat_ident) => pat_ident,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // `mut` could be re-assigned later in the body; `ref` binds a reference and
+    // a sub-pattern (`x @ ..`) is not a flat scalar bind.
+    if pat_ident.mutability.is_some() || pat_ident.by_ref.is_some() || pat_ident.subpat.is_some() {
+        return None;
+    }
+    Some(pat_ident.ident.to_string())
 }
 
 /// True iff `expr` is a flat collection `push` of a pure-arithmetic value onto a
@@ -12759,8 +13840,8 @@ fn mut_ref_params_mutated_in_body(
     visitor.mutated
 }
 
-/// The subset of `params` (each a `&mut <collection>` parameter, modeled as
-/// `Seq`/`Set`/`Map`/`Multiset`) that is mutated IN PLACE by a method call in
+/// The subset of `params` (each a `&mut <collection-or-array>` parameter, modeled
+/// as `Seq`/`Set`/`Map`/`Multiset`/`Array`) that is mutated IN PLACE by a method call in
 /// the body — i.e. a method call `P.m(..)` (or `(*P).m(..)`) where `m` is NOT a
 /// recognized pure `&self` read (`len`/`get`/`index`/`contains`/`iter`/…).
 ///
@@ -12776,7 +13857,8 @@ fn mut_ref_params_mutated_in_body(
 /// collection-mutation default: any non-pure-read method counts as a mutation
 /// (`is_known_mutating_method` omits `retain`/`drain`/`dedup`/`extend`/`sort`/
 /// `reverse`/`rotate_*`/`fill`/`split_off`, so we key on the pure-read allow-list
-/// complement, not that positive list).
+/// complement, not that positive list). Let-move aliases (`let q = P`) and
+/// sub-place receivers resolve back to the root parameter before classification.
 pub(super) fn mut_ref_collection_params_method_mutated_in_body(
     block: &syn::Block,
     params: &BTreeSet<String>,
@@ -12784,26 +13866,55 @@ pub(super) fn mut_ref_collection_params_method_mutated_in_body(
     struct MethodMutationVisitor<'a> {
         params: &'a BTreeSet<String>,
         mutated: BTreeSet<String>,
+        /// Lexically-scoped local binding -> moved `&mut` parameter root. `None`
+        /// records a non-alias shadow, including a local that shadows a parameter.
+        aliases: BTreeMap<String, Option<String>>,
     }
 
-    fn method_receiver_param(receiver: &Expr, params: &BTreeSet<String>) -> Option<String> {
-        let receiver = strip_place_wrappers(receiver);
-        // `(*P).m(..)` — explicit deref of the reference.
-        if let Expr::Unary(unary) = receiver {
-            if matches!(unary.op, syn::UnOp::Deref(_)) {
-                let name = expr_path_ident(&unary.expr)?;
-                return params.contains(&name).then_some(name);
+    impl MethodMutationVisitor<'_> {
+        fn resolve_root_param(&self, ident: &str) -> Option<String> {
+            match self.aliases.get(ident) {
+                Some(root) => root.clone(),
+                None => self.params.contains(ident).then(|| ident.to_string()),
             }
         }
-        // `P.m(..)` — auto-deref of the `&mut` reference.
-        let name = expr_path_ident(receiver)?;
-        params.contains(&name).then_some(name)
+
+        fn method_receiver_param(&self, receiver: &Expr) -> Option<String> {
+            // Direct auto/explicit-deref receiver (`P.m()` / `(*P).m()`), or a
+            // projection (`P[i].m()`) whose in-place mutation changes the root
+            // collection. Resolve the syntactic root through a let-move alias.
+            let ident = method_call_receiver_ident(receiver)
+                .or_else(|| field_index_projection_root(receiver))?;
+            self.resolve_root_param(&ident)
+        }
     }
 
     impl<'ast> Visit<'ast> for MethodMutationVisitor<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            let saved = self.aliases.clone();
+            syn::visit::visit_block(self, block);
+            self.aliases = saved;
+        }
+
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            let binding = local_binding_ident(&local.pat).map(|name| {
+                let root = local.init.as_ref().and_then(|init| {
+                    expr_path_ident(&init.expr).and_then(|ident| self.resolve_root_param(&ident))
+                });
+                (name, root)
+            });
+            // A `let` binding is not in scope in its own initializer (nor in a
+            // diverging `let-else` arm), so visit the initializer under the old
+            // alias environment before installing the new binding.
+            syn::visit::visit_local(self, local);
+            if let Some((name, root)) = binding {
+                self.aliases.insert(name, root);
+            }
+        }
+
         fn visit_expr_method_call(&mut self, method_call: &'ast syn::ExprMethodCall) {
             if !is_pure_collection_read_method(&method_call.method.to_string()) {
-                if let Some(name) = method_receiver_param(&method_call.receiver, self.params) {
+                if let Some(name) = self.method_receiver_param(&method_call.receiver) {
                     self.mutated.insert(name);
                 }
             }
@@ -12816,6 +13927,7 @@ pub(super) fn mut_ref_collection_params_method_mutated_in_body(
     let mut visitor = MethodMutationVisitor {
         params,
         mutated: BTreeSet::new(),
+        aliases: BTreeMap::new(),
     };
     visitor.visit_block(block);
     visitor.mutated
@@ -12845,65 +13957,106 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
     struct PlaceMutationVisitor<'a> {
         params: &'a BTreeSet<String>,
         flagged: BTreeSet<String>,
+        // SOUNDNESS-CRITICAL (let-move alias of a non-scalar `&mut` param): a bare
+        // `let q = p;` MOVES the `&mut S` / `&mut [T; N]` reference, so `q` denotes
+        // the SAME referent as `p`. A place write through the alias (`q.f = ..`,
+        // `q[i] = ..`, `*q = ..`), a reborrow of it (`&mut *q`, `&mut q.f`), or an
+        // escape of it (`take(q)`) mutates `p`'s referent — but is rooted at `q`,
+        // not `p`, so the param would otherwise never be flagged and a
+        // postcondition reading `p` would resolve to its frozen ENTRY snapshot (a
+        // false `Verified`; round-10 findings 16-17). Track each alias local -> the
+        // root `&mut` param it aliases (chains flattened at insertion) and resolve a
+        // place / escape root through it. The bare-move sibling of the scalar
+        // `mut_ref_params_escaping_in_body` detector, which the non-scalar
+        // place-mutation path previously lacked. A bare `let q = p;` with NO
+        // through-alias mutation does NOT flag `p` (no over-rejection of a read-only
+        // capture).
+        aliases: BTreeMap<String, Option<String>>,
     }
 
-    /// The root parameter of a place expression, peeling field / index / deref /
-    /// reference / paren / group wrappers down to the anchoring identifier.
-    fn place_root_param(expr: &Expr, params: &BTreeSet<String>) -> Option<String> {
-        match expr {
-            Expr::Field(field) => place_root_param(&field.base, params),
-            Expr::Index(index) => place_root_param(&index.expr, params),
-            Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                place_root_param(&unary.expr, params)
+    /// The anchoring identifier of a place expression (NO parameter filter),
+    /// peeling field / index / deref / reference / paren / group wrappers — e.g.
+    /// `q.inner.x` / `q.items[i]` / `*q` -> `q`. Resolution against the tracked
+    /// params / let-move aliases is done by the visitor's `resolve_root_param`.
+    fn place_root_ident(expr: &Expr) -> Option<String> {
+        field_index_projection_root(expr)
+    }
+
+    impl PlaceMutationVisitor<'_> {
+        /// Resolve a place-root identifier to the root non-scalar `&mut` param it
+        /// denotes: the param itself, or the param a `let`-move alias chains to.
+        fn resolve_root_param(&self, ident: &str) -> Option<String> {
+            match self.aliases.get(ident) {
+                Some(root) => root.clone(),
+                None => self.params.contains(ident).then(|| ident.to_string()),
             }
-            Expr::Reference(reference) => place_root_param(&reference.expr, params),
-            Expr::Paren(paren) => place_root_param(&paren.expr, params),
-            Expr::Group(group) => place_root_param(&group.expr, params),
-            Expr::Path(path) if path.qself.is_none() => path
-                .path
-                .get_ident()
-                .map(ToString::to_string)
-                .filter(|name| params.contains(name)),
-            _ => None,
         }
-    }
 
-    /// The root parameter of an ASSIGNMENT LHS that is a genuine PROJECTION of the
-    /// parameter (a field / index / deref place), not the bare parameter itself
-    /// (rebinding the reference variable is not a referent mutation).
-    fn projection_root_param(lhs: &Expr, params: &BTreeSet<String>) -> Option<String> {
-        match strip_place_wrappers(lhs) {
-            Expr::Field(_) | Expr::Index(_) => place_root_param(strip_place_wrappers(lhs), params),
-            Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                place_root_param(&unary.expr, params)
+        /// The root param of an ASSIGNMENT LHS that is a genuine PROJECTION (a
+        /// field / index / deref place) of a tracked param OR a let-move alias of
+        /// one — not a bare rebinding of the reference variable (which is not a
+        /// referent mutation).
+        fn projection_root(&self, lhs: &Expr) -> Option<String> {
+            match strip_place_wrappers(lhs) {
+                Expr::Field(_) | Expr::Index(_) => place_root_ident(strip_place_wrappers(lhs))
+                    .and_then(|id| self.resolve_root_param(&id)),
+                Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                    place_root_ident(&unary.expr).and_then(|id| self.resolve_root_param(&id))
+                }
+                _ => None,
             }
-            _ => None,
         }
-    }
 
-    /// The tracked root parameter passed as a CALL/METHOD ARGUMENT in a way that
-    /// lets the callee mutate the referent: a bare `P`, a reborrow `&mut P` /
-    /// `&mut *P` / `&mut P.f`, or an explicit `*P`. This is the free-function
-    /// sibling of `projection_root_param` — `core::mem::take(P)` /
-    /// `core::mem::replace(P, ..)` / `core::mem::swap(P, Q)` / `clobber(P)` all
-    /// pass the `&mut` referent out where a mutation is invisible to the body
-    /// model, so the parameter's final value is uncertain. A by-value scalar
-    /// argument that is merely READ does not reach here through a place root, but
-    /// a bare `&mut`-param argument always could be mutated, so we conservatively
-    /// flag it (mirrors the scalar `mut_ref_params_escaping_in_body`).
-    fn call_arg_escapes_param(arg: &Expr, params: &BTreeSet<String>) -> Option<String> {
-        match strip_place_wrappers(arg) {
-            Expr::Reference(reference) => call_arg_escapes_param(&reference.expr, params),
-            Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                call_arg_escapes_param(&unary.expr, params)
+        /// The root param of a CALL/METHOD ARGUMENT passed in a referent-escaping
+        /// way: a bare `P` / alias, a reborrow `&mut P` / `&mut *P` / `&mut P.f`, or
+        /// an explicit `*P`. `core::mem::take(P)` / `replace(P, ..)` / `swap(P, Q)`
+        /// / `clobber(P)` all pass the `&mut` referent out where a mutation is
+        /// invisible to the body model. Mirrors the scalar
+        /// `mut_ref_params_escaping_in_body`, resolving through let-move aliases.
+        fn call_arg_escapes(&self, arg: &Expr) -> Option<String> {
+            match strip_place_wrappers(arg) {
+                Expr::Reference(reference) => self.call_arg_escapes(&reference.expr),
+                Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                    self.call_arg_escapes(&unary.expr)
+                }
+                other => place_root_ident(other).and_then(|id| self.resolve_root_param(&id)),
             }
-            other => place_root_param(other, params),
         }
     }
 
     impl<'ast> Visit<'ast> for PlaceMutationVisitor<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            // Lexical scoping: a `let`-move alias is visible only within its block
+            // (and nested blocks). Save/restore so an inner shadow does not leak
+            // out and over-flag a same-named outer binding.
+            let saved = self.aliases.clone();
+            syn::visit::visit_block(self, block);
+            self.aliases = saved;
+        }
+
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            let binding = local_binding_ident(&local.pat).map(|name| {
+                // `let q = p;` (or `let r = <existing alias>;`) — a bare path move
+                // of a non-scalar `&mut` param (transitively) aliases its referent.
+                // Any other RHS (or no initializer) re-binds the name to a
+                // non-alias, shadowing away any prior alias for it in this scope.
+                let aliased = local
+                    .init
+                    .as_ref()
+                    .and_then(|init| expr_path_ident(&init.expr))
+                    .and_then(|id| self.resolve_root_param(&id));
+                (name, aliased)
+            });
+            syn::visit::visit_local(self, local);
+            if let Some((name, aliased)) = binding {
+                // Keep an explicit `None` for a non-alias binding so a local can
+                // soundly shadow a parameter with the same name.
+                self.aliases.insert(name, aliased);
+            }
+        }
+
         fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
-            if let Some(root) = projection_root_param(&assign.left, self.params) {
+            if let Some(root) = self.projection_root(&assign.left) {
                 self.flagged.insert(root);
             }
             syn::visit::visit_expr_assign(self, assign);
@@ -12911,7 +14064,7 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
 
         fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
             if is_assignment_binop(&binary.op) {
-                if let Some(root) = projection_root_param(&binary.left, self.params) {
+                if let Some(root) = self.projection_root(&binary.left) {
                     self.flagged.insert(root);
                 }
             }
@@ -12919,10 +14072,13 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
         }
 
         fn visit_expr_reference(&mut self, reference: &'ast syn::ExprReference) {
-            // A `&mut <place rooted at P>` reborrow lets a later mutation flow
-            // through the alias, so the parameter's final value is uncertain.
+            // A `&mut <place rooted at P or an alias of P>` reborrow lets a later
+            // mutation flow through the alias, so the parameter's final value is
+            // uncertain.
             if reference.mutability.is_some() {
-                if let Some(root) = place_root_param(&reference.expr, self.params) {
+                if let Some(root) =
+                    place_root_ident(&reference.expr).and_then(|id| self.resolve_root_param(&id))
+                {
                     self.flagged.insert(root);
                 }
             }
@@ -12931,11 +14087,11 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
 
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             // Free-function escape: `core::mem::take(P)` / `replace(P, ..)` /
-            // `swap(P, Q)` / any `f(P)` passes the `&mut` referent out where the
-            // body model cannot see the mutation — fail closed on a postcondition
-            // reading `P`.
+            // `swap(P, Q)` / any `f(P)` (or `f(q)` for an alias `q` of `P`) passes
+            // the `&mut` referent out where the body model cannot see the mutation
+            // — fail closed on a postcondition reading `P`.
             for arg in &call.args {
-                if let Some(root) = call_arg_escapes_param(arg, self.params) {
+                if let Some(root) = self.call_arg_escapes(arg) {
                     self.flagged.insert(root);
                 }
             }
@@ -12943,12 +14099,12 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
         }
 
         fn visit_expr_method_call(&mut self, method_call: &'ast syn::ExprMethodCall) {
-            // A tracked param passed as a NON-receiver argument to a method call
-            // (`other.absorb(P)`) escapes exactly like a free-function argument.
-            // The RECEIVER position is classified by the method-mutation detectors,
-            // not here.
+            // A tracked param (or its alias) passed as a NON-receiver argument to a
+            // method call (`other.absorb(P)`) escapes exactly like a free-function
+            // argument. The RECEIVER position is classified by the method-mutation
+            // detectors, not here.
             for arg in &method_call.args {
-                if let Some(root) = call_arg_escapes_param(arg, self.params) {
+                if let Some(root) = self.call_arg_escapes(arg) {
                     self.flagged.insert(root);
                 }
             }
@@ -12961,6 +14117,7 @@ pub(super) fn mut_ref_params_place_mutated_or_reborrowed_in_body(
     let mut visitor = PlaceMutationVisitor {
         params,
         flagged: BTreeSet::new(),
+        aliases: BTreeMap::new(),
     };
     visitor.visit_block(block);
     visitor.flagged
@@ -13191,6 +14348,16 @@ struct ExternalAssignmentCollector {
     /// VC's file-wide impl-method registry so the collector can resolve whether a
     /// struct receiver-method call mutates the caller's binding.
     struct_self_receiver_kinds: HashMap<(String, String), SelfReceiverKind>,
+    /// SOUNDNESS-CRITICAL (generic receiver × loop frame). Per-receiver
+    /// `&mut self` trait-method names for bindings whose declared type is a bare
+    /// type parameter (`fn g<T: Tr>(t: &mut T)`, and its `&mut impl Tr` sugar).
+    /// Such a receiver is in NEITHER `struct_receivers` (a `Datatype` map) nor
+    /// `collection_receivers`, so without this a `t.bump()` in a loop body left
+    /// `t` out of the modified set, the frame pinned `t == t_pre`, and a FALSE
+    /// invariant about `t.a()` was trivially "preserved". Built by
+    /// `AssertionCollector::type_param_mut_methods_by_receiver`, which shares its
+    /// bound walk with the straight-line havoc so the two cannot drift.
+    type_param_mut_methods: BTreeMap<String, BTreeSet<String>>,
     /// Per-call `&mut`-argument positions for free functions called in the body
     /// (callee-signature derived; see `AssertionCollector::mut_ref_call_args`).
     /// SOUNDNESS-CRITICAL (free-call `&mut`-argument framing × loop/branch frame):
@@ -13201,6 +14368,22 @@ struct ExternalAssignmentCollector {
     /// is excluded by its callee signature (no over-rejection of a pure-read
     /// helper inside a loop).
     mut_ref_call_args: BTreeMap<String, Vec<bool>>,
+    /// Per-ARGUMENT `&mut` positions of every method NAME the file declares, and
+    /// the `&mut`-typed bindings of the function under extraction. The frame twin
+    /// of `AssertionCollector::{method_arg_mut_flags, mut_ref_reborrowable_bindings}`:
+    /// the straight-line havoc and the loop/join MODIFIED set must agree on which
+    /// arguments a call may write through, or a loop frame pins `t == t_pre` for
+    /// exactly the call the straight-line lane havocs.
+    method_arg_mut_flags: BTreeMap<String, Vec<bool>>,
+    mut_ref_reborrowable_bindings: BTreeSet<String>,
+    /// Record bare external deref-write roots (`*p = v`) in the modified set
+    /// (1c0cfb56: loop-frame havoc / invariant preservation; 2bdd29f9: a
+    /// deref write inside a side-effecting index/RHS evaluation fails closed).
+    /// Cleared ONLY by `externally_assigned_in_block` — the `if`/`else`/
+    /// `match`-less block JOIN consumers, which keep the #83 deref-aliasing
+    /// skip and leave the roots to the slice-C region havoc. See
+    /// `externally_assigned_in_loop_body`.
+    include_deref_roots: bool,
 }
 
 impl ExternalAssignmentCollector {
@@ -13213,7 +14396,45 @@ impl ExternalAssignmentCollector {
             collection_receivers: BTreeSet::new(),
             struct_receivers: BTreeMap::new(),
             struct_self_receiver_kinds: HashMap::new(),
+            type_param_mut_methods: BTreeMap::new(),
             mut_ref_call_args: BTreeMap::new(),
+            method_arg_mut_flags: BTreeMap::new(),
+            mut_ref_reborrowable_bindings: BTreeSet::new(),
+            include_deref_roots: true,
+        }
+    }
+
+    /// The frame-side twin of
+    /// `AssertionCollector::call_arg_may_be_written_through`. Kept literally
+    /// parallel: the straight-line havoc and the loop/join modified set must
+    /// answer the SAME question the same way, or a `&mut` argument gets havoced
+    /// in one lane and frame-pinned in the other.
+    fn call_arg_may_be_written_through(
+        &self,
+        resolved: Option<&[bool]>,
+        index: usize,
+        arg: &Expr,
+    ) -> bool {
+        if let Some(flags) = resolved {
+            return flags.get(index).copied().unwrap_or(false);
+        }
+        expr_path_ident(arg).is_some_and(|name| self.mut_ref_reborrowable_bindings.contains(&name))
+    }
+
+    fn record_written_through_call_args(
+        &mut self,
+        args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>,
+        resolved: Option<&[bool]>,
+    ) {
+        for (index, arg) in args.iter().enumerate() {
+            if !self.call_arg_may_be_written_through(resolved, index, arg) {
+                continue;
+            }
+            if let Some(root) = field_index_projection_root(arg) {
+                if !self.is_local(&root) {
+                    self.external_assignments.insert(root);
+                }
+            }
         }
     }
 
@@ -13380,10 +14601,14 @@ impl<'ast> Visit<'ast> for ExternalAssignmentCollector {
             // `invariant!(*p == old)` verify. Restrict this to a bare external
             // alias: a block-local alias cannot be resolved to its outer target
             // in this collector and remains owned by the alias/deref fail-closed
-            // machinery.
-            if let Some(name) = deref_assignment_target_alias(assign.left.as_ref()) {
-                if !self.is_local(&name) {
-                    self.external_assignments.insert(name);
+            // machinery. LOOP frames only (`include_deref_roots`): at a
+            // branch/match/block join the root is owned by the slice-C region
+            // havoc, and inserting it here invalidates the alias target instead.
+            if self.include_deref_roots {
+                if let Some(name) = deref_assignment_target_alias(assign.left.as_ref()) {
+                    if !self.is_local(&name) {
+                        self.external_assignments.insert(name);
+                    }
                 }
             }
             // SOUNDNESS (round-2 audit P0-A): a named/tuple-field place write
@@ -13432,9 +14657,11 @@ impl<'ast> Visit<'ast> for ExternalAssignmentCollector {
                     self.external_assignments.insert(name);
                 }
             } else {
-                if let Some(name) = deref_assignment_target_alias(binary.left.as_ref()) {
-                    if !self.is_local(&name) {
-                        self.external_assignments.insert(name);
+                if self.include_deref_roots {
+                    if let Some(name) = deref_assignment_target_alias(binary.left.as_ref()) {
+                        if !self.is_local(&name) {
+                            self.external_assignments.insert(name);
+                        }
                     }
                 }
                 // SOUNDNESS (round-2 audit P0-A, compound-assign sibling): a
@@ -13494,6 +14721,11 @@ impl<'ast> Visit<'ast> for ExternalAssignmentCollector {
             self.visit_expr(arg);
         }
         let method = method_call.method.to_string();
+        // ARGUMENTS FIRST, and unconditionally: a `&mut` non-self argument
+        // (`h.hit(t)`) is modified by the call no matter what the RECEIVER
+        // resolves to, and every `return` below this point would skip it.
+        let resolved_args = self.method_arg_mut_flags.get(&method).cloned();
+        self.record_written_through_call_args(&method_call.args, resolved_args.as_deref());
         // Resolve through an explicit deref `(*v).m(..)` as well as the
         // auto-deref form `v.m(..)`; `expr_path_ident` alone strips paren/group
         // but NOT `*`, which left the explicit-deref residual of the loop
@@ -13536,7 +14768,22 @@ impl<'ast> Visit<'ast> for ExternalAssignmentCollector {
         if let Some(struct_type) = self.struct_receivers.get(&name) {
             if self.struct_method_mutates_caller(struct_type, &method) {
                 self.external_assignments.insert(name);
+                return;
             }
+        }
+        // GENERIC-RECEIVER analog: a `&mut self` trait method on a receiver whose
+        // declared type is a bare type parameter. Neither map above can see it (a
+        // `TypeParam` has no `Datatype` and is not collection-like), so `t.bump()`
+        // in a loop body left `t` frame-pinned and a false invariant about
+        // `t.a()` was trivially preserved. Only methods the in-scope trait
+        // declarations RESOLVE to `&mut self` are recorded, so a pure `&self`
+        // read keeps a true invariant framed (NO over-rejection).
+        if self
+            .type_param_mut_methods
+            .get(&name)
+            .is_some_and(|methods| methods.contains(&method))
+        {
+            self.external_assignments.insert(name);
         }
     }
 
@@ -13556,22 +14803,13 @@ impl<'ast> Visit<'ast> for ExternalAssignmentCollector {
         // The `&mut` positions come from the callee signature (`mut_ref_call_args`),
         // so a `&`-shared read argument (`read_helper(v)`) is excluded and a true
         // invariant about an only-read collection stays framed (no over-rejection).
-        let Some(symbol) = super::call_function_symbol(call) else {
-            return;
-        };
-        let Some(mut_flags) = self.mut_ref_call_args.get(&symbol) else {
-            return;
-        };
-        for (arg, is_mut) in call.args.iter().zip(mut_flags.iter()) {
-            if !is_mut {
-                continue;
-            }
-            if let Some(root) = field_index_projection_root(arg) {
-                if !self.is_local(&root) {
-                    self.external_assignments.insert(root);
-                }
-            }
-        }
+        // UNRESOLVED is reported as unresolved, not as an empty flag vector:
+        // `None` routes to the argument-type fallback so a file-level
+        // `use m::bump2;` / an `H::zap(t)` associated fn / an external-crate
+        // callee still records its reborrowed `&mut` argument as modified.
+        let resolved = super::call_function_symbol(call)
+            .and_then(|symbol| self.mut_ref_call_args.get(&symbol).cloned());
+        self.record_written_through_call_args(&call.args, resolved.as_deref());
     }
 
     fn visit_expr_match(&mut self, expr_match: &'ast syn::ExprMatch) {
@@ -13639,6 +14877,8 @@ impl BodyOptionClosureContract {
             erased_shared_ref_params: &erased_shared_ref_params,
             old_substitutions: &old_substitutions,
             erased_mut_ref_value_params: &erased_mut_ref_value_params,
+            binder_scopes: Vec::new(),
+            unscopable_binder: false,
         }
         .visit_expr_mut(&mut condition);
         Some(condition)
@@ -13883,13 +15123,31 @@ fn substitute_helper_contract_clause(
     erased_mut_ref_value_params: &BTreeSet<String>,
 ) -> TrustVcResult<String> {
     let mut condition = clause.condition.clone();
-    ContractExprSubstituter {
+    let mut substituter = ContractExprSubstituter {
         substitutions,
         erased_shared_ref_params,
         old_substitutions,
         erased_mut_ref_value_params,
+        binder_scopes: Vec::new(),
+        unscopable_binder: false,
+    };
+    substituter.visit_expr_mut(&mut condition);
+    if substituter.unscopable_binder {
+        // The clause binds names in a form whose scope this pass cannot delimit
+        // exactly. Both available guesses are unsound (see
+        // `ContractExprSubstituter::unscopable_binder`), so refuse: on the
+        // `requires` side this drops no obligation (the whole call extraction
+        // errors), and on the `ensures` side it assumes nothing.
+        return Err(TrustVcError::Encoding {
+            context: "substitute helper contract clause",
+            detail: format!(
+                "contract clause binds names in a scope this pass cannot delimit exactly \
+                 (an opaque pattern, or an `if let`/`while let`); refusing to substitute \
+                 call arguments into it rather than risk capturing a binder: `{}`",
+                clause.condition.to_token_stream()
+            ),
+        });
     }
-    .visit_expr_mut(&mut condition);
     Ok(condition.to_token_stream().to_string())
 }
 
@@ -14013,6 +15271,9 @@ pub(super) fn mut_ref_struct_params_method_mutated_in_body(
         kinds: &'a HashMap<(String, String), SelfReceiverKind>,
         struct_types: &'a [StructDef],
         mutated: BTreeSet<String>,
+        /// Lexically-scoped local binding -> moved `&mut` parameter root. `None`
+        /// is a non-alias shadow and blocks fallback to a same-named parameter.
+        aliases: BTreeMap<String, Option<String>>,
     }
 
     /// Resolve the method receiver to a tracked `&mut` struct param plus whether
@@ -14021,35 +15282,50 @@ pub(super) fn mut_ref_struct_params_method_mutated_in_body(
     /// root `P` exactly when it mutates that sub-field, but the sub-field's own
     /// type is not resolvable here, so the caller classifies a projection by the
     /// universal pure-method allow-list rather than the root type's receiver kind.
-    fn method_receiver_param(
-        receiver: &Expr,
-        params: &BTreeMap<String, String>,
-    ) -> Option<(String, bool)> {
-        let receiver = strip_place_wrappers(receiver);
-        // `(*P).m(..)` — explicit deref of the reference (direct receiver).
-        if let Expr::Unary(unary) = receiver {
-            if matches!(unary.op, syn::UnOp::Deref(_)) {
-                let name = expr_path_ident(&unary.expr)?;
-                return params.contains_key(&name).then_some((name, true));
+    impl StructMethodMutationVisitor<'_> {
+        fn resolve_root_param(&self, ident: &str) -> Option<String> {
+            match self.aliases.get(ident) {
+                Some(root) => root.clone(),
+                None => self
+                    .param_struct_types
+                    .contains_key(ident)
+                    .then(|| ident.to_string()),
             }
         }
-        // `P.m(..)` — auto-deref of the `&mut` reference (direct receiver).
-        if let Some(name) = expr_path_ident(receiver) {
-            return params.contains_key(&name).then_some((name, true));
+
+        fn method_receiver_param(&self, receiver: &Expr) -> Option<(String, bool)> {
+            // `P.m()` / `(*P).m()` (and their let-move aliases) are direct.
+            if let Some(ident) = method_call_receiver_ident(receiver) {
+                return self.resolve_root_param(&ident).map(|root| (root, true));
+            }
+            // `P.field.m()` / `P[i].m()` mutate a sub-place of the root.
+            let ident = field_index_projection_root(receiver)?;
+            self.resolve_root_param(&ident).map(|root| (root, false))
         }
-        // `P.field.m(..)` / `P[i].m(..)` — a `&mut self` method LAUNDERED through a
-        // field/index projection of the parameter. Resolve the projection root.
-        if matches!(receiver, Expr::Field(_) | Expr::Index(_)) {
-            let root = field_index_projection_root(receiver)?;
-            return params.contains_key(&root).then_some((root, false));
-        }
-        None
     }
 
     impl<'ast> Visit<'ast> for StructMethodMutationVisitor<'_> {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            let saved = self.aliases.clone();
+            syn::visit::visit_block(self, block);
+            self.aliases = saved;
+        }
+
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            let binding = local_binding_ident(&local.pat).map(|name| {
+                let root = local.init.as_ref().and_then(|init| {
+                    expr_path_ident(&init.expr).and_then(|ident| self.resolve_root_param(&ident))
+                });
+                (name, root)
+            });
+            syn::visit::visit_local(self, local);
+            if let Some((name, root)) = binding {
+                self.aliases.insert(name, root);
+            }
+        }
+
         fn visit_expr_method_call(&mut self, method_call: &'ast syn::ExprMethodCall) {
-            if let Some((name, direct_receiver)) =
-                method_receiver_param(&method_call.receiver, self.param_struct_types)
+            if let Some((name, direct_receiver)) = self.method_receiver_param(&method_call.receiver)
             {
                 let method = method_call.method.to_string();
                 let mutates = if direct_receiver {
@@ -14091,6 +15367,7 @@ pub(super) fn mut_ref_struct_params_method_mutated_in_body(
         kinds,
         struct_types,
         mutated: BTreeSet::new(),
+        aliases: BTreeMap::new(),
     };
     visitor.visit_block(block);
     visitor.mutated
@@ -14698,6 +15975,113 @@ fn collect_token_stream_idents(tokens: TokenStream, out: &mut BTreeSet<String>) 
     }
 }
 
+/// Lexically free identifier candidates in one closure body, including names
+/// that occur only inside opaque macro token streams. This is intentionally an
+/// over-approximation (macro field/type identifiers are also seen), but it is
+/// scope- and order-aware for ordinary Rust bindings: a `let` name enters scope
+/// only after its initializer, block/match/for bindings do not escape, closure
+/// parameters are bound from entry, and nested closures analyze themselves.
+fn closure_free_ident_candidates(expr_closure: &syn::ExprClosure) -> BTreeSet<String> {
+    struct Collector {
+        scopes: Vec<BTreeSet<String>>,
+        free: BTreeSet<String>,
+    }
+
+    impl Collector {
+        fn is_bound(&self, name: &str) -> bool {
+            self.scopes.iter().rev().any(|scope| scope.contains(name))
+        }
+
+        fn record(&mut self, name: String) {
+            if !self.is_bound(&name) {
+                self.free.insert(name);
+            }
+        }
+
+        fn push_bindings(&mut self, bindings: BTreeSet<String>) {
+            self.scopes.push(bindings);
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if path.qself.is_none() && path.path.segments.len() == 1 {
+                if let Some(segment) = path.path.segments.first() {
+                    self.record(segment.ident.to_string());
+                }
+            }
+            visit::visit_expr_path(self, path);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast Macro) {
+            let mut raw = BTreeSet::new();
+            collect_token_stream_idents(mac.tokens.clone(), &mut raw);
+            for name in raw {
+                self.record(name);
+            }
+        }
+
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            self.push_bindings(BTreeSet::new());
+            for stmt in &block.stmts {
+                self.visit_stmt(stmt);
+            }
+            self.scopes.pop();
+        }
+
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            // Rust does not put a `let` pattern in scope for its initializer or
+            // diverging `else` arm. Visit those under the prior environment.
+            if let Some(init) = &local.init {
+                self.visit_expr(&init.expr);
+                if let Some((_, diverge)) = &init.diverge {
+                    self.visit_expr(diverge);
+                }
+            }
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.extend(bound_idents_from_pat(&local.pat));
+            }
+        }
+
+        fn visit_expr_match(&mut self, expr_match: &'ast syn::ExprMatch) {
+            self.visit_expr(&expr_match.expr);
+            for arm in &expr_match.arms {
+                self.push_bindings(bound_idents_from_pat(&arm.pat));
+                if let Some((_, guard)) = &arm.guard {
+                    self.visit_expr(guard);
+                }
+                self.visit_expr(&arm.body);
+                self.scopes.pop();
+            }
+        }
+
+        fn visit_expr_for_loop(&mut self, expr_for_loop: &'ast syn::ExprForLoop) {
+            self.visit_expr(&expr_for_loop.expr);
+            self.push_bindings(bound_idents_from_pat(&expr_for_loop.pat));
+            self.visit_block(&expr_for_loop.body);
+            self.scopes.pop();
+        }
+
+        // A nested closure owns its own capture isolation when the assertion
+        // collector visits it; treating its binders/references as this closure's
+        // would both blur scopes and unnecessarily freshen outer facts.
+        fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+        fn visit_item(&mut self, _item: &'ast Item) {}
+    }
+
+    let mut entry_bindings = BTreeSet::new();
+    for input in &expr_closure.inputs {
+        entry_bindings.extend(bound_idents_from_pat(input));
+    }
+    let mut collector = Collector {
+        scopes: vec![entry_bindings],
+        free: BTreeSet::new(),
+    };
+    collector.visit_expr(&expr_closure.body);
+    collector.free
+}
+
 /// Collects every identifier bound by a pattern anywhere within `expr` — nested
 /// closure parameters, `let` bindings, and `match`/`for` patterns. Used to make
 /// the flat closure-capture substitution shadowing-safe: a name re-bound in an
@@ -14811,10 +16195,228 @@ struct ContractExprSubstituter<'a> {
     /// deref and substitutes the value directly, exactly like the erased
     /// shared-ref params.
     erased_mut_ref_value_params: &'a BTreeSet<String>,
+    /// SCOPE STACK — the identifiers bound by the binders ENCLOSING the
+    /// expression currently being visited (quantifier/spec-closure params,
+    /// `let` locals, `match`-arm and `for` patterns). Always starts EMPTY at
+    /// every construction site; it is pushed/popped by the visitor itself.
+    ///
+    /// SOUNDNESS (the reason this field exists). Every map here is keyed by
+    /// BARE PARAMETER NAME. Without a scope stack the rewriter also rewrote
+    /// occurrences that a binder inside the clause had RE-BOUND, so a callee
+    /// contract `requires(forall|m: int| m <= 100)` on `fn callee(m: u64)`
+    /// became `forall|m: int| ARG <= 100` at the call site — the caller then
+    /// discharged a TAUTOLOGY instead of the (unsatisfiable) real clause and
+    /// `callee(5)` verified. See the `contract_binder_capture_*` guards.
+    ///
+    /// The correction must stay EXACT in both directions: skipping too much is
+    /// unsound too. Leaving a FREE param occurrence unsubstituted would let it
+    /// re-bind to a same-named local in the CALLER's scope, so
+    /// `requires(m <= 100)` checked at a call passing `200` inside a caller
+    /// holding `let m = 5;` would wrongly pass (guard
+    /// `free_occurrence_must_not_rebind_to_a_caller_local`). Bound occurrences
+    /// are skipped; free ones are always substituted.
+    binder_scopes: Vec<BTreeSet<String>>,
+    /// STICKY POISON, set when a binder's bound names cannot be enumerated
+    /// exactly (an opaque `Pat` form, or an `if let`/`while let` whose binding
+    /// region this local view cannot delimit). Once set, every enclosing
+    /// expression is replaced by [`unscopable_binder_marker`] as the visit
+    /// unwinds, so the whole clause reaches the encoder as an unresolved
+    /// symbol and fails CLOSED. `substitute_helper_contract_clause` reads the
+    /// flag directly and returns a diagnostic instead.
+    ///
+    /// Guessing a region is not an option here: guessing WIDE drops a real
+    /// substitution (unsound — the caller-scope re-bind above), guessing NARROW
+    /// captures (unsound — the tautology above). Only refusing is safe.
+    unscopable_binder: bool,
+}
+
+impl ContractExprSubstituter<'_> {
+    /// True when `name` is RE-BOUND by a binder enclosing the current position,
+    /// i.e. the occurrence denotes the binder's variable and NOT the contracted
+    /// callee's parameter. Such occurrences must never be substituted.
+    fn is_binder_bound(&self, name: &str) -> bool {
+        self.binder_scopes.iter().any(|scope| scope.contains(name))
+    }
+
+    /// Handles the expression forms that INTRODUCE bindings, pushing the bound
+    /// names for exactly the sub-expressions they scope over. Returns `true`
+    /// when `expr` was fully handled here (the generic walk must not re-run).
+    ///
+    /// Returning `false` for a form that DOES bind is the failure direction, so
+    /// the fallthrough is deliberately restricted to `syn`'s binder-free
+    /// expression forms plus the block/loop wrappers, whose bindings all arrive
+    /// through `visit_block_mut`.
+    fn visit_binder_scope_expr(&mut self, expr: &mut Expr) -> bool {
+        match expr {
+            Expr::Closure(closure) => {
+                let mut names = BTreeSet::new();
+                let scopable = closure
+                    .inputs
+                    .iter()
+                    .all(|input| collect_binder_names_from_pat(input, &mut names));
+                for input in &mut closure.inputs {
+                    syn::visit_mut::visit_pat_mut(self, input);
+                }
+                if !scopable {
+                    self.unscopable_binder = true;
+                    return true;
+                }
+                self.binder_scopes.push(names);
+                self.visit_expr_mut(&mut closure.body);
+                self.binder_scopes.pop();
+                true
+            }
+            Expr::ForLoop(for_loop) => {
+                // The iterated expression is evaluated OUTSIDE the pattern's
+                // scope; only the body is under it.
+                self.visit_expr_mut(&mut for_loop.expr);
+                let mut names = BTreeSet::new();
+                let scopable = collect_binder_names_from_pat(&for_loop.pat, &mut names);
+                syn::visit_mut::visit_pat_mut(self, &mut for_loop.pat);
+                if !scopable {
+                    self.unscopable_binder = true;
+                    return true;
+                }
+                self.binder_scopes.push(names);
+                self.visit_block_mut(&mut for_loop.body);
+                self.binder_scopes.pop();
+                true
+            }
+            Expr::Match(expr_match) => {
+                self.visit_expr_mut(&mut expr_match.expr);
+                for arm in &mut expr_match.arms {
+                    let mut names = BTreeSet::new();
+                    let scopable = collect_binder_names_from_pat(&arm.pat, &mut names);
+                    syn::visit_mut::visit_pat_mut(self, &mut arm.pat);
+                    if !scopable {
+                        self.unscopable_binder = true;
+                        return true;
+                    }
+                    // An arm pattern scopes over the guard AND the body.
+                    self.binder_scopes.push(names);
+                    if let Some((_, guard)) = &mut arm.guard {
+                        self.visit_expr_mut(guard);
+                    }
+                    self.visit_expr_mut(&mut arm.body);
+                    self.binder_scopes.pop();
+                }
+                true
+            }
+            // `if let` / `while let` / a `let` chain: the pattern binds over a
+            // region (the enclosing branch, the rest of the `&&` chain) that is
+            // not visible from this node. Poison rather than guess.
+            Expr::Let(_) => {
+                self.unscopable_binder = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Replaces `expr` with the unresolvable marker once the poison is set, so
+    /// the poison propagates outward to the whole clause.
+    fn poison_if_unscopable(&self, expr: &mut Expr) {
+        if self.unscopable_binder {
+            *expr = unscopable_binder_marker();
+        }
+    }
+}
+
+/// Collects the identifiers `pat` binds, returning `false` when the pattern form
+/// hides its binders. `syn::Pat` is `#[non_exhaustive]`, so the catch-all arm
+/// covers macro/verbatim patterns AND every form a future `syn` may add: an
+/// unseen binder is exactly the capture this machinery exists to prevent, so the
+/// default answer is "cannot enumerate" and never "binds nothing".
+fn collect_binder_names_from_pat(pat: &Pat, names: &mut BTreeSet<String>) -> bool {
+    match pat {
+        Pat::Ident(ident) => {
+            names.insert(ident.ident.to_string());
+            match &ident.subpat {
+                Some((_, subpat)) => collect_binder_names_from_pat(subpat, names),
+                None => true,
+            }
+        }
+        Pat::Or(pat_or) => pat_or
+            .cases
+            .iter()
+            .all(|case| collect_binder_names_from_pat(case, names)),
+        Pat::Paren(paren) => collect_binder_names_from_pat(&paren.pat, names),
+        Pat::Reference(reference) => collect_binder_names_from_pat(&reference.pat, names),
+        Pat::Slice(slice) => slice
+            .elems
+            .iter()
+            .all(|elem| collect_binder_names_from_pat(elem, names)),
+        Pat::Struct(strukt) => strukt
+            .fields
+            .iter()
+            .all(|field| collect_binder_names_from_pat(&field.pat, names)),
+        Pat::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .all(|elem| collect_binder_names_from_pat(elem, names)),
+        Pat::TupleStruct(tuple_struct) => tuple_struct
+            .elems
+            .iter()
+            .all(|elem| collect_binder_names_from_pat(elem, names)),
+        Pat::Type(pat_type) => collect_binder_names_from_pat(&pat_type.pat, names),
+        // Binder-free pattern forms, enumerated explicitly so the catch-all
+        // below keeps meaning "unknown", not "harmless".
+        Pat::Const(_)
+        | Pat::Lit(_)
+        | Pat::Path(_)
+        | Pat::Range(_)
+        | Pat::Rest(_)
+        | Pat::Wild(_) => true,
+        _ => false,
+    }
+}
+
+/// The symbol spliced in place of a contract clause whose binder structure could
+/// not be determined. It resolves to nothing at any call site, so the clause
+/// fails closed in BOTH directions (an unprovable obligation to discharge, an
+/// unencodable assumption to assume).
+fn unscopable_binder_marker() -> Expr {
+    syn::parse_quote!(__trust_vc_unscopable_binder)
 }
 
 impl VisitMut for ContractExprSubstituter<'_> {
+    /// A block's `let`s bind over the REST of the block, so statements are
+    /// walked in order: each initializer is substituted in the scope BEFORE its
+    /// own binding, then the binding is pushed. The whole stack unwinds at the
+    /// closing brace.
+    fn visit_block_mut(&mut self, block: &mut syn::Block) {
+        let depth = self.binder_scopes.len();
+        for stmt in &mut block.stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                syn::visit_mut::visit_stmt_mut(self, stmt);
+                continue;
+            };
+            if let Some(init) = &mut local.init {
+                self.visit_expr_mut(&mut init.expr);
+                if let Some((_, diverge)) = &mut init.diverge {
+                    self.visit_expr_mut(diverge);
+                }
+            }
+            let mut names = BTreeSet::new();
+            let scopable = collect_binder_names_from_pat(&local.pat, &mut names);
+            syn::visit_mut::visit_pat_mut(self, &mut local.pat);
+            if !scopable {
+                self.unscopable_binder = true;
+                break;
+            }
+            self.binder_scopes.push(names);
+        }
+        self.binder_scopes.truncate(depth);
+    }
+
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        // BINDER FORMS FIRST. None of them is a `Call`/`Unary`/`Path`, so the
+        // three arms below are unreachable for them and the pre-existing
+        // ordering is preserved byte-for-byte for every other shape.
+        if self.visit_binder_scope_expr(expr) {
+            self.poison_if_unscopable(expr);
+            return;
+        }
         // Two-state old() forms FIRST (they wrap a `Call`, which the bare
         // `Path` / deref-of-path arms below never match). Active only on the
         // helper-call contract path (`old_substitutions` non-empty): `old(P)`
@@ -14828,8 +16430,14 @@ impl VisitMut for ContractExprSubstituter<'_> {
         if !self.old_substitutions.is_empty() {
             match super::classify_old_call(expr) {
                 super::OldCallShape::Param(name) => {
-                    if let Some(replacement) = self.old_substitutions.get(&name) {
-                        *expr = replacement.clone();
+                    // A binder that RE-BINDS the param name owns this
+                    // occurrence; `old(name)` then names the binder's variable,
+                    // not the callee's pre-state, so leave it VERBATIM to fail
+                    // closed at the encoder rather than splice a pre-value.
+                    if !self.is_binder_bound(&name) {
+                        if let Some(replacement) = self.old_substitutions.get(&name) {
+                            *expr = replacement.clone();
+                        }
                     }
                     return;
                 }
@@ -14843,8 +16451,9 @@ impl VisitMut for ContractExprSubstituter<'_> {
                     if path.qself.is_none() && path.path.segments.len() == 1 {
                         if let Some(segment) = path.path.segments.first() {
                             let name = segment.ident.to_string();
-                            if self.erased_shared_ref_params.contains(&name)
-                                || self.erased_mut_ref_value_params.contains(&name)
+                            if !self.is_binder_bound(&name)
+                                && (self.erased_shared_ref_params.contains(&name)
+                                    || self.erased_mut_ref_value_params.contains(&name))
                             {
                                 if let Some(replacement) = self.substitutions.get(&name) {
                                     *expr = replacement.clone();
@@ -14858,17 +16467,24 @@ impl VisitMut for ContractExprSubstituter<'_> {
         }
         let Expr::Path(path) = expr else {
             syn::visit_mut::visit_expr_mut(self, expr);
+            self.poison_if_unscopable(expr);
             return;
         };
         if path.qself.is_none() && path.path.segments.len() == 1 {
             if let Some(segment) = path.path.segments.first() {
-                if let Some(replacement) = self.substitutions.get(&segment.ident.to_string()) {
-                    *expr = replacement.clone();
-                    return;
+                let name = segment.ident.to_string();
+                // SOUNDNESS: a name RE-BOUND by an enclosing binder inside this
+                // clause is that binder's variable, not the callee's parameter.
+                if !self.is_binder_bound(&name) {
+                    if let Some(replacement) = self.substitutions.get(&name) {
+                        *expr = replacement.clone();
+                        return;
+                    }
                 }
             }
         }
         syn::visit_mut::visit_expr_mut(self, expr);
+        self.poison_if_unscopable(expr);
     }
 }
 
@@ -14949,14 +16565,40 @@ fn arm_pattern_match_condition(
             }
             // A bare binding `x` is irrefutable UNLESS the scrutinee is an enum and
             // `x` names a zero-field variant (e.g. `None` parsed as an ident).
+            let name = ident.ident.to_string();
             if let Some(ty) = scrutinee_ty {
-                if datatype_variant(ty, &ident.ident.to_string()).is_some() {
-                    return ArmMatchCond::Refutable(variant_match_condition(
-                        scrutinee,
-                        ty,
-                        &ident.ident.to_string(),
-                    ));
+                if datatype_variant(ty, &name).is_some() {
+                    return ArmMatchCond::Refutable(variant_match_condition(scrutinee, ty, &name));
                 }
+            }
+            // NOT a resolved variant. A bare ident that Rust resolves to an ITEM
+            // — a `const`, an associated const, a unit struct — is REFUTABLE:
+            // the arm matches only scrutinees equal to that item's value.
+            // Answering `Always` here does not merely over-approximate THIS
+            // arm; it makes every later arm's prior-negation `!(true)`, i.e.
+            // FALSE, so their obligations are vacuously discharged. That was a
+            // cardinal false verify:
+            //
+            //     const K: u64 = 5;
+            //     match n { K => {} _ => { assert!(false); } }   // VERIFIED
+            //
+            // while the identical `5 => {}` refutes. `const_pattern_desugar`
+            // now folds a declared const pattern to its literal before this
+            // runs, so the shapes reaching here are (a) the reserved marker for
+            // a declared const whose value could not be folded, and (b) a const
+            // this file does not declare (e.g. `use other::K`), which the
+            // desugar's file-local scan cannot see. Both fail closed:
+            // `Unknown` sets `prior_unrenderable`, leaving later arms UNGUARDED
+            // — the sound direction.
+            //
+            // A snake_case ident with no marker prefix stays a binding. That is
+            // the overwhelmingly common case and Rust's own convention: an
+            // uppercase-initial BINDING is warned on (`non_snake_case`) and
+            // `E0530` forbids one that shadows a constant.
+            if crate::const_pattern_desugar::unmodeled_const_pat_name(&name).is_some()
+                || name.starts_with(|c: char| c.is_uppercase())
+            {
+                return ArmMatchCond::Unknown;
             }
             ArmMatchCond::Always
         }
@@ -15010,6 +16652,29 @@ fn pattern_elem_is_plain_binding(pat: &Pat) -> bool {
     }
 }
 
+/// TRUE when `pat` matches EVERY value of its type with no refinement at all, so
+/// its match condition is unconditionally `"true"` — a snake_case binder without
+/// an `@`-subpattern, or a wildcard, looking through `(..)` and `: T` wrappers.
+///
+/// An UPPERCASE-initial bare ident is deliberately NOT counted: Rust resolves it
+/// to a unit variant or a `const`, both of which refine the match (see the
+/// `Pat::Ident` arm of [`pattern_match_condition_for_scoped_value`]).
+fn pattern_is_irrefutable_binder(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wild(_) => true,
+        Pat::Ident(ident) => {
+            ident.subpat.is_none()
+                && !ident
+                    .ident
+                    .to_string()
+                    .starts_with(|c: char| c.is_uppercase())
+        }
+        Pat::Paren(paren) => pattern_is_irrefutable_binder(&paren.pat),
+        Pat::Type(pat_type) => pattern_is_irrefutable_binder(&pat_type.pat),
+        _ => false,
+    }
+}
+
 fn pattern_match_condition_for_scoped_value(
     pat: &Pat,
     base: &str,
@@ -15036,11 +16701,24 @@ fn pattern_match_condition_for_scoped_value(
             }
             Some(variant_match_condition(base, base_ty, &variant_name))
         }
-        Pat::Path(path) => path
-            .path
-            .segments
-            .last()
-            .map(|segment| variant_match_condition(base, base_ty, &segment.ident.to_string())),
+        Pat::Path(path) => {
+            let variant_name = path.path.segments.last()?.ident.to_string();
+            // A path pattern is a unit VARIANT only when the scrutinee's
+            // datatype actually has a zero-field variant by that name. The other
+            // things a path pattern can denote — a `const` or an
+            // associated-const (`k::K`, `Self::LIMIT`) — are VALUE refinements
+            // that no variant tester expresses, and `({base}).is_K()` is not
+            // merely useless there but a claim about a variant that does not
+            // exist. Fail closed instead. (Without this gate the const case
+            // survived only because the encoder happened to reject the bogus
+            // tester downstream — an accident, not a guarantee.)
+            match datatype_variant(base_ty, &variant_name) {
+                Some(variant) if variant.fields.is_empty() => {
+                    Some(variant_match_condition(base, base_ty, &variant_name))
+                }
+                _ => None,
+            }
+        }
         Pat::Struct(struct_pat) => {
             let variant_name = struct_pat
                 .path
@@ -15062,7 +16740,33 @@ fn pattern_match_condition_for_scoped_value(
                 Some("true".to_string())
             }
         }
-        Pat::Ident(_) | Pat::Wild(_) => Some("true".to_string()),
+        Pat::Wild(_) => Some("true".to_string()),
+        Pat::Ident(ident) => {
+            // `x @ SUBPAT` carries a refinement the bare binder cannot express;
+            // answering `true` would widen the condition to always-match — the
+            // same drop the tuple-struct/struct arms above guard against.
+            if ident.subpat.is_some() {
+                return None;
+            }
+            let name = ident.ident.to_string();
+            if !name.starts_with(|c: char| c.is_uppercase()) {
+                return Some("true".to_string());
+            }
+            // An UPPERCASE-initial bare ident is not a binding: Rust resolves it
+            // to a zero-field enum VARIANT when the scrutinee's datatype has one
+            // by that name, and otherwise to a `const`/associated-const PATTERN.
+            // Both are REFUTABLE, so `true` drops a real value refinement. Same
+            // ruling, and same reasoning, as
+            // `ir_lowering::match_lowering::lower_pattern` — which fails closed
+            // on the const case because a snake_case binding is the only
+            // idiomatic spelling of a genuine binder.
+            match datatype_variant(base_ty, &name) {
+                Some(variant) if variant.fields.is_empty() => {
+                    Some(variant_match_condition(base, base_ty, &name))
+                }
+                _ => None,
+            }
+        }
         Pat::Type(pat_type) => {
             pattern_match_condition_for_scoped_value(&pat_type.pat, base, base_ty)
         }
@@ -15479,6 +17183,18 @@ fn collect_value_position_index_exprs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr
             collect_value_position_index_exprs(&repeat.expr, out);
             collect_value_position_index_exprs(&repeat.len, out);
         }
+        // A `Range` / `RangeInclusive` value eagerly evaluates every present bound at
+        // construction, so an OOB index in either bound (`0..arr[i]`) is an
+        // unconditionally-evaluated value-position access — descend into both bounds
+        // (sibling of the arith collector's `Expr::Range` arm).
+        Expr::Range(range) => {
+            if let Some(start) = &range.start {
+                collect_value_position_index_exprs(start, out);
+            }
+            if let Some(end) = &range.end {
+                collect_value_position_index_exprs(end, out);
+            }
+        }
         Expr::Struct(struct_expr) => {
             for field in &struct_expr.fields {
                 collect_value_position_index_exprs(&field.expr, out);
@@ -15639,6 +17355,24 @@ fn collect_value_position_arith_exprs<'a>(
         Expr::Index(index) => {
             collect_value_position_arith_exprs(&index.expr, guards, out);
             collect_value_position_arith_exprs(&index.index, guards, out);
+        }
+        // SOUNDNESS-CRITICAL (range-bound arithmetic panic-freedom): constructing a
+        // `Range` / `RangeInclusive` value (`lo..hi`, `lo..=hi`, `..hi`, `lo..`)
+        // EAGERLY evaluates every present bound, so an arithmetic / shift / negation
+        // site in either bound is an unconditionally-evaluated value-position site
+        // at this program point (the bound is computed before the range value
+        // exists). Descend into both bounds. Reached from the for-loop iterator
+        // (`for _ in 0..(a / b)`), a bare range value (`let _ = 0..(a / b)`), and any
+        // aggregate / call sub-position nesting a range. The earlier "loops own
+        // those" exclusion was wrong for the bounds themselves: a range bound is NOT
+        // conditionally evaluated — it always runs exactly once at construction.
+        Expr::Range(range) => {
+            if let Some(start) = &range.start {
+                collect_value_position_arith_exprs(start, guards, out);
+            }
+            if let Some(end) = &range.end {
+                collect_value_position_arith_exprs(end, guards, out);
+            }
         }
         Expr::Tuple(tuple) => {
             for elem in &tuple.elems {
@@ -16270,6 +18004,17 @@ fn expr_path_ident(expr: &Expr) -> Option<String> {
             .map(|segment| segment.ident.to_string())
     } else {
         None
+    }
+}
+
+/// The single binding identifier of a `let` pattern (`let q`, `let mut q`, or
+/// `let q: T`). Destructuring and `@` subpatterns deliberately return `None`:
+/// the alias analyses cannot assign one initializer place to multiple bindings.
+fn local_binding_ident(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(pat_ident) if pat_ident.subpat.is_none() => Some(pat_ident.ident.to_string()),
+        Pat::Type(pat_type) => local_binding_ident(&pat_type.pat),
+        _ => None,
     }
 }
 

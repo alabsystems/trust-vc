@@ -333,7 +333,15 @@ categories) with rustc-class DIAGNOSTICS parity. **These are text-classification
 estimates from manifest `reason`/`known_gaps` fields and the project's own gap
 maps — not per-case re-verification.**
 
-> **Count correction.** The working notes' headline "112 unsupported-gap" reflects the
+> **Count correction — ITSELF SUPERSEDED (2026-08-28).** The manifest no longer
+> carries a `status` field at all, so the `status`-vs-`classification`
+> discrepancy this note is built on no longer exists; the live
+> `classification` split is **46 ported / 106 unsupported-gap / 4 not-applicable
+> / 0 unclassified** of 156. The per-cluster arithmetic below is keyed to the
+> 2026-06-14 base of 111 and should be re-derived, not quoted. Original note
+> follows.
+>
+> The working notes' headline "112 unsupported-gap" reflects the
 > manifest's `status` field; the `classification` field holds **111**
 > unsupported-gap / 41 ported / 4 not-applicable / 1 unclassified (= 156). Both
 > are present in `evals/verus/verus-tests.json` (verified); this memo uses the 111

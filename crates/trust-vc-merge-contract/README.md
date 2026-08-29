@@ -4,10 +4,13 @@ Versioned merge-boundary schema for trust_vc to trust_mc handoff.
 
 ## Version policy
 
-- Current schema: `MergeBundle` v3 (`bundle_version = 3`)
-- Supported versions: 1 through 3 (inclusive).
-- v3 bundles include an explicit `expression_format` field
-  (`smt_lib2_term_v1`) declaring the grammar of `TypedExpr.expr` strings.
+- Current schema: `MergeBundle` v4 (`bundle_version = 4`) — the single source of
+  truth is `MERGE_BUNDLE_VERSION` in `src/lib.rs`; read it there rather than
+  trusting this line.
+- Supported versions: 1 through `MERGE_BUNDLE_VERSION` (inclusive).
+- v3 added an explicit `expression_format` field
+  (`smt_lib2_term_v1`) declaring the grammar of `TypedExpr.expr` strings; v4 adds
+  `FuncDeclMeta` / `FuelAxiomMeta` / `BroadcastLemmaMeta` (#2578).
 - Unsupported versions are hard-fail:
   `MergeBundle::from_json_str` returns `MergeBundleError::UnsupportedBundleVersion`
   for versions outside the supported range.
@@ -17,7 +20,7 @@ accept incompatible bundle layouts.
 
 ## Expression format
 
-v3 bundles use `expression_format: smt_lib2_term_v1`, meaning every
+v3 and later bundles use `expression_format: smt_lib2_term_v1`, meaning every
 `TypedExpr.expr` string must be a canonical SMT-LIB2 **term** (not a full
 script). Consumers assemble the surrounding `set-logic`, declarations,
 `assert`, and `check-sat` scaffolding themselves.

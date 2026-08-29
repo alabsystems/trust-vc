@@ -89,11 +89,17 @@ impl<'a> AstExpressionParser<'a> {
                     // purification never fires here: pass `None`.
                     let result =
                         self.encode_int_arith(op, left_term, right_term, false, false, ty, None)?;
-                    if self.use_int_arithmetic {
-                        let wrap_ctx = ty.bit_width().map(|w| (w, ty.is_unsigned()));
-                        return self.wrap_int_with_ctx(result, wrap_ctx);
-                    }
-                    Ok(result)
+                    // Apply the type-derived truncation HERE, unconditionally.
+                    // `encode_int_arith` declines the wrap in two modes now — the
+                    // long-standing `use_int_arithmetic` one, and (new) inside a
+                    // quantifier body, where ordinary spec `+`/`-`/`*` is
+                    // mathematical `int`. An explicit `WrappingArith` node is
+                    // *defined* as finite-width truncation, so it must not inherit
+                    // either relaxation: without this, `forall|x: u8|
+                    // x.wrapping_add(1) >= 1` would wrongly verify. For MathInt/Nat
+                    // `ty` there is no width and the exact math result is returned.
+                    let wrap_ctx = ty.bit_width().map(|w| (w, ty.is_unsigned()));
+                    self.wrap_int_with_ctx(result, wrap_ctx)
                 }
                 WrappingMode::Checked => {
                     let left_term = self.encode_subexpr(left)?;

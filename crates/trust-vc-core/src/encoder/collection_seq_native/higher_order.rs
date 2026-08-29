@@ -922,6 +922,9 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        // A set drops duplicates: `|seq.to_set()| <= |seq|`, not `== |seq|`.
+        // Mirror of the non-native `encode_seq_to_set` decline.
+        self.decline_collection_len(result);
 
         // Native Seq already has membership for singleton subsequences. Tie
         // the Set projection directly to that operation so assumptions and

@@ -39,6 +39,7 @@ pub(super) fn valued_trait_decl() -> TraitDecl {
 
 pub(super) fn valued_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6Valued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), concrete_fn_name.to_string())],
@@ -68,6 +69,7 @@ fn gated_trait_decl() -> TraitDecl {
 
 fn gated_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6Gate".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("grant".to_string(), concrete_fn_name.to_string())],
@@ -184,7 +186,7 @@ fn test_trait_conformance_verifies_captured_body_without_body_axiom() {
         vec![("self".to_string(), TrustVcType::Bool)],
     );
     ctx.register_trait_impl_method_body(
-        "Slice6BoolImpl__cap_good".to_string(),
+        crate::ir::ImplMethodKey::new("Slice6Valued", "Slice6BoolImpl__cap_good"),
         crate::ir::ConformanceMethodBody::new("true", 0),
     );
     ctx.push_obligation(crate::vc::ProofObligation::assert("user_goal", "true"));
@@ -213,7 +215,7 @@ fn test_trait_conformance_rejects_captured_body_violating_contract() {
         vec![("self".to_string(), TrustVcType::Bool)],
     );
     ctx.register_trait_impl_method_body(
-        "Slice6BoolImpl__cap_bad".to_string(),
+        crate::ir::ImplMethodKey::new("Slice6Valued", "Slice6BoolImpl__cap_bad"),
         crate::ir::ConformanceMethodBody::new("false", 0),
     );
     // Unrelated obligation that would otherwise verify. It is NO LONGER SUNK by
@@ -312,6 +314,7 @@ fn test_trait_conformance_skips_default_methods_without_binding() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6DefaultOnly".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -369,6 +372,7 @@ fn test_trait_conformance_rejects_bad_nonoverridden_default() {
     let ctx = pipeline.context_mut();
     ctx.register_trait_decl(bad_default_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -450,6 +454,7 @@ fn test_trait_conformance_accepts_correct_nonoverridden_default_no_over_rejectio
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3Good".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -497,6 +502,7 @@ fn test_trait_conformance_accepts_default_using_requires_to_establish_ensures() 
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3Req".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -536,6 +542,7 @@ fn test_trait_conformance_rejects_default_when_requires_dropped() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3NoReq".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -598,6 +605,7 @@ fn test_trait_conformance_good_override_of_default_still_verifies() {
     ctx.declare_var_typed("self", TrustVcType::Bool);
     ctx.register_trait_decl(bad_default_bool_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3B".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("m".to_string(), "TR3BBoolImpl__m_good".to_string())],
@@ -632,6 +640,7 @@ fn test_trait_conformance_bad_override_of_default_fails() {
     ctx.declare_var_typed("self", TrustVcType::Bool);
     ctx.register_trait_decl(bad_default_bool_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3B".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("m".to_string(), "TR3BBoolImpl__m_bad".to_string())],
@@ -686,6 +695,7 @@ fn test_trait_conformance_skips_default_without_body_text() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TR3NoBody".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -749,6 +759,7 @@ fn test_trait_conformance_rejects_bad_sibling_call_default() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -819,6 +830,7 @@ fn test_trait_conformance_accepts_good_sibling_call_default() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibGood".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -886,6 +898,7 @@ fn test_trait_conformance_accepts_nested_sibling_call_default() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibNest".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -946,6 +959,7 @@ fn test_trait_conformance_rejects_nested_sibling_call_default() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibNestBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1003,6 +1017,7 @@ fn test_trait_conformance_accepts_param_sibling_call_default() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibParam".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1055,6 +1070,7 @@ fn test_trait_conformance_rejects_param_sibling_call_default_without_requires() 
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TRSibParamBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1097,6 +1113,7 @@ fn test_trait_conformance_specializes_poly_params_and_return() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6PolyMirror".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("mirror".to_string(), "Slice6BoolImpl__mirror".to_string())],
@@ -1169,6 +1186,7 @@ fn test_trait_conformance_accepts_unit_receiver_and_return() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6UnitApply".to_string(),
         concrete_type: TrustVcType::Unit,
         method_bindings: vec![("apply".to_string(), "Slice6UnitImpl__apply".to_string())],
@@ -1220,6 +1238,7 @@ fn test_trait_conformance_enforces_all_postconditions() {
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Slice6MultiEnsures".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("grant".to_string(), "Slice6BoolImpl__grant_all".to_string())],
@@ -1437,7 +1456,7 @@ fn assoc_view_client(
         vec![("self".to_string(), TrustVcType::Bool)],
     );
     ctx.register_trait_impl_method_body(
-        concrete_fn.to_string(),
+        crate::ir::ImplMethodKey::new("AssocView", concrete_fn),
         crate::ir::ConformanceMethodBody::new(body_text, 0),
     );
     ctx.push_obligation(crate::vc::ProofObligation::assert(

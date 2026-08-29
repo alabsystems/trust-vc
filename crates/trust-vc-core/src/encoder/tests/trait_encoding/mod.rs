@@ -64,6 +64,7 @@ fn simple_trait_decl() -> TraitDecl {
 
 fn simple_impl_decl() -> TraitImplDecl {
     TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Valued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), "BoolImpl__get_value".to_string())],

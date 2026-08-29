@@ -41,6 +41,9 @@ pub(in crate::encoder) struct PrunePlan {
     /// Optional current-state variable/fact slice for fresh per-assertion
     /// encoders. Global/shared plans leave this as `None`.
     current_state_slice: Option<CurrentStateSlice>,
+    /// Whether anything in this query reads a collection ELEMENT, or only its
+    /// LENGTH. See [`ElementDemand`].
+    element_demand: ElementDemand,
 }
 
 impl PrunePlan {
@@ -79,6 +82,22 @@ impl PrunePlan {
 
     pub(super) fn current_state_slice(&self) -> Option<&CurrentStateSlice> {
         self.current_state_slice.as_ref()
+    }
+
+    /// Whether this query's Seq element models must be encoded in full.
+    pub(in crate::encoder) fn element_demand(&self) -> ElementDemand {
+        self.element_demand
+    }
+
+    /// Override the analysed verdict for one encoder build.
+    ///
+    /// Used by the OBLIGATION-LOCAL prune (`assertion.rs`): the collection
+    /// precondition / overflow lane gets its own encoder, so it can be built in
+    /// a deliberately WEAKER (element-free) context and consulted first. Only a
+    /// `Verified` from that weaker context is accepted — entailment is monotone,
+    /// so anything the pruned context proves the full context proves too.
+    pub(in crate::encoder) fn set_element_demand(&mut self, demand: ElementDemand) {
+        self.element_demand = demand;
     }
 }
 
@@ -342,6 +361,7 @@ fn expand_reachability(
     PrunePlan {
         reachable_functions: reachable,
         current_state_slice: None,
+        element_demand: ElementDemand::Observed,
     }
 }
 
@@ -386,7 +406,9 @@ pub(in crate::encoder) fn build_prune_plan(
     }
 
     seed_trait_impl_bindings(&mut reachable, ctx);
-    expand_reachability(reachable, broadcast_assumptions)
+    let mut plan = expand_reachability(reachable, broadcast_assumptions);
+    plan.element_demand = context_element_demand(ctx, broadcast_assumptions);
+    plan
 }
 
 /// Build a per-assertion prune plan seeded from a single assertion and its
@@ -428,12 +450,265 @@ pub(in crate::encoder) fn build_per_assertion_prune_plan(
     seed_trait_impl_bindings(&mut reachable, ctx);
 
     let mut plan = expand_reachability(reachable, slices.broadcast_assumptions);
+    plan.element_demand = context_element_demand(ctx, slices.broadcast_assumptions);
     plan.current_state_slice = Some(build_current_state_slice(
         assertion,
         slices,
         &plan.reachable_functions,
     ));
     plan
+}
+
+/// Does this query ever OBSERVE a collection element, or only its LENGTH?
+///
+/// The Seq element model is not a fact about the program: it is the encoder's
+/// *definition* of a derived carrier array (`__seq_shifted`, `__seq_concat`).
+/// A definition is only worth stating when something can read it. When no
+/// obligation, assumption, invariant, broadcast or type invariant in the whole
+/// query reads an element, the guarded `forall` and its ground instances are
+/// pure dead weight — and expensive dead weight, because they drag the query
+/// into AUFBV with `int2bv`/`bv2nat` bridges that the length-only goal has to
+/// share a theory with.
+///
+/// This is the sub-variable granularity `CurrentStateSlice` cannot express:
+/// its `reachable_variables` key is a whole `VariableDecl` name, so a `Vec`
+/// that is reachable *at all* drags in its entire model. Part of the
+/// length-vs-elements split (#2520 follow-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::encoder) enum ElementDemand {
+    /// Something in this query reads an element or a membership. Encode the
+    /// full element model — this is the fail-closed default for every path
+    /// that does not run the analysis.
+    Observed,
+    /// NOTHING in this query reads an element. Seq element models are pruned
+    /// down to their length metadata.
+    LengthOnly,
+}
+
+/// Types whose SMT value is a scalar, so that a term of this type cannot be
+/// (or transitively contain) a collection carrier array.
+///
+/// `StrSlice`/`String` are deliberately excluded: they share the `Seq<char>`
+/// backend shape. `Datatype`/`Array`/`TypeParam`/`Poly`/`Opaque` are excluded
+/// because a field or an erased value can be a collection.
+fn ty_is_element_blind(ty: &crate::ir::TrustVcType) -> bool {
+    use crate::ir::TrustVcType as T;
+    matches!(
+        ty,
+        T::Unit
+            | T::Bool
+            | T::Int { .. }
+            | T::Uint { .. }
+            | T::MathInt
+            | T::Nat
+            | T::Real
+            | T::Float { .. }
+            | T::Char
+    )
+}
+
+/// Conservative static check: can this expression's VALUE be proven scalar?
+///
+/// Returns `false` whenever the type is unknown or could carry a collection —
+/// the caller then treats the position as an element observation.
+fn operand_is_element_blind(expr: &TrustVcExpr) -> bool {
+    match expr {
+        TrustVcExpr::UnitLit
+        | TrustVcExpr::BoolLit(_)
+        | TrustVcExpr::Not(_)
+        | TrustVcExpr::Compare { .. }
+        | TrustVcExpr::Logic { .. }
+        | TrustVcExpr::Implies { .. }
+        | TrustVcExpr::Quantifier { .. }
+        | TrustVcExpr::PlaceDisjoint { .. }
+        | TrustVcExpr::ProphecyResolve { .. } => true,
+        TrustVcExpr::Neg(inner) => operand_is_element_blind(inner),
+        TrustVcExpr::IntLit { ty, .. }
+        | TrustVcExpr::Var { ty, .. }
+        | TrustVcExpr::Arith { ty, .. }
+        | TrustVcExpr::Ite { ty, .. }
+        | TrustVcExpr::Match { ty, .. }
+        | TrustVcExpr::Let { ty, .. }
+        | TrustVcExpr::CollectionOp { ty, .. }
+        | TrustVcExpr::IntConst { ty, .. }
+        | TrustVcExpr::SpecialArith { ty, .. }
+        | TrustVcExpr::WrappingArith { ty, .. }
+        | TrustVcExpr::SpecClosure { ty, .. }
+        | TrustVcExpr::ReadPlace { ty, .. }
+        | TrustVcExpr::ProphecyNew { ty, .. } => ty_is_element_blind(ty),
+        TrustVcExpr::Cast { to_ty, .. } => ty_is_element_blind(to_ty),
+        TrustVcExpr::Index { elem_ty, .. } => ty_is_element_blind(elem_ty),
+        TrustVcExpr::FnCall { return_ty, .. } => ty_is_element_blind(return_ty),
+        TrustVcExpr::Choose { var_ty, .. } => ty_is_element_blind(var_ty),
+        // Unknown shape: assume it can carry a collection.
+        _ => false,
+    }
+}
+
+/// Collection operations that read only LENGTH/CARDINALITY, plus the pure
+/// constructors whose result length is a function of its operands' lengths
+/// alone.
+///
+/// Everything not listed here — every element read (`First`/`Last`/`Index`),
+/// every membership test (`Contains`/`ContainsKey`/`Dom`/`Get`), every
+/// higher-order fold/map/filter, and every Set/Map/Multiset operation whose
+/// CARDINALITY depends on element identity (`Insert`/`Remove`/`Union`/
+/// `Intersect`/`Difference`/`ToSet`/`ToMultiset`/`NoDuplicates`) — counts as
+/// an observation and switches the whole query back to the full model.
+const fn collection_op_is_length_only(op: crate::ir::CollectionOp) -> bool {
+    use crate::ir::CollectionOp as Op;
+    matches!(
+        op,
+        Op::Len
+            | Op::IsEmpty
+            | Op::Push
+            | Op::Add
+            | Op::Concat
+            | Op::Take
+            | Op::Skip
+            | Op::Subrange
+            | Op::DropFirst
+            | Op::DropLast
+            | Op::Update
+            | Op::Reverse
+            | Op::View
+    )
+}
+
+/// Sets `observed` as soon as any element/membership observation is found.
+struct ElementObservationDetector {
+    observed: bool,
+}
+
+impl TrustVcExprVisitor for ElementObservationDetector {
+    fn visit_expr(&mut self, expr: &TrustVcExpr) {
+        if self.observed {
+            return;
+        }
+        match expr {
+            // Direct element reads.
+            TrustVcExpr::Index { .. } => self.observed = true,
+            TrustVcExpr::ReadPlace { place, .. } => {
+                if place
+                    .projections
+                    .iter()
+                    .any(|proj| matches!(proj, crate::ir_place::PlaceProjection::Index { .. }))
+                {
+                    self.observed = true;
+                }
+            }
+            TrustVcExpr::CollectionOp { op, .. } => {
+                if !collection_op_is_length_only(*op) {
+                    self.observed = true;
+                }
+            }
+            // Structural equality on a collection (or on anything that may
+            // contain one) compares ELEMENTS, not just lengths.
+            TrustVcExpr::Compare { left, right, .. } => {
+                if !operand_is_element_blind(left) || !operand_is_element_blind(right) {
+                    self.observed = true;
+                }
+            }
+            // A collection handed to an uninterpreted / spec function escapes
+            // into a UF application whose meaning depends on its elements.
+            TrustVcExpr::FnCall { args, .. } => {
+                if args.iter().any(|arg| !operand_is_element_blind(arg)) {
+                    self.observed = true;
+                }
+            }
+            TrustVcExpr::Match { scrutinee, .. } => {
+                if !operand_is_element_blind(scrutinee) {
+                    self.observed = true;
+                }
+            }
+            TrustVcExpr::Choose { var_ty, .. } => {
+                if !ty_is_element_blind(var_ty) {
+                    self.observed = true;
+                }
+            }
+            TrustVcExpr::ProphecyNew { ty, .. } => {
+                if !ty_is_element_blind(ty) {
+                    self.observed = true;
+                }
+            }
+            TrustVcExpr::ProphecyResolve { value, .. } => {
+                if !operand_is_element_blind(value) {
+                    self.observed = true;
+                }
+            }
+            _ => {}
+        }
+        if self.observed {
+            return;
+        }
+        walk_expr(self, expr);
+    }
+}
+
+fn expr_observes_elements(expr: &TrustVcExpr) -> bool {
+    let mut detector = ElementObservationDetector { observed: false };
+    detector.visit_expr(expr);
+    detector.observed
+}
+
+fn obligation_observes_elements(obligation: &PreparedObligation) -> bool {
+    expr_observes_elements(&obligation.expr)
+        || obligation
+            .broadcast_guard
+            .as_ref()
+            .is_some_and(expr_observes_elements)
+}
+
+/// Whole-query element-demand analysis.
+///
+/// SOUNDNESS. The `LengthOnly` verdict only ever removes ASSERTIONS from the
+/// solver context (the derived carriers' defining `forall` and its ground
+/// instances, and the `bv2int` length-companion bridges that exist solely to
+/// keep that `forall` in pure BV). Every verification decision this encoder
+/// makes has the shape "context AND NOT goal is UNSAT", so a strictly smaller
+/// context can only make UNSAT *harder* to reach: a `Verified` can degrade to
+/// `Counterexample`/`Unknown`, never the reverse. No proof obligation is
+/// dropped — the one obligation that disappears with the pruned bridge
+/// (`push_index_representability_check`, queued by `len_as_index_bv`) is a
+/// well-formedness condition of the `int2bv` carrier index we no longer build,
+/// not a property of the program.
+///
+/// The analysis is fail-closed by construction: every unrecognised expression
+/// shape, every unknown type, and every trait/impl surface (whose method specs
+/// and conformance bodies are still carried as unlowered TEXT) answers
+/// `Observed`.
+pub(in crate::encoder) fn context_element_demand(
+    ctx: &PreparedVerificationContext,
+    broadcast_assumptions: &[&PreparedObligation],
+) -> ElementDemand {
+    // Trait/impl surfaces carry method specs and conformance bodies as text
+    // that is lowered later, so this analysis cannot see them.
+    if !ctx.trait_decls.is_empty()
+        || !ctx.trait_impl_decls.is_empty()
+        || !ctx.trait_impl_method_bodies.is_empty()
+    {
+        return ElementDemand::Observed;
+    }
+    let observed = ctx.obligations.iter().any(obligation_observes_elements)
+        || broadcast_assumptions
+            .iter()
+            .any(|ob| obligation_observes_elements(ob))
+        || ctx
+            .assert_by_scopes
+            .values()
+            .flatten()
+            .any(obligation_observes_elements)
+        || ctx
+            .loop_entry_scopes
+            .values()
+            .flatten()
+            .any(obligation_observes_elements)
+        || ctx.type_invariants.values().any(expr_observes_elements);
+    if observed {
+        ElementDemand::Observed
+    } else {
+        ElementDemand::LengthOnly
+    }
 }
 
 #[cfg(test)]

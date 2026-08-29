@@ -29,6 +29,21 @@ pub enum VerdictKind {
     Unknown,
     Error,
     Skipped,
+    /// The scan SAW this `fn` item but computed no verdict for it, and says why.
+    ///
+    /// Distinct from [`VerdictKind::Skipped`], which is a recognized target the
+    /// verifier deliberately declined (a bodyless trait declaration, a marker
+    /// attribute with no contract). `NotAnalyzed` is the bucket for a function
+    /// that never reached the verifier at all — an ordinary uncontracted helper,
+    /// or a contract spelled in a way discovery could not recognize.
+    ///
+    /// It exists so the report's buckets SUM to the number of functions scanned.
+    /// Before it, a function with an unrecognized contract spelling appeared in
+    /// no bucket whatsoever: `"functions": []`, an all-zero summary and exit 0,
+    /// indistinguishable from a clean verification of an empty file. It is not a
+    /// failure — a crate full of uncontracted helpers must still exit 0 — but it
+    /// is never silent.
+    NotAnalyzed,
 }
 
 /// Step-level localization for the first non-verified proof obligation.
@@ -137,6 +152,16 @@ fn has_extractable_contracts(func: &AnnotatedFunction) -> bool {
 /// channel through which a non-conforming impl is reported, and it must fail
 /// closed: an obligation that cannot be built or addressed comes back
 /// `Unknown`/`Error`, never `Verified`.
+///
+/// POINTER WIDTH is decided by the LIBRARY, not here. This lane used to install
+/// only `install_pointer_width_for` — the pinned `global size_of usize`
+/// directive, and otherwise nothing, leaving the host's 64-bit `usize` in force
+/// — while the FUNCTION lane below routed through [`width_plan_for`] /
+/// [`run_under_width_plan`]. Same file, two lanes, one of them blind to 32-bit:
+/// an impl that violates its trait `ensures` at a 32-bit `usize` came back
+/// `verified`. `trust_vc_core::verify_trait_conformance_obligation` now owns the
+/// full plan (pinned / host / dual), so this call needs no guard of its own —
+/// and must not install one, or it would pin a width the plan did not choose.
 fn verify_conformance_obligation(
     func: &AnnotatedFunction,
 ) -> (VerdictKind, Option<String>, Vec<CounterexampleBinding>) {
@@ -150,12 +175,60 @@ fn verify_conformance_obligation(
             Vec::new(),
         );
     };
-    // Hold the pointer-width guard across the (re-)extraction AND verification,
-    // exactly as the function path does.
-    let _width_guard = install_pointer_width_for(&func.file_path);
     match trust_vc_core::verify_trait_conformance_obligation(path, &func.name) {
         Ok(result) => verdict_from_result(&result),
         Err(err) => (VerdictKind::Error, Some(err.to_string()), Vec::new()),
+    }
+}
+
+/// Reason reported for a bodyless trait method declaration. It is a SKIP, not a
+/// pass: nothing about this item was proven, and the reader is pointed at the
+/// obligations that do carry the weight.
+const TRAIT_DECLARATION_SKIP_DETAIL: &str =
+    "trait method declaration (no default body) — nothing to verify at the declaration; its \
+     contract is discharged by the per-impl `trait impl conformance` obligations and assumed at \
+     call sites";
+
+/// The EXACT source line of `func`'s signature identifier, as the file scan
+/// recorded it (`sig.ident.span().start().line`).
+///
+/// Every [`AnnotatedFunction`] that reaches a body-verifying path comes from
+/// `scan::extract_from_items`, which stores that span line verbatim; the only
+/// synthetic-`line` targets are trait-conformance obligations, and both
+/// verifying entry points return those before they ever get here. So this is
+/// real lexical provenance, and passing it lets the resolver name ONE item
+/// instead of guessing among same-named ones.
+///
+/// This returns `Some` for every target the CLI has, because every target the
+/// CLI has came from the scan. The `Option` is not hedging — it is the type that
+/// makes [`find_target_function`] state a REQUIREMENT rather than an assumption:
+/// a caller with no provenance must say so and take the fail-closed bare-name
+/// gate. `trust_vc_core::verify_function_from_file`, the library entry a human's
+/// bare name reaches, is exactly such a caller and still refuses an ambiguous
+/// name. Collapsing this to a plain `usize` would let a future caller pass a
+/// made-up line and silently get the wrong item.
+fn provenance_line(func: &AnnotatedFunction) -> Option<usize> {
+    Some(func.line)
+}
+
+/// Turn a scanned-but-unverified function into its report entry.
+///
+/// The verifier never runs here — there is nothing to run. What matters is that
+/// the entry EXISTS, carrying the scan's reason, so the function is visible in
+/// the report instead of being dropped between the scan and the summary.
+pub fn not_analyzed_verdict(entry: &crate::scan::UnanalyzedFunction) -> FunctionVerdict {
+    FunctionVerdict {
+        function: AnnotatedFunction {
+            file_path: entry.file_path.clone(),
+            name: entry.name.clone(),
+            line: entry.line,
+            attributes: Vec::new(),
+        },
+        result: VerdictKind::NotAnalyzed,
+        duration_ms: 0,
+        detail: Some(entry.reason.clone()),
+        localized_failure: None,
+        bindings: Vec::new(),
     }
 }
 
@@ -171,6 +244,16 @@ pub fn verify_one(func: &AnnotatedFunction) -> FunctionVerdict {
             detail,
             localized_failure: None,
             bindings,
+        };
+    }
+    if crate::scan::is_trait_declaration_target(func) {
+        return FunctionVerdict {
+            function: func.clone(),
+            result: VerdictKind::Skipped,
+            duration_ms: 0,
+            detail: Some(TRAIT_DECLARATION_SKIP_DETAIL.into()),
+            localized_failure: None,
+            bindings: Vec::new(),
         };
     }
     if !has_extractable_contracts(func) {
@@ -192,10 +275,11 @@ pub fn verify_one(func: &AnnotatedFunction) -> FunctionVerdict {
     // so this path agrees with `verify_one_detailed` and with the library's
     // `verify_function_from_file`.
     let start = Instant::now();
-    let (result_kind, detail, cx_bindings) = match verify_result_for(&func.file_path, &func.name) {
-        Ok(result) => verdict_from_result(&result),
-        Err(err) => (VerdictKind::Error, Some(err), Vec::new()),
-    };
+    let (result_kind, detail, cx_bindings) =
+        match verify_result_for(&func.file_path, &func.name, provenance_line(func)) {
+            Ok(result) => verdict_from_result(&result),
+            Err(err) => (VerdictKind::Error, Some(err), Vec::new()),
+        };
 
     FunctionVerdict {
         function: func.clone(),
@@ -219,6 +303,10 @@ pub fn verify_one_detailed(func: &AnnotatedFunction) -> FunctionVerification {
             VerdictKind::Unknown => ObligationStatus::Unknown,
             VerdictKind::Error => ObligationStatus::Error,
             VerdictKind::Skipped => ObligationStatus::Skipped,
+            // `verify_conformance_obligation` never returns this — a conformance
+            // target is always addressed — but it must not map to `Verified` if
+            // it ever does.
+            VerdictKind::NotAnalyzed => ObligationStatus::Uncaptured,
         };
         return FunctionVerification {
             verdict: FunctionVerdict {
@@ -241,6 +329,26 @@ pub fn verify_one_detailed(func: &AnnotatedFunction) -> FunctionVerification {
                 status,
                 unknown_category: None,
             }],
+            report: None,
+            #[cfg(feature = "proof-certificates")]
+            proof_alethe: None,
+            #[cfg(feature = "proof-certificates")]
+            proof_strict_verified: None,
+        };
+    }
+    if crate::scan::is_trait_declaration_target(func) {
+        return FunctionVerification {
+            verdict: FunctionVerdict {
+                function: func.clone(),
+                result: VerdictKind::Skipped,
+                duration_ms: 0,
+                detail: Some(TRAIT_DECLARATION_SKIP_DETAIL.into()),
+                localized_failure: None,
+                bindings: Vec::new(),
+            },
+            source_hash: source_hash(&func.file_path),
+            warnings: Vec::new(),
+            obligations: Vec::new(),
             report: None,
             #[cfg(feature = "proof-certificates")]
             proof_alethe: None,
@@ -282,7 +390,7 @@ pub fn verify_one_detailed(func: &AnnotatedFunction) -> FunctionVerification {
 
     let mut warnings: Vec<String> = Vec::new();
     let (result_kind, detail, localized_failure, cx_bindings, obligations, captured_report) =
-        match load_context_and_report(&func.file_path, &func.name) {
+        match load_context_and_report(&func.file_path, &func.name, provenance_line(func)) {
             Ok((ctx, report)) => {
                 let obligations = collect_obligation_verifications(&ctx, &report);
                 let localized_failure = localized_failure_from_report(&report);
@@ -343,6 +451,16 @@ pub fn verify_one_detailed(func: &AnnotatedFunction) -> FunctionVerification {
 /// (so non-directive files are byte-identical in behavior). A malformed
 /// directive installs no guard; the unstripped line then fails to parse
 /// downstream, surfacing as an error (fail-closed).
+///
+/// TEST-ONLY since the conformance lane stopped calling it. It was the ONLY
+/// width handling that lane had — a directive-or-nothing install with no
+/// dual-width plan, which is what let a 32-bit-false conformance obligation
+/// report `verified` on a 64-bit host. The plan now lives entirely in
+/// `trust_vc_core::verify_trait_conformance_obligation`, so re-introducing a
+/// production call here would pin a width the plan did not choose. The
+/// directive-scan/guard-drop contract it asserts is still pinned by
+/// `corpus_path_applies_pointer_width_directive`.
+#[cfg(test)]
 fn install_pointer_width_for(file_path: &Path) -> Option<trust_vc_core::ir::PointerWidthGuard> {
     let source = fs::read_to_string(file_path).ok()?;
     trust_vc_core::ir::scan_pointer_width_directive(&source)
@@ -373,58 +491,37 @@ enum WidthPlan {
     Dual,
 }
 
-/// Decides the [`WidthPlan`] for `func` in `file_path`.
+/// Decides the [`WidthPlan`] for `func` in `file_path`, whose (sibling-augmented)
+/// AST is `ast`.
 ///
-/// A pinned directive wins. Otherwise the decision is the same conservative
-/// syntactic over-approximation the library uses: any unit that *names*
-/// `usize`/`isize` is treated as width-polymorphic. Over-approximating is sound
-/// (a width-invariant unit simply verifies identically at both widths, at the
-/// cost of one extra solver pass); under-approximating is NOT (a genuinely
-/// width-dependent proof would be verified at only one width), so we err toward
-/// inclusion.
+/// A pinned directive wins. Otherwise the decision is delegated, VERBATIM, to
+/// the library's `trust_vc_core::ir::unit_is_pointer_width_polymorphic` — the
+/// single implementation both entry points share. It used to be hand-copied
+/// here, and the copy drifted: it lost the numeric-literal-suffix arm, so a unit
+/// whose only `usize` was `4294967295usize` planned ONE host-width solve and
+/// came back `verified` from the CLI while the library refuted it.
+///
+/// `ast` matters as much as `func`. The predicate needs the whole file because
+/// `usize` reaches a unit through a type alias, a nested alias or a struct field
+/// without ever appearing as a token inside the function. `load_ast` has already
+/// merged the crate's sibling type definitions into `ast`, so those routes are
+/// covered here too.
 ///
 /// A malformed directive yields [`WidthPlan::Host`] deliberately: that is the
 /// pre-existing fail-closed route, where the unstripped directive line survives
 /// into the parse and surfaces as an error verdict rather than a proof.
-fn width_plan_for(file_path: &Path, func: &syn::ItemFn) -> WidthPlan {
+fn width_plan_for(file_path: &Path, ast: &syn::File, func: &syn::ItemFn) -> WidthPlan {
     let pinned = fs::read_to_string(file_path)
         .ok()
         .and_then(|source| trust_vc_core::ir::scan_pointer_width_directive(&source).ok())
         .and_then(trust_vc_core::ir::pinned_width_from_guard);
     match pinned {
         Some(width) => WidthPlan::Pinned(width),
-        None if unit_is_pointer_width_polymorphic(func) => WidthPlan::Dual,
+        None if trust_vc_core::ir::unit_is_pointer_width_polymorphic(Some(ast), func) => {
+            WidthPlan::Dual
+        }
         None => WidthPlan::Host,
     }
-}
-
-/// Conservatively decides whether verifying `func` depends on the target
-/// pointer width, i.e. whether it mentions `usize`/`isize` (including
-/// `usize::BITS`). Scans the function's own token stream — signature, contract
-/// attributes and body — so the decision is independent of how widths are later
-/// baked into the IR. Mirrors `unit_is_pointer_width_polymorphic` in
-/// `trust-vc-core`'s `vc_extraction.rs`; the two must stay in step or the two
-/// entry points diverge again.
-fn unit_is_pointer_width_polymorphic(func: &syn::ItemFn) -> bool {
-    fn tokens_mention_pointer_width(tokens: proc_macro2::TokenStream) -> bool {
-        use proc_macro2::TokenTree;
-        for tree in tokens {
-            match tree {
-                TokenTree::Ident(ident) => {
-                    let name = ident.to_string();
-                    if name == "usize" || name == "isize" {
-                        return true;
-                    }
-                }
-                TokenTree::Group(group) if tokens_mention_pointer_width(group.stream()) => {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-    tokens_mention_pointer_width(quote::ToTokens::to_token_stream(func))
 }
 
 /// Runs `pass` once per pointer width required by `plan`, holding the matching
@@ -472,11 +569,12 @@ fn run_under_width_plan<T>(
 fn load_context_and_report(
     file_path: &Path,
     func_name: &str,
+    at_line: Option<usize>,
 ) -> Result<(VerificationContext, VerificationReport), String> {
     let ast = load_ast(file_path)?;
-    let func = find_target_function(&ast, file_path, func_name)?;
+    let func = find_target_function(&ast, file_path, func_name, at_line)?;
     run_under_width_plan(
-        width_plan_for(file_path, func),
+        width_plan_for(file_path, &ast, func),
         || {
             let ctx = context_from_func(&ast, file_path, func)?;
             let report = ctx.verify_with_report(VerificationReportOptions::new());
@@ -490,11 +588,15 @@ fn load_context_and_report(
 /// raw [`VerifyResult`]. The result-only twin of [`load_context_and_report`];
 /// both must route through [`run_under_width_plan`] or the CLI's two entry
 /// points disagree with each other as well as with the library.
-fn verify_result_for(file_path: &Path, func_name: &str) -> Result<VerifyResult, String> {
+fn verify_result_for(
+    file_path: &Path,
+    func_name: &str,
+    at_line: Option<usize>,
+) -> Result<VerifyResult, String> {
     let ast = load_ast(file_path)?;
-    let func = find_target_function(&ast, file_path, func_name)?;
+    let func = find_target_function(&ast, file_path, func_name, at_line)?;
     run_under_width_plan(
-        width_plan_for(file_path, func),
+        width_plan_for(file_path, &ast, func),
         || Ok(context_from_func(&ast, file_path, func)?.verify()),
         VerifyResult::is_verified,
     )
@@ -524,17 +626,40 @@ fn load_ast(file_path: &Path) -> Result<syn::File, String> {
     Ok(ast)
 }
 
+/// Locates the requested function through trust-vc-core's SHARED resolver.
+///
+/// The CLI used to carry its own copy of this walk whose comment claimed to
+/// match the core logic; it did not. The copy returned the FIRST source-order
+/// match, so in a file with two same-named methods it verified one body and
+/// contract and reported that verdict under the other's name — a false verify
+/// when the first candidate happened to be the sound one. There is now exactly
+/// one resolver, and an ambiguous name is REPORTED rather than silently
+/// resolved: naming several functions at once has no single true verdict.
 fn find_target_function<'a>(
     ast: &'a syn::File,
     file_path: &Path,
     func_name: &str,
+    at_line: Option<usize>,
 ) -> Result<&'a syn::ItemFn, String> {
-    find_function(ast, func_name).ok_or_else(|| {
-        format!(
-            "Function '{func_name}' not found in {}",
-            file_path.display()
-        )
-    })
+    // The failure strings live in trust-vc-core next to the resolver, so the CLI
+    // and the library gate report the SAME reason for the SAME file. They had
+    // already drifted: this arm reported ambiguity while `verify_function_from_file`
+    // reported "not found" for the identical input.
+    //
+    // `at_line` is the caller's EXACT lexical provenance. The file scan records
+    // each annotated function's ident line, so when it asks for a verdict it is
+    // naming one item, not a name. Re-asking by bare name discarded that and
+    // manufactured ambiguity: a file with `impl G for P` and `impl G for Q`
+    // failed BOTH `w` methods as "2 definitions share that name" even though
+    // each scan target denoted exactly one of them. A bare `--function NAME`
+    // from a human has no such provenance and keeps the fail-closed
+    // ambiguity gate.
+    match at_line {
+        Some(line) => trust_vc_core::resolve_function_at_line(ast, func_name, line)
+            .require_unique(func_name, file_path.display()),
+        None => trust_vc_core::resolve_function_in_file(ast, func_name)
+            .require_unique(func_name, file_path.display()),
+    }
 }
 
 /// Extracts the verification context for an already-located `func`.
@@ -635,77 +760,6 @@ fn collect_type_items_from_items(items: &[syn::Item], out: &mut Vec<syn::Item>) 
             _ => {}
         }
     }
-}
-
-fn find_function<'a>(ast: &'a syn::File, func_name: &str) -> Option<&'a syn::ItemFn> {
-    find_in_items(&ast.items, func_name)
-}
-
-/// Recursive search matching trust-vc-core's function_discovery logic:
-/// top-level functions first, then impl/mod/trait blocks.
-fn find_in_items<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a syn::ItemFn> {
-    // First pass: top-level functions (preferred for name-collision avoidance).
-    for item in items {
-        if let syn::Item::Fn(func) = item {
-            if func.sig.ident == name {
-                return Some(func);
-            }
-        }
-    }
-
-    // Second pass: impl blocks, inline modules, trait blocks.
-    for item in items {
-        match item {
-            syn::Item::Impl(impl_block) => {
-                for impl_item in &impl_block.items {
-                    if let syn::ImplItem::Fn(method) = impl_item {
-                        if method.sig.ident == name {
-                            return Some(impl_fn_to_item_fn_leak(method));
-                        }
-                    }
-                }
-            }
-            syn::Item::Mod(module) => {
-                if let Some((_, ref inner_items)) = module.content {
-                    if let Some(found) = find_in_items(inner_items, name) {
-                        return Some(found);
-                    }
-                }
-            }
-            syn::Item::Trait(trait_block) => {
-                for trait_item in &trait_block.items {
-                    if let syn::TraitItem::Fn(method) = trait_item {
-                        if method.sig.ident == name {
-                            if let Some(ref block) = method.default {
-                                return Some(trait_fn_to_item_fn_leak(method, block));
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn impl_fn_to_item_fn_leak(method: &syn::ImplItemFn) -> &'static syn::ItemFn {
-    Box::leak(Box::new(syn::ItemFn {
-        attrs: method.attrs.clone(),
-        vis: method.vis.clone(),
-        sig: method.sig.clone(),
-        block: Box::new(method.block.clone()),
-    }))
-}
-
-fn trait_fn_to_item_fn_leak(method: &syn::TraitItemFn, block: &syn::Block) -> &'static syn::ItemFn {
-    Box::leak(Box::new(syn::ItemFn {
-        attrs: method.attrs.clone(),
-        vis: syn::Visibility::Inherited,
-        sig: method.sig.clone(),
-        block: Box::new(block.clone()),
-    }))
 }
 
 fn collect_obligation_verifications(
@@ -1062,6 +1116,22 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Builds the check target for `name` the way production does — by SCANNING
+    /// the file — instead of hand-writing an [`AnnotatedFunction`].
+    ///
+    /// Hand-written targets in these tests carried the ATTRIBUTE's line while
+    /// `scan::extract_from_items` records the signature IDENTIFIER's line. That
+    /// disagreement was invisible while the resolver ignored the line and looked
+    /// the function up by bare name. Now that the line SELECTS the item, a test
+    /// that invents one is testing a target production never produces — so the
+    /// tests take theirs from the scanner and cannot drift from it again.
+    fn scanned_target(path: &Path, name: &str) -> AnnotatedFunction {
+        crate::scan::scan_file(path)
+            .into_iter()
+            .find(|func| func.name == name)
+            .unwrap_or_else(|| panic!("scan should discover `{name}` in {}", path.display()))
+    }
+
     /// Writes `source` to a fresh temp file and returns its path.
     fn temp_source(label: &str, source: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1077,8 +1147,12 @@ mod tests {
     fn plan_for(label: &str, source: &str, func_name: &str) -> WidthPlan {
         let path = temp_source(label, source);
         let ast = load_ast(&path).expect("temp source should parse");
-        let func = find_target_function(&ast, &path, func_name).expect("target fn should be found");
-        let plan = width_plan_for(&path, func);
+        // `None`: these width-plan fixtures name their functions uniquely, and
+        // the helper is handed a bare name with no scan behind it — which is
+        // precisely the case the bare-name resolver is for.
+        let func =
+            find_target_function(&ast, &path, func_name, None).expect("target fn should be found");
+        let plan = width_plan_for(&path, &ast, func);
         let _ = std::fs::remove_file(&path);
         plan
     }
@@ -1119,6 +1193,124 @@ mod tests {
                 "isize_body",
                 "#[trust_vc::ensures(result >= x)]\nfn widen(x: i32) -> i64 { x as isize as i64 }\n",
                 "widen",
+            ),
+            WidthPlan::Dual,
+        );
+    }
+
+    /// FV-2 REGRESSION — the plan selector must see `usize` that reaches the
+    /// unit through a definition, not just through a token inside it.
+    ///
+    /// Every source below has NO `usize`/`isize` token in the function itself,
+    /// so the old unit-local token scan planned [`WidthPlan::Host`] and the
+    /// 32-bit pass that refutes never ran. Each of these programs is FALSE at a
+    /// 32-bit `usize` (measured: pinning `global size_of usize == 4` yields a
+    /// counterexample for all of them), so `Host` here is a false verify.
+    #[test]
+    fn width_reaching_the_unit_through_a_definition_plans_both_widths() {
+        // Type alias.
+        assert_eq!(
+            plan_for(
+                "alias",
+                "type Idx = usize;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: Idx) -> Idx { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+        // NESTED alias — one hop further from any `usize` token.
+        assert_eq!(
+            plan_for(
+                "nested_alias",
+                "type Idx = usize;\ntype Idx2 = Idx;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: Idx2) -> Idx2 { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+        // `isize` through an alias.
+        assert_eq!(
+            plan_for(
+                "alias_isize",
+                "type SIdx = isize;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: SIdx) -> SIdx { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+        // Struct FIELD.
+        assert_eq!(
+            plan_for(
+                "struct_field",
+                "struct H { n: usize }\n#[trust_vc::requires(h.n <= 100)]\nfn f(h: H) { assert!(h.n * 2 >= h.n); }\n",
+                "f",
+            ),
+            WidthPlan::Dual,
+        );
+        // Numeric literal SUFFIX. This arm existed in the library copy and was
+        // missing from the CLI's hand-copied one — the drift that made
+        // `(4294967295usize + 1) as u64` verify from `cargo trust-vc check`
+        // while the library refuted the same bytes.
+        assert_eq!(
+            plan_for(
+                "literal_suffix",
+                "#[trust_vc::ensures(result == 4294967296)]\nfn f() -> u64 { (4294967295usize + 1) as u64 }\n",
+                "f",
+            ),
+            WidthPlan::Dual,
+        );
+    }
+
+    /// A file whose definitions we cannot see is treated as width-dependent:
+    /// an out-of-line `mod m;` and a crate-local `use` both name items that are
+    /// not in this file's tokens, so a `usize` may hide behind either.
+    #[test]
+    fn unresolvable_module_scope_plans_both_widths() {
+        assert_eq!(
+            plan_for(
+                "out_of_line_mod",
+                "mod helper;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: u64) -> u64 { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+        assert_eq!(
+            plan_for(
+                "crate_local_use",
+                "use crate::helper::Idx;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: u64) -> u64 { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Dual,
+        );
+    }
+
+    /// NARROWNESS PIN — the widened scan must not swallow every import. A `use`
+    /// of an EXTERNAL crate names items that are never resolved into the type
+    /// environment (they fail closed on their own), so it must NOT by itself
+    /// force a second solve; and an inline `mod { .. }` IS in the file's tokens,
+    /// so a width-invariant one stays on the single-solve path.
+    #[test]
+    fn external_import_and_inline_module_stay_on_the_host_plan() {
+        assert_eq!(
+            plan_for(
+                "external_use",
+                "use std::collections::BTreeMap;\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: u64) -> u64 { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Host,
+        );
+        assert_eq!(
+            plan_for(
+                "inline_mod",
+                "mod helper { pub struct H { pub n: u32 } }\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: u64) -> u64 { x * 2 }\n",
+                "dbl",
+            ),
+            WidthPlan::Host,
+        );
+        // ...but an inline module that DOES carry a `usize` is caught, because
+        // its body is part of the file's token stream.
+        assert_eq!(
+            plan_for(
+                "inline_mod_usize",
+                "mod helper { pub struct H { pub n: usize } }\n#[trust_vc::ensures(result >= x)]\nfn dbl(x: u64) -> u64 { x * 2 }\n",
+                "dbl",
             ),
             WidthPlan::Dual,
         );
@@ -1204,12 +1396,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_identity.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "identity".into(),
-            line: 2,
-            attributes: vec!["ensures".into()],
-        };
+        let func = scanned_target(&path, "identity");
         let verification = verify_one_detailed(&func);
 
         assert_eq!(verification.verdict.result, VerdictKind::Verified);
@@ -1253,12 +1440,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_identity_requires.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "identity".into(),
-            line: 3,
-            attributes: vec!["requires".into(), "ensures".into()],
-        };
+        let func = scanned_target(&path, "identity");
         let verification = verify_one_detailed(&func);
 
         assert_eq!(verification.verdict.result, VerdictKind::Verified);
@@ -1299,12 +1481,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_identity_contract.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "identity".into(),
-            line: 2,
-            attributes: vec!["contract".into()],
-        };
+        let func = scanned_target(&path, "identity");
         let verification = verify_one_detailed(&func);
 
         assert_eq!(verification.verdict.result, VerdictKind::Verified);
@@ -1340,12 +1517,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_localized_counterexample.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "broken".into(),
-            line: 2,
-            attributes: vec!["ensures".into()],
-        };
+        let func = scanned_target(&path, "broken");
         let verification = verify_one_detailed(&func);
 
         assert_eq!(verification.verdict.result, VerdictKind::Counterexample);
@@ -1412,12 +1584,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_fast_path_counterexample.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "broken".into(),
-            line: 2,
-            attributes: vec!["ensures".into()],
-        };
+        let func = scanned_target(&path, "broken");
         let verdict = verify_one(&func);
 
         assert_eq!(verdict.result, VerdictKind::Counterexample);
@@ -1454,12 +1621,7 @@ mod tests {
         let path = std::env::temp_dir().join("cargo_trust_vc_real_nonlinear2.rs");
         std::fs::write(&path, source).expect("temp source should be written");
 
-        let func = AnnotatedFunction {
-            file_path: path.clone(),
-            name: "real_nonlinear2".into(),
-            line: 2,
-            attributes: vec!["ensures".into()],
-        };
+        let func = scanned_target(&path, "real_nonlinear2");
         let verdict = verify_one(&func);
 
         // Load-bearing gate properties (solver-version-independent): the gate

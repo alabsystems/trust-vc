@@ -73,6 +73,13 @@ pub fn parse_file_allow_tracked(source: &str) -> Result<syn::File, syn::Error> {
         .parse()
         .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
     let mut file: syn::File = syn::parse2(normalize_verus_file_tokens(tokens))?;
+    // Runs FIRST, and here rather than in any one consumer: a contract reached
+    // through `use trust_vc::ensures as promises` must look canonical to the
+    // scanner AND to the extractor, or the two disagree — the scanner drops the
+    // function (silent, exit 0) or, worse, discovers it with no visible clause
+    // and it verifies vacuously. Resolving at the shared parse entry means the
+    // lanes cannot diverge. See `crate::contract_attr_alias`.
+    let _alias_report = crate::contract_attr_alias::resolve_contract_attr_aliases(&mut file);
     unwrap_trust_vc_cfg_attrs_in_file(&mut file);
     // Runs AFTER cfg_attr unwrapping so a `#[cfg_attr(.., trust_vc::spec)]`
     // bodyless declaration is recognized as a spec fn too.

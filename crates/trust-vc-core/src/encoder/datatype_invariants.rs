@@ -285,6 +285,13 @@ impl AYEncoder {
         // Encode the invariant body using selector terms as field bindings.
         // Scoped so the parser (which borrows self.solver) is dropped before
         // we continue using self.solver for the axiom.
+        //
+        // BINDER-CAPTURE backstop (see `encoder::binder_capture`): the body is
+        // encoded BEFORE the `forall v` below is built, i.e. this is an
+        // encode-then-close site. Watermark the assertion stack first so a
+        // helper hoist that mentions `v` cannot be silently captured by the
+        // closing binder.
+        let capture_watermark = self.assertion_watermark();
         let body_term = {
             let mut col_lengths = std::collections::HashMap::new();
             let funcs = std::collections::HashMap::new();
@@ -295,12 +302,20 @@ impl AYEncoder {
                 &field_var_types,
                 &funcs,
             );
-            parser.encode_trust_vc_expr(body).map_err(|err| {
+            // The body is destined for the body of `forall v`: let the
+            // capture-aware helpers (`match_encode.rs`, `arith/int_arith.rs`)
+            // INLINE their result rather than hoist a fresh const, exactly as
+            // `trait_encoding_axioms` propagates the flag before its own
+            // encode-then-close.
+            parser.pending_universal_closure = true;
+            let body_term = parser.encode_trust_vc_expr(body).map_err(|err| {
                 datatype_error(format!(
                     "Failed to encode invariant body for '{}': {}",
                     type_name, err
                 ))
-            })?
+            });
+            self.state.diagnostics.merge(&parser.diagnostics);
+            body_term?
         };
 
         // Build: inv_T(v) <==> body
@@ -317,22 +332,36 @@ impl AYEncoder {
             ))
         })?;
 
-        // Quantify: forall v. {inv_T(v)} inv_T(v) <==> body
-        let trigger_groups = [vec![inv_v]];
-        let trigger_refs: Vec<&[Term]> = trigger_groups.iter().map(Vec::as_slice).collect();
-        let quantified = self
-            .solver
-            .try_forall_with_triggers(&[v], iff, &trigger_refs)
-            .map_err(|err| {
-                datatype_error(format!(
-                    "Failed to quantify invariant axiom for '{}': {}",
-                    type_name, err
-                ))
-            })?;
-        self.assert_axiom(
-            quantified,
-            format!("Failed to assert invariant axiom for '{}'", type_name),
-        )?;
+        // Quantify: forall v. {inv_T(v)} inv_T(v) <==> body — unless a hoist
+        // made during the body encode mentions `v`, in which case building the
+        // `forall` would capture it and the defining axiom is DECLINED instead
+        // (see `encoder::binder_capture`). On decline `inv_T` stays
+        // uninterpreted: assuming `inv_T(param)` then constrains nothing
+        // (weaker context) and any obligation on `inv_T` becomes unprovable —
+        // fail-closed in both directions.
+        match self.binder_capture_since(capture_watermark, &[v]) {
+            Some(capture) => {
+                self.record_binder_capture(&format!("datatype_invariant:{type_name}"), &capture);
+            }
+            None => {
+                let trigger_groups = [vec![inv_v]];
+                let trigger_refs: Vec<&[Term]> =
+                    trigger_groups.iter().map(Vec::as_slice).collect();
+                let quantified = self
+                    .solver
+                    .try_forall_with_triggers(&[v], iff, &trigger_refs)
+                    .map_err(|err| {
+                        datatype_error(format!(
+                            "Failed to quantify invariant axiom for '{}': {}",
+                            type_name, err
+                        ))
+                    })?;
+                self.assert_axiom(
+                    quantified,
+                    format!("Failed to assert invariant axiom for '{}'", type_name),
+                )?;
+            }
+        }
 
         // Store the invariant UF for use in parameter assumptions
         self.registries

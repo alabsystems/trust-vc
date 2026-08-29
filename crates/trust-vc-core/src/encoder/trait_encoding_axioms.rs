@@ -15,6 +15,8 @@ use crate::error::{TrustVcError, TrustVcResult};
 use crate::ir::{LogicOp, TraitDecl, TraitImplDecl, TraitMethodDecl, TrustVcExpr, TrustVcType};
 use crate::ir_lowering::{lower_syn_expr, MethodMeta, TypeEnv};
 
+use super::super::trait_self_fields::PolySelfFieldProjection;
+
 use super::{
     TraitEncoding, TRAIT_ENCODING_CONTEXT, TRAIT_RECEIVER_NAME, TRAIT_RECEIVER_TYPE_NAME,
     TRAIT_RESULT_NAME,
@@ -36,6 +38,13 @@ impl AYEncoder {
         method: &TraitMethodDecl,
         body_text: &str,
     ) -> TrustVcResult<()> {
+        let projections = crate::encoder::trait_self_fields::poly_self_field_projections(
+            &encoding.name,
+            method,
+            &[body_text],
+        )?;
+        self.declare_poly_self_field_ufs(&projections)?;
+
         let trait_method_fn = encoding.method_fns.get(&method.name).ok_or_else(|| {
             trait_encoding_error(format!(
                 "Missing UF for default method '{}' in trait '{}'",
@@ -97,7 +106,7 @@ impl AYEncoder {
             supertraits: Vec::new(),
             generics: encoding.generics.clone(),
         };
-        let env = build_trait_contract_env(&trait_decl_for_env, method);
+        let env = build_trait_contract_env(&trait_decl_for_env, method, &projections);
         let parsed: syn::Expr =
             syn::parse_str(body_text).map_err(|source| TrustVcError::Parse {
                 context: "parse default body",
@@ -114,14 +123,31 @@ impl AYEncoder {
             ),
         })?;
 
-        let rhs =
-            self.encode_trait_expr_with_bindings(&body_expr, &local_bindings, &local_types)?;
+        // BINDER CAPTURE (CARDINAL), same encode-then-close shape as
+        // `add_typed_broadcast`: the axiom body is encoded with every bound
+        // variable resolved as an ordinary top-level term and only closed
+        // afterwards. Announce the pending closure so the inlined helpers
+        // decline their top-level hoist, and take an assertion watermark so the
+        // general backstop can catch any helper that still hoists.
+        // See `crate::encoder::binder_capture`.
+        let capture_watermark = self.assertion_watermark();
+        let rhs = crate::encoder::with_flag_unwind_safe!(
+            self.state.pending_universal_closure,
+            !bound_vars.is_empty(),
+            { self.encode_trait_expr_with_bindings(&body_expr, &local_bindings, &local_types) }
+        )?;
 
         // Assert: ∀(p:Poly, params). {Trait__method(p, ...)} lhs == rhs
         let eq = self
             .solver
             .try_eq(lhs, rhs)
             .map_err(|e| trait_encoding_error(format!("Default body equality failed: {e}")))?;
+
+        if let Some(capture) = self.binder_capture_since(capture_watermark, &bound_vars) {
+            let site = format!("trait-default-body:{}::{}", encoding.name, method.name);
+            self.record_binder_capture(&site, &capture);
+            return Ok(());
+        }
 
         let axiom = self
             .solver
@@ -215,6 +241,13 @@ impl AYEncoder {
             return Ok(());
         }
 
+        let projections = crate::encoder::trait_self_fields::poly_self_field_projections(
+            &decl.name,
+            method,
+            &[],
+        )?;
+        self.declare_poly_self_field_ufs(&projections)?;
+
         let method_fn = encoding.method_fns.get(&method.name).ok_or_else(|| {
             trait_encoding_error(format!(
                 "Trait '{}' missing method UF for '{}'",
@@ -268,7 +301,7 @@ impl AYEncoder {
         local_bindings.push((TRAIT_RESULT_NAME, result_term));
         local_types.push((TRAIT_RESULT_NAME.to_string(), method.return_type.clone()));
 
-        let env = build_trait_contract_env(decl, method);
+        let env = build_trait_contract_env(decl, method, &projections);
         let requires =
             lower_contracts(&method.requires, &env, "requires", &decl.name, &method.name)?;
         let ensures = lower_contracts(&method.ensures, &env, "ensures", &decl.name, &method.name)?;
@@ -288,8 +321,24 @@ impl AYEncoder {
             ensured
         };
 
-        let body =
-            self.encode_trait_expr_with_bindings(&axiom_expr, &local_bindings, &local_types)?;
+        // BINDER CAPTURE (CARDINAL), same encode-then-close shape as
+        // `add_typed_broadcast`: the axiom body is encoded with every bound
+        // variable resolved as an ordinary top-level term and only closed
+        // afterwards. Announce the pending closure so the inlined helpers
+        // decline their top-level hoist, and take an assertion watermark so the
+        // general backstop can catch any helper that still hoists.
+        // See `crate::encoder::binder_capture`.
+        let capture_watermark = self.assertion_watermark();
+        let body = crate::encoder::with_flag_unwind_safe!(
+            self.state.pending_universal_closure,
+            !bound_terms.is_empty(),
+            { self.encode_trait_expr_with_bindings(&axiom_expr, &local_bindings, &local_types) }
+        )?;
+        if let Some(capture) = self.binder_capture_since(capture_watermark, &bound_terms) {
+            let site = format!("trait-postcondition:{}::{}", decl.name, method.name);
+            self.record_binder_capture(&site, &capture);
+            return Ok(());
+        }
         let quantified = self
             .solver
             .try_forall_with_triggers(&bound_terms, body, &[&[result_term]])
@@ -305,6 +354,60 @@ impl AYEncoder {
                 decl.name, method.name, err
             ))
         })?;
+        Ok(())
+    }
+
+    /// Declares a projection signature exactly once.  A same-name declaration
+    /// with different metadata is a soundness error, not an idempotent hit.
+    fn declare_poly_self_field_ufs(
+        &mut self,
+        projections: &[PolySelfFieldProjection],
+    ) -> TrustVcResult<()> {
+        for projection in projections {
+            if self.fn_ctx.functions.contains_key(&projection.uf_name) {
+                let return_matches = self.fn_ctx.return_types.get(&projection.uf_name)
+                    == Some(&projection.field_type);
+                let params_match = self
+                    .fn_ctx
+                    .param_types
+                    .get(&projection.uf_name)
+                    .is_some_and(|params| params == &[TrustVcType::Poly]);
+                if return_matches && params_match {
+                    continue;
+                }
+                return Err(trait_encoding_error(format!(
+                    "conflicting declaration for self-field projection '{}'",
+                    projection.uf_name
+                )));
+            }
+
+            let domain = [sort_for_type(&TrustVcType::Poly)];
+            let range = sort_for_type(&projection.field_type);
+            let decl = self
+                .solver
+                .try_declare_fun(&projection.uf_name, &domain, range)
+                .map_err(|err| {
+                    trait_encoding_error(format!(
+                        "Failed to declare self-field projection '{}': {err}",
+                        projection.uf_name
+                    ))
+                })?;
+            self.fn_ctx
+                .functions
+                .insert(projection.uf_name.clone(), decl);
+            self.fn_ctx
+                .return_types
+                .insert(projection.uf_name.clone(), projection.field_type.clone());
+            self.fn_ctx
+                .param_types
+                .insert(projection.uf_name.clone(), vec![TrustVcType::Poly]);
+            self.state
+                .lowering_env
+                .insert_fn(projection.uf_name.clone(), projection.field_type.clone());
+            self.state
+                .lowering_env
+                .insert_fn_params(projection.uf_name.clone(), vec![TrustVcType::Poly]);
+        }
         Ok(())
     }
 
@@ -328,14 +431,31 @@ impl AYEncoder {
     /// declared `ensures` Counterexamples in that pass (which runs after the main
     /// verification), so this axiom can never yield a lasting false `Verified`.
     ///
+    /// A requires-bearing trait method is NOT skipped; it is GUARDED. The
+    /// conformance pass assumes the trait `requires` (`build_contract_obligations`
+    /// pushes each one as `ObligationKind::Assume`) before asserting the impl
+    /// `ensures`, so the fact it discharges is exactly
+    /// `requires ⟹ impl_ensures` — never the unconditional postcondition. The
+    /// axiom therefore carries the same implication, mirroring
+    /// `assert_trait_postconditions`. Emitting it unconditionally would claim the
+    /// postcondition on inputs the impl was never checked against; dropping it
+    /// (the previous behaviour) loses every ordinary "trait method with a
+    /// precondition" call site. If ANY requires clause fails to lower against the
+    /// minimal env, the whole axiom is skipped — an un-lowered premise must never
+    /// weaken into an unconditional claim.
+    ///
+    /// An impl method with its OWN `requires` never reaches here at all:
+    /// `capture_conformance_method_body` declines on it, so no body is captured
+    /// and no `impl_ensures` is registered.
+    ///
     /// Fail-closed skips (leave the caller without the strengthened
-    /// postcondition; never emit an unjustified fact): a requires-bearing trait
-    /// method, a `Self`-returning (`Poly`) method, any clause that does not lower
+    /// postcondition; never emit an unjustified fact): a `Self`-returning
+    /// (`Poly`) method, any clause — requires or ensures — that does not lower
     /// cleanly against a minimal (self/result/params) env, or any solver failure.
     pub(crate) fn assert_impl_postcondition_axioms(
         &mut self,
         impl_decl: &TraitImplDecl,
-        impl_ensures_by_fn: &HashMap<String, Vec<String>>,
+        impl_ensures_by_fn: &HashMap<crate::ir::ImplMethodKey, Vec<String>>,
     ) -> TrustVcResult<()> {
         if impl_ensures_by_fn.is_empty() {
             return Ok(());
@@ -410,11 +530,30 @@ impl AYEncoder {
                         ),
                         carrier.clone(),
                     );
+                    //
+                    // ONLY when the handle is a DISTINCT symbol. `selector_symbol_name`
+                    // is the native selector's own name (`datatype.rs` reuses the exact
+                    // native symbols), so `try_apply(handle)` and
+                    // `try_datatype_selector` normally yield the SAME term and the
+                    // equality folds to `true`. Asserting `∀self:S. true` is not a
+                    // harmless no-op: ay (0787f78bd) reports the whole query
+                    // `Unknown(QuantifierUnhandled)` when that vacuous
+                    // datatype-sorted binder is present — measured on the
+                    // concrete_trait_method_call_site `field_pos` query (faithful
+                    // SMT2 repro: with the `(forall ((s S)) true)` line Unknown/
+                    // QuantifierUnhandled, without it unsat in 4ms), which is why
+                    // every impl-ensures-over-a-field call site and
+                    // concrete_trait_method_resolution::impl_ensures_reaches_concrete_caller
+                    // came back NotProved. A definitional link between one term and
+                    // itself carries no information, so it is skipped outright.
                     if let (Ok(handle_app), Ok(native)) = (
                         self.solver.try_apply(&handle, &[self_var]),
                         self.solver
                             .try_datatype_selector(&selector_name, self_var, field_sort),
                     ) {
+                        if handle_app == native {
+                            continue;
+                        }
                         if let Ok(eq) = self.solver.try_eq(handle_app, native) {
                             if let Ok(axiom) = self.solver.try_forall_with_triggers(
                                 &[self_var],
@@ -430,7 +569,18 @@ impl AYEncoder {
         }
 
         for (trait_method_name, concrete_fn_name) in &impl_decl.method_bindings {
-            let Some(impl_ensures) = impl_ensures_by_fn.get(concrete_fn_name) else {
+            // The shared concrete symbol is not an identity — see
+            // `TraitImplDecl::inherent_shadowed_methods`. `impl_ensures_by_fn` is
+            // keyed by the trait-erased `Type__method` string, so when another
+            // declaration owns that symbol this lookup can return a DIFFERENT
+            // impl's `ensures`; publish nothing rather than the wrong contract.
+            if !impl_decl.may_claim_concrete_symbol(trait_method_name) {
+                continue;
+            }
+            let Some(impl_ensures) = impl_ensures_by_fn.get(&crate::ir::ImplMethodKey::new(
+                &impl_decl.trait_name,
+                concrete_fn_name,
+            )) else {
                 continue;
             };
             if impl_ensures.is_empty() {
@@ -448,8 +598,7 @@ impl AYEncoder {
             // propagation is A2-conformance work, and publishing a strengthened
             // ensures over Poly-erased slots without an instantiation-aware
             // conformance check would be the cardinal unchecked-axiom leak.
-            if !method.requires.is_empty()
-                || method.return_type == TrustVcType::Poly
+            if method.return_type == TrustVcType::Poly
                 || method.return_type.contains_type_param()
                 || method
                     .params
@@ -556,12 +705,58 @@ impl AYEncoder {
                 continue;
             };
 
-            let body =
-                match self.encode_trait_expr_with_bindings(&ensured, &local_bindings, &local_types)
-                {
-                    Ok(term) => term,
-                    Err(_) => continue,
+            // GUARD by the trait method's `requires`. The conformance pass
+            // assumes each one (`build_contract_obligations`, ObligationKind::
+            // Assume) before asserting `body ⊨ impl_ensures`, so the implication
+            // — and ONLY the implication — is the fact it discharges. A requires
+            // clause that does not lower cleanly drops the ENTIRE axiom:
+            // proceeding without the premise would publish the conclusion
+            // unconditionally, which is the unsound direction.
+            let mut lowered_requires = Vec::with_capacity(method.requires.len());
+            let mut requires_lowering_ok = true;
+            for clause in &method.requires {
+                let parsed: syn::Expr = match syn::parse_str(clause) {
+                    Ok(expr) => expr,
+                    Err(_) => {
+                        requires_lowering_ok = false;
+                        break;
+                    }
                 };
+                match lower_syn_expr(&parsed, &env) {
+                    Ok(expr) => lowered_requires.push(expr),
+                    Err(_) => {
+                        requires_lowering_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !requires_lowering_ok {
+                continue;
+            }
+            let guarded = match conjunction(lowered_requires) {
+                Some(required) => TrustVcExpr::Implies {
+                    premise: Box::new(required),
+                    conclusion: Box::new(ensured),
+                },
+                None => ensured,
+            };
+
+            // See `crate::encoder::binder_capture` — encode-then-close, so the
+            // pending closure must be announced and the hoist watermark taken.
+            let capture_watermark = self.assertion_watermark();
+            let body = match crate::encoder::with_flag_unwind_safe!(
+                self.state.pending_universal_closure,
+                !bound_terms.is_empty(),
+                { self.encode_trait_expr_with_bindings(&guarded, &local_bindings, &local_types) }
+            ) {
+                Ok(term) => term,
+                Err(_) => continue,
+            };
+            if let Some(capture) = self.binder_capture_since(capture_watermark, &bound_terms) {
+                let site = format!("trait-impl-ensures:{}", method.name);
+                self.record_binder_capture(&site, &capture);
+                continue;
+            }
             // `bound_terms` always carries at least the boxed self, so the axiom
             // is always quantified (triggered on the boxed application).
             let axiom = match self
@@ -648,6 +843,14 @@ impl AYEncoder {
         };
 
         for (trait_method_name, concrete_fn_name) in &impl_decl.method_bindings {
+            // This axiom asserts the TRAIT's `ensures` directly about the bare
+            // concrete symbol `Type__method`, with NO box guard — so it is the
+            // most direct route by which a trait contract reaches a call site
+            // that resolved to some other declaration of that name. Gate it on
+            // the same resolution the linking axiom uses.
+            if !impl_decl.may_claim_concrete_symbol(trait_method_name) {
+                continue;
+            }
             let Some(method) = trait_decl
                 .methods
                 .iter()
@@ -781,12 +984,22 @@ impl AYEncoder {
                 continue;
             };
 
-            let body =
-                match self.encode_trait_expr_with_bindings(&ensured, &local_bindings, &local_types)
-                {
-                    Ok(term) => term,
-                    Err(_) => continue,
-                };
+            // See `crate::encoder::binder_capture` — encode-then-close, so the
+            // pending closure must be announced and the hoist watermark taken.
+            let capture_watermark = self.assertion_watermark();
+            let body = match crate::encoder::with_flag_unwind_safe!(
+                self.state.pending_universal_closure,
+                !bound_terms.is_empty(),
+                { self.encode_trait_expr_with_bindings(&ensured, &local_bindings, &local_types) }
+            ) {
+                Ok(term) => term,
+                Err(_) => continue,
+            };
+            if let Some(capture) = self.binder_capture_since(capture_watermark, &bound_terms) {
+                let site = format!("trait-impl-ensures-concrete:{}", method.name);
+                self.record_binder_capture(&site, &capture);
+                continue;
+            }
             let axiom = match self
                 .solver
                 .try_forall_with_triggers(&bound_terms, body, &[&[app]])
@@ -826,6 +1039,7 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = true;
+        ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         // See `eval::condition` — every parser that can encode a collection
         // length must agree about which lengths are `usize`-bounded, or two
         // encodings of the same proposition mint unrelated length companions.
@@ -856,12 +1070,24 @@ impl AYEncoder {
     }
 }
 
-fn build_trait_contract_env(decl: &TraitDecl, method: &TraitMethodDecl) -> TypeEnv {
+fn build_trait_contract_env(
+    decl: &TraitDecl,
+    method: &TraitMethodDecl,
+    projections: &[PolySelfFieldProjection],
+) -> TypeEnv {
     let mut env = TypeEnv::new();
     env.insert(TRAIT_RECEIVER_NAME.to_string(), TrustVcType::Poly);
     env.insert(TRAIT_RESULT_NAME.to_string(), method.return_type.clone());
     for (param_name, param_ty) in &method.params {
         env.insert(param_name.clone(), param_ty.clone());
+    }
+    for projection in projections {
+        env.insert_field_metadata(
+            TRAIT_RECEIVER_TYPE_NAME.to_string(),
+            projection.field_name.clone(),
+            projection.uf_name.clone(),
+            projection.field_type.clone(),
+        );
     }
     for trait_method in &decl.methods {
         env.insert_method_metadata(

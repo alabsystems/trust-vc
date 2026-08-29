@@ -89,7 +89,9 @@ pub(crate) mod broadcast_state;
 pub(crate) mod calc_parser;
 pub(crate) mod chained_comparisons;
 pub mod compilation_proven_facts;
+pub(crate) mod const_pattern_desugar;
 pub(crate) mod context_management;
+pub mod contract_attr_alias;
 pub(crate) mod contract_monitor;
 pub(crate) mod contract_registry;
 pub(crate) mod counterexample_names;
@@ -133,6 +135,7 @@ pub(crate) mod ir_place;
 mod local_vars;
 mod local_vars_helpers;
 pub mod loop_metadata;
+pub(crate) mod macro_scope;
 pub(crate) mod marker_extraction;
 pub(crate) mod match_pattern_scope;
 pub(crate) mod matches_macro_desugar;
@@ -162,6 +165,7 @@ pub mod proven_facts;
 pub(crate) mod recursion_graph;
 #[cfg(test)]
 pub(crate) mod smtlib2_emit;
+pub mod solver_budget;
 mod solver_mode_assert_parser;
 pub(crate) mod source_tree;
 pub(crate) mod spec_expand;
@@ -175,6 +179,7 @@ pub(crate) mod tracked_syntax;
 pub(crate) mod trait_catalog;
 pub(crate) mod trait_expand;
 pub(crate) mod trait_instantiation;
+pub(crate) mod trait_path_resolution;
 pub(crate) mod trait_registry;
 pub(crate) mod translator;
 pub(crate) mod trigger_inference;
@@ -285,6 +290,15 @@ pub use vc_extraction::{
 /// conformance obligations as their own check targets, so a non-conforming impl
 /// is reported even when nothing in the file calls it.
 pub use vc_extraction::{list_trait_conformance_obligations, verify_trait_conformance_obligation};
+
+/// The single name→function resolver, shared with `cargo-trust-vc`.
+///
+/// A verdict is only meaningful when the body it was computed from is the body
+/// the caller asked about. Exporting the resolver (with its ambiguity case
+/// intact) is what keeps the CLI from re-deriving that answer and drifting.
+pub use vc_extraction::function_discovery::{
+    resolve_function_at_line, resolve_function_in_file, FunctionResolution,
+};
 
 // Cross-crate entrypoints for the trust_vc proc-macro crate.
 // These allow the support modules above to be pub(crate) while the

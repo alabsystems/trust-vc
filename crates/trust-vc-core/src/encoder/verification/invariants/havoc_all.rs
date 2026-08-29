@@ -34,8 +34,14 @@ fn setup_havoc_all_encoder(
     invariant: &PreparedObligation,
     verified_invariants: &[&PreparedObligation],
 ) -> TrustVcResult<AYEncoder> {
-    let timeout_ms = ctx.rlimit_ms.unwrap_or(30_000);
-    let mut encoder = AYEncoder::new().with_limits(timeout_ms, 512);
+    // Second solver instance; same envelope as the top-level encoder so the
+    // deterministic budget is not silently absent on the havoc-all lane.
+    let wall_backstop_ms = ctx
+        .rlimit_ms
+        .unwrap_or(crate::encoder::verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS);
+    let conflict_budget =
+        crate::encoder::verification::timeout::effective_conflict_budget(ctx.rlimit_conflicts);
+    let mut encoder = AYEncoder::new().with_limits(wall_backstop_ms, conflict_budget, 512);
     let broadcast_assumptions: Vec<_> = ctx
         .obligations
         .iter()

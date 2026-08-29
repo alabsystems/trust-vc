@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -67,15 +68,56 @@ def latest_source_mtime(root: Path) -> float:
     return max(path.stat().st_mtime for path in candidates if path.exists())
 
 
+def resolve_targo() -> str:
+    """Absolute path to the PINNED toolchain's targo.
+
+    A bare "targo" is not enough: it is absent from PATH on an ordinary host
+    (the sysroot's bin/ is not added by rustup's shims), and subprocess then
+    raises an uncaught FileNotFoundError that surfaces as `kind=engine_error`
+    on every fixture -- a gate failure that looks like an engine disagreement.
+    `rustc --print sysroot` honours rust-toolchain.toml, so this follows the PIN
+    rather than whatever happens to be on PATH, and falls back to PATH only if
+    the sysroot copy is missing.
+    """
+    try:
+        sysroot = subprocess.run(
+            ["rustc", "--print", "sysroot"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+    except OSError:
+        sysroot = ""
+    if sysroot:
+        candidate = Path(sysroot) / "bin" / "targo"
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("targo")
+    if found:
+        return found
+    sys.stderr.write(
+        "run_merge_bundle: cannot locate the pinned Trust `targo`.\n"
+        "  rust-toolchain.toml pins channel = \"trust\"; that sysroot must supply bin/targo.\n"
+        f"  resolved sysroot: {sysroot or '<none>'}\n"
+        "  refusing to continue -- a missing toolchain must not read as an engine disagreement.\n"
+    )
+    raise SystemExit(2)
+
+
 def ensure_runner_binary(root: Path) -> Path:
     binary = existing_runner_binary(root)
     if binary is not None and binary.stat().st_mtime >= latest_source_mtime(root):
         return binary
 
     manifest_path = root / "crates/trust-vc-merge-runner/Cargo.toml"
+    # `--unverified` is REQUIRED, not a shortcut: targo has exactly two lanes and
+    # refuses a bare `targo build` outright ("refuses to create an implicitly
+    # unverified artifact", exit 101), so without it this gate can never build its
+    # own runner. The runner is harness tooling, never a proof artifact — the
+    # verdicts it compares come from the MergeBundle, not from compiling it — and
+    # trust-vc is the verifier, not a verification target (see .cargo/config.toml).
     result = subprocess.run(
         [
-            "targo",
+            resolve_targo(),
+            "--unverified",
             "build",
             "--quiet",
             "--manifest-path",

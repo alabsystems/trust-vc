@@ -191,7 +191,7 @@ fn test_bit_vector_finite_quantifier_depth_restored() {
 
 /// DISCRIMINATING: forall |i: u8, j: u32| j + 1 > j should NOT verify.
 #[test]
-fn test_forall_multi_var_u8_u32_add_overflow() {
+fn test_forall_multi_var_u8_u32_add_is_greater() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(crate::vc::ProofObligation::assert(
         "multi_var_overflow",
@@ -199,9 +199,11 @@ fn test_forall_multi_var_u8_u32_add_overflow() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    // FV-B: spec `j + 1` is mathematical `int`, so there is no wrap at
+    // u32::MAX and the claim is TRUE.
+    expect_verified(
         &result,
-        "forall(|i: u8, j: u32| j + 1 > j) must NOT verify — overflow at u32::MAX",
+        "forall(|i: u8, j: u32| j + 1 > j) is TRUE under mathematical semantics",
     );
 }
 

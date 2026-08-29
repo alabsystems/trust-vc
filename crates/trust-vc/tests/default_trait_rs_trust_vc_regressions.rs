@@ -553,6 +553,15 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         2,
         &[],
     ),
+    // `<&'static str>::default()` is a QSELF associated call. Since `49d16b38`
+    // ("Phase A no-self UFCS") a no-arg qself call is rendered with the CONCRETE
+    // self type taken from `qself.ty`, not the bare method name — that IS the
+    // point of the change, because a bare name cannot say which impl is meant.
+    // So the unresolved symbol is `str::default`, not `default`; this row simply
+    // predates the rendering, and every sibling row here is already qualified.
+    // The requirement is unchanged and the new fragment is STRICTER: it pins
+    // which type's `default` went unmodeled rather than merely that some
+    // `default` did.
     (
         "rust_default_str_associated_constructor_currently_blocked",
         "test_default_str_ok",
@@ -560,7 +569,7 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         0,
         &[
             "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'default'",
+            "unknown return type for function 'str::default'",
         ],
     ),
     (
@@ -577,12 +586,19 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         3,
         &[],
     ),
+    // Promoted from `..._currently_blocked` (error). The trait-qualified UFCS
+    // spelling now models as the same zero `u32::default()` does. Measured in
+    // BOTH directions before promoting — `result == 0u32` verifies, `result ==
+    // 1u32` counterexamples, on both spellings — and stock `rustc --edition
+    // 2021` prints `0`, so the claim that verifies is the true one. It read
+    // `error` only because the fail-closed loop panicked on an earlier row and
+    // never reached this one.
     (
-        "rust_default_u32_ufcs_constructor_currently_blocked",
+        "rust_default_u32_ufcs_constructor_verified",
         "test_default_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'core::default::Default::default'"],
+        "verified",
+        1,
+        &[],
     ),
     (
         "rust_default_string_constructor_currently_blocked",

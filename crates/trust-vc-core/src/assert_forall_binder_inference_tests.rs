@@ -14,7 +14,8 @@ fn rewrite(source: &str, func_name: &str) -> Option<String> {
             _ => None,
         })
         .expect("probe function should exist");
-    infer_untyped_assert_forall_binders(&file, func)
+    // These probes all define their function at the file top level.
+    infer_untyped_assert_forall_binders(&file, func, Some(&[]))
         .map(|rewritten| rewritten.to_token_stream().to_string())
 }
 

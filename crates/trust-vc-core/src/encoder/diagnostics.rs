@@ -41,6 +41,27 @@ pub(crate) enum EncodingApproximation {
     /// an UNSAT/`Verified` on this shape becomes `Unknown` rather than trusting
     /// ay's verdict.
     NestedExistentialAlternation,
+    /// A datatype-valued `match` was encoded INSIDE a real solver binder, so its
+    /// tester/selector re-binding (`bind_datatype_match_result`) was withheld:
+    /// those facts are asserted at the solver top level and would have captured
+    /// the enclosing binder's variable. The `ite` tree is used directly instead.
+    /// Non-demoting: this withholds ASSUMPTIONS, so the solver context is only
+    /// ever weaker — it cannot turn a refutation into a `Verified`.
+    ///
+    /// This covers the DATATYPE-MATCH instance only. The general case is
+    /// `HoistCapturedByPendingBinder` below.
+    DatatypeMatchBindingUnderBinder,
+    /// An encode-then-close axiom (`add_typed_broadcast`, `encode_fuel_axioms`,
+    /// the trait-method axioms) was DECLINED because a fact hoisted to the
+    /// solver top level during the body encode mentions a variable the pending
+    /// `forall` was about to bind. Emitting the axiom would have captured that
+    /// fact and collapsed the function to a constant. See
+    /// `encoder::binder_capture`.
+    ///
+    /// Non-demoting: declining an ASSUMPTION only weakens the context — the
+    /// function stays uninterpreted, so a proof can be lost but no refutation
+    /// can turn into a `Verified`.
+    HoistCapturedByPendingBinder,
 }
 
 impl EncodingApproximation {
@@ -58,6 +79,8 @@ impl EncodingApproximation {
             | Self::IntBvCoercion
             | Self::BroadcastCapHit
             | Self::ForallSkolemization
+            | Self::DatatypeMatchBindingUnderBinder
+            | Self::HoistCapturedByPendingBinder
             | Self::GroundFixpointNonConvergence => false,
         }
     }
@@ -73,6 +96,12 @@ impl fmt::Display for EncodingApproximation {
             Self::IntBvCoercion => write!(f, "int_bv_coercion"),
             Self::BroadcastCapHit => write!(f, "broadcast_cap_hit"),
             Self::ForallSkolemization => write!(f, "forall_skolemization"),
+            Self::DatatypeMatchBindingUnderBinder => {
+                write!(f, "datatype_match_binding_under_binder")
+            }
+            Self::HoistCapturedByPendingBinder => {
+                write!(f, "hoist_captured_by_pending_binder")
+            }
             Self::GroundFixpointNonConvergence => {
                 write!(f, "ground_fixpoint_non_convergence")
             }

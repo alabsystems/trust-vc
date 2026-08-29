@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::encoder::datatype::ConstructorKind;
-use crate::ir::{CompareOp, StructDef, TrustVcExpr, TrustVcType};
+use crate::ir::{ArithOp, CompareOp, StructDef, TrustVcExpr, TrustVcType};
 use crate::prepared_context::{PreparedObligation, PreparedVerificationContext};
 use crate::vc::{InvariantMask, ObligationKind, VariableDecl, VerificationMode};
 
@@ -488,6 +488,90 @@ fn test_type_invariant_rejects_invalid_constructed_value() {
     assert!(
         result.is_unsat(),
         "invalid constructed Counter value should violate the type invariant, got {:?}",
+        result
+    );
+}
+
+// --- Binder-capture backstop at the invariant closure boundary ---
+// (`encoder::binder_capture`; the boundary wiring is in `emit_type_invariant`.)
+
+/// `Gauge { n: int }` with invariant `n / 2 == 1` (holds for n in {2, 3}).
+///
+/// The invariant body is encoded BEFORE its `forall v` is built, and a literal
+/// Euclidean division used to hoist `__euclid_q` defining equations to the
+/// solver top level from exactly this kind of position (the measured
+/// `half(2) == 5` CARDINAL in `tests/hoist_capture_class.rs`). With the
+/// boundary wired, the body encode runs under `pending_universal_closure`, so
+/// the euclid helper INLINES the division and the axiom is emitted intact.
+///
+/// The discriminator: a captured hoist collapses `inv_Gauge` to a constant
+/// (the axiom degenerates to `forall v. inv(v) <==> <v-free body>`), which
+/// makes `inv(a) && !inv(b)` UNSAT. With the intact axiom it is SAT
+/// (a.n == 2, b.n == 0 is a model).
+#[test]
+fn invariant_with_literal_division_body_still_distinguishes_values() {
+    let math = TrustVcType::MathInt;
+    let gauge = StructDef::new("Gauge", vec![("n".to_string(), math.clone())]);
+    let dt = gauge.to_datatype_type();
+    let TrustVcType::Datatype { name, variants } = &dt else {
+        panic!("Gauge should lower to TrustVcType::Datatype");
+    };
+
+    let mut encoder = AYEncoder::new();
+    for var in ["a", "b"] {
+        encoder
+            .declare_variable(&VariableDecl {
+                bounded_len: false,
+                name: var.to_string(),
+                ty: dt.clone(),
+            })
+            .unwrap();
+    }
+    encoder.register_datatype(name, variants).unwrap();
+
+    let body = TrustVcExpr::Compare {
+        op: CompareOp::Eq,
+        left: Box::new(TrustVcExpr::Arith {
+            op: ArithOp::Div,
+            left: Box::new(TrustVcExpr::Var {
+                name: "n".to_string(),
+                ty: math.clone(),
+            }),
+            right: Box::new(TrustVcExpr::IntLit {
+                value: 2,
+                ty: math.clone(),
+            }),
+            ty: math.clone(),
+        }),
+        right: Box::new(TrustVcExpr::IntLit {
+            value: 1,
+            ty: math.clone(),
+        }),
+    };
+    encoder.emit_type_invariant("Gauge", &body).unwrap();
+
+    // The flagged encode must have INLINED the division: the axiom is emitted,
+    // not declined, so the invariant UF supports both polarities below.
+    let inv = encoder
+        .registries
+        .type_invariant_funcs
+        .get("Gauge")
+        .expect("invariant UF registered")
+        .clone();
+
+    let a = *encoder.variables.get("a").unwrap();
+    let b = *encoder.variables.get("b").unwrap();
+    encoder.assert_type_invariant_on_term("Gauge", a).unwrap();
+    let inv_b = encoder.solver.try_apply(&inv, &[b]).unwrap();
+    let not_inv_b = encoder.solver.try_not(inv_b).unwrap();
+    encoder.solver.try_assert_term(not_inv_b).unwrap();
+
+    let result = encoder.solver.check_sat();
+    assert!(
+        result.is_sat(),
+        "inv(a) && !inv(b) must be satisfiable (a.n == 2, b.n == 0); UNSAT means \
+         the invariant collapsed to a value-independent constant — the binder \
+         capture this boundary is wired against. Got {:?}",
         result
     );
 }

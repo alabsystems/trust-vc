@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use syn::{Attribute, Item};
+use syn::{Attribute, File, Item};
 
 const MANIFEST_SOURCE_ROOTS: &[&str] = &["src", "tests", "examples", "benches"];
 const TRAIT_MARKERS: &[&str] = &["trait_spec", "trait_impl"];
@@ -36,8 +36,24 @@ pub(crate) fn traits_from_source_text(source_text: &str) -> TrustVcResult<TraitC
         context: "parse source file for trait metadata",
         source,
     })?;
+    // Same duplicate-trait prune the file lane performs, and for the same
+    // reason: a same-named declaration this file's impl headers do not name must
+    // not occupy the bare-ident key. Both producers must agree, because their
+    // decls have to stay EQUAL for the dedup in `register_trait_impl`.
+    let pruned = crate::trait_path_resolution::prune_shadowed_duplicate_traits(&file)?;
+    let file = pruned.as_ref().unwrap_or(&file);
     let mut catalog = TraitCatalog::default();
-    collect_traits(&file.items, &mut catalog)?;
+    // Same resolution the file lane performs, so the two producers agree on
+    // which trait an `impl` names. See `crate::trait_path_resolution`.
+    let scope_index = crate::trait_path_resolution::TraitScopeIndex::build(file);
+    scope_index.reject_duplicate_trait_names()?;
+    collect_traits(
+        file,
+        &file.items,
+        &mut Vec::new(),
+        &scope_index,
+        &mut catalog,
+    )?;
     Ok(catalog)
 }
 
@@ -129,20 +145,59 @@ fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) -> TrustVcResult<()
     Ok(())
 }
 
-fn collect_traits(items: &[Item], catalog: &mut TraitCatalog) -> TrustVcResult<()> {
+/// `root_file` is the whole file; `items` is the (possibly `mod`-nested) slice
+/// being walked. The two are separate because `shadowed_trait_impl_methods`
+/// resolves each impl method against EVERY competing declaration in the file,
+/// and a `mod`-local view would report a nested one as unshadowed.
+///
+/// Computing the shadow set here as well as in the file lane keeps the two
+/// producers' decls EQUAL for the dedup in `register_trait_impl`; that dedup
+/// additionally unions the sets, so a scope that genuinely cannot see the
+/// competing declaration still fails closed rather than resurrecting an
+/// unshadowed copy.
+fn collect_traits(
+    root_file: &File,
+    items: &[Item],
+    module: &mut Vec<String>,
+    scope_index: &crate::trait_path_resolution::TraitScopeIndex,
+    catalog: &mut TraitCatalog,
+) -> TrustVcResult<()> {
     for item in items {
         match item {
             Item::Trait(item_trait) if has_trust_vc_attr(&item_trait.attrs, "trait_spec") => {
-                catalog.trait_decls.push(parse_trait_decl(item_trait)?);
+                let mut decl = parse_trait_decl(item_trait)?;
+                // Supertraits are keyed by the bound path's LAST SEGMENT inside
+                // `parse_trait_decl`, which a `use` rename defeats — a measured
+                // cardinal. Re-key against the trait's own module scope, in
+                // lockstep with `trait_contracts::collect_source_trait_declarations`
+                // so the two views of `TraitDecl::supertraits` cannot drift.
+                decl.supertraits = crate::trait_path_resolution::resolved_supertrait_names(
+                    scope_index,
+                    module,
+                    item_trait,
+                );
+                catalog.trait_decls.push(decl);
             }
             Item::Impl(item_impl) if has_trust_vc_attr(&item_impl.attrs, "trait_impl") => {
-                catalog
-                    .trait_impl_decls
-                    .push(parse_trait_impl_decl(item_impl)?);
+                let mut decl = parse_trait_impl_decl(item_impl)?.with_inherent_shadowed_methods(
+                    crate::vc_extraction::shadowed_trait_impl_methods(root_file, item_impl),
+                );
+                if let Some(resolved) = crate::trait_path_resolution::resolved_impl_trait_name(
+                    scope_index,
+                    module,
+                    item_impl,
+                )? {
+                    decl.trait_name = resolved;
+                }
+                catalog.trait_impl_decls.push(decl);
             }
             Item::Mod(item_mod) => {
                 if let Some((_, nested_items)) = &item_mod.content {
-                    collect_traits(nested_items, catalog)?;
+                    module.push(item_mod.ident.to_string());
+                    let nested =
+                        collect_traits(root_file, nested_items, module, scope_index, catalog);
+                    module.pop();
+                    nested?;
                 }
             }
             _ => {}

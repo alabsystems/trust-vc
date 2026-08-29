@@ -85,22 +85,37 @@ fn control_nat_binder_still_refuted() {
 }
 
 // ---------------------------------------------------------------------------
-// NARROWNESS PINS — the fix must not degenerate into "quantifier bodies never
-// wrap". The first two are TRUE ONLY under fixed-width wrapping.
+// FV-B: these two ASSERTED THE FALSE VERIFY. They used to demand that
+// fixed-width `+`/`*` under a binder keep wrapping; a quantifier body is spec
+// code, where Verus types `u8 + u8` as `int`, so `a + b <= 255` is refuted by
+// `a == b == 200`. Verdicts inverted; see the fixture note.
 
 #[test]
-fn pin_fixed_width_add_still_wraps() {
-    assert_verified(
-        "pin_u8_add_wraps_into_range",
-        "`a + b` on u8 operands is a u8 and must still be reduced mod 256",
+fn fixed_width_add_under_binder_must_not_wrap() {
+    assert_not_verified(
+        "fv_u8_add_wraps_into_range",
+        "spec `a + b` on u8 binders is `int`: 200 + 200 == 400, not 144",
     );
 }
 
 #[test]
-fn pin_fixed_width_mul_still_wraps() {
+fn fixed_width_mul_under_binder_must_not_wrap() {
+    assert_not_verified(
+        "fv_u8_mul_wraps_into_range",
+        "spec `a * b` on u8 binders is `int`: 200 * 200 == 40000, not 64",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NARROWNESS PINS — the fix must not degenerate into "quantifier bodies never
+// wrap at all". An explicit `wrapping_*` op IS defined as finite-width
+// truncation and must keep truncating under a binder.
+
+#[test]
+fn pin_explicit_wrapping_add_still_wraps() {
     assert_verified(
-        "pin_u8_mul_wraps_into_range",
-        "`a * b` on u8 operands is a u8 and must still be reduced mod 256",
+        "pin_u8_wrapping_add_still_wraps",
+        "`a.wrapping_add(b)` is a u8 BY DEFINITION and must stay <= 255",
     );
 }
 

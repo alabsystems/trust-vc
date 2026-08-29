@@ -398,12 +398,13 @@ pub(crate) struct AYEvidence {
     pub latest_private_main: Option<String>,
     pub is_latest_private_main: Option<bool>,
     pub local_patch_detected: bool,
-    /// Auditable ay identity facts under the verified-sibling Path model. These
-    /// describe exactly which ay produced the proofs: the clean,
+    /// Auditable ay identity facts whenever dependency resolution uses the
+    /// verified sibling Path authority. These describe exactly which ay
+    /// produced the proofs: the clean,
     /// origin-verified `../ay` HEAD (`ay_identity_rev`), its worktree root and
     /// origin URL, whether the worktree was clean, and whether that HEAD is
     /// already published to `origin/main` (`ay_published`). All are `None`
-    /// outside the Path model.
+    /// outside a Path-backed model.
     #[serde(default)]
     pub ay_identity_rev: Option<String>,
     #[serde(default)]
@@ -428,14 +429,17 @@ struct AYManifestProvenance {
     pinned_revs: BTreeMap<String, Option<String>>,
     pinned_sources: BTreeMap<String, Option<String>>,
     source_model: AYSourceModel,
-    /// Verified-sibling-path identity facts (present only under the Path model).
+    /// Independently verified sibling-path identity facts. These are present
+    /// for the pure Path model and for the normal Git-rev + committed-patch
+    /// composition, where both authorities must agree before evidence passes.
     sibling_identity: Option<AYSiblingIdentity>,
 }
 
 /// Auditable identity facts for the verified `../ay` sibling that produced the
-/// proofs under the Path model.
+/// proofs under a Path-backed dependency resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AYSiblingIdentity {
+    head: String,
     repo_root: PathBuf,
     origin_url: String,
     worktree_clean: bool,
@@ -445,6 +449,7 @@ struct AYSiblingIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AYSourceModel {
     GitRev,
+    GitRevWithVerifiedSiblingPath,
     VerifiedSiblingPath,
     Unverified,
 }
@@ -453,9 +458,17 @@ impl AYSourceModel {
     fn label(self) -> &'static str {
         match self {
             Self::GitRev => "git-rev",
+            Self::GitRevWithVerifiedSiblingPath => "git-rev+verified-sibling-path",
             Self::VerifiedSiblingPath => "verified-sibling-path",
             Self::Unverified => "unverified",
         }
+    }
+
+    fn has_verified_sibling_path(self) -> bool {
+        matches!(
+            self,
+            Self::GitRevWithVerifiedSiblingPath | Self::VerifiedSiblingPath
+        )
     }
 }
 
@@ -1450,12 +1463,13 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
     let pinned_ay_revs = ay_manifest_provenance.pinned_revs.clone();
     let pinned_ay_sources = ay_manifest_provenance.pinned_sources.clone();
     let pinned_ay = ay_manifest_provenance.pinned_rev.clone();
-    // Auditable ay identity facts under the Path model; `ay_identity_rev` is the
-    // verified sibling HEAD (the recorded pin).
+    // Auditable ay identity facts under every Path-backed model;
+    // `ay_identity_rev` is the independently read sibling HEAD, not a copy of
+    // the manifest pin. Keeping them separate makes disagreement observable.
     let ay_sibling_identity = ay_manifest_provenance.sibling_identity.clone();
     let ay_identity_rev = ay_sibling_identity
         .as_ref()
-        .and_then(|_| ay_manifest_provenance.pinned_rev.clone());
+        .map(|identity| identity.head.clone());
     let ay_lock_source_entries = parse_ay_lock_sources(&args.crate_root.join("Cargo.lock"));
     let ay_lock_sources = ay_lock_sources_by_package(&ay_lock_source_entries);
     let latest_ay = ls_remote_head(AY_REPO_URL);
@@ -2352,7 +2366,7 @@ fn ay_lock_provenance_gate(
     for entry in lock_sources {
         match entry.source.as_deref() {
             Some(source) if ay_lock_source_matches_pin(source, pinned_rev) => {}
-            None if provenance.source_model == AYSourceModel::VerifiedSiblingPath => {}
+            None if provenance.source_model.has_verified_sibling_path() => {}
             Some(source) => failures.push(format!(
                 "{} source does not match pin: {source}",
                 entry.package_name
@@ -2369,7 +2383,7 @@ fn ay_lock_provenance_gate(
             GateStatus::Failed
         },
         detail: Some(if failures.is_empty() {
-            if provenance.source_model == AYSourceModel::VerifiedSiblingPath {
+            if provenance.source_model.has_verified_sibling_path() {
                 format!(
                     "{} ay package entries match verified sibling-path ay repo at {pinned_rev}",
                     lock_sources.len()
@@ -2509,7 +2523,7 @@ fn cargo_fixture_lockfile_check(
                     &lock_rel,
                     &lock_sources,
                     pinned_rev,
-                    provenance.source_model == AYSourceModel::VerifiedSiblingPath,
+                    provenance.source_model.has_verified_sibling_path(),
                 );
                 if let Some(mismatch) = mismatch {
                     push_fixture_preflight_failure(
@@ -2599,7 +2613,9 @@ fn fixture_ay_lock_mismatch_detail(
     // crate to the verified `../ay` sibling regardless of what each fixture's
     // Cargo.lock records, so a fixture's ay source (null/path AND git+rev) is
     // irrelevant to which ay actually ran. The binding lives in the single root
-    // Path identity, not in 25 fixture lockfiles. Accept any recorded source.
+    // Path identity, not independently in each fixture lockfile. Accept any
+    // recorded source; canonical Git-source fixture locks are still required
+    // by the neutral/config-isolated reproducibility lane.
     if path_model {
         return None;
     }
@@ -10227,6 +10243,7 @@ fn verdict_kind_label(kind: &verify::VerdictKind) -> &'static str {
         verify::VerdictKind::Unknown => "unknown",
         verify::VerdictKind::Error => "error",
         verify::VerdictKind::Skipped => "skipped",
+        verify::VerdictKind::NotAnalyzed => "not_analyzed",
     }
 }
 
@@ -12069,32 +12086,41 @@ fn collect_ay_manifest_provenance(crate_root: &Path) -> AYManifestProvenance {
     let git_revs = ay_pins_from_specs(&specs);
     let sources = ay_sources_from_specs(&specs, None);
     if let Some(pin) = common_ay_pin(&git_revs) {
+        // The committed checkout uses TWO simultaneous authorities: the exact
+        // Git rev in Cargo.toml is the expected public identity, while the
+        // repo-local [patch] makes Cargo compile the sibling worktree. Preserve
+        // both instead of letting the manifest's rev hide the active Path
+        // resolution. An invalid/dirty patch intentionally yields no identity;
+        // active_local_ay_patch_detected then fails the strict gate below.
+        let sibling_identity = verified_sibling_ay_patch_model(crate_root)
+            .ok()
+            .flatten()
+            .map(ay_sibling_identity);
+        let source_model = if sibling_identity.is_some() {
+            AYSourceModel::GitRevWithVerifiedSiblingPath
+        } else {
+            AYSourceModel::GitRev
+        };
         return AYManifestProvenance {
             pinned_rev: Some(pin),
             pinned_revs: git_revs,
             pinned_sources: sources,
-            source_model: AYSourceModel::GitRev,
-            sibling_identity: None,
+            source_model,
+            sibling_identity,
         };
     }
 
     if let Ok(sibling) = verified_sibling_ay_dependency_model(crate_root, &specs) {
+        let head = sibling.head.clone();
         return AYManifestProvenance {
-            pinned_rev: Some(sibling.head.clone()),
+            pinned_rev: Some(head.clone()),
             pinned_revs: REQUIRED_AY_CRATES
                 .iter()
-                .map(|crate_name| ((*crate_name).to_string(), Some(sibling.head.clone())))
+                .map(|crate_name| ((*crate_name).to_string(), Some(head.clone())))
                 .collect(),
             pinned_sources: ay_sources_from_specs(&specs, Some(&sibling.repo_root)),
             source_model: AYSourceModel::VerifiedSiblingPath,
-            sibling_identity: Some(AYSiblingIdentity {
-                repo_root: sibling.repo_root,
-                origin_url: sibling.origin_url,
-                // Identity construction requires a clean worktree; reaching
-                // here implies it.
-                worktree_clean: true,
-                published: sibling.published,
-            }),
+            sibling_identity: Some(ay_sibling_identity(sibling)),
         };
     }
 
@@ -12104,6 +12130,18 @@ fn collect_ay_manifest_provenance(crate_root: &Path) -> AYManifestProvenance {
         pinned_sources: sources,
         source_model: AYSourceModel::Unverified,
         sibling_identity: None,
+    }
+}
+
+fn ay_sibling_identity(sibling: VerifiedSiblingAYRepo) -> AYSiblingIdentity {
+    AYSiblingIdentity {
+        head: sibling.head,
+        repo_root: sibling.repo_root,
+        origin_url: sibling.origin_url,
+        // Identity construction requires a clean worktree; reaching here
+        // implies it.
+        worktree_clean: true,
+        published: sibling.published,
     }
 }
 
@@ -12140,18 +12178,29 @@ fn ay_latest_private_main_matches(
         return false;
     }
     match provenance.source_model {
-        AYSourceModel::GitRev => REQUIRED_AY_CRATES.iter().all(|crate_name| {
-            provenance
-                .pinned_revs
-                .get(*crate_name)
-                .and_then(|rev| rev.as_deref())
-                == Some(latest_private_main)
-                && provenance
-                    .pinned_sources
+        AYSourceModel::GitRev | AYSourceModel::GitRevWithVerifiedSiblingPath => {
+            let manifest_matches = REQUIRED_AY_CRATES.iter().all(|crate_name| {
+                provenance
+                    .pinned_revs
                     .get(*crate_name)
-                    .and_then(|source| source.as_deref())
-                    .is_some_and(ay_remote_url_matches)
-        }),
+                    .and_then(|rev| rev.as_deref())
+                    == Some(latest_private_main)
+                    && provenance
+                        .pinned_sources
+                        .get(*crate_name)
+                        .and_then(|source| source.as_deref())
+                        .is_some_and(ay_remote_url_matches)
+            });
+            let sibling_matches = match provenance.source_model {
+                AYSourceModel::GitRevWithVerifiedSiblingPath => provenance
+                    .sibling_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.head == latest_private_main),
+                AYSourceModel::GitRev => provenance.sibling_identity.is_none(),
+                _ => false,
+            };
+            manifest_matches && sibling_matches
+        }
         // Under the Path model the gate passes on *identity*: a clean,
         // origin-verified `../ay` sibling whose HEAD is the recorded pin. The
         // identity is constructed only when those soundness conditions hold
@@ -12175,10 +12224,7 @@ fn parse_ay_sources(cargo_toml: &Path) -> BTreeMap<String, Option<String>> {
 }
 
 fn parse_ay_dependency_specs(cargo_toml: &Path) -> BTreeMap<String, AYDependencySpec> {
-    let mut specs = BTreeMap::new();
-    for crate_name in REQUIRED_AY_CRATES {
-        specs.insert((*crate_name).to_string(), AYDependencySpec::default());
-    }
+    let mut specs = empty_ay_dependency_specs();
     let Ok(text) = fs::read_to_string(cargo_toml) else {
         return specs;
     };
@@ -12198,6 +12244,86 @@ fn parse_ay_dependency_specs(cargo_toml: &Path) -> BTreeMap<String, AYDependency
         }
     }
     specs
+}
+
+fn empty_ay_dependency_specs() -> BTreeMap<String, AYDependencySpec> {
+    REQUIRED_AY_CRATES
+        .iter()
+        .map(|crate_name| ((*crate_name).to_string(), AYDependencySpec::default()))
+        .collect()
+}
+
+/// Parse the repo-local AY patch that Cargo applies in the normal checkout.
+///
+/// Cargo.toml's exact Git rev remains the expected/public authority. This
+/// parser independently captures the Path authority that selects the bytes
+/// actually compiled. Missing/duplicate/malformed required entries fail closed
+/// by preventing construction of a verified sibling identity.
+fn repo_local_ay_patch_specs(
+    crate_root: &Path,
+) -> Result<Option<BTreeMap<String, AYDependencySpec>>, String> {
+    let paths = [
+        crate_root.join("Cargo.toml"),
+        crate_root.join(".cargo/config.toml"),
+        crate_root.join(".cargo/config"),
+    ];
+    let mut specs = empty_ay_dependency_specs();
+    let mut seen = BTreeSet::new();
+    let mut found_ay_patch = false;
+
+    for path in paths {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut in_ay_patch_section = false;
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                in_ay_patch_section = ay_patch_section_matches(line);
+                found_ay_patch |= in_ay_patch_section;
+                continue;
+            }
+            if !in_ay_patch_section {
+                continue;
+            }
+            for crate_name in REQUIRED_AY_CRATES {
+                if !line.starts_with(&format!("{crate_name} =")) {
+                    continue;
+                }
+                if !seen.insert((*crate_name).to_string()) {
+                    return Err(format!(
+                        "duplicate {crate_name} entry across repo-local ay patch tables"
+                    ));
+                }
+                specs.insert(
+                    (*crate_name).to_string(),
+                    AYDependencySpec {
+                        rev: parse_rev_field(line),
+                        git: parse_git_field(line),
+                        path: parse_path_field(line),
+                    },
+                );
+            }
+        }
+    }
+
+    if found_ay_patch {
+        Ok(Some(specs))
+    } else {
+        Ok(None)
+    }
+}
+
+fn verified_sibling_ay_patch_model(
+    crate_root: &Path,
+) -> Result<Option<VerifiedSiblingAYRepo>, String> {
+    let Some(specs) = repo_local_ay_patch_specs(crate_root)? else {
+        return Ok(None);
+    };
+    verified_sibling_ay_dependency_model(crate_root, &specs).map(Some)
 }
 
 fn ay_pins_from_specs(
@@ -12469,9 +12595,17 @@ fn active_local_ay_patch_in_file(path: &Path, verified_ay_root: Option<&Path>) -
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    // `[patch]`/`.cargo/config` path entries resolve relative to the directory
-    // containing the file being scanned.
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // Cargo resolves paths in a repo's `.cargo/config*` from the directory
+    // containing `.cargo`, while a manifest patch resolves from the manifest's
+    // own directory. Mirroring that distinction is authority-critical: using
+    // `.cargo` itself as the base falsely classified the committed `../ay`
+    // redirect as a different, nonexistent checkout.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base_dir = if parent.file_name().is_some_and(|name| name == ".cargo") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    };
     let mut in_ay_patch_section = false;
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -12482,10 +12616,12 @@ fn active_local_ay_patch_in_file(path: &Path, verified_ay_root: Option<&Path>) -
             in_ay_patch_section = ay_patch_section_matches(line);
             continue;
         }
+        // Every assignment in an AY patch table can replace code from AY,
+        // including an aliased or transitive package name. Authenticate all of
+        // them to the same sibling repo; checking only the four direct crate
+        // names would leave an easy provenance bypass.
         if in_ay_patch_section
-            && REQUIRED_AY_CRATES
-                .iter()
-                .any(|crate_name| line.starts_with(&format!("{crate_name} =")))
+            && line.contains('=')
             && !ay_patch_entry_is_sanctioned(line, base_dir, verified_ay_root)
         {
             return true;
@@ -14436,6 +14572,271 @@ ay-sys = { git = "https://github.com/alabsystems/ay", rev = "abc123" }
     }
 
     #[test]
+    fn git_rev_with_committed_sibling_patch_preserves_and_agrees_both_authorities() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-model");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (ay_root, ay_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        write_ay_git_manifest(&trust_vc_root, &ay_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+
+        let provenance = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(
+            provenance.source_model,
+            AYSourceModel::GitRevWithVerifiedSiblingPath,
+            "the normal Git-rev + committed-patch topology must not collapse to either authority"
+        );
+        assert_eq!(provenance.pinned_rev.as_deref(), Some(ay_head.as_str()));
+        let identity = provenance
+            .sibling_identity
+            .as_ref()
+            .expect("the active sibling patch must produce an independent identity");
+        assert_eq!(identity.head, ay_head);
+        assert_eq!(
+            identity.repo_root,
+            ay_root.canonicalize().expect("ay root should canonicalize")
+        );
+        assert!(identity.worktree_clean);
+        assert!(!active_local_ay_patch_detected(
+            &trust_vc_root,
+            None,
+            Some(&identity.repo_root)
+        ));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&provenance, Some(&ay_head), false),
+            Some(true)
+        );
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&provenance, Some("stale-public-head"), false),
+            Some(false),
+            "the sibling identity must not make a stale manifest/public pin pass"
+        );
+
+        let path_lock_entries = REQUIRED_AY_CRATES
+            .iter()
+            .map(|crate_name| AYLockSourceEntry {
+                package_name: (*crate_name).to_string(),
+                source: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ay_lock_provenance_gate(&provenance, &path_lock_entries).status,
+            GateStatus::Passed,
+            "source-less lock rows are authorized only by the verified sibling identity"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn git_rev_with_sibling_patch_rejects_clean_head_mismatch() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-head-mismatch");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (ay_root, manifest_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        write_ay_git_manifest(&trust_vc_root, &manifest_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+
+        fs::write(ay_root.join("ahead.txt"), "different compiled bytes\n")
+            .expect("ahead file should be written");
+        let compiled_head = git_commit_all(&ay_root, "different clean ay head");
+        assert_ne!(compiled_head, manifest_head);
+
+        let provenance = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(
+            provenance.source_model,
+            AYSourceModel::GitRevWithVerifiedSiblingPath
+        );
+        assert_eq!(
+            provenance.pinned_rev.as_deref(),
+            Some(manifest_head.as_str())
+        );
+        assert_eq!(
+            provenance
+                .sibling_identity
+                .as_ref()
+                .map(|identity| identity.head.as_str()),
+            Some(compiled_head.as_str())
+        );
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&provenance, Some(&manifest_head), false),
+            Some(false),
+            "a clean but different compiled sibling must not inherit the manifest's authority"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn git_rev_with_sibling_patch_rejects_dirty_or_wrong_path() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-patch-tamper");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (ay_root, ay_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        write_ay_git_manifest(&trust_vc_root, &ay_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+
+        fs::write(ay_root.join("dirty.txt"), "uncommitted proof code\n")
+            .expect("dirty file should be written");
+        let dirty = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(dirty.source_model, AYSourceModel::GitRev);
+        assert!(dirty.sibling_identity.is_none());
+        assert!(active_local_ay_patch_detected(&trust_vc_root, None, None));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&dirty, Some(&ay_head), true),
+            Some(false)
+        );
+        fs::remove_file(ay_root.join("dirty.txt")).expect("dirty file should be removed");
+
+        let (_rogue_root, _rogue_head) =
+            create_clean_origin_main_named_ay_sibling(&temp_dir, "rogue-ay");
+        write_ay_patch_config(&trust_vc_root, "../rogue-ay");
+        let wrong_path = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(wrong_path.source_model, AYSourceModel::GitRev);
+        assert!(wrong_path.sibling_identity.is_none());
+        assert!(active_local_ay_patch_detected(&trust_vc_root, None, None));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&wrong_path, Some(&ay_head), true),
+            Some(false)
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn git_rev_with_sibling_patch_rejects_wrong_origin_or_missing_entry() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-incomplete");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (ay_root, ay_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        write_ay_git_manifest(&trust_vc_root, &ay_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+
+        let set_url = run_command(
+            &ay_root,
+            DEFAULT_GIT_COMMAND,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://attacker.invalid/ay.git",
+            ],
+        );
+        assert_eq!(
+            set_url.exit_code,
+            Some(0),
+            "remote tamper should succeed: {}",
+            set_url.stderr_tail
+        );
+        let wrong_origin = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(wrong_origin.source_model, AYSourceModel::GitRev);
+        assert!(wrong_origin.sibling_identity.is_none());
+        assert!(active_local_ay_patch_detected(&trust_vc_root, None, None));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&wrong_origin, Some(&ay_head), true),
+            Some(false)
+        );
+
+        let restore_url = run_command(
+            &ay_root,
+            DEFAULT_GIT_COMMAND,
+            &["remote", "set-url", "origin", AY_REPO_URL],
+        );
+        assert_eq!(
+            restore_url.exit_code,
+            Some(0),
+            "remote restore should succeed: {}",
+            restore_url.stderr_tail
+        );
+        let config_path = trust_vc_root.join(".cargo/config.toml");
+        let config = fs::read_to_string(&config_path).expect("patch config should be readable");
+        let missing = config
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("ay-sys ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&config_path, format!("{missing}\n"))
+            .expect("incomplete patch config should be written");
+        let missing_entry = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(missing_entry.source_model, AYSourceModel::GitRev);
+        assert!(missing_entry.sibling_identity.is_none());
+        assert!(active_local_ay_patch_detected(&trust_vc_root, None, None));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&missing_entry, Some(&ay_head), true),
+            Some(false)
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn git_rev_with_sibling_patch_rejects_duplicate_required_entry() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-duplicate");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (_ay_root, ay_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        write_ay_git_manifest(&trust_vc_root, &ay_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+
+        let config_path = trust_vc_root.join(".cargo/config.toml");
+        let mut config = fs::read_to_string(&config_path).expect("patch config should be readable");
+        config.push_str("ay-core = { path = \"../ay/crates/ay-core\" }\n");
+        fs::write(&config_path, config).expect("duplicate patch entry should be written");
+
+        let duplicate = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(duplicate.source_model, AYSourceModel::GitRev);
+        assert!(duplicate.sibling_identity.is_none());
+        assert!(active_local_ay_patch_detected(&trust_vc_root, None, None));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&duplicate, Some(&ay_head), true),
+            Some(false)
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn git_rev_with_sibling_patch_rejects_extra_patch_outside_verified_repo() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-ay-composed-extra-patch");
+        let trust_vc_root = temp_dir.join("trust_vc");
+        fs::create_dir_all(&trust_vc_root).expect("trust_vc dir should be created");
+        let (_ay_root, ay_head) = create_clean_origin_main_ay_sibling(&temp_dir);
+        let (rogue_root, _) = create_clean_origin_main_named_ay_sibling(&temp_dir, "rogue-ay");
+        fs::create_dir_all(rogue_root.join("crates/ay-proof"))
+            .expect("rogue transitive crate dir should be created");
+        write_ay_git_manifest(&trust_vc_root, &ay_head);
+        write_ay_patch_config(&trust_vc_root, "../ay");
+        let config_path = trust_vc_root.join(".cargo/config.toml");
+        let mut config = fs::read_to_string(&config_path).expect("patch config should be readable");
+        config.push_str("ay-proof = { path = \"../rogue-ay/crates/ay-proof\" }\n");
+        fs::write(&config_path, config).expect("extra patch entry should be written");
+
+        // The four required entries still produce a valid independent sibling
+        // identity. The extra transitive replacement must nevertheless make
+        // the local-patch gate fail; otherwise the positive path is vacuous.
+        let provenance = collect_ay_manifest_provenance(&trust_vc_root);
+        assert_eq!(
+            provenance.source_model,
+            AYSourceModel::GitRevWithVerifiedSiblingPath
+        );
+        let identity = provenance
+            .sibling_identity
+            .as_ref()
+            .expect("required patch entries should still identify the canonical sibling");
+        assert!(active_local_ay_patch_detected(
+            &trust_vc_root,
+            None,
+            Some(&identity.repo_root)
+        ));
+        assert_eq!(
+            ay_latest_private_main_gate_passes(&provenance, Some(&ay_head), true),
+            Some(false)
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
     fn sibling_path_ay_model_reports_clean_origin_main_head_as_pin() {
         let temp_dir = unique_temp_dir("trust-vc-evidence-ay-sibling-model");
         let trust_vc_root = temp_dir.join("trust_vc");
@@ -14622,75 +15023,39 @@ ay-sys = { git = "https://github.com/alabsystems/ay", rev = "abc123" }
 
     #[cfg(unix)]
     #[test]
-    fn current_path_dep_checkout_yields_path_identity_that_passes_provenance() {
-        // The normal dev environment — trust-vc's real Cargo.toml with
-        // `ay-* = { path = "../ay/..." }` plus the sanctioned root [patch]
-        // redirect — must be a first-class verifiable identity that PASSES
-        // provenance whenever the sibling ../ay is clean. This is the scenario
-        // the env-surgery removal exists to support. We skip (not fail) when the
-        // sibling is unavailable or dirty so the suite stays robust on machines
-        // without a clean ../ay checkout.
+    fn current_git_rev_and_patch_checkout_non_vacuously_agree() {
+        // This repository cannot resolve its committed dependency graph without
+        // the committed sibling patch, so a passing workspace test necessarily
+        // has an available sibling. Assert the REAL checkout composition rather
+        // than returning early merely because Cargo.toml carries Git revs (the
+        // old test did exactly that and therefore never exercised this lane).
         let repo_root = cargo_trust_vc_repo_root();
-        // This test exercises the PATH-dep dev scenario. When the committed
-        // manifest pins ay by git rev (the GitRev model — the current
-        // committed dependency shape since the path->git restructure), the
-        // path-dep scenario is simply not configured, and provenance
-        // correctly reports GitRev regardless of the sibling state; skip
-        // (not fail), exactly like the other unavailable-scenario guards.
-        let committed_specs = parse_ay_dependency_specs(&repo_root.join("Cargo.toml"));
-        if common_ay_pin(&ay_pins_from_specs(&committed_specs)).is_some() {
-            return;
-        }
-        let ay_root = repo_root.parent().map(|parent| parent.join("ay"));
-        let ay_root = match ay_root.and_then(|root| root.canonicalize().ok()) {
-            Some(root) if root.is_dir() => root,
-            _ => return,
-        };
-        if git_remote_url(&ay_root, "origin")
-            .as_deref()
-            .map(ay_remote_url_matches)
-            != Some(true)
-        {
-            return;
-        }
-        if git_dirty(&ay_root) != Some(false) {
-            // Dirty sibling: must NOT yield a Path identity (dirty safeguard).
-            let provenance = collect_ay_manifest_provenance(&repo_root);
-            assert_ne!(
-                provenance.source_model,
-                AYSourceModel::VerifiedSiblingPath,
-                "a dirty ../ay must never yield a Path identity"
-            );
-            return;
-        }
-
         let provenance = collect_ay_manifest_provenance(&repo_root);
         assert_eq!(
             provenance.source_model,
-            AYSourceModel::VerifiedSiblingPath,
-            "clean path-dep ../ay checkout should yield a Path identity"
+            AYSourceModel::GitRevWithVerifiedSiblingPath,
+            "the committed Git rev and active sibling patch must both be represented"
         );
         let identity = provenance
             .sibling_identity
             .as_ref()
-            .expect("clean path-dep checkout should record a path identity");
+            .expect("current checkout must record the compiled sibling identity");
         assert!(identity.worktree_clean);
         assert!(ay_remote_url_matches(&identity.origin_url));
-        assert_eq!(identity.repo_root, ay_root);
-        let head = git_rev_parse(&ay_root, "HEAD").expect("ay HEAD should be readable");
-        assert_eq!(provenance.pinned_rev.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            provenance.pinned_rev.as_deref(),
+            Some(identity.head.as_str())
+        );
 
-        // The sanctioned root [patch] redirect must NOT be treated as an
-        // override, so the latest-pin gate passes on identity alone.
         assert!(!active_local_ay_patch_detected(
             &repo_root,
             None,
             Some(identity.repo_root.as_path())
         ));
         assert_eq!(
-            ay_latest_private_main_gate_passes(&provenance, None, false),
+            ay_latest_private_main_gate_passes(&provenance, Some(&identity.head), false),
             Some(true),
-            "clean path-dep checkout must pass the latest-pin gate on identity"
+            "current checkout must pass only because manifest, public expectation, and sibling agree"
         );
     }
 
@@ -25399,6 +25764,7 @@ entries:
                 .collect(),
             source_model: AYSourceModel::VerifiedSiblingPath,
             sibling_identity: Some(AYSiblingIdentity {
+                head: rev.to_string(),
                 repo_root: PathBuf::from("/tmp/ay"),
                 origin_url: AY_REPO_URL.to_string(),
                 worktree_clean: true,
@@ -25420,8 +25786,48 @@ ay-sys = { path = "../ay/crates/ay-sys" }
         .expect("Cargo.toml should be written");
     }
 
+    fn write_ay_git_manifest(crate_root: &Path, rev: &str) {
+        fs::write(
+            crate_root.join("Cargo.toml"),
+            format!(
+                r#"
+ay-core = {{ git = "{AY_REPO_URL}", rev = "{rev}" }}
+ay-dpll = {{ git = "{AY_REPO_URL}", rev = "{rev}" }}
+ay-frontend = {{ git = "{AY_REPO_URL}", rev = "{rev}" }}
+ay-sys = {{ git = "{AY_REPO_URL}", rev = "{rev}" }}
+"#
+            ),
+        )
+        .expect("Cargo.toml should be written");
+    }
+
+    fn write_ay_patch_config(crate_root: &Path, ay_relative_root: &str) {
+        let cargo_dir = crate_root.join(".cargo");
+        fs::create_dir_all(&cargo_dir).expect(".cargo dir should be created");
+        fs::write(
+            cargo_dir.join("config.toml"),
+            format!(
+                r#"
+[patch."{AY_REPO_URL}"]
+ay-core = {{ path = "{ay_relative_root}/crates/ay-core" }}
+ay-dpll = {{ path = "{ay_relative_root}/crates/ay-dpll" }}
+ay-frontend = {{ path = "{ay_relative_root}/crates/ay-frontend" }}
+ay-sys = {{ path = "{ay_relative_root}/crates/ay-sys" }}
+"#
+            ),
+        )
+        .expect(".cargo/config.toml should be written");
+    }
+
     fn create_clean_origin_main_ay_sibling(parent: &Path) -> (PathBuf, String) {
-        let ay_root = parent.join("ay");
+        create_clean_origin_main_named_ay_sibling(parent, "ay")
+    }
+
+    fn create_clean_origin_main_named_ay_sibling(
+        parent: &Path,
+        directory_name: &str,
+    ) -> (PathBuf, String) {
+        let ay_root = parent.join(directory_name);
         init_git_repo(&ay_root);
         for crate_name in REQUIRED_AY_CRATES {
             let crate_dir = ay_root.join("crates").join(crate_name);

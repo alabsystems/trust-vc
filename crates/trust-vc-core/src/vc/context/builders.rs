@@ -9,6 +9,7 @@
 use super::{DemandInlineConfig, FunctionContext, VariableDecl, VerificationContext};
 use crate::counterexample_names::CounterexampleVarMeta;
 use crate::ir::{StructDef, TraitDecl, TraitImplDecl};
+use crate::solver_budget::ConflictBudget;
 use crate::vc::obligation::{InvariantMask, ObligationKind, ProofObligation, SolverMode};
 
 impl VerificationContext {
@@ -162,6 +163,29 @@ impl VerificationContext {
             .or_insert(kind);
     }
 
+    /// Records how a TRAIT-DECLARED method takes its `self` receiver, keyed by
+    /// `(declaring_trait_name, method_name)`. Drives the GENERIC-receiver
+    /// mutation detection (a `TypeParam`-typed receiver has no `Datatype`, so
+    /// `register_struct_self_receiver_kind` can never classify it). Same
+    /// fail-closed collision rule: on a conflicting re-registration, promote to
+    /// the most-mutating kind so a possible mutation is never missed.
+    pub(crate) fn register_trait_method_self_receiver_kind(
+        &mut self,
+        trait_name: String,
+        method_name: String,
+        kind: crate::vc::context::SelfReceiverKind,
+    ) {
+        use crate::vc::context::SelfReceiverKind;
+        self.trait_method_self_receiver_kinds
+            .entry((trait_name, method_name))
+            .and_modify(|existing| {
+                if *existing != kind {
+                    *existing = SelfReceiverKind::RefMut;
+                }
+            })
+            .or_insert(kind);
+    }
+
     /// Register a helper function with trait bounds so they survive
     /// `prepare_context()` and reach `setup_from_prepared`. Part of #2425.
     pub fn declare_helper_function_typed_with_bounds(
@@ -183,40 +207,68 @@ impl VerificationContext {
     }
 
     /// Registers a trait implementation declaration, deduplicating by equality.
+    ///
+    /// SHADOW-SET UNION, and it is soundness-critical. Two producers reach this
+    /// method for the same impl: the file lane
+    /// (`trait_contracts::collect_source_trait_declarations`, which computes
+    /// `inherent_shadowed_methods` against the whole file) and the thread-local
+    /// catalog lane (`trait_registry::apply_registered_traits_to_context`, whose
+    /// `TraitCatalog` may have been built from a different scope). Plain
+    /// equality-dedup would treat a shadowed decl and an unshadowed one as
+    /// DIFFERENT and keep BOTH — and the encoder iterates every decl, so the
+    /// unshadowed copy would emit the very linking axiom the shadowed one
+    /// declines to emit, silently defeating the gate.
+    ///
+    /// Shadowing only ever SUPPRESSES an axiom about a symbol the file resolves
+    /// to another declaration, so the UNION is the fail-closed merge: if ANY
+    /// producer determined the symbol is contested, it stays contested.
     pub fn register_trait_impl(&mut self, decl: TraitImplDecl) {
-        if !self.trait_impl_decls.contains(&decl) {
-            self.trait_impl_decls.push(decl);
+        if let Some(existing) = self
+            .trait_impl_decls
+            .iter_mut()
+            .find(|existing| existing.matches_ignoring_shadowed_methods(&decl))
+        {
+            existing
+                .inherent_shadowed_methods
+                .extend(decl.inherent_shadowed_methods);
+            return;
         }
+        self.trait_impl_decls.push(decl);
     }
 
     /// Records the captured single-pure-return body of a trait-impl method,
-    /// keyed by its concrete UF name (`Type__method`). Consumed only by the
-    /// auxiliary trait-conformance pass to assume the impl method's definitional
-    /// fact while checking it against the trait contract. First registration
-    /// wins (the source declaration is unique per concrete name).
+    /// keyed by its declaring TRAIT plus its concrete UF name. Consumed only by
+    /// the auxiliary trait-conformance pass to assume the impl method's
+    /// definitional fact while checking it against the trait contract.
+    ///
+    /// The key used to be the bare concrete UF name, with a doc comment claiming
+    /// "the source declaration is unique per concrete name". It is not: the
+    /// concrete name carries the self type but NOT the trait, so `impl A1 for S`
+    /// and `impl A2 for S` both mint `S__v` and this first-wins insert handed
+    /// A1's body to A2's conformance obligation — every trait after the first
+    /// counterexampled against a foreign body. See [`crate::ir::ImplMethodKey`].
+    /// First registration still wins, but the key is now genuinely unique, so
+    /// nothing but a literal duplicate declaration can reach that branch.
     pub fn register_trait_impl_method_body(
         &mut self,
-        concrete_fn_name: String,
+        key: crate::ir::ImplMethodKey,
         body: crate::ir::ConformanceMethodBody,
     ) {
-        self.trait_impl_method_bodies
-            .entry(concrete_fn_name)
-            .or_insert(body);
+        self.trait_impl_method_bodies.entry(key).or_insert(body);
     }
 
-    /// Records a trait-impl method's OWN declared `ensures` postconditions, keyed
-    /// by its concrete UF name (`Type__method`). Only called for a non-exempt
-    /// impl method whose body was ALSO captured, so the conformance pass can
-    /// verify `body ⊨ impl_ensures` before the strengthened postcondition is
-    /// propagated to callers. First registration wins (unique per concrete name).
+    /// Records a trait-impl method's OWN declared `ensures` postconditions,
+    /// keyed by its declaring TRAIT plus its concrete UF name (see
+    /// [`Self::register_trait_impl_method_body`] for why the trait is
+    /// load-bearing). Only called for a non-exempt impl method whose body was
+    /// ALSO captured, so the conformance pass can verify `body ⊨ impl_ensures`
+    /// before the strengthened postcondition is propagated to callers.
     pub fn register_trait_impl_method_ensures(
         &mut self,
-        concrete_fn_name: String,
+        key: crate::ir::ImplMethodKey,
         ensures: Vec<String>,
     ) {
-        self.trait_impl_method_ensures
-            .entry(concrete_fn_name)
-            .or_insert(ensures);
+        self.trait_impl_method_ensures.entry(key).or_insert(ensures);
     }
 
     /// Marks a trait-impl method (by its concrete UF name) as exempt from the
@@ -250,10 +302,25 @@ impl VerificationContext {
         self.invariant_mask = mask;
     }
 
-    /// Set a per-function solver timeout override in milliseconds.
-    /// Overrides the default 30,000ms solver timeout. Part of #2489.
+    /// Override the per-function WALL-CLOCK backstop, in milliseconds.
+    ///
+    /// This moves the LIVENESS bound only. It does not change how much work
+    /// the solver is allowed to do — that is
+    /// [`Self::set_rlimit_conflicts`], the deterministic budget — so a
+    /// verdict obtained by raising this number alone is still a
+    /// machine-dependent verdict. Part of #2489.
     pub fn set_rlimit(&mut self, ms: u64) {
         self.rlimit_ms = Some(ms);
+    }
+
+    /// Override the per-function DETERMINISTIC work budget, in SAT conflicts.
+    ///
+    /// Unlike [`Self::set_rlimit`], this bound is machine-independent: the
+    /// same query stops at the same conflict count on every host under every
+    /// load. Exhausting it yields `Unknown` (`resourceout`), never
+    /// `Verified`.
+    pub fn set_rlimit_conflicts(&mut self, budget: ConflictBudget) {
+        self.rlimit_conflicts = Some(budget);
     }
 
     /// Skip the timeout retry cascade (int-mode + extended-timeout stages).

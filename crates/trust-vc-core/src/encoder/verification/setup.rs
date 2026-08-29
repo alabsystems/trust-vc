@@ -186,8 +186,24 @@ fn register_datatypes_from_prepared_context(
         return Err(setup_encoding_error(collector.conflicts.join("; ")));
     }
 
+    // DEPENDENCY ORDER is load-bearing (same ay guard the struct loop in
+    // `bootstrap_prepared` documents): declaring an OUTER datatype introduces
+    // the sorts of its field types, and ay refuses to later re-declare such a
+    // sort as a datatype ("sort 'Option<u64>' is already declared; re-declaring
+    // it as a datatype would conflate ..."). The collector is a name-keyed
+    // BTreeMap, so `Option<Option<u64>>` sorts BEFORE `Option<u64>` and
+    // `(Option<u64>, bool)` before `Option<u64>` — registering in map order
+    // declared the outer first and every nested Option/Result/tuple payload
+    // (clone_method_spec `clone_nested_option` / `clone_tuple_option`) failed
+    // setup. `register_datatypes_in_type` walks a datatype's fields before the
+    // datatype itself and is idempotent per name, so it is the ordering
+    // authority here too.
     for (name, variants) in collector.datatypes {
-        encoder.register_datatype(&name, &variants).map_err(|err| {
+        let ty = TrustVcType::Datatype {
+            name: name.clone(),
+            variants,
+        };
+        encoder.register_datatypes_in_type(&ty).map_err(|err| {
             setup_encoding_error(format!("Failed to register datatype '{name}': {err}"))
         })?;
     }
@@ -296,6 +312,54 @@ fn encode_selected_obligations(
     Ok(())
 }
 
+/// Names of every function applied inside a `Choose` predicate (the
+/// `condition` and the multi-binder `also_assert` combined axiom) across the
+/// prepared obligations and the assumption slices this bootstrap will encode.
+/// See the suppression call site for why these must stay uninterpreted UFs.
+fn choose_predicate_function_names(
+    ctx: &PreparedVerificationContext,
+    active_assumptions: &[&PreparedObligation],
+    scoped_assumptions: &[&PreparedObligation],
+) -> std::collections::BTreeSet<String> {
+    struct ChooseFnCollector {
+        names: std::collections::BTreeSet<String>,
+    }
+    impl crate::ir_expr_traversal::TrustVcExprVisitor for ChooseFnCollector {
+        fn visit_expr(&mut self, expr: &TrustVcExpr) {
+            if let TrustVcExpr::Choose {
+                condition,
+                also_assert,
+                ..
+            } = expr
+            {
+                self.names
+                    .extend(super::body_support::referenced_function_names(condition));
+                // The shared walker does not descend into `also_assert`;
+                // visit it explicitly — the combined axiom is exactly where
+                // the multi-binder predicate's fn calls live.
+                if let Some(extra) = also_assert {
+                    self.names
+                        .extend(super::body_support::referenced_function_names(extra));
+                    crate::ir_expr_traversal::walk_expr(self, extra);
+                }
+            }
+            crate::ir_expr_traversal::walk_expr(self, expr);
+        }
+    }
+    let mut collector = ChooseFnCollector {
+        names: std::collections::BTreeSet::new(),
+    };
+    for obligation in ctx
+        .obligations
+        .iter()
+        .chain(active_assumptions.iter().copied())
+        .chain(scoped_assumptions.iter().copied())
+    {
+        crate::ir_expr_traversal::TrustVcExprVisitor::visit_expr(&mut collector, &obligation.expr);
+    }
+    collector.names
+}
+
 fn bootstrap_prepared_encoder_with_prune_plan(
     encoder: &mut AYEncoder,
     ctx: &PreparedVerificationContext,
@@ -315,6 +379,17 @@ fn bootstrap_prepared_encoder_with_prune_plan(
         ..
     } = config;
     let prune_traits = assertion_focus.is_some();
+
+    // ELEMENT-DEMAND PRUNE (see `pruning::context_element_demand`). Install the
+    // query-wide length-vs-elements verdict BEFORE any variable declaration or
+    // assumption encoding, so every derived Seq carrier this encoder mints
+    // observes it. `VerificationState::new` defaults the flag to `true`, so any
+    // encoder that never runs this bootstrap keeps the full model.
+    encoder.state.seq_element_model_demanded = matches!(
+        prune_plan.element_demand(),
+        super::pruning::ElementDemand::Observed
+    );
+
     let current_state_slice = if enable_current_state_variable_slice {
         prune_plan.current_state_slice()
     } else {
@@ -338,6 +413,20 @@ fn bootstrap_prepared_encoder_with_prune_plan(
             scoped_assumptions,
             current_state_slice.map(|slice| slice.selected_scoped_assumptions.as_slice()),
         );
+    }
+    // Hilbert-`choose` trigger preservation: a spec fn referenced inside a
+    // choose predicate is the E-matching TRIGGER of that choose's guarded /
+    // combined axiom (PATH-B marks those axioms `no_mbqi` — fire only on a
+    // genuine ground witness). AY's definitional-forall macro adoption would
+    // otherwise expand the fn's defining axiom into every application — the
+    // marked axiom's body AND the ground witness (`assert(f(7))` becomes the
+    // dropped truth `5 <= 7`) — leaving the discipline nothing to match, so a
+    // Verus-verified case (choose.rs `test1`) degraded to
+    // `quantifier-unhandled`. Suppression costs only the adoption
+    // optimization: the defining axiom stays asserted verbatim, so `f(7)`
+    // stays an f-application and both axioms fire exactly as in Verus.
+    for name in choose_predicate_function_names(ctx, active_assumptions, scoped_assumptions) {
+        encoder.solver.suppress_definitional_adoption(&name);
     }
     encoder.state.inline_bodies = active_broadcasts
         .iter()
@@ -733,11 +822,38 @@ fn bootstrap_prepared_encoder_with_prune_plan(
             })?;
     }
 
-    // Assert type invariants on parameters of invariant-bearing types.
+    // Assert type invariants on PARAMETERS of invariant-bearing types.
     // Part of #2419 Slice 2.
+    //
+    // SOUNDNESS-CRITICAL — the restriction to parameters is the whole
+    // justification. `assert_type_invariant_on_term` asserts `inv_T(v)` as a
+    // FREE axiom, i.e. an assumption that `v` satisfies its type invariant.
+    // That is legitimate only for a value whose invariant somebody else already
+    // ESTABLISHED: a parameter arrives from a caller that had to build it, so
+    // assuming it here is the callee half of a contract. There is currently NO
+    // establishment obligation anywhere, so for any value this function itself
+    // CONSTRUCTS the same assertion is an unchecked assumption — and a locally
+    // built value that violates its invariant makes the context contradictory
+    // against the `inv_T(x) <==> body(x)` defining axiom, which proves
+    // ANYTHING. This loop used to walk every entry of `ctx.variables`, locals
+    // included, so the guard below is what keeps that from being a cardinal
+    // false verify the moment the surface is wired up.
+    //
+    // FAIL CLOSED, not fail open: an invariant that cannot be justified is
+    // simply not asserted. Dropping an ASSUMPTION is always sound (unlike
+    // dropping a `requires`, which is a discharged obligation). So a context
+    // with type invariants but no `function_context` — hence no parameter list
+    // to check against — asserts none of them.
+    let invariant_bearing_params: std::collections::HashSet<&str> = ctx
+        .function_context
+        .as_ref()
+        .map(|fc| fc.param_names().collect())
+        .unwrap_or_default();
     for var in &ctx.variables {
         if let crate::ir::TrustVcType::Datatype { name, .. } = &var.ty {
-            if ctx.type_invariants.contains_key(name) {
+            if ctx.type_invariants.contains_key(name)
+                && invariant_bearing_params.contains(var.name.as_str())
+            {
                 if let Some(&var_term) = encoder.variables.get(&var.name) {
                     encoder
                         .assert_type_invariant_on_term(name, var_term)
@@ -941,10 +1057,12 @@ impl AYEncoder {
     ) -> TrustVcResult<Self> {
         let ctx = slices.ctx;
         super::test_hooks::bump_setup_from_prepared_count();
-        let timeout_ms = ctx
+        let wall_backstop_ms = ctx
             .rlimit_ms
-            .unwrap_or(super::timeout::DEFAULT_SOLVER_NOMINAL_TIMEOUT_MS);
-        let mut encoder = Self::with_logic(logic).with_limits(timeout_ms, 512);
+            .unwrap_or(super::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS);
+        let conflict_budget = super::timeout::effective_conflict_budget(ctx.rlimit_conflicts);
+        let mut encoder =
+            Self::with_logic(logic).with_limits(wall_backstop_ms, conflict_budget, 512);
         encoder.state.unpruned_proof_fact_count = slices.assumptions.len()
             + slices.broadcast_assumptions.len()
             + slices.verified_invariants.len()

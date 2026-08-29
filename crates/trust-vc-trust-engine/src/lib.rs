@@ -4331,14 +4331,50 @@ impl TrustReplayableProofArtifact {
             .filter(|obligation| obligation.role == TrustObligationRole::Assertion)
             .collect::<Vec<_>>();
         let mut artifacts = Vec::new();
+        // Assertions whose label covered SEVERAL verified queries. Distinct from
+        // "no artifact bound", which is why it is counted separately.
+        let mut ambiguous_assertions = 0usize;
 
         for assertion in &assertion_obligations {
-            let Some(step) = report.steps().iter().find(|step| {
+            // A certificate must bind to ONE solver query. `label()` is
+            // `obligation.name`, and a name is NOT unique per query: a loop
+            // invariant's establishment and its preservation are separate
+            // queries over the same `PreparedObligation`, so they carry the same
+            // label. `begin_obligation_step` records the `VerificationPhase`
+            // alongside the name, but this lookup never consulted it and took
+            // the FIRST match — which would mint a loop-ENTRY refutation as the
+            // certificate for the invariant itself.
+            //
+            // Fixed by requiring UNIQUENESS rather than by guessing which phase
+            // is the right one. That choice is deliberate: matching on a phase I
+            // inferred could bind the wrong query and would be a false
+            // certificate, whereas refusing an ambiguous label can only ever
+            // produce FEWER certificates. An ambiguous binding yields no
+            // artifact, the policy then declines, and the obligation is reported
+            // unproved. Strictly fail-closed.
+            //
+            // When a query-identity key exists (name + phase + goal formula),
+            // this can be tightened to select rather than refuse. Any test for
+            // that must compare the REFUTED formula against the step's goal —
+            // comparing label strings cannot see this defect.
+            let mut matching = report.steps().iter().filter(|step| {
                 step.label() == assertion.id
                     && matches!(step.result(), trust_vc_core::StepResultKind::Verified)
-            }) else {
+            });
+            let Some(step) = matching.next() else {
+                // Zero matches: nothing to bind, and no ambiguity either.
                 continue;
             };
+            if matching.next().is_some() {
+                // TWO OR MORE distinct solver queries share this label. Which one
+                // refuted what is not recoverable here, so bind nothing rather
+                // than the first — and RECORD that the refusal was for ambiguity,
+                // because the single-assertion fallback below must not then step
+                // in and mint the very binding this refused.
+                ambiguous_assertions += 1;
+                continue;
+            }
+
             let Some(proof) = step.proof() else {
                 continue;
             };
@@ -4353,7 +4389,23 @@ impl TrustReplayableProofArtifact {
             }
         }
 
-        if artifacts.is_empty() && assertion_obligations.len() == 1 {
+        // The single-assertion fallback mints from `report.proof()`, which is
+        // `collector.proof` — OVERWRITTEN on every recorded certificate
+        // (trust-vc-core capture.rs:340), so it is the LAST one. That is fine
+        // when the sole assertion simply had no per-step certificate recorded.
+        //
+        // It is NOT fine when the per-assertion loop refused for AMBIGUITY: a
+        // unit whose one assertion is a loop invariant has two verified steps
+        // under one label, the loop above binds nothing, `artifacts` is empty —
+        // and this fallback would then mint the LAST step's certificate (the
+        // preservation phase) under the invariant's own id. That is exactly the
+        // mis-attribution the guard above exists to prevent, arriving through
+        // the other door.
+        //
+        // So the fallback is suppressed whenever any assertion was refused for
+        // ambiguity. The unit then fails the completeness check below and the
+        // policy declines, which is the fail-closed outcome.
+        if artifacts.is_empty() && assertion_obligations.len() == 1 && ambiguous_assertions == 0 {
             if let Some(proof) = report.proof() {
                 let assertion = assertion_obligations[0];
                 if let Some(artifact) = Self::from_certificate(
@@ -9090,6 +9142,102 @@ mod tests {
 
     #[cfg(feature = "proof-certificates")]
     #[test]
+    #[cfg(feature = "proof-certificates")]
+    fn a_loop_invariant_label_shared_by_two_queries_binds_no_certificate() {
+        // THE INTEGRATION HALF of the ambiguity guard. `unique_or_none` proves the
+        // RULE; this proves the CALL SITE meets a real report in which one label
+        // covers more than one solver query.
+        //
+        // A loop invariant is verified in two phases — establishment on entry and
+        // preservation across the body — and both are recorded under
+        // `obligation.name`, because `begin_obligation_step` labels a step with
+        // that name. Before the guard, `find()` took the FIRST Verified match, so
+        // the loop-ENTRY refutation was minted as the certificate for the
+        // invariant itself.
+        //
+        // This test does not ASSUME two steps appear: it counts them and says so.
+        // If the engine only ever records one step per invariant, the count
+        // assertion below fails loudly with the labels, and the guard's
+        // integration is genuinely unreachable rather than silently untested.
+        let _env_lock = trust_vc_core::env::lock_env();
+        let _vc_cache = trust_vc_core::env::ScopedEnvVar::set("TRUST_VC_DISABLE_VC_CACHE", "1");
+        let engine = TrustVcTrustEngine::new();
+        let i32_sort = TrustSort::signed(32);
+        let i = TrustExpr::variable("i", i32_sort.clone());
+        // `i >= 0` — true on entry and preserved, so BOTH phases verify. A
+        // clause that fails one phase would give one Verified step and prove
+        // nothing about ambiguity.
+        let invariant = TrustExpr::compare(
+            TrustCompareOp::Ge,
+            i.clone(),
+            TrustExpr::int_literal(0, i32_sort.clone()),
+        );
+        let request = TrustVerificationRequest::new("loop-invariant-ambiguity")
+            .for_full_verification()
+            .require_replayable_proof_artifacts()
+            .with_unit(
+                TrustVerificationUnit::new("crate::loop_proof")
+                    .with_variable(TrustVariable::new("i", i32_sort.clone()))
+                    .with_obligation(TrustObligation::requires_typed(
+                        "pre.non_negative",
+                        TrustExpr::compare(
+                            TrustCompareOp::Ge,
+                            i,
+                            TrustExpr::int_literal(0, i32_sort),
+                        ),
+                    ))
+                    .with_obligation(TrustObligation::assert_typed(
+                        "inv.non_negative",
+                        TrustObligationKind::LoopInvariant,
+                        invariant,
+                    )),
+            );
+
+        // Requiring artifacts legitimately refuses the WHOLE UNIT when no
+        // certificate binds — that is the guard working at the policy level, and
+        // for a single-assertion loop-invariant unit it is the EXPECTED outcome
+        // now that the fallback is suppressed on ambiguity. Returning early here
+        // is therefore a pass, not a skip.
+        let Ok(report) = engine.verify(&request) else {
+            return;
+        };
+        let unit = &report.units()[0];
+
+        // The engine report does not expose raw steps; the artifact's own
+        // assertion binding is what this guard controls, so measure that.
+        let bound: Vec<_> = unit
+            .proof_artifacts()
+            .iter()
+            .filter(|artifact| {
+                artifact.assertion_obligation_ids().iter().any(|id| id == "inv.non_negative")
+            })
+            .map(|artifact| artifact.artifact_id().to_string())
+            .collect();
+
+        // AT MOST ONE artifact may claim this invariant. Two would mean a single
+        // label bound more than one solver query's refutation, which is exactly
+        // the mis-attribution `unique_or_none` exists to prevent. Zero is the
+        // fail-closed outcome when the label is ambiguous, and is fine.
+        // WAS `bound.len() <= 1`, which could not see the defect it was written
+        // for: when the per-assertion guard refuses and the unit has exactly ONE
+        // assertion, the single-assertion fallback used to mint `report.proof()`
+        // — the LAST recorded certificate, i.e. the preservation phase — under
+        // the invariant's own id. That is ONE artifact, so `<= 1` passed while
+        // the mis-attribution it exists to catch was happening.
+        //
+        // The correct bound is ZERO. If a label covers several verified queries,
+        // NOTHING may claim it — not several, not the first, and not a fallback.
+        assert!(
+            bound.is_empty(),
+            "AMBIGUOUS LABEL BOUND {} CERTIFICATE(S) for `inv.non_negative` ({bound:?}). A \
+             label covering several solver queries must bind NONE of them. One artifact here \
+             is the single-assertion fallback minting the LAST phase's certificate under the \
+             whole obligation's id.",
+            bound.len(),
+        );
+    }
+
+    #[test]
     fn multi_assertion_full_verification_binds_distinct_step_artifacts() {
         let _env_lock = trust_vc_core::env::lock_env();
         let _vc_cache = trust_vc_core::env::ScopedEnvVar::set("TRUST_VC_DISABLE_VC_CACHE", "1");
@@ -11090,5 +11238,63 @@ mod tests {
             decoded.bootstrap_provenance(),
             Some(&rust_cast_bootstrap_provenance())
         );
+    }
+}
+
+/// Exactly one, or nothing — never "the first of several".
+///
+/// Extracted from the certificate binding in `from_verified_report` so the rule
+/// can be TESTED: `VerificationReport` and `StepDiagnostic` both have private
+/// fields and no public constructor, so a report carrying two same-label
+/// verified steps cannot be built from outside `trust-vc-core`, and the guard
+/// would otherwise sit unexercised.
+///
+/// Returning `None` on ambiguity is the fail-closed half: a caller that cannot
+/// tell WHICH match it has must bind none of them. Preferring the first is how a
+/// loop-entry refutation ends up minted as the certificate for the invariant.
+#[cfg(test)]
+fn unique_or_none<T>(mut candidates: impl Iterator<Item = T>) -> Option<T> {
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+#[cfg(test)]
+mod unique_or_none_tests {
+    use super::unique_or_none;
+
+    #[test]
+    fn none_when_empty() {
+        assert_eq!(unique_or_none(std::iter::empty::<u8>()), None);
+    }
+
+    #[test]
+    fn the_value_when_exactly_one() {
+        assert_eq!(unique_or_none([7u8].into_iter()), Some(7));
+    }
+
+    /// THE POINT OF THE FUNCTION. Two candidates must yield nothing — NOT the
+    /// first one. If this ever returns `Some`, a certificate can again be bound
+    /// to whichever solver query happened to be recorded first under a shared
+    /// label.
+    #[test]
+    fn none_when_ambiguous_never_the_first() {
+        assert_eq!(unique_or_none([7u8, 9].into_iter()), None);
+        assert_eq!(unique_or_none([7u8, 9, 11].into_iter()), None);
+    }
+
+    /// The ambiguity check must not consume more than it needs, so a long or
+    /// expensive candidate stream is not walked to the end to answer "several".
+    #[test]
+    fn stops_at_the_second_candidate() {
+        let mut pulled = 0usize;
+        let counted = (0u8..200).map(|v| {
+            pulled += 1;
+            v
+        });
+        assert_eq!(unique_or_none(counted), None);
+        assert_eq!(pulled, 2, "answering `ambiguous` must need only two pulls");
     }
 }

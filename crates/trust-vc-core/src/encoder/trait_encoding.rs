@@ -145,6 +145,28 @@ impl AYEncoder {
             .or_insert_with(|| box_fn.clone());
 
         for (trait_method_name, concrete_fn_name) in &impl_decl.method_bindings {
+            // SOUNDNESS GATE — the shared concrete symbol is not an identity.
+            // `concrete_fn_name` is `format!("{type}__{method}")`: it carries the
+            // self type but NOT the trait, so an inherent `impl T { fn w }` and
+            // this `impl B1 for T { fn w }` mint the SAME string. The axiom
+            // emitted below is `B1__w(Box_T(t)) == T__w(t)`, which would equate
+            // the trait UF with a symbol the inherent method also defines. Two
+            // ways that goes wrong, both measured:
+            //   * with the inherent body axiom `T__w(t) == 4` in scope and the
+            //     trait postcondition axiom `B1__w(_) == 9`, this axiom asserts
+            //     `4 == 9` — a contradiction, which proves everything;
+            //   * with the inherent body axiom suppressed instead, the trait's
+            //     `ensures` becomes the value of the INHERENT call `t.w()` —
+            //     `ensures(result == 9)` VERIFIED while the true `result == 4`
+            //     was refuted, against a ground truth of 4 under stock rustc.
+            // Rust resolves `t.w()` to the inherent method, so the trait must
+            // simply not claim the symbol. The trait's own contract is
+            // unaffected: `B1__w` still carries it for the UFCS spellings
+            // `B1::w(&t)` / `<T as B1>::w(&t)`, which render trait-qualified and
+            // never touch `T__w`.
+            if !impl_decl.may_claim_concrete_symbol(trait_method_name) {
+                continue;
+            }
             // A parameterized signature (bare-TypeParam slots) links only when
             // the impl's trait type args instantiate it soundly; every other
             // TypeParam-bearing shape (blanket impl, nested position, unbound

@@ -887,6 +887,7 @@ fn make_trait_impl_body_context(concrete_fn: &str, body_text: &str) -> Verificat
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "CacheValued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), concrete_fn.to_string())],
@@ -902,7 +903,7 @@ fn make_trait_impl_body_context(concrete_fn: &str, body_text: &str) -> Verificat
         vec![("self".to_string(), TrustVcType::Bool)],
     );
     ctx.register_trait_impl_method_body(
-        concrete_fn.to_string(),
+        crate::ir::ImplMethodKey::new("CacheValued", concrete_fn),
         ConformanceMethodBody::new(body_text, 0),
     );
     ctx.push_obligation(ProofObligation::assert("user_goal", "true"));
@@ -1183,14 +1184,22 @@ fn a_forged_cache_entry_is_rejected_and_resolved_fresh() {
     reset_cache_counts();
 
     // A context whose obligation is FALSE. Honest verification refutes it.
+    //
+    // Deliberately NOT `x != x`: the reflexive-disequality pre-solve
+    // short-circuit answers that shape before the cache or the solver is ever
+    // consulted, which would make the fresh-solve witnesses below vacuous.
+    // `x == x + 1` is false, non-reflexive and not constant-foldable, so it
+    // must travel the full path this test exists to pin: forged entry
+    // rejected, then a REAL fresh solve. The reflexive shape gets its own
+    // companion pin below.
     let mut ctx = VerificationContext::new();
     ctx.declare_var_typed("x", TrustVcType::Int { width: 32 });
-    ctx.push_obligation(ProofObligation::assert("never_true", "x != x"));
+    ctx.push_obligation(ProofObligation::assert("never_true", "x == x + 1"));
 
     let honest = AYEncoder::verify(&ctx);
     assert!(
         !matches!(honest, VerifyResult::Verified),
-        "control: `x != x` must not verify honestly, got {honest:?}"
+        "control: `x == x + 1` must not verify honestly, got {honest:?}"
     );
 
     // Forge an entry at this context's own fingerprint. No verification behind it.
@@ -1215,7 +1224,7 @@ fn a_forged_cache_entry_is_rejected_and_resolved_fresh() {
     let replayed = AYEncoder::verify(&ctx);
     expect_counterexample(
         &replayed,
-        "a forged cache entry for `x != x` must not mint Verified",
+        "a forged cache entry for `x == x + 1` must not mint Verified",
     );
     assert_eq!(cache_hit_count(), 0, "forged entry must not cache-hit");
     assert_eq!(cache_miss_count(), 1, "forged entry must fall through");
@@ -1223,6 +1232,41 @@ fn a_forged_cache_entry_is_rejected_and_resolved_fresh() {
         setup_from_prepared_count() >= 1,
         "forged entry must reach a fresh solver setup"
     );
+}
+
+/// The reflexive shape, pinned separately: the pre-solve short-circuit answers
+/// `x != x` before the cache is consulted, so a forged `Verified` entry for it
+/// must be unreachable — the verdict must be the short-circuit's
+/// Counterexample and the forged file must never register as a hit.
+#[test]
+fn a_forged_cache_entry_for_a_reflexive_disequality_cannot_mint_verified() {
+    let _cache_dir = CacheTestEnvGuard::install("trust_vc_cache_forged_reflexive_witness");
+    reset_test_cache_disable();
+    reset_cache_counts();
+
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", TrustVcType::Int { width: 32 });
+    ctx.push_obligation(ProofObligation::assert("never_true", "x != x"));
+
+    let hash_hex = fingerprint_hex_for_context(&ctx);
+    let dir =
+        crate::encoder::verification::cache::cache_directory_for_test().expect("cache directory");
+    std::fs::create_dir_all(&dir).expect("create cache dir");
+    let forged = format!(
+        "{{\n  \"schema_version\": {},\n  \"fingerprint\": {:?},\n  \"display_name\": null,\n  \"primary_location\": null,\n  \"result\": {:?}\n}}",
+        crate::encoder::verification::cache::VC_CACHE_SCHEMA_VERSION,
+        hash_hex,
+        "verified",
+    );
+    std::fs::write(dir.join(format!("{hash_hex}.json")), forged).expect("write forged entry");
+
+    reset_cache_counts();
+    let replayed = AYEncoder::verify(&ctx);
+    expect_counterexample(
+        &replayed,
+        "the reflexive short-circuit must refute `x != x`; the forged entry must be unreachable",
+    );
+    assert_eq!(cache_hit_count(), 0, "forged entry must never register as a hit");
 }
 
 /// SOUNDNESS: session authority is for one exact cache path, not merely one

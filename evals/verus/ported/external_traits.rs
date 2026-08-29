@@ -83,9 +83,14 @@ pub const EXTERNAL_TRAITS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
         "external_trait_impl_side_requires_currently_blocked",
         &["trait method implementation cannot declare requires"],
     ),
+    // Two `#[trait_impl]` blocks define this name for the same concrete type, so
+    // the bare name denotes two bodies. That is now caught at function RESOLUTION
+    // (`resolve_function_in_file`), one layer above the contract-inheritance check
+    // that used to report it — strictly stronger, since it cannot be reached past
+    // and does not depend on the impls carrying matching contract attributes.
     (
         "external_trait_duplicate_spec_currently_fails_closed",
-        &["ambiguous trait method contract inheritance"],
+        &["is ambiguous in", "2 definitions share that name"],
     ),
 ];
 

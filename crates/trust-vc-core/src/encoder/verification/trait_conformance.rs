@@ -212,11 +212,17 @@ fn verify_trait_conformance_inner(
             // (the trait method may have none): the strengthened impl
             // postcondition still has to be verified against the body before it
             // can be propagated to callers. `trait_impl_method_ensures` is keyed
-            // by the concrete UF name and is populated only for a captured,
-            // non-exempt impl body.
+            // by the DECLARING TRAIT plus the concrete UF name and is populated
+            // only for a captured, non-exempt impl body. The trait half is
+            // load-bearing: keyed by the concrete name alone, `impl A1 for S` and
+            // `impl A2 for S` share `S__v` and this lookup answers with the wrong
+            // impl's clauses.
             let impl_declares_ensures = concrete_fn_binding.is_some_and(|(_, concrete_fn_name)| {
                 base.trait_impl_method_ensures
-                    .get(concrete_fn_name)
+                    .get(&crate::ir::ImplMethodKey::new(
+                        &impl_decl.trait_name,
+                        concrete_fn_name,
+                    ))
                     .is_some_and(|ensures| !ensures.is_empty())
             });
             if method.ensures.is_empty() && !impl_declares_ensures {
@@ -524,7 +530,13 @@ fn verify_generic_struct_impl_conformance(
                 // Body not captured (complex / has-requires / not a single pure
                 // return), or an arity mismatch that would make the positional
                 // restore unsound: fail SAFE — no worse than the prior skip.
-                let Some(body) = base.trait_impl_method_bodies.get(concrete_fn_name) else {
+                let Some(body) = base
+                    .trait_impl_method_bodies
+                    .get(&crate::ir::ImplMethodKey::new(
+                        &impl_decl.trait_name,
+                        concrete_fn_name,
+                    ))
+                else {
                     continue;
                 };
                 if body.param_count != method.params.len() {
@@ -798,7 +810,8 @@ fn build_impl_conformance_context(
     // body value and this assert genuinely checks `body ⊨ impl_ensures`. A
     // violating body Counterexamples here, which is the sole justification that
     // makes the caller-side propagation axiom sound.
-    let impl_ensures_obligations = match base.trait_impl_method_ensures.get(concrete_fn_name) {
+    let impl_method_key = crate::ir::ImplMethodKey::new(&impl_decl.trait_name, concrete_fn_name);
+    let impl_ensures_obligations = match base.trait_impl_method_ensures.get(&impl_method_key) {
         Some(impl_ensures) if !impl_ensures.is_empty() => build_impl_ensures_assert_obligations(
             impl_ensures,
             obligation_name,
@@ -820,7 +833,7 @@ fn build_impl_conformance_context(
     // failure), the prior body-axiom path is preserved unchanged.
     let impl_body_definition = base
         .trait_impl_method_bodies
-        .get(concrete_fn_name)
+        .get(&impl_method_key)
         .and_then(|body| {
             build_impl_body_definition_obligation(
                 concrete_fn_name,
@@ -1057,13 +1070,21 @@ fn build_implless_default_conformance_context(
     let synthetic_fn_ctx =
         synthesize_implless_default_function_context(trait_decl, method, &bindings);
 
-    let env = build_impl_contract_env(
+    let mut env = build_impl_contract_env(
         base,
         trait_decl,
         abstract_impl,
         &synthetic_fn_ctx,
         &bindings,
     )?;
+    let poly_self_fields = crate::encoder::trait_self_fields::poly_self_field_projections(
+        &trait_decl.name,
+        method,
+        &[default_body],
+    )?;
+    for projection in &poly_self_fields {
+        insert_poly_self_field_metadata_checked(&mut env, projection)?;
+    }
     let contract_obligations = build_default_contract_obligations(
         method,
         default_body,
@@ -1096,7 +1117,11 @@ fn build_implless_default_conformance_context(
     let mut variables = base.variables.clone();
     variables.extend(bindings.variables());
 
-    let helper_function_contexts = collect_helper_function_contexts(base, &synthetic_fn_ctx.name);
+    let mut helper_function_contexts =
+        collect_helper_function_contexts(base, &synthetic_fn_ctx.name);
+    for projection in &poly_self_fields {
+        insert_poly_self_field_helper_checked(&mut helper_function_contexts, projection)?;
+    }
     let has_collection_context = base.has_collection_context
         || variables.iter().any(|var| var.ty.is_collection())
         || obligations
@@ -1126,6 +1151,61 @@ fn build_implless_default_conformance_context(
     conformance_ctx.struct_types = base.struct_types.clone();
     conformance_ctx.type_invariants = base.type_invariants.clone();
     Ok(conformance_ctx)
+}
+
+fn insert_poly_self_field_metadata_checked(
+    env: &mut TypeEnv,
+    projection: &crate::encoder::trait_self_fields::PolySelfFieldProjection,
+) -> Result<(), TrustVcError> {
+    let receiver = TrustVcType::Poly.to_type_string();
+    if let Some(existing) = env.lookup_field(&receiver, &projection.field_name) {
+        if existing.uf_name == projection.uf_name && existing.field_type == projection.field_type {
+            return Ok(());
+        }
+        return Err(super::encoding_error(
+            CONFORMANCE_CONTEXT,
+            format!(
+                "conflicting abstract receiver field metadata for '{}.{}'",
+                receiver, projection.field_name
+            ),
+        ));
+    }
+    env.insert_field_metadata(
+        receiver,
+        projection.field_name.clone(),
+        projection.uf_name.clone(),
+        projection.field_type.clone(),
+    );
+    Ok(())
+}
+
+fn insert_poly_self_field_helper_checked(
+    helpers: &mut Vec<FunctionContext>,
+    projection: &crate::encoder::trait_self_fields::PolySelfFieldProjection,
+) -> Result<(), TrustVcError> {
+    if let Some(existing) = helpers
+        .iter()
+        .find(|helper| helper.name == projection.uf_name)
+    {
+        let expected_params = [("__trust_vc_poly_self".to_string(), TrustVcType::Poly)];
+        if existing.params == expected_params && existing.return_type == projection.field_type {
+            return Ok(());
+        }
+        return Err(super::encoding_error(
+            CONFORMANCE_CONTEXT,
+            format!(
+                "conflicting helper signature for abstract receiver projection '{}'",
+                projection.uf_name
+            ),
+        ));
+    }
+    helpers.push(FunctionContext::new(
+        projection.uf_name.clone(),
+        vec![("__trust_vc_poly_self".to_string(), TrustVcType::Poly)],
+        projection.field_type.clone(),
+        crate::mode::FunctionMode::Spec,
+    ));
+    Ok(())
 }
 
 /// Clones `trait_decl` with `method`'s OWN `ensures` (and `default_ensures`)

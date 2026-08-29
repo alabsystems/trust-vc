@@ -451,10 +451,6 @@ impl<'a> AstExpressionParser<'a> {
 
     /// Simplify unsigned comparisons against literal 0 in int_mode (#2062).
     ///
-    /// In int_mode, unsigned arithmetic results are wrapped via `mod 2^w`, which
-    /// always produces values in `[0, 2^w)`. Certain comparisons against 0 are
-    /// therefore tautological or contradictory:
-    ///
     /// - `unsigned_expr >= 0` → always true
     /// - `0 <= unsigned_expr` → always true
     /// - `unsigned_expr < 0`  → always false
@@ -462,6 +458,27 @@ impl<'a> AstExpressionParser<'a> {
     ///
     /// Returns `Some(true)` for tautologies, `Some(false)` for contradictions,
     /// `None` when no simplification applies.
+    ///
+    /// # Why the operand must be subtraction-free
+    ///
+    /// The original justification was *"in int_mode, unsigned arithmetic results
+    /// are wrapped via `mod 2^w`, which always produces values in `[0, 2^w)`"*.
+    /// That premise DIED when quantifier bodies moved to faithful mathematical
+    /// arithmetic: `encode_int_arith` no longer wraps under a binder, so
+    /// `i - 1` for `i: u64` is now the honest `int` value `-1` at `i == 0`,
+    /// exactly as Verus types it (`u64 - u64 : int`, not `u64`).
+    ///
+    /// Left unrestricted the fold would be a false verify in BOTH polarities:
+    /// `forall|i: u64| i - 1 >= 0` folds to `true` (refuted by `i == 0`), and
+    /// `forall|i: u64| !(i - 1 < 0)` folds the inner compare to `false` and so
+    /// verifies (also refuted by `i == 0`).
+    ///
+    /// Restricting to operands with no `-` and no unary negation anywhere
+    /// restores the invariant the fold actually needs — every remaining leaf is
+    /// a genuinely unsigned-typed value (`>= 0` by Rust/Verus typing) and
+    /// `+`/`*`/`/`/`%` are monotone on non-negatives, so the whole expression is
+    /// non-negative. The #2062 motivating shape `forall(|j: u32| j + 1 >= 0)`
+    /// is subtraction-free and keeps folding.
     fn simplify_unsigned_zero_compare(
         op: CompareOp,
         left: &TrustVcExpr,
@@ -471,17 +488,64 @@ impl<'a> AstExpressionParser<'a> {
         let left_is_zero = is_trust_vc_literal_zero(left);
 
         match op {
-            // unsigned_expr >= 0 → true (mod result is always non-negative)
-            CompareOp::Ge if right_is_zero => Some(true),
+            // unsigned_expr >= 0 → true
+            CompareOp::Ge if right_is_zero && expr_is_subtraction_free(left) => Some(true),
             // 0 <= unsigned_expr → true
-            CompareOp::Le if left_is_zero => Some(true),
+            CompareOp::Le if left_is_zero && expr_is_subtraction_free(right) => Some(true),
             // unsigned_expr < 0 → false
-            CompareOp::Lt if right_is_zero => Some(false),
+            CompareOp::Lt if right_is_zero && expr_is_subtraction_free(left) => Some(false),
             // 0 > unsigned_expr → false
-            CompareOp::Gt if left_is_zero => Some(false),
+            CompareOp::Gt if left_is_zero && expr_is_subtraction_free(right) => Some(false),
             _ => None,
         }
     }
+}
+
+/// Whether `expr` contains no subtraction and no unary negation anywhere.
+///
+/// Narrowness pin for `simplify_unsigned_zero_compare`: `-` (and unary `-`) is
+/// the ONLY way an expression built from unsigned-typed leaves can take a
+/// negative mathematical value now that quantifier bodies encode faithful
+/// unbounded `int` arithmetic. `+`, `*`, `/` and `%` are all non-negative on
+/// non-negative operands, and every leaf whose static type is unsigned is
+/// non-negative by Rust/Verus typing. An explicit `WrappingArith` subtraction is
+/// excluded too — it is textually a `-` and the cheapest correct answer is to
+/// decline rather than reason about its width.
+///
+/// The walk is EXHAUSTIVE (`walk_expr` visits every child, including quantifier
+/// bodies, match arms and cast operands), so a `-` buried under a cast or a call
+/// argument still blocks the fold. Declining is the fail-closed direction: the
+/// comparison is then encoded and discharged by the solver as usual.
+fn expr_is_subtraction_free(expr: &TrustVcExpr) -> bool {
+    use crate::ir::ArithOp;
+    use crate::ir_expr_traversal::{walk_expr, TrustVcExprVisitor};
+
+    struct V {
+        found_subtraction: bool,
+    }
+    impl TrustVcExprVisitor for V {
+        fn visit_expr(&mut self, expr: &TrustVcExpr) {
+            if self.found_subtraction {
+                return;
+            }
+            match expr {
+                TrustVcExpr::Neg(_) => self.found_subtraction = true,
+                TrustVcExpr::Arith {
+                    op: ArithOp::Sub, ..
+                }
+                | TrustVcExpr::WrappingArith {
+                    op: ArithOp::Sub, ..
+                } => self.found_subtraction = true,
+                _ => walk_expr(self, expr),
+            }
+        }
+    }
+
+    let mut v = V {
+        found_subtraction: false,
+    };
+    v.visit_expr(expr);
+    !v.found_subtraction
 }
 
 fn finite_seq_literal_elements(expr: &TrustVcExpr) -> Option<Vec<&TrustVcExpr>> {

@@ -1103,11 +1103,17 @@ fn display_finding_path(root: &Path, path: &Path) -> String {
 /// A target is either a crate root (its `src/` tree is walked — the long-
 /// standing behavior, unchanged) or a single `.rs` file. Both cases delegate to
 /// `scan`, which is the only thing that reads Rust source here.
-fn scan_target(target: &Path) -> Vec<scan::AnnotatedFunction> {
+///
+/// Returns BOTH halves of the scan: the functions that get verdicts and the ones
+/// that do not. `run_verification` needs both so every `fn` item the scan saw
+/// reaches the report in exactly one bucket — reporting only the analyzed half
+/// is what let a contract spelled through a `use ... as ...` rename disappear
+/// entirely.
+fn scan_target_full(target: &Path) -> scan::FileScan {
     if target.is_file() {
-        scan::scan_file(target)
+        scan::scan_file_full(target)
     } else {
-        scan::scan_crate(target)
+        scan::scan_crate_full(target)
     }
 }
 
@@ -1145,8 +1151,18 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
         }
     }
 
-    let mut functions = scan_target(&args.crate_root);
-    if functions.is_empty() {
+    let scanned = scan_target_full(&args.crate_root);
+    let mut functions = scanned.analyzed;
+    // Functions the scan SAW but will never verify. They ride the same filters
+    // as the analyzed half and are appended to the report at the end, so the
+    // buckets partition the scanned set rather than covering part of it.
+    let mut unanalyzed = scanned.unanalyzed;
+    // Files that yielded NEITHER list because they could not be read or parsed.
+    // These never take the "0 functions found" path below: an unreadable file's
+    // function count is unknown, not zero, and answering it with the empty-file
+    // report is the fail-silent shape one level up from the dropped-function one.
+    let mut unscannable = scanned.unscannable;
+    if functions.is_empty() && unanalyzed.is_empty() && unscannable.is_empty() {
         if args.emit_certificate {
             let cert = certificate::generate_certificate(&[], root);
             if let Err(err) = certificate::write_certificate(&cert, root) {
@@ -1156,7 +1172,7 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
         }
 
         if args.json_output {
-            report::print_json(&[], root, args.localize);
+            report::print_json(&[], &[], root, args.localize);
         } else {
             println!("trust_vc check: 0 functions found");
         }
@@ -1165,9 +1181,15 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
     }
 
     // --function: exact function name match
+    //
+    // The name filters deliberately do NOT prune `unscannable`: a file that did
+    // not parse has no known function names, so it can neither match nor be
+    // ruled out. Reporting "no function named 'foo'" over an unparsed file would
+    // be a claim about source we never read.
     if let Some(ref name) = args.function_filter {
         functions.retain(|function| function.name == *name);
-        if functions.is_empty() {
+        unanalyzed.retain(|function| function.name == *name);
+        if functions.is_empty() && unanalyzed.is_empty() && unscannable.is_empty() {
             eprintln!("Error: no function named '{name}' found with trust_vc attributes");
             return Err(2);
         }
@@ -1176,7 +1198,8 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
     // --filter: substring match on function name
     if let Some(ref pattern) = args.filter {
         functions.retain(|function| function.name.contains(pattern.as_str()));
-        if functions.is_empty() {
+        unanalyzed.retain(|function| function.name.contains(pattern.as_str()));
+        if functions.is_empty() && unanalyzed.is_empty() && unscannable.is_empty() {
             eprintln!("Error: no functions matching filter '{pattern}'");
             return Err(2);
         }
@@ -1197,16 +1220,21 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
             }
             return Ok(report::Summary::from_verdicts(&[]));
         }
-        functions.retain(|function| {
+        let in_changed_files = |path: &Path| {
             changed_files.iter().any(|changed| {
                 // Canonicalize for robust comparison; fall back to direct comparison.
-                match (function.file_path.canonicalize(), changed.canonicalize()) {
+                match (path.canonicalize(), changed.canonicalize()) {
                     (Ok(a), Ok(b)) => a == b,
-                    _ => function.file_path == *changed,
+                    _ => path == changed.as_path(),
                 }
             })
-        });
-        if functions.is_empty() {
+        };
+        functions.retain(|function| in_changed_files(&function.file_path));
+        unanalyzed.retain(|function| in_changed_files(&function.file_path));
+        // `--diff` selects by FILE, so it is the one filter that applies to a
+        // file-level failure on its own terms.
+        unscannable.retain(|failure| in_changed_files(&failure.file_path));
+        if functions.is_empty() && unanalyzed.is_empty() && unscannable.is_empty() {
             if !args.json_output {
                 println!("trust_vc check: no annotated functions in changed files");
             }
@@ -1215,10 +1243,17 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
     }
 
     if args.verbose >= 1 && !args.json_output {
+        // The not-analyzed count is stated alongside the verified count, not
+        // hidden behind it: "verifying 3 functions" over a file of forty is a
+        // true sentence that reads like a false one.
         eprintln!(
-            "trust_vc: verifying {} function{} (jobs: {}, timeout: {})",
+            "trust_vc: verifying {} function{} of {} scanned ({} not analyzed, \
+             {} file(s) not scanned) (jobs: {}, timeout: {})",
             functions.len(),
             if functions.len() == 1 { "" } else { "s" },
+            functions.len() + unanalyzed.len() + unscannable.len(),
+            unanalyzed.len(),
+            unscannable.len(),
             effective_jobs(args),
             args.timeout
                 .map_or_else(|| "none".to_string(), |t| format!("{t}s")),
@@ -1242,7 +1277,7 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
     } else {
         Vec::new()
     };
-    let verdicts: Vec<verify::FunctionVerdict> = if use_detailed_verification {
+    let mut verdicts: Vec<verify::FunctionVerdict> = if use_detailed_verification {
         verifications
             .iter()
             .map(|verification| verification.verdict.clone())
@@ -1251,10 +1286,16 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
         verify_all(&functions, args)
     };
 
+    // Appended AFTER the verified set, never merged into it: `verifications`
+    // feeds the proof certificate, and a function that was never analyzed has
+    // nothing to certify. The report, which must account for every scanned
+    // function, gets both.
+    verdicts.extend(unanalyzed.iter().map(verify::not_analyzed_verdict));
+
     if args.json_output {
-        report::print_json(&verdicts, root, args.localize);
+        report::print_json(&verdicts, &unscannable, root, args.localize);
     } else {
-        report::print_human(&verdicts, root, args.localize);
+        report::print_human(&verdicts, &unscannable, root, args.localize);
     }
 
     if args.verbose >= 1 && !args.json_output {
@@ -1282,7 +1323,7 @@ fn run_verification(args: &CliArgs) -> Result<report::Summary, i32> {
         emit_hints(args, &verifications)?;
     }
 
-    Ok(report::Summary::from_verdicts(&verdicts))
+    Ok(report::Summary::from_parts(&verdicts, &unscannable))
 }
 
 /// Extracts proven facts from verification reports and emits optimization hints.
@@ -1762,6 +1803,9 @@ fn syn_verdict_word(kind: &verify::VerdictKind) -> &'static str {
         verify::VerdictKind::Unknown => "Unknown",
         verify::VerdictKind::Error => "Error",
         verify::VerdictKind::Skipped => "Skipped",
+        // Never `Verified`: a function the scan never analyzed has proved
+        // nothing, so the parity check must read it as "not verified".
+        verify::VerdictKind::NotAnalyzed => "NotAnalyzed",
     }
 }
 
@@ -3544,7 +3588,12 @@ fn create_cargo_trust_vc_project(args: &CargoTrustVcNewArgs) -> Result<(), Strin
     result
 }
 
+/// The scaffolded manifest pins the `trust-vc` release that matches this CLI.
+/// The requirement is read from `CARGO_PKG_VERSION` (both crates take
+/// `version.workspace = true`), so a workspace version bump carries the pin
+/// with it instead of leaving a hand-written literal to rot.
 fn cargo_trust_vc_new_manifest_template(name: &str) -> String {
+    let trust_vc_version = env!("CARGO_PKG_VERSION");
     format!(
         r#"[package]
 name = "{name}"
@@ -3555,7 +3604,7 @@ edition = "2021"
 verify = true
 
 [dependencies]
-trust_vc = {{ package = "trust-vc", version = "1.0" }}
+trust_vc = {{ package = "trust-vc", version = "{trust_vc_version}" }}
 "#
     )
 }

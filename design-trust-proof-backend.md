@@ -96,7 +96,8 @@ So the design is: **finish and lean into this boundary**, not invent a new one.
   │            ▼                                                               │
   │      VerifyResult  +  ay UNSAT proof                                        │
   │            ▼                                                               │
-  │      trust-vc-kernel  → checks the certificate independently               │
+  │      trust-vc-kernel  → re-checks the certificate (resolution + EUF/LRA;   │
+  │                          NIA/BV/Array/Seq accepted on trust)               │
   │            ▼                                                               │
   │      trust_ir::ProofCertificate / ProofEvidence / ProofLineageNode  ───────┼──▶ back to Trust
   └────────────────────────────────────────────────────────────────────────────┘
@@ -140,6 +141,14 @@ capabilities trust-vc owns:
    Trust, a "Verified" is *certificate-checked by a small, separate kernel*. This
    is a soundness property Verus structurally cannot match, and trust-ir already
    models the certificate lineage end to end.
+   **Scope this honestly, today:** the kernel checks propositional resolution
+   plus structural EUF (transitivity/congruence) and LRA (Farkas) lemmas, and
+   returns `Trusted` for **NIA, BV, Array and Seq**
+   (`crates/trust-vc-kernel/src/lib.rs:17`, `theory_check/mod.rs:44`) — the
+   theories the machine-integer and collection encodings lean on hardest. Alethe
+   is one of the kernel's *export* formats, not an input it re-checks. Closing
+   that gap is item 6.2 below; until it closes, the headline is a structural
+   advantage over Verus, not a delivered end-to-end guarantee.
 2. **One verifier across all levels.** Trust reasons about MIR/exec + borrows
    (`trust_verify`, `mir_memory`), model checking (trust-mc), separation logic
    (trust-wp), **and** the proof calculus (trust-vc) — over **one** IR family and
@@ -154,12 +163,17 @@ capabilities trust-vc owns:
    surface (where Verus must lean on Z3's MBQI/e-matching) into *decidable*
    territory — and because we **own** ay, every completeness gap is a fixable,
    measurable target (the differential oracle), not a black box.
-5. **No Z3, no external SMT.** Reproducible, dependency-clean (ay's TCB is
-   GMP/MPFR/libc + a self-hosted JIT), and shippable inside the Trust toolchain.
-6. **Cross-IR portability + differential oracle.** Because trust-vc consumes the
-   universal `trust-ir`, it can verify Trust MIR *and* Verus-surface programs under
-   one engine, and run ay-vs-Z3 differentially on identical SMT — a portability and
-   cross-checking claim beyond Verus's Rust-only, Z3-only scope.
+5. **No Z3, no external SMT.** Reproducible, dependency-clean (ay's native TCB
+   is `libc` for resource limits plus `ay-jit`, its self-hosted JIT; GMP/MPFR via
+   `rug` are gone — they left `Cargo.lock` at `9d3f8fc5` and arbitrary precision
+   is now `num-bigint`), and shippable inside the Trust toolchain.
+6. **Cross-IR portability + differential cross-checking.** Because trust-vc
+   consumes the universal `trust-ir`, it can verify Trust MIR *and* Verus-surface
+   programs under one engine, and the same SMT can be run ay-vs-Z3 differentially
+   — a portability and cross-checking claim beyond Verus's Rust-only, Z3-only
+   scope. The oracle that does that differential now lives in **ay**, as its
+   `ay-z3-parity classify` subcommand; it was extracted out of trust-vc at R1 and
+   is no longer a deliverable of this repo.
 
 **The crisp statement of "better":** *Verus proves Rust with Z3 you must trust;
 Trust+trust-vc proves Rust — and MIR, and protocols — with ay you can check.*
@@ -227,7 +241,8 @@ evidence gate (parity benchmark).
 4. **ay Problem-B program (parallel, front-end-independent)** — native-theory
    completeness for symbolic collections, MBQI counterexample finding, nonlinear
    (Gröbner/CAD). A perfect front end still emits VCs ay must discharge; this is
-   the differential-oracle + native-theory track from `grand-strategy-ay.md`.
+   the differential-oracle + native-theory track from `grand-strategy-ay.md` —
+   owned in ay (`ay-z3-parity`), not here.
 
 ---
 
@@ -274,7 +289,9 @@ gated stable build and evidence gate are undisturbed):
   ay UNSAT proof, and surfaces a `Certificate { kernel_verified, strict_verified,
   alethe, … }`. `tests/certificates.rs` proves the edge concretely: a verified
   function yields a certificate with **`kernel_verified == true`** (trust-vc-kernel
-  independently re-checked a ~350-char Alethe proof); a refuted goal carries none.
+  re-checked the resolution trace and exported a ~350-char Alethe rendering of it —
+  Alethe is an output format here, not the thing being re-checked); a refuted goal
+  carries none.
   *This is the soundness property Verus's black-box Z3 cannot provide, now realized
   at the front-end seam.*
 - **The standalone rustc-driver skeleton** (`feature = "rustc-driver"`, nightly) —

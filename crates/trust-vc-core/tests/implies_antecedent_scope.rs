@@ -110,6 +110,13 @@ fn implies_antecedent_does_not_leak_into_the_enclosing_scope() {
              out as a free assumption of the enclosing function. Verus scopes it to the block; \
              this proves strictly more."
         ),
+        // CLOSED (ay `e7385d1a3`): the refutation-power gap this arm briefly
+        // tolerated — a native-API-declared head refused as a projection
+        // binding, so the SAT certificates declined and the genuinely SAT
+        // counterexample surfaced as `NotProved (quantifier-unhandled)` — is
+        // fixed at the solver, and this pin is back to Counterexample-only.
+        // ay's `native_declaration_projection_binding.rs` carries the
+        // solver-level twin of this exact query.
         other => panic!("expected a counterexample on `y > 100`, got {other:?}"),
     }
 }

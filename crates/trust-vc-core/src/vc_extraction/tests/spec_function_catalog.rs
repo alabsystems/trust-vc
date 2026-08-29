@@ -965,28 +965,25 @@ fn source_spec_recommends_resolves_module_qualified_trait_path() {
         #[trust_vc::ensures(guarded(s))]
         fn target(s: Seq<u8>) {}
     "#;
+    // This test guards a bare-name collision: `b::Tr::trait_fn` must not be
+    // typed `Option<u8>` using the same-bare-named `a::Tr`. It originally
+    // asserted that resolution picked `b::Tr` and typed the helper `bool`.
+    //
+    // `reject_duplicate_trait_names` (c13e022a) now delivers that same guarantee
+    // one step earlier and more strongly: EVERY trait registry in the engine is
+    // keyed by the bare ident, so a file declaring `a::Tr` and `b::Tr` has no
+    // faithful representation and is refused outright rather than resolved. The
+    // property under test is unchanged — `a::Tr` can never supply the typing —
+    // but it is now enforced by rejection, so the expectation is updated to the
+    // fail-closed contract instead of the resolve-correctly one.
     let file = syn::parse_file(code).expect("source should parse");
     let func = find_function(&file, "target").unwrap();
-    let vc = extract_verification_conditions_with_file_context(&file, func).unwrap();
-
-    let trait_fn_helpers = vc
-        .helper_functions_typed
-        .iter()
-        .filter(|(name, _)| name.contains("trait_fn"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        trait_fn_helpers.len(),
-        1,
-        "module-qualified trait path should register one helper, got {trait_fn_helpers:?}"
-    );
-    let (return_ty, _, _) = vc
-        .helper_functions_typed
-        .get(trait_fn_helpers[0].0)
-        .expect("associated trait helper should be typed");
-    assert_eq!(
-        *return_ty,
-        TrustVcType::Bool,
-        "b::Tr::trait_fn should not be typed using same-bare-name a::Tr"
+    let err = extract_verification_conditions_with_file_context(&file, func)
+        .expect_err("two traits sharing the bare ident `Tr` must fail the file closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("both named `Tr`") && message.contains("bare name"),
+        "rejection should name the colliding trait ident, got {message}"
     );
 }
 

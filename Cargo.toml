@@ -22,7 +22,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alabsystems/trust-vc"
@@ -36,42 +36,32 @@ authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 #
 # ay pin — tiers. `alabsystems/ay` is the DEV tier (agents push it freely);
 # `alabsystems/ay` is the PUBLIC release tier, which only a human can write via
-# `pub promote`. alabsystems has published only up to v0.13.0's predecessor, so
-# the pin below names the dev tier. Flip the URL to
-# `https://github.com/alabsystems/ay.git` (same rev) once a human promotes
-# v0.13.0 there.
+# `pub promote`. The public tier may lag the dev authority, so the pin below
+# names the dev tier. Publication remaps an attested dev revision to the
+# corresponding public snapshot; never guess that mapping here.
 #
-# Pinned to a 40-HEX SHA — never a tag, never branch=main. A tag is a MOVING
-# selector: the constellation's own gates reject it outright (ty's
-# `check_reproducible_git_pins.py`, trust-mc's `check_first_party_git_pins.py`,
-# clean's `check_ay_updates.py` and `publish/transform.py` all hard-require
-# `^[0-9a-fA-F]{40}$`). The sha below is ay tag v0.13.0.
-#
-# The `version` req must MOVE WITH ay on every bump: cargo checks a [patch]ed
-# source against it, and a stale req does NOT merely drift — cargo SILENTLY
-# DROPS the whole [patch] and resolves the git pin instead, emitting only
-# `warning: patch ... was not used in the crate graph` with exit 0. That is how
-# the 0.11.0 req survived ay's 0.11 -> 0.12 -> 0.13 releases while every local
-# gate secretly measured the pinned git source rather than `../ay`. Verify
-# after any bump: `targo metadata` must show the ay crates resolving to PATH
-# and print ZERO "was not used in the crate graph" warnings.
+# Pinned to a 40-HEX SHA — never a tag or branch=main — so the evidence gate's
+# "common ay pin" check resolves one immutable provenance. The `version` req
+# must MOVE WITH ay on every bump: cargo checks a [patch]ed source against it,
+# and a stale req silently drops the sibling patch and resolves the git pin.
 # (`+g<sha>` build metadata does NOT help — cargo ignores build metadata when
 # matching versions; only a MINOR bump makes a mismatch fail loudly.)
 #
-# NOTE: `.cargo/config.toml` [patch]es all four to the sibling `../ay` checkout,
-# so this pin is NOT what local builds compile — it is what a standalone clone
-# would fetch. Bump all four together with ../ay's [workspace.package] version.
-ay-core = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
-ay-dpll = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
-ay-frontend = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
-ay-sys = { version = "0.13.0", git = "https://github.com/alabsystems/ay.git", rev = "a533b9ebf54427ff4a375b15579f2f7d2298d601" }
+# NOTE: committed `.cargo/config.toml` [patch]es all four to the sibling `../ay`
+# checkout, so local builds compile that worktree. The evidence gate preserves
+# BOTH authorities and requires the clean sibling HEAD to equal this exact rev.
+# Bump all four rows and the version together with the sibling identity.
+ay-core = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
+ay-dpll = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
+ay-frontend = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
+ay-sys = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
 # ty and trust-ir are rev-pinned (not branch=main) for reproducible standalone
 # builds. ty's internal tla-ir -> trust-ir-build dependencies still name
 # trust-ir's main branch, so Cargo.lock must pin those branch sources to the
 # same trust-ir commit as the direct dependency. Update both sources together.
-tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "21a31de828a2b99f40fdff0ac0f0569244182609" }
-tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "21a31de828a2b99f40fdff0ac0f0569244182609" }
-trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "32a2c54b555c884a40020093f5910cbb5e2050ab", default-features = false, features = ["clean-expr"] }
+tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "a13fc3bcca38a65e2be43aeb97086b6cd649dc76" }
+tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "a13fc3bcca38a65e2be43aeb97086b6cd649dc76" }
+trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "036e1ea8a3994b0eeb826c88e6116cf076560aea", default-features = false, features = ["clean-expr"] }
 
 # BigInt for 128-bit bitvector constants
 num-bigint = "0.4"
@@ -145,13 +135,12 @@ opt-level = 3
 [profile.release]
 strip = "debuginfo"
 
-# Local cross-repo co-development override: sibling [patch] redirects for the ay
-# git deps above live in `.cargo/config.toml`, which IS TRACKED and IS ACTIVE —
-# so a clone of trust-vc REQUIRES a sibling `../ay` checkout, and local builds
-# compile that working tree rather than the rev pinned above. Keep each override
-# keyed to the exact git source above, and keep the `version` reqs in step with
-# ../ay, so Cargo retains a single package identity per owned crate and does not
-# silently drop the patch. See that file's header for the full failure mode.
+# Cross-repo co-development override: the sibling [patch] redirects for the Git
+# deps above are committed in `.cargo/config.toml`. Every build therefore needs
+# the authenticated sibling checkout; the evidence gate binds its clean HEAD to
+# the exact manifest authority. Keep the patch key byte-aligned with the Git
+# source and the version in step with the sibling so Cargo retains one direct
+# package identity instead of silently dropping the patch.
 
 [workspace.metadata.atpkg]
 # The user-facing commands here, both produced by crate cargo-trust-vc and both

@@ -1,68 +1,49 @@
-# trust-vc v1.0
+# trust-vc v0.3
 
 trust-vc is the **proof-calculus and SMT backend of Trust** (the Trust rustc
-fork), where it lives as the `first-party/trust-vc` submodule.
-Its destination is to be Trust's proof backend: it consumes Trust's compiler IR
-(`trust-ir`), discharges proof obligations on the pure-Rust **ay** SMT solver
-(no Z3, ay is git-pinned), and emits independently-checkable proof certificates
-back to Trust.
+fork), where it lives as the `first-party/trust-vc` submodule. It consumes
+Trust's compiler IR (`trust-ir`), discharges proof obligations on the pure-Rust
+**ay** SMT solver (no Z3; ay is pinned by exact git revision), and emits proof
+certificates back to Trust.
 
-**R1 (2026-07-11) retired the Verus-surface program — and was AMENDED two days
-later.** `docs/capability-audit-2026-07-13.md` §preamble reinstates the program
-in two phases, and the **ACTIVE GOAL** (author-set 2026-07-15, re-affirmed
-2026-07-18) is **100% of Verus functionality in trust-vc at "full or
-superior"** — verification-power parity on the native surface across the whole
-156-file corpus, per `docs/execution-plan-100-verus-2026-07-15.md` §2/§5.
-Phase 1: all of Verus's verification functionality on a better, ay/Trust-native
-surface (no slavish copying; diagnostic-string byte-parity stays retired).
-Phase 2 (follow-up): drop-in Verus replacement, scoped in that doc's §8.
-R1 was a documentation-only change — it deleted no macro, no CLI, no driver:
-the 69-macro frontend, targo-trust-vc (invoked `targo trust-vc`;
-`cargo trust-vc` alias), and `trust-vc-driver` are retained Phase-2 assets,
-not debt. Per the ratified two-language spec-surface design (the Trust repo's
-`docs/design/2026-07-09-two-language-spec-surface.md` §6, §3.2), Trust still
-ships **one** spec surface (first-class Rust contract clauses + Clean) and
-engines stay invisible backends behind trust-router.
-What trust-vc **is**: the fleet's auto-active SMT proof-calculus engine
-(triggers, fuel, broadcast, `calc!`, `by(compute)`) — trust-vc-core +
-trust-vc-trust-engine + trust-vc-types behind the router, with the ay-native
-collection theory encodings and the production `mir_memory` certificate lane.
-The 156-file Verus corpus is retained forever as regression material, re-keyed
-to the native Trust surface at R4; the evidence gate is the corpus-port
-instrument that measures the active goal.
+Inside Trust the front end is `trust-vc-trust-engine`, which consumes `trust-ir`
+requests carrying resolved compiler facts (types/borrows); Trust ships one spec
+surface (first-class Rust contract clauses plus Clean) with engines as invisible
+backends. The `trust_vc::*` annotation dialect documented below is trust-vc's
+*own* surface — what the standalone `trust-vc` command reads and what the
+Verus-compatibility driver targets. The 156-file Verus corpus under
+`evals/verus/` is retained as regression material; the `evidence` gate below
+measures parity against it.
 
-> North-star design: see `design-trust-proof-backend.md` (Trust proof
-> backend). `design-rustc-driver-frontend.md` (the Verus-compat front
-> end) is historical — superseded at R1.
+> North-star design: `design-trust-proof-backend.md` (Trust proof backend).
+> `design-rustc-driver-frontend.md` (the Verus-compat front end) is
+> historical — superseded at R1 (2026-07-11).
 
-**Author:** Andrew Yates <andrewyates.name@gmail.com> · **Version:** 1.0.0 · **License:** Apache-2.0
+**Author:** Andrew Yates <andrewyates.name@gmail.com> · **Version:** 0.4.0 · **License:** Apache-2.0
 **Copyright:** 2026 Andrew Yates
 
 ## What trust-vc Does
 
-trust-vc proves mathematical properties of Rust code — preconditions, postconditions, loop invariants, termination measures, quantifiers — automatically, using the ay SMT solver. As Trust's proof backend it lowers resolved compiler facts (types/borrows from `trust-ir`) into its own typed IR, discharges them through ay, and re-checks ay's UNSAT/Alethe proofs to produce certificates Trust can trust. Users reach it through Trust's native contract surface via trust-router — the trust-vc-specific annotation dialect is not a user-facing surface (R1 as amended: the native surface is primary; the macro frontend is a retained Phase-2 compat asset).
+trust-vc proves mathematical properties of Rust code automatically —
+preconditions, postconditions, loop invariants, termination measures,
+quantifiers. This is the program `trust-vc example` prints; it verifies as-is:
 
 ```rust
-use trust_vc::*;
-
-#[trust_vc::proof]
-fn lemma_double_positive(x: u64) {
-    trust_vc::requires!(x > 0);
-    trust_vc::ensures!(x + x > x);
-    // ay proves: for all x > 0, x + x > x (under bitvector arithmetic)
-}
-
-#[trust_vc::proof]
-#[trust_vc::decreases(n)]
-fn lemma_sum_nonneg(n: u64) {
-    if n > 0 {
-        lemma_sum_nonneg(n - 1);  // recursive example; self-recursion verified via fuel encoding
-    }
-    trust_vc::assert!(sum(n) >= 0);
+/// Returns `x + 1`, proven greater than `x` when `x < u32::MAX`.
+#[trust_vc::contract(
+    requires(x < u32::MAX),
+    ensures(ret > x),
+    returns(ret),
+)]
+fn increment(x: u32) -> u32 {
+    x + 1
 }
 ```
 
-When you run `targo --unverified test`, trust_vc collects proof obligations from your annotations and sends them to ay. Each assertion is checked via refutation: ay attempts to find a counterexample to `NOT(assertion)`. If no counterexample exists (UNSAT), the assertion is verified. If ay finds one, it reports the concrete values that violate the property. `--unverified` describes the outer Trust compiler lane; these trust_vc engine checks still run.
+Each assertion is checked by refutation: ay attempts to find a counterexample to
+`NOT(assertion)`. UNSAT means verified; SAT means ay reports the concrete values
+that violate the property. Delete the `requires` line above and the proof fails
+with `x = 4294967295`.
 
 ## How It Works
 
@@ -70,16 +51,18 @@ When you run `targo --unverified test`, trust_vc collects proof obligations from
 
 ```
 crates/
-├── cargo-trust-vc/         # CLI wrapper, package `targo-trust-vc` (`targo trust-vc check`; `cargo trust-vc check` alias)
+├── cargo-trust-vc/         # CLI, package `targo-trust-vc` — builds both the `trust-vc`
+│                           #   and `cargo-trust-vc` bins
 ├── trust-vc/               # Proc macros (#[proof], #[decreases], requires!, etc.)
 ├── trust-vc-core/          # Verification engine (encoder, VC generation, ay interface)
-├── trust-vc-driver/        # rustc-driver (THIR) front end — the one crate needing the Trust rustc fork
+├── trust-vc-driver/        # Typed lowering seam + rustc-driver (THIR) Verus-compat front
+│                           #   end — the one crate needing the Trust rustc fork
 ├── trust-vc-kernel/        # Proof certificate wire format + independent resolution checker
 ├── trust-vc-merge-contract/# Versioned MergeBundle boundary for Trust integration
 ├── trust-vc-merge-runner/  # Merge parity gate runner
 ├── trust-vc-oracle/        # LLM proof oracle — semantic counterexample feedback
 ├── trust-vc-std/           # Standard-library lemma surface for specifications
-├── trust-vc-trust-engine/  # Trust adapter: consumes trust-ir compiler facts, emits proof certificates
+├── trust-vc-trust-engine/  # Trust adapter: consumes trust-ir compiler facts
 └── trust-vc-types/         # Ghost types (Seq, Set, Map) for specifications
 ```
 
@@ -89,15 +72,15 @@ crates/
 Annotated Rust code
     │
     ▼
-Proc macros expand annotations        (trust-vc/src/lib.rs)
+Proc macros expand annotations         (trust-vc/src/lib.rs)
     │
     ▼
 Obligation collection via              (trust-vc-core/src/verify_macro.rs)
 thread-local context
     │
     ▼
-Rust expressions lowered to trust-vcExpr (trust-vc-core/src/ir_lowering/)
-typed IR and encoded to ay terms
+Rust expressions lowered to            (trust-vc-core/src/ir_lowering/)
+`TrustVcExpr` typed IR
     │
     ▼
 AYEncoder encodes obligations:         (trust-vc-core/src/encoder/)
@@ -108,17 +91,19 @@ AYEncoder encodes obligations:         (trust-vc-core/src/encoder/)
     │
     ├─ UNSAT  → Verified ✓
     ├─ SAT    → Counterexample (model extracted)
-    └─ Unknown → solver limit reached
+    └─ Unknown → budget exhausted (fails closed)
 ```
 
-### Three Compilation Modes
+### Compilation Modes
 
-Each proc macro generates code for three `cfg` targets:
+Each proc macro generates code for four `cfg` lanes, which are mutually
+exclusive:
 
 | Mode | When | Behavior |
 |------|------|----------|
 | `cfg(test)` | `targo --unverified test` | Collects obligations, invokes ay, panics on counterexample |
 | `cfg(trust_mc)` | trust-mc verifier | Emits `__trust_vc_*` marker variables for trust-mc to consume |
+| `cfg(trust_vc_driver)` | `trust-vc-driver` | Emits `trust_vc_core::__driver_markers::*` surface-bridge calls |
 | default | `targo --unverified build` | Proof functions become no-ops; assertions become runtime panics |
 
 ### What ay Encodes
@@ -129,21 +114,30 @@ The encoder (`encoder/`) handles:
 - **Boolean logic** — &&, ||, !, with proper short-circuit semantics
 - **Comparisons** — signed and unsigned variants selected per-expression
 - **Type casts** — widening (sign/zero extend), narrowing (extract), signed↔unsigned
-- **Collections** — `Seq<T>` as `Array(BV64, T)`, `Set<T>` as `Array(T, Bool)`, `Map<K,V>` as `Array(K, V)`
+- **Collections** — `Seq<T>` as `Array(BV<usize>, T)`, `Set<T>` as `Array(T, Bool)`,
+  `Map<K,V>` as `Array(K, V)`, `Multiset<T>` as `Array(T, Int)`
 - **Quantifiers** — `forall!` and `exists!` with trigger patterns
 - **Match expressions** — compiled to chained if-then-else
 - **Function calls** — recursive functions as uninterpreted functions with decrease checks
 - **Division safety** — literal division by zero rejected during encoding; variable divisors checked via SMT
 
-Solver limits: 30s timeout / 128MB term-memory per assertion (overridable via `#[rlimit]`). BV-mode queries use a 10s thread watchdog since ay-dpll's BV solver bypasses internal timeout. Extended retry uses 20s for marginal BV timeouts (#2313).
+Per-solve budgets are **deterministic work first, wall clock only as a liveness
+backstop**, and both fail closed — exhausting either yields `Unknown`, never
+`Verified`:
 
-The in-tree performance proof and regression-gate coverage is maintained in
-the internal engineering notes that are not shipped in the public mirror.
+- 400,000-conflict deterministic budget, overridable per function with
+  `#[verifier::rlimit(N)]`;
+- 30s wall-clock backstop (a quantified solve gets a wider far-out watchdog —
+  130s with the defaults);
+- 60s thread watchdog on ground bit-blasted BV queries, because ay-dpll's BV
+  solver is not interruptible; a marginal BV timeout is retried once at 2×;
+- 512MB process memory limit. A per-encoder term-memory cap is opt-in via
+  `TRUST_VC_TERM_MEMORY_MB`.
 
 ## Features
 
-The tables below highlight the common user-facing surface. The fuller exported
-proc-macro inventory lives in `crates/trust-vc/src/lib.rs`.
+The tables below highlight the common user-facing surface. The full 69-macro
+inventory lives in `crates/trust-vc/src/lib.rs`.
 
 ### Common Proof Annotations
 
@@ -186,30 +180,25 @@ proc-macro inventory lives in `crates/trust-vc/src/lib.rs`.
 | `trust_vc::arbitrary!(T)` | Introduce an unconstrained symbolic value of type `T` |
 | `trust_vc::closure!(...)` | Closure literal with verification contracts |
 
-### Legacy Experimental Protocol Surface
-
-| Annotation | Purpose |
-|-----------|---------|
-| `#[trust_vc::protocol]` | TY protocol state machine declaration |
-| `#[trust_vc::action]` | TY next-state action declaration |
-| `#[trust_vc::safety]` | TY safety invariant declaration |
-| `#[trust_vc::liveness]` | TY liveness property declaration |
-
-Feature-gated behind `ty`. This bridge remains in trust_vc for compatibility
-and internal experiments, but protocol verification is not part of the active
-trust_vc roadmap; strategic ownership lives in `trust-mc` / `tRust`.
+`#[trust_vc::protocol]`, `#[trust_vc::action]`, `#[trust_vc::safety]` and
+`#[trust_vc::liveness]` are a legacy experimental bridge to TY protocol state
+machines. The macros always compile; the model-checking backend is behind the
+`ty` feature. Protocol verification is not on the active trust-vc roadmap —
+strategic ownership lives in `trust-mc` / `tRust`.
 
 ### Ghost Types (trust-vc-types)
 
-Specification-only collection types. These are `PhantomData` wrappers — zero runtime cost, used only in proof context.
+Specification-only types, used only in proof context. The collection wrappers
+are zero-sized `PhantomData` markers; `List`/`Tree` are real enums used for
+structural induction.
 
 | Type | ay Encoding | Key Operations |
 |------|-------------|----------------|
-| `Seq<T>` | `Array(BV64, T)` | `len()`, `index()`, `push()`, `subrange()` |
+| `Seq<T>` | `Array(BV<usize>, T)` | `len()`, `index()`, `push()`, `subrange()` |
 | `Set<T>` | `Array(T, Bool)` | `contains()`, `insert()`, `remove()`, `union()`, `intersect()` |
 | `Map<K,V>` | `Array(K, V)` | `get()`, `insert()`, `contains_key()`, `dom()` |
+| `Multiset<T>` | `Array(T, Int)` | `count()`, `insert()`, `remove()`, `union()`, `intersect()` |
 | `Ghost<T>` | unwrapped `T` | `view()` — extract ghost value in spec context |
-| `Multiset<T>` | `Array(T, BV64)` | `count()`, `insert()`, `remove()`, `union()`, `intersect()` |
 | `Tracked<T>` | unwrapped `T` | Linear/affine ghost ownership for proof mode |
 | `Proph<T>` | unwrapped `T` | Prophecy variables for future-value reasoning in proof mode |
 | `List<T>` | UF datatype (Nil/Cons) | Recursive linked list for structural induction |
@@ -220,139 +209,119 @@ Specification-only collection types. These are `PhantomData` wrappers — zero r
 
 ## Current Status
 
-**Build:** passes `targo --unverified check --workspace --all-targets` in this checkout. **Verus replacement:** evidence-gated by
-`./target/debug/targo-trust-vc evidence` (the `cargo-trust-vc` bin remains as a back-compat alias); **`replacement_verdict: not_proven`** today — not proven until the full trust-vc,
-upstream Verus, and corpus gates pass from a clean worktree. **Honest parity:** the feature surface below is broad, but only
-~12–15% of the upstream Verus test corpus is genuinely ported at the proof-language level (111 of 156 entries are
-`unsupported-gap`). Do not read "broad feature list" as Verus parity; the gate is the source of truth. The dependency-ordered
-path to a proven replacement lives in the internal parity-to-100 program plan. **Lines:** about
-727k Rust across 11 workspace crates (source + tests). **Note:** there is
-**no CI** — every gate is a local script (`scripts/quality_audit.py`,
-`scripts/stock-harness.sh`, the merge-parity gate) run by hand, so test health
-is not gate-enforced; run `targo --unverified test` locally before relying on a checkout.
+**Verus replacement: not proven.** `evals/verus/verus-tests.json` pins 156
+upstream Verus test files — **46 `ported`, 106 `unsupported-gap`, 4
+`not-applicable`**. `unsupported-gap` is a failing classification under the
+manifest's own gate, so `replacement_verdict` is `not_proven` and stays that way
+until every entry is `ported` or `not-applicable` *and* the full trust-vc,
+upstream-Verus and corpus gates pass from a clean worktree. The feature tables
+above describe **in-repo surface, not corpus acceptance** — do not read a broad
+feature list as Verus parity. The gate is the source of truth.
+
+**Scale.** About 922k lines of Rust across the 11 workspace crates (source and
+tests), including 900+ integration test files and compile-fail tests via
+trybuild.
+
+**No CI.** There is no `.github/workflows`; every gate is local.
+`targo trust-vc gate` runs fmt, clippy, test, examples, evidence triage and a
+fuzz smoke in one command; `scripts/quality_audit.py`, `scripts/stock-harness.sh`
+and `scripts/merge_parity_gate.py` run individually. Test health is therefore not
+enforced on push — run the gate locally before relying on a checkout.
 
 ### Replacement Evidence
 
 Generate the current replacement evidence report:
 
 ```bash
-./target/debug/targo-trust-vc evidence . --strict --run-trust-vc --run-trust-vc-corpus --run-verus \
+./target/debug/targo-trust-vc evidence . --strict --run-trust_vc --run-trust-vc-corpus --run-verus \
   --verus-path /path/to/verus --verus-rev <verus-commit> \
   --manifest evals/verus/verus-tests.json --json --markdown
 ```
 
-The command exits `0` only when every required gate passes. It exits `1` and
-writes a `not_proven` report when evidence is incomplete, including manifest-only
-runs, missing upstream Verus enumeration, unclassified tests, unsupported gaps,
-dirty worktrees, stale ay pins, or failed trust-vc/Verus test commands.
-The JSON and Markdown reports expose accepted executable ports separately from
-unsupported-gap evidence: accepted ports include owner issues, trust-vc paths,
-expected cases, source hashes, obligation fingerprints, and proof-gap status
-that must remain empty; unsupported entries may list partial cases, but those
-cases do not count toward a replacement claim.
+Exit `0` only when every required gate passes; otherwise exit `1` and write a
+`not_proven` report — manifest-only runs, missing upstream Verus enumeration,
+unclassified tests, unsupported gaps, dirty worktrees, stale ay pins, and failed
+trust-vc/Verus test commands all block. The reports keep accepted executable
+ports (with owner issue, trust-vc path, expected cases, source hash, obligation
+fingerprint, and a proof-gap status that must be empty) separate from
+unsupported-gap evidence, whose partial cases never count toward a replacement
+claim.
 
 ### Feature Highlights
 
-Where these go beyond Verus: trust-vc emits **independently-checkable proof
-certificates** (ay UNSAT/Alethe proofs re-checked by `trust-vc-kernel`), whereas
-Verus trusts a black-box Z3 with no checkable artifact; it rides **native ay
-decision procedures** (Seq/Set/Map/Multiset/String/FP/BV) that sidestep Z3's
-MBQI/quantifier fragility; it uses **no Z3** (pure-Rust, reproducible); and as
-Trust's proof backend it contributes to one unified verifier (MIR/exec +
-borrows + model checking + separation logic + proof calculus, one engine, one
-solver) rather than a Rust-surface-plus-Z3 silo. It also offers cross-IR
-portability and an ay-vs-Z3 differential oracle.
+**Checkable proof certificates.** Under the `proof-certificates` feature, ay's
+UNSAT resolution trace is re-checked by `trust-vc-kernel`: an independent
+propositional resolution checker, plus structural validation of EUF
+(transitivity/congruence) and LRA (Farkas) theory lemmas. Lemmas from theories
+the kernel does not yet check — **NIA, BV, Array, Seq — are accepted on trust**
+and are part of the trusted computing base. Certificates export to JSON, binary,
+Alethe, DRAT, and Lean5 proof terms.
 
-- Broad proc macro surface (69 macros) with three-way cfg expansion (test/trust-mc/runtime)
+**No Z3.** The solver is the pure-Rust `ay` stack, pinned by exact git revision.
+No external or third-party SMT solver is invoked at build time or at run time.
+
+**Native ay theories.** Set/Multiset/Map subset obligations lower to ay's native
+`set.subset` / `multiset.subset` / `map.subset` atoms rather than a quantified
+array encoding, so they decide without MBQI. ay's native `Seq` and `String`
+sorts are wired behind the opt-in `native-seq` / `native-strings` features; the
+default encodings are arrays.
+
+Engine surface:
+
+- 69 proc macros with four-way cfg expansion (test / trust-mc / driver / runtime)
 - End-to-end verification: annotation → obligation collection → ay solving → result
 - Bitvector-precise arithmetic for all Rust integer types (i8–i128, u8–u128)
 - Pre/postconditions, loop invariants, proof functions, recursive termination (self + mutual via Tarjan SCC)
-- Quantifiers (forall/exists) with automatic trigger inference
+- Quantifiers (forall/exists) with automatic trigger inference and adaptive E-matching escalation
 - Ghost collections (Seq, Set, Map, Multiset) with higher-order combinators (fold, filter, map, flat_map)
 - Datatype encoding (Option/Result, recursive ADTs), polymorphism (Poly/Box/Unbox), trait verification
-- Mutable reference verification via SSA shadow rewriting
-- Place-based reasoning for memory locations
+- Mutable reference verification via SSA shadow rewriting; place-based reasoning for memory locations
 - Mode-aware overflow/division/shift checking (OverflowBehavior/Div0Behavior/BitshiftBehavior)
 - Real number arithmetic, nondeterministic expressions, prophecy variables
-- Broadcast lemmas, reveal/hide/opaque, inline spec functions, SMT pruning
-- calc!, assert_by, assert_by_contradiction, assert_by_compute, choose
-- Proof-call postcondition propagation (ensures assumed at call site)
-- Loop invariant auto-inference for `for i in range` loops
-- Per-function rlimit, recommends clauses, extern specs
+- Broadcast lemmas, reveal/hide/opaque, inline spec functions; calc!, assert_by,
+  assert_by_contradiction, assert_by_compute, choose
+- Proof-call postcondition propagation, loop invariant auto-inference for
+  `for i in range`, per-function rlimit, recommends clauses, extern specs
 - Specialized solver modes: nonlinear arithmetic, bitvector, compute
-- SMT reachability pruning to reduce solver load
-- Compile-fail tests via trybuild, 300+ integration test files
+- Incremental solving (push/pop reuse), VC-level caching, parallel function
+  verification, per-assertion SMT reachability pruning, source-level
+  counterexamples, proof-failure localization, demand-driven cross-function
+  inlining, optimization hints from proven facts (`--emit-hints`)
 
-### Roadmap: Verus Parity, then Trust's Proof Backend
-
-The near-term milestone is evidence-gated Verus replacement/compatibility (the
-parity benchmark). The destination is serving as Trust's proof backend, where
-the capabilities below — independently-checkable certificates, incremental
-solving, parallel verification, source-level counterexamples — feed Trust's
-unified verifier rather than a standalone tool.
-
-| Priority | Capability | Status | Tracking |
-|----------|------------|--------|----------|
-| **P1** | Incremental solving (push/pop reuse) | done | #2648 |
-| **P1** | Parallel function verification | done | #2647 |
-| **P2** | Counterexample extraction to source level | done | #2651 |
-| **P1** | VC-level caching | done | #2646 |
-| **P2** | Per-assertion SMT pruning | done | #2649 |
-| **P2** | Proof failure localization | done | #2652 |
-| **P2** | UNSAT proof certificates from ay | done | #2654 |
-| **P2** | Adaptive E-matching depth | deferred | #2665 |
-| **P3** | Demand-driven cross-function inlining | done | #2655 |
-
-Execution enablers such as test-tiering, gate-serialization removal, and the
-`targo trust-vc` wrapper are tracked in epic #2656 rather than this public
-capability table.
-
-#### Deferred research
-
-- **P3** Custom sequence theory solver in ay
-- **P3** Verification-aware optimization hints
-- **P3** Proof-guided quantifier instantiation
+Deferred research: proof-guided quantifier instantiation.
 
 ### Trust integration
 
-- **Trust backend integration** — trust_vc ships MergeBundle v4 for ingest into Trust's unified verifier; downstream adoption is tracked outside the replacement proof gates.
+`trust-vc-merge-contract` exports **MergeBundle v4**, the versioned boundary for
+ingest into Trust's unified verifier. `trust-vc-trust-engine` accepts three
+`trust-ir` request modes: `ImportProofCertificates`, `MergeProofCertificates`,
+and `DischargeProofObligations`. The first two are wired.
+`DischargeProofObligations` is **not yet answerable** — nothing in the engine
+lowers a `trust-ir` function body to trust-vc's IR, so such a request fails
+loudly rather than silently reading as success. `mir_memory` is the typed
+MIR memory/ownership facade Trust lowers into.
+
+Downstream adoption inside Trust is tracked outside this repo's gates.
 
 ## Dependencies
 
 | Crate | Purpose |
 |-------|---------|
 | `ay-core` | SMT types and term AST |
-| `ay-dpll` | DPLL(T) solver engine (includes array, EUF, BV, LRA, NIA theories) |
+| `ay-dpll` | DPLL(T) solver engine (array, EUF, BV, LRA, NIA, Seq, Set, Map, Multiset, String, FP theories) |
 | `ay-frontend` | SMT-LIB2 parsing for merge-runner |
+| `ay-sys` | OS boundary: memory measurement and process supervision |
+| `trust-ir` | Trust's compiler IR — the request/facts protocol |
 | `syn` | Rust AST parsing for proc macro expression translation |
 
 All ay crates are pinned to exact git revisions. trust-vc does not depend on Z3
-or any external/third-party SMT solver. "Pure Rust" refers to the solver
-*algorithms*: the dependency closure is not C-free. The ay lock graph includes
-GMP/MPFR/libc crates (`gmp-mpfr-sys`, `rug`, `libc`) through its arithmetic and
-resource-measurement backends, and `ay-dpll`'s default `jit` feature pulls in
-`ay-jit`, a self-hosted native-code JIT that emits and executes machine code
+or any external SMT solver, and arbitrary-precision arithmetic runs on pure-Rust
+`num-bigint`. "Pure Rust" refers to the solver *algorithms*: the dependency
+closure is not C-free. `ay-sys` links `libc`/`windows-sys` for memory
+measurement and process supervision, and `ay-dpll`'s default `jit` feature pulls
+in `ay-jit`, a self-hosted native-code JIT that emits and executes machine code
 (`mmap`/`PROT_EXEC`, `extern "C"` function pointers). These are part of the
 trusted computing base.
-
-## Integration Path
-
-trust-vc integrates as Trust's proof backend. Verus-style proofs (trust-vc),
-separation logic (trust-wp), and model checking (trust-mc) are capabilities
-*within* Trust — one unified verifier over one solver (ay), not separate
-end-products:
-
-```
-trust_vc (Verus-style proofs) ──┐
-                              ├──► Trust (unified verifier) ──► proof certificates
-trust_wp (separation logic) ────┘    (trust-mc / trust-wp / trust-vc capabilities)
-```
-
-Current integration staging:
-
-1. trust_vc exports a versioned `MergeBundle` boundary via `trust-vc-merge-contract`.
-2. Trust must add a production consumer for that bundle and pass parity coverage through that ingest path.
-3. Only after that ingest/parity gate exists do the trust_vc capabilities land inside Trust's unified verifier.
 
 ## Installation and Usage
 
@@ -367,50 +336,50 @@ claiming that the Trust compiler verified the produced artifacts. Use
 
 ### `trust-vc` — verify in one command
 
-The build produces two front ends over the same verifier (both from crate
-`targo-trust-vc`). Neither needs cargo, rustc, a sysroot or an external solver
-at runtime: sources are parsed with `syn` and the proof obligations are
-discharged in-process on `ay`.
+The build produces two front ends over the same verifier, both from crate
+`targo-trust-vc`. Neither needs cargo, rustc, a sysroot or an external solver at
+runtime: sources are parsed with `syn` and the proof obligations are discharged
+in-process on `ay`.
 
 ```bash
 trust-vc example > demo.rs   # a tiny annotated program that verifies as-is
 trust-vc demo.rs             # verify a single file
 trust-vc path/to/crate       # verify a crate through its src/ tree
+trust-vc new --bin myproj    # scaffold a crate wired the same way
 trust-vc --help              # answers with nothing installed, as does --version
 ```
 
 Every check flag is reachable from either front end — `--function`, `--filter`,
 `--json`, `--ci`, `--diff`, `--localize`, `--no-cheating`, `--timeout`, `-j`,
-`--emit-certificate`, `--emit-hints`, `--watch` — and the cargo subcommand is
-unchanged:
+`--emit-certificate`, `--emit-hints`, `--emit-hints-json`, `--watch`, `-v` — and
+the cargo subcommand is unchanged:
 
 ```bash
 targo trust-vc check <crate>   # `cargo trust-vc check <crate>` still works (alias)
 ```
 
-Cargo-driven selection (`--package`, `--manifest-path`, `--features`, …) stays
-on the cargo subcommand. `trust-vc` never silently ignores a flag: it names the
-one you passed and the one to use instead.
+Subcommands: `check`, `gate`, `fuzz`, `evidence`, `suggest`, `new`,
+`verus-compat`. Cargo-driven selection (`--package`, `--manifest-path`,
+`--features`, …) stays on the cargo subcommand. `trust-vc` never silently
+ignores a flag: it names the one you passed and the one to use instead.
 
 ## Running proofs on STOCK rustc (no Trust fork — minutes, not hours)
 
 The trust-vc verification **engine** (`trust-vc-core` + the `trust_vc` proc
 macros + the `ay` SMT solver crates) has **no `rustc_private` dependency and no
 `#![feature(...)]`**: `verify_function_from_file` parses the proof fixture itself
-and runs the AY engine + trust-vc-kernel — all pure Rust. Only the separate
+and runs the AY engine + trust-vc-kernel, all pure Rust. Only the separate
 `trust-vc-driver` rustc-driver links `rustc_private` and needs the Trust
 rustc-fork stage2 (an hours-long build). The native-deductive proof harness does
 **not** use the driver, so it builds and runs on stock/homebrew rustc in well
-under a minute (cold build ≈ 50s here).
+under a minute.
 
 Use the committed runner — it handles the stock-rustc flag override for you:
 
 ```bash
-# Curated AY real-fixture suite (eval/optimum/incumbent/composite/verdict-chain):
-scripts/stock-harness.sh
-
-# A single proof target (any tests/ay_*_realbody.rs etc.):
-scripts/stock-harness.sh ay_incumbent_vig_realbody
+scripts/stock-harness.sh                       # curated AY real-fixture suite
+scripts/stock-harness.sh --all                 # every ay_* native-proof driver
+scripts/stock-harness.sh ay_incumbent_vig_realbody   # one proof target
 ```
 
 Equivalently, by hand:
@@ -420,59 +389,37 @@ RUSTC=/opt/homebrew/bin/rustc RUSTFLAGS="" /opt/homebrew/bin/cargo test \
   -p trust-vc-core --test ay_incumbent_vig_realbody --locked
 ```
 
-Both overrides leave the Trust-toolchain path untouched:
-
-`RUSTC` matters because homebrew `cargo` — a non-rustup cargo that itself
-ignores `rust-toolchain.toml`'s `channel = "trust"` — still resolves `rustc`
-from `PATH`, where the rustup shim usually shadows homebrew's; the shim honors
-the `trust` pin and fails whenever that toolchain is absent or mid-rebuild.
-Pinning `RUSTC` to the rustc that ships with the chosen cargo keeps both
-halves of the toolchain stock. `RUSTFLAGS=""` clears any ambient Trust-only
-`-Z` flags that stock rustc would reject (the committed `.cargo/config.toml`
-no longer sets `build.rustflags`; Targo injects its own per-unit off-switch).
-Dependencies stay on the same exact revisions recorded in `Cargo.lock`; the
-stock harness does not redirect them to mutable local checkouts.
-
-If you drive a rustup `stable` instead, `cargo +stable` (or
-`RUSTUP_TOOLCHAIN=stable`) handles both halves at once.
-`scripts/stock-harness.sh` selects the homebrew cargo automatically and
-isolates artifacts in `target-stock/` so it never thrashes the
-Trust-toolchain `target/` cache.
+Both overrides leave the Trust-toolchain path untouched. `RUSTC` matters because
+homebrew `cargo` ignores `rust-toolchain.toml`'s `channel = "trust"` but still
+resolves `rustc` from `PATH`, where the rustup shim — which honors that pin, and
+fails whenever the toolchain is absent or mid-rebuild — usually shadows
+homebrew's. `RUSTFLAGS=""` clears ambient Trust-only `-Z` flags that stock rustc
+would reject (the committed `.cargo/config.toml` no longer sets
+`build.rustflags`; Targo injects its own per-unit off-switch). Dependencies stay
+on the exact revisions in `Cargo.lock` — no redirect to mutable local checkouts.
+On a rustup `stable`, `cargo +stable` (or `RUSTUP_TOOLCHAIN=stable`) handles both
+halves at once. The script picks the homebrew cargo automatically and isolates
+artifacts in `target-stock/`.
 
 ## False-Verified Fuzzing
 
-The cargo-fuzz suite for contradictory postconditions lives under
-`fuzz/` and exercises the VC extraction plus encoder path.
+The cargo-fuzz suite for contradictory postconditions lives under `fuzz/` and
+exercises the VC extraction plus encoder path. Targets: `ensures_false`,
+`strict_inequality`, `mode_crossing`, `collections_contradiction`.
 
 ```bash
-targo --unverified test --manifest-path fuzz/Cargo.toml
+targo trust-vc fuzz                     # every target, 30s each (needs cargo-fuzz)
+targo trust-vc fuzz ensures_false --time 900
+targo --unverified test --manifest-path fuzz/Cargo.toml   # the targets' own tests
 ```
-
-For a 1-hour release sweep, run each target for 15 minutes:
-
-```bash
-rustup run nightly cargo fuzz run ensures_false -- -max_total_time=900
-rustup run nightly cargo fuzz run strict_inequality -- -max_total_time=900
-rustup run nightly cargo fuzz run mode_crossing -- -max_total_time=900
-rustup run nightly cargo fuzz run collections_contradiction -- -max_total_time=900
-```
-
-Extended fuzzing runbooks stay in the internal development docs; the public
-mirror keeps the executable fuzz targets and commands above.
 
 ## Documentation
 
-The public mirror ships the crate sources, examples, and tests. The broader
-engineering deep dives stay in the private development repo. Those internal
-notes cover:
-
-- Verus parity tracking and follow-on roadmap
-- Unsigned overflow semantics
-- ay backend architecture
-- Verification idioms and proof patterns
-- Termination encoding and `#[decreases]` semantics
-- Rust-to-ay type mapping
-- `__trust_vc_*` metadata for trust-mc integration
+The public mirror ships the crate sources, examples, tests, the eval corpus, and
+the root `design-*.md` documents. The broader engineering deep dives — Verus
+parity tracking, ay backend architecture, verification idioms, termination
+encoding, Rust-to-ay type mapping, `__trust_vc_*` metadata for trust-mc
+integration — stay in the private development repo.
 
 ## License
 

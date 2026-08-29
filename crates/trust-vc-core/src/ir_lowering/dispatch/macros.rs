@@ -908,6 +908,61 @@ fn lower_choose_closure(
     }
 }
 
+/// Explicit E-matching triggers for a `choose` combined Hilbert axiom:
+/// each spec-fn application in the predicate whose free variables cover EVERY
+/// binder becomes its own trigger group (Verus's own choice — the `f2(i, j)`
+/// pattern). If no single application covers the binders but their union
+/// does, all applications form one multi-pattern group. `None` when the
+/// binders are not covered at all — the axiom then stays inference-only,
+/// which for a `no_mbqi` quantifier means it cannot fire; that is the
+/// fail-closed direction (an unfireable axiom proves nothing), never a
+/// false-verify. Without explicit triggers the marked axiom was PERMANENTLY
+/// dead: AY infers no triggers for `no_mbqi` quantifiers (their trigger set
+/// is preserved verbatim), so even a genuine ground witness
+/// (`assert(cnatf2(10, 10))`) had nothing to match and Verus-verified cases
+/// (choose.rs `test_refine2_tuple`) demoted to unknown.
+fn choose_combined_axiom_triggers(
+    condition: &TrustVcExpr,
+    binders: &[(String, TrustVcType)],
+) -> Option<Vec<Vec<TrustVcExpr>>> {
+    struct CallCollector {
+        calls: Vec<TrustVcExpr>,
+    }
+    impl crate::ir_expr_traversal::TrustVcExprVisitor for CallCollector {
+        fn visit_expr(&mut self, expr: &TrustVcExpr) {
+            if matches!(expr, TrustVcExpr::FnCall { .. }) {
+                self.calls.push(expr.clone());
+            }
+            crate::ir_expr_traversal::walk_expr(self, expr);
+        }
+    }
+    let mut collector = CallCollector { calls: Vec::new() };
+    crate::ir_expr_traversal::TrustVcExprVisitor::visit_expr(&mut collector, condition);
+    if collector.calls.is_empty() {
+        return None;
+    }
+    let binder_names: Vec<&str> = binders.iter().map(|(name, _)| name.as_str()).collect();
+    let call_frees: Vec<std::collections::HashSet<String>> = collector
+        .calls
+        .iter()
+        .map(crate::ir_expr_traversal::free_root_names)
+        .collect();
+    let covering: Vec<TrustVcExpr> = collector
+        .calls
+        .iter()
+        .zip(&call_frees)
+        .filter(|(_, frees)| binder_names.iter().all(|b| frees.contains(*b)))
+        .map(|(call, _)| call.clone())
+        .collect();
+    if !covering.is_empty() {
+        return Some(covering.into_iter().map(|call| vec![call]).collect());
+    }
+    let union_covers = binder_names
+        .iter()
+        .all(|b| call_frees.iter().any(|frees| frees.contains(*b)));
+    union_covers.then_some(vec![collector.calls])
+}
+
 fn lower_single_binder_choose_closure(
     closure: &syn::ExprClosure,
     env: &TypeEnv,
@@ -948,6 +1003,8 @@ fn lower_single_binder_choose_closure(
         let mut chosen_by_name = HashMap::new();
         chosen_by_name.insert(var_name.clone(), chosen);
         let combined_conclusion = substitute_unbound_vars((*condition).clone(), &chosen_by_name);
+        let binder = [(var_name.clone(), var_ty.clone())];
+        let triggers = choose_combined_axiom_triggers(&condition, &binder);
         let combined_axiom = TrustVcExpr::Quantifier {
             kind: QuantifierKind::Forall,
             bound_vars: vec![(var_name.clone(), var_ty.clone())],
@@ -955,7 +1012,7 @@ fn lower_single_binder_choose_closure(
                 premise: condition,
                 conclusion: Box::new(combined_conclusion),
             }),
-            triggers: None,
+            triggers,
             trigger_inference_mode: None,
         };
         return Ok(TrustVcExpr::Choose {
@@ -1050,7 +1107,7 @@ fn lower_multi_binder_choose_closure(
             premise: Box::new(condition.clone()),
             conclusion: Box::new(combined_conclusion.clone()),
         }),
-        triggers: None,
+        triggers: choose_combined_axiom_triggers(&condition, &params),
         trigger_inference_mode: None,
     };
     if trigger_gated {

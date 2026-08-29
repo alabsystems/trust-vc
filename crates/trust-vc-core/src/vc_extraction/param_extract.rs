@@ -452,7 +452,7 @@ pub(super) fn syn_type_string_is_bounded_len_collection(type_str: &str) -> bool 
 /// Peels leading reference decorations (`&`, `&mut`, `&'a`, `&'a mut`, `&&`, …)
 /// from an origin syn type string, mirroring how `parse_or_opaque` strips
 /// references before classifying the referent.
-fn strip_leading_references(input: &str) -> &str {
+pub(super) fn strip_leading_references(input: &str) -> &str {
     let mut rest = input.trim_start();
     while let Some(after_amp) = rest.strip_prefix('&') {
         rest = after_amp.trim_start();

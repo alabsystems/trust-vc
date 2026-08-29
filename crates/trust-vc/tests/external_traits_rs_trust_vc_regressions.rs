@@ -34,7 +34,7 @@ fn verify_case(path: &str, case: &str, upstream_case: &str) -> VerifyResult {
         .unwrap_or_else(|err| panic!("{case} ({upstream_case}) should extract: {err}"))
 }
 
-fn expect_fail_closed(path: &str, case: &str, upstream_case: &str, expected_fragment: &str) {
+fn expect_fail_closed(path: &str, case: &str, upstream_case: &str, expected_fragments: &[&str]) {
     let message = match verify_function_from_file(path, case) {
         Ok(VerifyResult::Error { message }) => message,
         Ok(result) => {
@@ -43,10 +43,12 @@ fn expect_fail_closed(path: &str, case: &str, upstream_case: &str, expected_frag
         Err(err) => err.to_string(),
     };
 
-    assert!(
-        message.contains(expected_fragment),
-        "{case} ({upstream_case}) error should contain {expected_fragment:?}, got: {message}"
-    );
+    for expected_fragment in expected_fragments {
+        assert!(
+            message.contains(expected_fragment),
+            "{case} ({upstream_case}) error should contain {expected_fragment:?}, got: {message}"
+        );
+    }
 }
 
 const VERIFIED_CASES: &[(&str, &str)] = &[
@@ -78,16 +80,31 @@ const REJECTED_CASES: &[(&str, &str)] = &[(
     "test_trait3 bad impl return currently fails closed instead of verifying",
 )];
 
-const FAIL_CLOSED_CASES: &[(&str, &str, &str)] = &[
+const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "external_trait_impl_side_requires_currently_blocked",
         "test_trait_extension / impl-side external trait contract extension boundary",
-        "trait method implementation cannot declare requires",
+        &["trait method implementation cannot declare requires"],
     ),
+    // The duplicate-spec case fails closed EARLIER than it used to, and for a
+    // stricter reason. The port writes the upstream `test_trait_dupe` shape as two
+    // `#[trait_spec]` traits declaring the same method name plus two `#[trait_impl]`
+    // blocks for the same concrete type — so the bare name
+    // `external_trait_duplicate_spec_currently_fails_closed` denotes TWO bodies,
+    // which is what `resolve_function_in_file` now says (`0a4c9f00`). Before that
+    // it silently took the source-order-first body and the ambiguity was caught one
+    // layer down, at contract inheritance ("ambiguous trait method contract
+    // inheritance"). Detecting it at RESOLUTION is strictly stronger: it cannot be
+    // reached past, it does not depend on the two impls carrying matching contract
+    // attributes, and it holds for any pair of same-named bodies, not just
+    // trait-inherited ones. The requirement the row encodes — a duplicate external
+    // trait specification must fail closed, naming ambiguity as the reason — is
+    // unchanged; both fragments below are pinned so a regression to a "not found"
+    // string, or to silently picking one of the two, still reddens this row.
     (
         "external_trait_duplicate_spec_currently_fails_closed",
         "test_trait_dupe / duplicate external trait specification",
-        "ambiguous trait method contract inheritance",
+        &["is ambiguous in", "2 definitions share that name"],
     ),
 ];
 
@@ -237,12 +254,15 @@ fn expected_metadata() -> Vec<CaseMetadata> {
         FAIL_CLOSED_CASES
             .iter()
             .map(
-                |(case_id, upstream_case_id, expected_error_pattern)| CaseMetadata {
+                |(case_id, upstream_case_id, expected_error_patterns)| CaseMetadata {
                     case_id: (*case_id).to_string(),
                     upstream_case_id: (*upstream_case_id).to_string(),
                     expected_verdict: "error".to_string(),
                     min_obligations: 0,
-                    expected_error_patterns: vec![(*expected_error_pattern).to_string()],
+                    expected_error_patterns: expected_error_patterns
+                        .iter()
+                        .map(|pattern| (*pattern).to_string())
+                        .collect(),
                 },
             );
 
@@ -380,7 +400,7 @@ fn external_traits_rs_duplicate_contracts_fail_closed_from_file() {
         .to_str()
         .expect("external_traits port path should be UTF-8");
 
-    for (case, upstream_case, expected_fragment) in FAIL_CLOSED_CASES {
-        expect_fail_closed(path, case, upstream_case, expected_fragment);
+    for (case, upstream_case, expected_fragments) in FAIL_CLOSED_CASES {
+        expect_fail_closed(path, case, upstream_case, expected_fragments);
     }
 }

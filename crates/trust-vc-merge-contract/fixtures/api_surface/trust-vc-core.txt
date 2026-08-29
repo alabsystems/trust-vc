@@ -129,7 +129,11 @@ const fn trust_vc_core::verification_report::VerificationReport::total_elapsed(s
 const fn trust_vc_core::verification_report::VerificationReportOptions::new() -> Self
 const fn trust_vc_core::verification_report::VerificationReportOptions::verbose(self: Self) -> bool
 const fn trust_vc_core::verification_report::VerificationReportOptions::with_verbose(self: Self, verbose: bool) -> Self
+const trust_vc_core::contract_attr_alias::ALIASABLE_ATTRS: &[&str]
+const trust_vc_core::contract_attr_alias::NON_ALIASABLE_TRUSTED_ATTRS: &[&str]
 const trust_vc_core::proof_note::AT_MOST_ONE_PROOF_NOTE: &str
+const trust_vc_core::solver_budget::RLIMIT_UNIT_CONFLICTS: u64
+enum trust_vc_core::FunctionResolution<'a>
 enum trust_vc_core::HarnessOutcome
 enum trust_vc_core::SolverStatValue
 enum trust_vc_core::StepResultKind
@@ -165,6 +169,7 @@ enum trust_vc_core::proven_facts::ProofStatus
 enum trust_vc_core::proven_facts::ProvenFactKind
 enum trust_vc_core::proven_facts::extraction::ProofStatus
 enum trust_vc_core::proven_facts::hints::OptimizationHintKind
+enum trust_vc_core::solver_budget::ConflictBudget
 enum trust_vc_core::vc::BitshiftBehavior
 enum trust_vc_core::vc::ConditionOrigin
 enum trust_vc_core::vc::Div0Behavior
@@ -180,6 +185,8 @@ field trust_vc_core::CounterexampleBinding::display_name: String
 field trust_vc_core::CounterexampleBinding::raw_name: String
 field trust_vc_core::CounterexampleBinding::ty: String
 field trust_vc_core::CounterexampleBinding::value: String
+field trust_vc_core::FunctionResolution::Ambiguous::0: usize
+field trust_vc_core::FunctionResolution::Unique::0: &'a syn::ItemFn
 field trust_vc_core::HarnessAssertion::index: usize
 field trust_vc_core::HarnessAssertion::location: Option<String>
 field trust_vc_core::HarnessAssertion::name: String
@@ -201,6 +208,10 @@ field trust_vc_core::VerifyResult::NotProved::category: crate::encoder::UnknownC
 field trust_vc_core::VerifyResult::NotProved::reason: String
 field trust_vc_core::VerifyResult::Unknown::category: crate::encoder::UnknownCategory
 field trust_vc_core::VerifyResult::Unknown::reason: String
+field trust_vc_core::contract_attr_alias::AliasReport::declined: Vec<DeclinedAlias>
+field trust_vc_core::contract_attr_alias::AliasReport::resolved: Vec<(String, String)>
+field trust_vc_core::contract_attr_alias::DeclinedAlias::alias: String
+field trust_vc_core::contract_attr_alias::DeclinedAlias::reason: String
 field trust_vc_core::full_verification::FullVerificationError::RejectedEvidence::rejected: Vec<EvidenceRejection>
 field trust_vc_core::full_verification::FullVerificationError::VerificationFailed::report: Box<crate::VerificationReport>
 field trust_vc_core::full_verification::FullVerificationError::VerificationFailed::result: crate::VerifyResult
@@ -250,6 +261,7 @@ field trust_vc_core::ir::TraitDecl::name: String
 field trust_vc_core::ir::TraitDecl::supertraits: Vec<String>
 field trust_vc_core::ir::TraitImplDecl::assoc_type_bindings: Vec<(String, TrustVcType)>
 field trust_vc_core::ir::TraitImplDecl::concrete_type: TrustVcType
+field trust_vc_core::ir::TraitImplDecl::inherent_shadowed_methods: std::collections::BTreeSet<String>
 field trust_vc_core::ir::TraitImplDecl::is_external: bool
 field trust_vc_core::ir::TraitImplDecl::method_bindings: Vec<(String, String)>
 field trust_vc_core::ir::TraitImplDecl::trait_name: String
@@ -362,6 +374,7 @@ field trust_vc_core::ir::TrustVcTypeParseError::InvalidSyntax::kind: &'static st
 field trust_vc_core::ir::TrustVcTypeParseError::UnknownType::input: String
 field trust_vc_core::proof_note::ProofNoteLabel::is_custom_err: bool
 field trust_vc_core::proof_note::ProofNoteLabel::text: String
+field trust_vc_core::solver_budget::ConflictBudget::Bounded::0: std::num::NonZeroU64
 field trust_vc_core::vc::InvariantMask::Namespaces::0: Vec<i64>
 field trust_vc_core::vc::VariableDecl::name: String
 field trust_vc_core::vc::VariableDecl::ty: crate::ir::TrustVcType
@@ -371,6 +384,7 @@ field trust_vc_core::verification_report::SolverStatValue::String::0: String
 fn trust_vc_core::BatchVerifyResult::result(self: &Self) -> &VerifyResult
 fn trust_vc_core::CounterexampleBinding::new<impl Into<String>, impl Into<String>, impl Into<String>, impl Into<String>>(display_name: impl Into<String>, raw_name: impl Into<String>, ty: impl Into<String>, value: impl Into<String>) -> Self
 fn trust_vc_core::DemandInlineRecovery::inlined_functions(self: &Self) -> &[String]
+fn trust_vc_core::FunctionResolution::require_unique<impl std::fmt::Display>(self: Self, name: &str, file_path: impl std::fmt::Display) -> Result<&'a ItemFn, String>
 fn trust_vc_core::HarnessAssertion::is_counterexample(self: &Self) -> bool
 fn trust_vc_core::HarnessOutcome::all_verified(self: &Self) -> bool
 fn trust_vc_core::HarnessOutcome::asserts_n_fail(self: &Self, count: usize) -> bool
@@ -415,6 +429,9 @@ fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::safe_indexin
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::to_json(self: &Self) -> String
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::total_matches(self: &Self) -> usize
 fn trust_vc_core::compilation_proven_facts::CompilationProvenFacts::try_from_report(report: &VerificationReport) -> Result<Self, CompilationProvenFactsError>
+fn trust_vc_core::contract_attr_alias::AliasReport::declined_reason(self: &Self, alias: &str) -> Option<&str>
+fn trust_vc_core::contract_attr_alias::AliasReport::is_empty(self: &Self) -> bool
+fn trust_vc_core::contract_attr_alias::resolve_contract_attr_aliases(file: &mut syn::File) -> AliasReport
 fn trust_vc_core::env::EnvEditor::remove<impl AsRef<OsStr>>(self: &mut Self, key: impl AsRef<OsStr>)
 fn trust_vc_core::env::EnvEditor::set<impl AsRef<OsStr>, impl AsRef<OsStr>>(self: &mut Self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>)
 fn trust_vc_core::env::ScopedEnvVar::set<impl AsRef<OsStr>, impl AsRef<OsStr>>(key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self
@@ -457,6 +474,10 @@ fn trust_vc_core::harness::HarnessOutcome::total_assertions(self: &Self) -> usiz
 fn trust_vc_core::harness::HarnessOutcome::verified_count(self: &Self) -> usize
 fn trust_vc_core::ir::ConformanceMethodBody::new<impl Into<String>>(body_text: impl Into<String>, param_count: usize) -> Self
 fn trust_vc_core::ir::DatatypeVariant::new<impl Into<String>>(name: impl Into<String>, fields: Vec<(String, TrustVcType)>) -> Self
+fn trust_vc_core::ir::ImplMethodKey::canonical_string(self: &Self) -> String
+fn trust_vc_core::ir::ImplMethodKey::concrete_fn(self: &Self) -> &str
+fn trust_vc_core::ir::ImplMethodKey::new<impl Into<String>, impl Into<String>>(trait_name: impl Into<String>, concrete_fn: impl Into<String>) -> Self
+fn trust_vc_core::ir::ImplMethodKey::trait_name(self: &Self) -> &str
 fn trust_vc_core::ir::MatchArm::new(pattern: MatchPattern, body: TrustVcExpr) -> Self
 fn trust_vc_core::ir::PointerWidthGuard::install(width_bits: u32) -> Self
 fn trust_vc_core::ir::StructDef::new<impl Into<String>>(name: impl Into<String>, fields: Vec<(String, TrustVcType)>) -> Self
@@ -467,10 +488,13 @@ fn trust_vc_core::ir::TraitBound::new<impl Into<String>, impl Into<String>>(type
 fn trust_vc_core::ir::TraitDecl::new<impl Into<String>>(name: impl Into<String>, methods: Vec<TraitMethodDecl>) -> Self
 fn trust_vc_core::ir::TraitDecl::with_generics(self: Self, generics: Vec<String>) -> Self
 fn trust_vc_core::ir::TraitDecl::with_supertraits(self: Self, supertraits: Vec<String>) -> Self
+fn trust_vc_core::ir::TraitImplDecl::matches_ignoring_shadowed_methods(self: &Self, other: &Self) -> bool
+fn trust_vc_core::ir::TraitImplDecl::may_claim_concrete_symbol(self: &Self, trait_method_name: &str) -> bool
 fn trust_vc_core::ir::TraitImplDecl::new<impl Into<String>>(trait_name: impl Into<String>, concrete_type: TrustVcType, method_bindings: Vec<(String, String)>) -> Self
 fn trust_vc_core::ir::TraitImplDecl::resolve_assoc_projections(self: &Self, ty: &TrustVcType) -> TrustVcType
 fn trust_vc_core::ir::TraitImplDecl::with_assoc_type_bindings(self: Self, bindings: Vec<(String, TrustVcType)>) -> Self
 fn trust_vc_core::ir::TraitImplDecl::with_external(self: Self, is_external: bool) -> Self
+fn trust_vc_core::ir::TraitImplDecl::with_inherent_shadowed_methods(self: Self, shadowed: std::collections::BTreeSet<String>) -> Self
 fn trust_vc_core::ir::TraitImplDecl::with_trait_type_args(self: Self, trait_type_args: Vec<TrustVcType>) -> Self
 fn trust_vc_core::ir::TraitMethodDecl::new<impl Into<String>>(name: impl Into<String>, params: Vec<(String, TrustVcType)>, return_type: TrustVcType, requires: Vec<String>, ensures: Vec<String>, has_default: bool, default_body: Option<String>) -> Self
 fn trust_vc_core::ir::TraitMethodDecl::with_default_ensures(self: Self, default_ensures: Vec<String>) -> Self
@@ -503,6 +527,7 @@ fn trust_vc_core::ir::pinned_width_from_guard(guard: Option<PointerWidthGuard>) 
 fn trust_vc_core::ir::pointer_width() -> u32
 fn trust_vc_core::ir::scan_pointer_width_directive(source: &str) -> Result<Option<PointerWidthGuard>, String>
 fn trust_vc_core::ir::strip_pointer_width_directives(source: &str) -> String
+fn trust_vc_core::ir::unit_is_pointer_width_polymorphic(file: Option<&syn::File>, func: &syn::ItemFn) -> bool
 fn trust_vc_core::json_escape(text: &str) -> String
 fn trust_vc_core::list_trait_conformance_obligations(file_path: &str) -> error::TrustVcResult<Vec<String>>
 fn trust_vc_core::mode::FunctionMode::as_str(self: Self) -> &'static str
@@ -577,6 +602,11 @@ fn trust_vc_core::proven_facts::report::ProvenFactsReport::from_facts(facts: &[P
 fn trust_vc_core::proven_facts::report::format_report(facts: &[super::ProvenFact]) -> String
 fn trust_vc_core::proven_facts::report::to_json(facts: &[super::ProvenFact]) -> String
 fn trust_vc_core::proven_facts::to_json(facts: &[super::ProvenFact]) -> String
+fn trust_vc_core::resolve_function_at_line<'a>(file: &'a syn::File, name: &str, line: usize) -> FunctionResolution<'a>
+fn trust_vc_core::resolve_function_in_file<'a>(file: &'a syn::File, name: &str) -> FunctionResolution<'a>
+fn trust_vc_core::solver_budget::ConflictBudget::bounded(conflicts: u64) -> Self
+fn trust_vc_core::solver_budget::ConflictBudget::conflicts(self: Self) -> Option<u64>
+fn trust_vc_core::solver_budget::ConflictBudget::option_value(self: Self) -> Option<String>
 fn trust_vc_core::vc::BitshiftBehavior::from_mode(mode: crate::mode::FunctionMode) -> Self
 fn trust_vc_core::vc::BitshiftBehavior::should_check(self: &Self) -> bool
 fn trust_vc_core::vc::Div0Behavior::from_mode(mode: crate::mode::FunctionMode) -> Self
@@ -585,6 +615,7 @@ fn trust_vc_core::vc::FunctionContext::is_recursive(self: &Self) -> bool
 fn trust_vc_core::vc::FunctionContext::mode(self: &Self) -> crate::mode::FunctionMode
 fn trust_vc_core::vc::FunctionContext::name(self: &Self) -> &str
 fn trust_vc_core::vc::FunctionContext::new<impl Into<String>>(name: impl Into<String>, params: Vec<(String, crate::ir::TrustVcType)>, return_type: crate::ir::TrustVcType, mode: crate::mode::FunctionMode) -> Self
+fn trust_vc_core::vc::FunctionContext::param_names(self: &Self) -> impl Iterator<Item = &str>
 fn trust_vc_core::vc::FunctionContext::params(self: &Self) -> &[(String, crate::ir::TrustVcType)]
 fn trust_vc_core::vc::FunctionContext::return_type(self: &Self) -> &crate::ir::TrustVcType
 fn trust_vc_core::vc::FunctionContext::trait_bounds(self: &Self) -> &[crate::ir::TraitBound]
@@ -709,8 +740,8 @@ fn trust_vc_core::vc::VerificationContext::register_source_type_alias(self: &mut
 fn trust_vc_core::vc::VerificationContext::register_struct_type(self: &mut Self, def: StructDef)
 fn trust_vc_core::vc::VerificationContext::register_trait_decl(self: &mut Self, decl: TraitDecl)
 fn trust_vc_core::vc::VerificationContext::register_trait_impl(self: &mut Self, decl: TraitImplDecl)
-fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_body(self: &mut Self, concrete_fn_name: String, body: crate::ir::ConformanceMethodBody)
-fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_ensures(self: &mut Self, concrete_fn_name: String, ensures: Vec<String>)
+fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_body(self: &mut Self, key: crate::ir::ImplMethodKey, body: crate::ir::ConformanceMethodBody)
+fn trust_vc_core::vc::VerificationContext::register_trait_impl_method_ensures(self: &mut Self, key: crate::ir::ImplMethodKey, ensures: Vec<String>)
 fn trust_vc_core::vc::VerificationContext::set_bitshift_behavior(self: &mut Self, behavior: BitshiftBehavior)
 fn trust_vc_core::vc::VerificationContext::set_demand_inline_config(self: &mut Self, config: DemandInlineConfig)
 fn trust_vc_core::vc::VerificationContext::set_demand_inline_depth(self: &mut Self, depth_bound: usize)
@@ -724,6 +755,7 @@ fn trust_vc_core::vc::VerificationContext::set_loop_entry_scope(self: &mut Self,
 fn trust_vc_core::vc::VerificationContext::set_loop_modified_vars(self: &mut Self, invariant_name: &str, vars: Vec<String>)
 fn trust_vc_core::vc::VerificationContext::set_overflow_behavior(self: &mut Self, behavior: OverflowBehavior)
 fn trust_vc_core::vc::VerificationContext::set_rlimit(self: &mut Self, ms: u64)
+fn trust_vc_core::vc::VerificationContext::set_rlimit_conflicts(self: &mut Self, budget: ConflictBudget)
 fn trust_vc_core::vc::VerificationContext::set_skip_retry_cascade(self: &mut Self, skip: bool)
 fn trust_vc_core::vc::VerificationContext::set_type_invariant(self: &mut Self, type_name: &str, invariant: crate::ir::TrustVcExpr)
 fn trust_vc_core::vc::VerificationContext::set_verification_mode(self: &mut Self, mode: VerificationMode)
@@ -782,6 +814,7 @@ macro trust_vc_core::verify_extern_call
 macro trust_vc_core::verify_markers
 macro trust_vc_core::verify_proof
 module trust_vc_core::compilation_proven_facts
+module trust_vc_core::contract_attr_alias
 module trust_vc_core::env
 module trust_vc_core::full_verification
 module trust_vc_core::harness
@@ -793,6 +826,7 @@ module trust_vc_core::proven_facts
 module trust_vc_core::proven_facts::extraction
 module trust_vc_core::proven_facts::hints
 module trust_vc_core::proven_facts::report
+module trust_vc_core::solver_budget
 module trust_vc_core::vc
 module trust_vc_core::verification_bridge
 module trust_vc_core::verification_report
@@ -800,6 +834,7 @@ module trust_vc_core::verify
 pub use trust_vc_core::BatchVerifyResult = encoder::BatchVerifyResult
 pub use trust_vc_core::CounterexampleBinding = verify_result::CounterexampleBinding
 pub use trust_vc_core::DemandInlineRecovery = verification_report::DemandInlineRecovery
+pub use trust_vc_core::FunctionResolution = vc_extraction::function_discovery::FunctionResolution
 pub use trust_vc_core::HarnessAssertion = harness::HarnessAssertion
 pub use trust_vc_core::HarnessOutcome = harness::HarnessOutcome
 pub use trust_vc_core::PipelineSummary = verification_report::PipelineSummary
@@ -838,6 +873,8 @@ pub use trust_vc_core::proven_facts::emit_hint_annotations = hints::emit_hint_an
 pub use trust_vc_core::proven_facts::format_report = report::format_report
 pub use trust_vc_core::proven_facts::generate_hints = hints::generate_hints
 pub use trust_vc_core::proven_facts::to_json = report::to_json
+pub use trust_vc_core::resolve_function_at_line = vc_extraction::function_discovery::resolve_function_at_line
+pub use trust_vc_core::resolve_function_in_file = vc_extraction::function_discovery::resolve_function_in_file
 pub use trust_vc_core::vc::BitshiftBehavior = context::BitshiftBehavior
 pub use trust_vc_core::vc::ConditionOrigin = obligation::ConditionOrigin
 pub use trust_vc_core::vc::DemandInlineConfig = context::DemandInlineConfig
@@ -868,6 +905,8 @@ struct trust_vc_core::VerificationReport
 struct trust_vc_core::VerificationReportOptions
 struct trust_vc_core::compilation_proven_facts::CompilationProvenFact
 struct trust_vc_core::compilation_proven_facts::CompilationProvenFacts
+struct trust_vc_core::contract_attr_alias::AliasReport
+struct trust_vc_core::contract_attr_alias::DeclinedAlias
 struct trust_vc_core::env::EnvEditor
 struct trust_vc_core::env::ScopedEnvVar
 struct trust_vc_core::full_verification::EvidenceRejection
@@ -879,6 +918,7 @@ struct trust_vc_core::full_verification::VerifiedProofEvidence
 struct trust_vc_core::harness::HarnessAssertion
 struct trust_vc_core::ir::ConformanceMethodBody
 struct trust_vc_core::ir::DatatypeVariant
+struct trust_vc_core::ir::ImplMethodKey
 struct trust_vc_core::ir::MatchArm
 struct trust_vc_core::ir::PointerWidthGuard
 struct trust_vc_core::ir::StructDef
@@ -915,6 +955,9 @@ struct trust_vc_core::verification_report::VerificationReport
 struct trust_vc_core::verification_report::VerificationReportOptions
 struct trust_vc_core::verify::Proof
 struct trust_vc_core::verify::Verifier
+variant trust_vc_core::FunctionResolution::Ambiguous
+variant trust_vc_core::FunctionResolution::NotFound
+variant trust_vc_core::FunctionResolution::Unique
 variant trust_vc_core::HarnessOutcome::AllVerified
 variant trust_vc_core::HarnessOutcome::Inconclusive
 variant trust_vc_core::HarnessOutcome::MultipleFailed
@@ -1137,6 +1180,8 @@ variant trust_vc_core::proven_facts::extraction::ProofStatus::Verified
 variant trust_vc_core::proven_facts::hints::OptimizationHintKind::BoundsElimination
 variant trust_vc_core::proven_facts::hints::OptimizationHintKind::NullCheckElimination
 variant trust_vc_core::proven_facts::hints::OptimizationHintKind::UnreachableBranch
+variant trust_vc_core::solver_budget::ConflictBudget::AyDefault
+variant trust_vc_core::solver_budget::ConflictBudget::Bounded
 variant trust_vc_core::vc::BitshiftBehavior::Allow
 variant trust_vc_core::vc::BitshiftBehavior::Error
 variant trust_vc_core::vc::ConditionOrigin::LegacyTranslatedString

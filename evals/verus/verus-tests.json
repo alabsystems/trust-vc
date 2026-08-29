@@ -4619,7 +4619,7 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'default'"
+            "unknown return type for function 'str::default'"
           ]
         },
         {
@@ -4635,13 +4635,10 @@
           "min_obligations": 3
         },
         {
-          "case_id": "rust_default_u32_ufcs_constructor_currently_blocked",
+          "case_id": "rust_default_u32_ufcs_constructor_verified",
           "upstream_case_id": "test_default_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'core::default::Default::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
           "case_id": "rust_default_string_constructor_currently_blocked",
@@ -5631,7 +5628,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "ambiguous trait method contract inheritance"
+            "is ambiguous in",
+            "2 definitions share that name"
           ]
         }
       ],

@@ -95,6 +95,10 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        // A set drops duplicates, so `|seq.to_set()| <= |seq|`, NOT `== |seq|`.
+        // Without this the name fallback would answer `.len()` with the source
+        // SEQUENCE's length.
+        self.decline_collection_len(result);
         self.register_derived_seq_view(
             result,
             super::parser_state::DerivedSeqView {
@@ -236,7 +240,13 @@ impl<'a> AstExpressionParser<'a> {
             element_sort: Sort::Bool,
         }));
         let result = self.solver.fresh_var("__set_filter", result_sort);
-        // No len metadata for filtered sets (design: fail-closed on cardinality)
+        // No len metadata for filtered sets (design: fail-closed on cardinality).
+        // `decline_collection_len` is what makes that design actually hold: the
+        // result is anonymous, so `lookup_collection_len`'s name fallback would
+        // otherwise resolve the SOURCE set's length and let `f.len() == s.len()`
+        // verify for a filter that removed elements. Computing the true value
+        // needs counting, and even `<= s.len()` needs `s.finite()`, which the
+        // Set model does not track — so decline rather than approximate.
         self.register_collection_meta(
             result,
             super::parser_state::CollectionMeta {
@@ -248,6 +258,7 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        self.decline_collection_len(result);
 
         // Safe quantification via helper — native-sorted bound var (#2531)
         let (quant_var, elem_term) = self.safe_element_quantifier("__set_filter_x", &elem_ty)?;
@@ -361,6 +372,7 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        self.decline_collection_len(result);
 
         // Safe quantification via helper — native-sorted bound var (#2531)
         let (quant_var, elem_term) = self.safe_element_quantifier("__set_new_x", &elem_ty)?;
@@ -433,7 +445,9 @@ impl<'a> AstExpressionParser<'a> {
             element_sort: Sort::Bool,
         }));
         let result = self.solver.fresh_var("__set_map", result_sort);
-        // No len metadata for mapped sets (design: fail-closed on cardinality)
+        // No len metadata for mapped sets (design: fail-closed on cardinality).
+        // `|s.map(f)| == |s|` needs `f` injective on `s`, which is not checked,
+        // so the length is declined rather than inherited from the source.
         self.register_collection_meta(
             result,
             super::parser_state::CollectionMeta {
@@ -445,6 +459,7 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        self.decline_collection_len(result);
 
         // Forward: forall x. self[x] => result[f(x)]
         // Safe quantification via helper — native-sorted bound var (#2531)

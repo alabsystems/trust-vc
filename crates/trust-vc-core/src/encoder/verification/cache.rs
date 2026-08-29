@@ -107,8 +107,15 @@ use crate::prepared_context::PreparedVerificationContext;
 // entry may now be replayed only after this process has independently produced
 // and stored that exact fingerprint, serialized entry, and canonical path. Disk
 // remains a within-process accelerator; cross-process reuse requires a
-// replayable certificate checked by the kernel.
-pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 15;
+// replayable certificate checked by the kernel. v16 closes two width/collection
+// soundness holes: constructor-backed push length non-negativity is guarded by
+// the source length's validity, and pointer-width scanning recognizes numeric
+// `usize`/`isize` literal suffixes. Earlier entries may encode a vacuous
+// UNSAT-backed collection verdict or a host-width-only verdict. v17 adds exact
+// qualified-helper and abstract `self.<field>` conformance semantics. A pre-v17
+// `Verified` entry may have skipped an unlowerable trait
+// default/generic-struct body, so it must not bypass the new addressed check.
+pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 17;
 
 /// Attempt cached verification. Returns `Some(VerifyResult::Verified)` on
 /// cache hit, `None` on miss or any I/O error.

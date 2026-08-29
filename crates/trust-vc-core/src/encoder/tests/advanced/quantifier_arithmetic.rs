@@ -10,17 +10,29 @@
 use super::*;
 
 // ========================================================================
-// Quantifier BV wrapping tests (#1763)
-// Arithmetic in quantifier bodies must model BV overflow semantics.
-// Without wrapping, Int arithmetic treats x+1>x as always-true,
-// but BV wrapping means u8(255)+1=0, so 0>255 is false.
+// Quantifier body arithmetic is MATHEMATICAL (FV-B, supersedes #1763)
+//
+// #1763 made quantifier bodies model BV wrapping, on the reading that
+// `x + 1 > x` verifying was a bug. That reading is wrong for SPEC code, which
+// is what a quantifier body always is: Verus types `u8 + u8` in spec position
+// as `int`, so spec arithmetic neither wraps nor overflows and `x + 1 > x` is
+// simply TRUE. Worse, the wrap came with NO obligation — every overflow
+// predicate in the arithmetic encoders is gated on `quantifier_depth == 0`
+// (#2557), because a predicate under a binder references the bound variable,
+// which becomes free at the outer scope. So the body got neither faithful
+// semantics nor a check, and FALSE claims like
+// `forall|i: u64| i + 1 <= u64::MAX` reported `verified`.
+//
+// The cases below therefore have their verdicts INVERTED relative to #1763.
+// Each subject formula is TRUE under Verus and must verify. The soundness
+// half of this change — the false claims that must now be REFUTED — lives in
+// `tests/quantifier_body_arith_wrap_soundness.rs`; without those, "everything
+// verifies" would satisfy this file.
 // ========================================================================
 
-/// DISCRIMINATING: forall |x: u8| x + 1 > x must NOT verify.
-/// At x=255, u8 wrapping gives 255+1=0, so 0>255 is false.
-/// Before #1763 fix, this verified as true (unbounded Int semantics).
+/// FV-B: forall |x: u8| x + 1 > x must VERIFY — spec `x + 1` is `int`.
 #[test]
-fn test_forall_u8_add_overflow_wraps() {
+fn test_forall_u8_add_one_is_greater() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "overflow",
@@ -28,16 +40,15 @@ fn test_forall_u8_add_overflow_wraps() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x + 1 > x) must NOT verify — u8(255)+1 wraps to 0",
+        "forall(|x: u8| x + 1 > x) is TRUE: spec arithmetic is mathematical",
     );
 }
 
-/// DISCRIMINATING: forall |x: u8| x + 1 > 0 must NOT verify.
-/// At x=255, u8(255)+1 wraps to 0, so 0>0 is false.
+/// FV-B: forall |x: u8| x + 1 > 0 must VERIFY — `x >= 0` so `x + 1 >= 1`.
 #[test]
-fn test_forall_u8_add_overflow_wraps_gt_zero() {
+fn test_forall_u8_add_one_is_positive() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "overflow_gt0",
@@ -45,16 +56,15 @@ fn test_forall_u8_add_overflow_wraps_gt_zero() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x + 1 > 0) must NOT verify — u8(255)+1=0, 0>0 false",
+        "forall(|x: u8| x + 1 > 0) is TRUE: x >= 0 gives x + 1 >= 1",
     );
 }
 
-/// DISCRIMINATING: forall |x: u8| x + 1 >= x should NOT verify.
-/// At x=255, u8(255)+1=0, so 0>=255 is false.
+/// FV-B: forall |x: u8| x + 1 >= x must VERIFY.
 #[test]
-fn test_forall_u8_add_overflow_ge() {
+fn test_forall_u8_add_one_is_ge() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "overflow_ge",
@@ -62,16 +72,15 @@ fn test_forall_u8_add_overflow_ge() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x + 1 >= x) must NOT verify — u8(255)+1=0 < 255",
+        "forall(|x: u8| x + 1 >= x) is TRUE under mathematical semantics",
     );
 }
 
-/// DISCRIMINATING: Signed wrapping — forall |x: i8| x - 1 < x should NOT verify.
-/// At x=-128 (i8::MIN), -128-1 wraps to 127, so 127 < -128 is false.
+/// FV-B: forall |x: i8| x - 1 < x must VERIFY — spec `x - 1` is `int`.
 #[test]
-fn test_forall_i8_sub_underflow_wraps() {
+fn test_forall_i8_sub_one_is_less() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "signed_underflow",
@@ -79,16 +88,15 @@ fn test_forall_i8_sub_underflow_wraps() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: i8| x - 1 < x) must NOT verify — i8(-128)-1 wraps to 127",
+        "forall(|x: i8| x - 1 < x) is TRUE under mathematical semantics",
     );
 }
 
-/// DISCRIMINATING: Multiplication wrapping — forall |x: u8| x * 2 >= x should NOT verify.
-/// At x=200, u8(200*2)=400 mod 256=144, so 144>=200 is false.
+/// FV-B: forall |x: u8| x * 2 >= x must VERIFY — `x >= 0` so `2x >= x`.
 #[test]
-fn test_forall_u8_mul_overflow_wraps() {
+fn test_forall_u8_mul_two_is_ge() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "mul_overflow",
@@ -96,9 +104,9 @@ fn test_forall_u8_mul_overflow_wraps() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x * 2 >= x) must NOT verify — u8(200)*2=144",
+        "forall(|x: u8| x * 2 >= x) is TRUE: x >= 0 gives 2x >= x",
     );
 }
 
@@ -119,11 +127,10 @@ fn test_forall_u8_add_zero_identity_still_holds() {
     );
 }
 
-/// Regression for #2669: trigger-less arithmetic forall assertions should now
-/// produce a real BV counterexample instead of falling back to fail-closed
-/// Int-mode `mod 2^w` arithmetic.
+/// FV-B (supersedes the #2669 expectation): `x + 200 > x` is TRUE for every
+/// `u8` under mathematical semantics, so there is no counterexample to produce.
 #[test]
-fn test_2669_forall_u8_add_overflow_has_counterexample_model() {
+fn test_2669_forall_u8_add_200_is_greater() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "overflow_counterexample",
@@ -131,9 +138,9 @@ fn test_2669_forall_u8_add_overflow_has_counterexample_model() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_counterexample(
+    expect_verified(
         &result,
-        "#2669: trigger-less u8 forall should expose a concrete BV counterexample",
+        "forall(|x: u8| x + 200 > x) is TRUE: x >= 0 gives x + 200 > x",
     );
 }
 
@@ -279,9 +286,11 @@ fn test_forall_int_division_remainder_identity_negative() {
 // Int-mode overflow checks in quantifier bodies (#1849)
 // ========================================================================
 
-/// DISCRIMINATING: forall |x: u8| x + 200 > x with overflow checks must NOT verify.
+/// FV-B: `with_overflow_checks` must NOT change a quantifier body. Overflow
+/// checking governs EXEC arithmetic; a spec quantifier body has no overflow to
+/// check, so this stays TRUE and must verify either way.
 #[test]
-fn test_forall_u8_add_overflow_check_fires() {
+fn test_forall_u8_add_200_verifies_under_overflow_checks() {
     let mut ctx = VerificationContext::new().with_overflow_checks();
     ctx.push_obligation(ProofObligation::assert(
         "overflow_in_forall",
@@ -289,15 +298,15 @@ fn test_forall_u8_add_overflow_check_fires() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x + 200 > x) with overflow checks must NOT verify — overflow at x=56+",
+        "forall(|x: u8| x + 200 > x) is TRUE; overflow checks govern exec code",
     );
 }
 
-/// DISCRIMINATING: forall |x: u8| x + 1 > x with overflow checks must NOT verify.
+/// FV-B: same, for `x + 1 > x`.
 #[test]
-fn test_forall_u8_add_one_overflow_check_fires() {
+fn test_forall_u8_add_one_verifies_under_overflow_checks() {
     let mut ctx = VerificationContext::new().with_overflow_checks();
     ctx.push_obligation(ProofObligation::assert(
         "add_one_overflow",
@@ -305,9 +314,9 @@ fn test_forall_u8_add_one_overflow_check_fires() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x + 1 > x) with overflow checks must NOT verify — u8(255)+1 overflows",
+        "forall(|x: u8| x + 1 > x) is TRUE; overflow checks govern exec code",
     );
 }
 
@@ -324,9 +333,9 @@ fn test_forall_u8_add_zero_no_overflow_check() {
     expect_verified(&result, "forall(|x: u8| x + 0 == x) with overflow checks should verify — adding 0 never overflows (#1849)");
 }
 
-/// DISCRIMINATING: forall |x: i8| x - 1 < x with overflow checks must NOT verify.
+/// FV-B: same, for signed `x - 1 < x`.
 #[test]
-fn test_forall_i8_sub_overflow_check_fires() {
+fn test_forall_i8_sub_one_verifies_under_overflow_checks() {
     let mut ctx = VerificationContext::new().with_overflow_checks();
     ctx.push_obligation(ProofObligation::assert(
         "sub_overflow",
@@ -334,15 +343,15 @@ fn test_forall_i8_sub_overflow_check_fires() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: i8| x - 1 < x) with overflow checks must NOT verify — i8(-128)-1 overflows",
+        "forall(|x: i8| x - 1 < x) is TRUE; overflow checks govern exec code",
     );
 }
 
-/// DISCRIMINATING: forall |x: u8| x * 2 >= x with overflow checks must NOT verify.
+/// FV-B: same, for `x * 2 >= x`.
 #[test]
-fn test_forall_u8_mul_overflow_check_fires() {
+fn test_forall_u8_mul_two_verifies_under_overflow_checks() {
     let mut ctx = VerificationContext::new().with_overflow_checks();
     ctx.push_obligation(ProofObligation::assert(
         "mul_overflow",
@@ -350,9 +359,9 @@ fn test_forall_u8_mul_overflow_check_fires() {
     ));
 
     let result = AYEncoder::verify(&ctx);
-    expect_fail_closed(
+    expect_verified(
         &result,
-        "forall(|x: u8| x * 2 >= x) with overflow checks must NOT verify — u8(200)*2 overflows",
+        "forall(|x: u8| x * 2 >= x) is TRUE; overflow checks govern exec code",
     );
 }
 

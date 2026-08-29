@@ -347,3 +347,176 @@ fn positive_length_false_concat_len_refutes() {
         "a positive-operand FALSE concat .len() must REFUTE, got {r:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Push/push_back consumer site. A constructor-backed push result must not add
+// an unconditional non-negative-length assertion when its source view has a
+// negative modeled length because a source precondition was violated.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn out_of_range_skip_push_len_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn out_of_range_skip_push_len_not_verified() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(100usize).push(5i32).len() == 777usize
+    );
+}
+"#,
+        "out_of_range_skip_push_len_not_verified",
+    );
+}
+
+#[test]
+fn out_of_range_skip_push_len_zero_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn out_of_range_skip_push_len_zero_not_verified() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(100usize).push(5i32).len() == 0usize
+    );
+}
+"#,
+        "out_of_range_skip_push_len_zero_not_verified",
+    );
+}
+
+#[test]
+fn out_of_range_skip_push_back_len_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn out_of_range_skip_push_back_len_not_verified() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(100usize).push_back(5i32).len() == 777usize
+    );
+}
+"#,
+        "out_of_range_skip_push_back_len_not_verified",
+    );
+}
+
+#[test]
+fn reversed_subrange_push_len_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn reversed_subrange_push_len_not_verified() {
+    trust_vc::assert!(
+        trust_vc_types::seq![10i32, 20i32, 30i32].subrange(2usize, 1usize).push(5i32).len() == 777usize
+    );
+}
+"#,
+        "reversed_subrange_push_len_not_verified",
+    );
+}
+
+#[test]
+fn empty_drop_first_push_len_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn empty_drop_first_push_len_not_verified() {
+    trust_vc::assert!(Seq::<i32>::empty().drop_first().push(5i32).len() == 777usize);
+}
+"#,
+        "empty_drop_first_push_len_not_verified",
+    );
+}
+
+#[test]
+fn out_of_range_skip_push_index_not_verified() {
+    assert_not_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn out_of_range_skip_push_index_not_verified() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(100usize).push(5i32).index(0usize) == 424242i32
+    );
+}
+"#,
+        "out_of_range_skip_push_index_not_verified",
+    );
+}
+
+#[test]
+fn valid_skip_push_len_still_verifies() {
+    assert_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn valid_skip_push_len_still_verifies() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(2usize).push(5i32).len() == 2usize
+    );
+}
+"#,
+        "valid_skip_push_len_still_verifies",
+    );
+}
+
+#[test]
+fn valid_skip_to_empty_push_len_still_verifies() {
+    assert_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn valid_skip_to_empty_push_len_still_verifies() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(3usize).push(5i32).len() == 1usize
+    );
+}
+"#,
+        "valid_skip_to_empty_push_len_still_verifies",
+    );
+}
+
+#[test]
+fn valid_skip_zero_push_len_still_verifies() {
+    assert_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn valid_skip_zero_push_len_still_verifies() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(0usize).push(5i32).len() == 4usize
+    );
+}
+"#,
+        "valid_skip_zero_push_len_still_verifies",
+    );
+}
+
+#[test]
+fn positive_length_false_skip_push_len_refutes() {
+    let result = verify(
+        r#"
+#[trust_vc::ensures(true)]
+fn positive_length_false_skip_push_len_refutes() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].skip(2usize).push(5i32).len() == 999usize
+    );
+}
+"#,
+        "positive_length_false_skip_push_len_refutes",
+    );
+    assert!(
+        matches!(result, VerifyResult::Counterexample { .. }),
+        "a valid-precondition false skip-then-push length must refute, got {result:?}"
+    );
+}
+
+#[test]
+fn plain_push_len_still_verifies() {
+    assert_verified(
+        r#"
+#[trust_vc::ensures(true)]
+fn plain_push_len_still_verifies() {
+    trust_vc::assert!(
+        trust_vc_types::seq![1i32, 2i32, 3i32].push(5i32).len() == 4usize
+    );
+}
+"#,
+        "plain_push_len_still_verifies",
+    );
+}

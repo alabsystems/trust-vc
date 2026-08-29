@@ -694,7 +694,8 @@ fn verify_single_assertion_typed_inner(
     }
 
     let ctx = slices.ctx;
-    let assertion_prune_plan = super::pruning::build_per_assertion_prune_plan(slices, assertion);
+    let mut assertion_prune_plan =
+        super::pruning::build_per_assertion_prune_plan(slices, assertion);
     // NonlinearArith mode: all variables as Sort::Int so ay's integer theory
     // handles *, /, % symbolically. No BV wrapping, no overflow. Part of #2187.
     let is_nonlinear_arith = is_nonlinear_arith_mode(assertion.solver_mode);
@@ -802,23 +803,84 @@ fn verify_single_assertion_typed_inner(
             .expr
             .may_emit_overflow_checks(arith_overflow_enabled)
     {
-        let mut overflow_encoder = match AYEncoder::setup_overflow_from_prepared(
-            slices,
-            assertion,
-            use_int_for_measures,
-            post_loop_modified_vars,
-            extra_variables,
-            Some(assertion),
-            Some(&assertion_prune_plan),
+        // OBLIGATION-LOCAL PRUNE (the collection-precondition / overflow lane).
+        //
+        // These predicates — `Seq::subrange(start, end) requires end <= len`,
+        // `requires 0 <= i < len`, the carrier-index representability bound,
+        // the arithmetic no-overflow atoms — are LENGTH and SCALAR claims. The
+        // Seq ELEMENT model (the `__seq_shifted`/`__seq_concat` defining
+        // `forall`s, their ground `select` instances and the `bv2nat` length
+        // companions that carry them) is unreachable from all of them, yet the
+        // whole-query analysis has to keep it whenever ANY obligation in the
+        // unit reads an element — which is exactly when the lane drowns: a
+        // `2 <= 3` bound arrives at ay wrapped in AUFBV with `int2bv`, and ay
+        // computes UNSAT but cannot certify it, publishing
+        // `unknown (incomplete self-check-rejected)`.
+        //
+        // This lane already builds its OWN encoder, so it can simply be built
+        // in the weaker element-free context and consulted first.
+        //
+        // SOUNDNESS. Entailment is monotone: the pruned context is a strict
+        // SUBSET of the full context's assertions (pruning drops assertions
+        // only — `encode_index_shifted_seq` re-pushes its representability
+        // obligation on the pruned path so the OBLIGATION set is unchanged), so
+        // anything the pruned context proves the full context proves too. Only
+        // `Verified` is accepted from it; every other outcome — Counterexample,
+        // Unknown, a setup error — is DISCARDED and the full-context lane runs
+        // unchanged, so no rejection and no counterexample is ever read off the
+        // weaker context.
+        let mut pruned_overflow_outcome = None;
+        if matches!(
+            assertion_prune_plan.element_demand(),
+            super::pruning::ElementDemand::Observed
         ) {
-            Ok(enc) => enc,
-            Err(err) => return convert_setup_error(err),
-        };
-        let overflow_outcome =
-            check_overflow_predicates(&mut overflow_encoder, assertion, arith_overflow_enabled)?;
-        run_diagnostics.merge(&overflow_encoder.state.diagnostics);
-        if !matches!(overflow_outcome, AssertionOutcome::Verified) {
-            return Ok(overflow_outcome);
+            assertion_prune_plan.set_element_demand(super::pruning::ElementDemand::LengthOnly);
+            let pruned_setup = AYEncoder::setup_overflow_from_prepared(
+                slices,
+                assertion,
+                use_int_for_measures,
+                post_loop_modified_vars,
+                extra_variables,
+                Some(assertion),
+                Some(&assertion_prune_plan),
+            );
+            assertion_prune_plan.set_element_demand(super::pruning::ElementDemand::Observed);
+            if let Ok(mut pruned_encoder) = pruned_setup {
+                if let Ok(outcome) = check_overflow_predicates(
+                    &mut pruned_encoder,
+                    assertion,
+                    arith_overflow_enabled,
+                ) {
+                    if matches!(outcome, AssertionOutcome::Verified) {
+                        run_diagnostics.merge(&pruned_encoder.state.diagnostics);
+                        pruned_overflow_outcome = Some(outcome);
+                    }
+                }
+            }
+        }
+
+        if pruned_overflow_outcome.is_none() {
+            let mut overflow_encoder = match AYEncoder::setup_overflow_from_prepared(
+                slices,
+                assertion,
+                use_int_for_measures,
+                post_loop_modified_vars,
+                extra_variables,
+                Some(assertion),
+                Some(&assertion_prune_plan),
+            ) {
+                Ok(enc) => enc,
+                Err(err) => return convert_setup_error(err),
+            };
+            let overflow_outcome = check_overflow_predicates(
+                &mut overflow_encoder,
+                assertion,
+                arith_overflow_enabled,
+            )?;
+            run_diagnostics.merge(&overflow_encoder.state.diagnostics);
+            if !matches!(overflow_outcome, AssertionOutcome::Verified) {
+                return Ok(overflow_outcome);
+            }
         }
     }
 

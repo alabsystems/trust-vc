@@ -475,7 +475,20 @@ pub(super) fn apply_source_trait_declarations(
     vc: &mut VerificationContext,
 ) -> TrustVcResult<()> {
     let trait_contracts = SourceTraitContractRegistry::from_file(file)?;
-    collect_source_trait_declarations(&file.items, vc, &trait_contracts)
+    // Resolve every `impl <path> for T` header against the file's declarations,
+    // `use` renames and module structure BEFORE any decl is registered, so the
+    // DECLARATION decides which trait an impl belongs to. See
+    // `crate::trait_path_resolution` for the two measured defects this closes.
+    let scope_index = crate::trait_path_resolution::TraitScopeIndex::build(file);
+    scope_index.reject_duplicate_trait_names()?;
+    collect_source_trait_declarations(
+        file,
+        &file.items,
+        &mut Vec::new(),
+        &scope_index,
+        vc,
+        &trait_contracts,
+    )
 }
 
 /// Returns true if `items` declares at least one `#[trust_vc::trait_impl]`
@@ -492,15 +505,33 @@ pub(super) fn file_declares_trait_impls(items: &[syn::Item]) -> bool {
     })
 }
 
+/// `root_file` is the WHOLE file, threaded separately from `items` because the
+/// recursion below descends into inline `mod` bodies while
+/// `MethodSymbolCensus` must see every competing declaration in the file — a
+/// `mod`-local view would report a nested trait impl as unshadowed and re-open
+/// the collision.
 fn collect_source_trait_declarations(
+    root_file: &File,
     items: &[syn::Item],
+    module: &mut Vec<String>,
+    scope_index: &crate::trait_path_resolution::TraitScopeIndex,
     vc: &mut VerificationContext,
     trait_contracts: &SourceTraitContractRegistry,
 ) -> TrustVcResult<()> {
     for item in items {
         match item {
             syn::Item::Trait(item_trait) if has_trust_vc_attr(&item_trait.attrs, "trait_spec") => {
-                vc.register_trait_decl(crate::trait_expand::parse_trait_decl(item_trait)?);
+                let mut decl = crate::trait_expand::parse_trait_decl(item_trait)?;
+                // `parse_trait_decl` keys supertraits by the bound path's LAST
+                // SEGMENT, which under a `use` rename is not the declaration's
+                // ident — a measured cardinal false verify. Re-key them against
+                // the trait's OWN module scope. (`resolved_supertrait_names`.)
+                decl.supertraits = crate::trait_path_resolution::resolved_supertrait_names(
+                    scope_index,
+                    module,
+                    item_trait,
+                );
+                vc.register_trait_decl(decl);
             }
             // Register `#[trust_vc::trait_impl] impl T for S` blocks so the
             // concrete-receiver `requires` discharge (unit 2) can look up the
@@ -509,7 +540,32 @@ fn collect_source_trait_declarations(
             // time. `register_trait_impl` dedupes by equality, so this is
             // idempotent with the verify-time `apply_registered_traits_to_context`.
             syn::Item::Impl(item_impl) if has_trust_vc_attr(&item_impl.attrs, "trait_impl") => {
-                let decl = crate::trait_expand::parse_trait_impl_decl(item_impl)?;
+                let mut decl = crate::trait_expand::parse_trait_impl_decl(item_impl)?;
+                // `parse_trait_impl_decl` keys on the path's LAST SEGMENT, which
+                // is a `use` rename under an alias and is the wrong trait
+                // whenever a same-named declaration sits in another module.
+                // Overwrite it with the resolved DECLARATION's name; an
+                // undecidable header fails the file closed here rather than
+                // silently picking. (`crate::trait_path_resolution`.)
+                if let Some(resolved) = crate::trait_path_resolution::resolved_impl_trait_name(
+                    scope_index,
+                    module,
+                    item_impl,
+                )? {
+                    decl.trait_name = resolved;
+                }
+                // Resolve every method of this impl against the WHOLE file
+                // before the decl reaches the encoder. A method whose shared
+                // concrete symbol `Type__method` is claimed by some OTHER
+                // declaration must publish no axiom about it — otherwise the
+                // per-impl linking axiom `Tr__m(Box_S(s)) == S__m(s)` hands the
+                // trait's contract to whatever else owns `S__m` (a cardinal
+                // false verify when an inherent method owns it, and an outright
+                // CONTRADICTION once that inherent method's own body axiom is
+                // also in scope). See `TraitImplDecl::inherent_shadowed_methods`.
+                let decl = decl.with_inherent_shadowed_methods(
+                    crate::vc_extraction::shadowed_trait_impl_methods(root_file, item_impl),
+                );
                 for impl_item in &item_impl.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         // `default_ensures` is legal ONLY on a defaulted trait-method
@@ -589,7 +645,10 @@ fn collect_source_trait_declarations(
                         // (single pure return, no requires, no shadow) and additive:
                         // an uncaptured method keeps the prior body-axiom path.
                         if let Some(body) = super::capture_conformance_method_body(method) {
-                            vc.register_trait_impl_method_body(concrete_fn_name.clone(), body);
+                            vc.register_trait_impl_method_body(
+                                crate::ir::ImplMethodKey::new(&decl.trait_name, concrete_fn_name),
+                                body,
+                            );
 
                             // Capture the impl method's OWN `#[trust_vc::ensures]`
                             // — the strengthened postcondition it extends onto the
@@ -614,7 +673,10 @@ fn collect_source_trait_declarations(
                                 )?;
                             if !impl_ensures.is_empty() {
                                 vc.register_trait_impl_method_ensures(
-                                    concrete_fn_name.clone(),
+                                    crate::ir::ImplMethodKey::new(
+                                        &decl.trait_name,
+                                        concrete_fn_name,
+                                    ),
                                     impl_ensures,
                                 );
                             }
@@ -623,9 +685,19 @@ fn collect_source_trait_declarations(
                 }
                 vc.register_trait_impl(decl);
             }
-            syn::Item::Mod(module) => {
-                if let Some((_, inner_items)) = &module.content {
-                    collect_source_trait_declarations(inner_items, vc, trait_contracts)?;
+            syn::Item::Mod(item_mod) => {
+                if let Some((_, inner_items)) = &item_mod.content {
+                    module.push(item_mod.ident.to_string());
+                    let nested = collect_source_trait_declarations(
+                        root_file,
+                        inner_items,
+                        module,
+                        scope_index,
+                        vc,
+                        trait_contracts,
+                    );
+                    module.pop();
+                    nested?;
                 }
             }
             _ => {}
@@ -635,11 +707,13 @@ fn collect_source_trait_declarations(
 }
 
 pub(super) fn apply_function_trait_bounds(
+    file: Option<&File>,
+    scope: Option<&[String]>,
     func: &ItemFn,
     source_structs: Option<&SourceStructRegistry>,
     vc: &mut VerificationContext,
 ) -> TrustVcResult<()> {
-    let trait_bounds = trait_bounds_from_signature(&func.sig);
+    let trait_bounds = resolved_trait_bounds_from_signature(file, scope, &func.sig);
     if trait_bounds.is_empty() {
         return Ok(());
     }
@@ -680,8 +754,14 @@ fn trust_vc_type_from_source_string(
     source_structs: Option<&SourceStructRegistry>,
     type_params: &BTreeSet<String>,
 ) -> TrustVcType {
-    if type_params.contains(ty) {
-        return TrustVcType::TypeParam(ty.to_string());
+    // Peel `&` / `&mut` / `&'a` first, mirroring `parse_or_opaque` (which strips
+    // references before classifying the referent) and the parameter loop in
+    // `vc_extraction`. Kept in lockstep with that call site: if the two disagree
+    // about whether `&Item` is a type parameter, the FunctionContext's parameter
+    // types drift from the declared variables' types.
+    let referent = super::param_extract::strip_leading_references(ty.trim()).trim_end();
+    if type_params.contains(referent) {
+        return TrustVcType::TypeParam(referent.to_string());
     }
 
     source_structs
@@ -696,11 +776,89 @@ fn type_params_from_signature(sig: &syn::Signature) -> BTreeSet<String> {
         .collect()
 }
 
+/// LAST-SEGMENT keying, kept for the callers that have no `syn::File` to resolve
+/// against (the proc-macro lane) and for the pure EMPTINESS probe in
+/// `vc_extraction`. Resolution never adds or removes a bound, so an emptiness
+/// test is identical either way.
+///
+/// Every caller that records these bounds into a `FunctionContext` must use
+/// [`resolved_trait_bounds_from_signature`] instead — see its soundness note.
 pub(super) fn trait_bounds_from_signature(sig: &syn::Signature) -> Vec<TraitBound> {
-    let mut bounds = Vec::new();
+    // `None` scope ⇒ no resolver ⇒ the last-segment path.
+    resolved_trait_bounds_from_signature(None, None, sig)
+}
 
+/// `trait_bounds_from_signature` with each bound's path resolved to the trait
+/// DECLARATION it names, through the same `TraitScopeIndex` walk the impl-header
+/// lane uses, from `scope` — the module the bounded function is written in.
+///
+/// SOUNDNESS (rename), a MEASURED CARDINAL. `TraitBound::trait_name` is the key
+/// every downstream consumer looks a trait up by: `supertrait_closure_methods`
+/// for method resolution and inherited contracts, and
+/// `type_param_mut_self_methods` for the generic-receiver `&mut self` mutation
+/// framing. Recording the path's LAST SEGMENT makes that key the name the bound
+/// SPELLED, which under a `use` rename is not the declaration's ident:
+///
+/// ```text
+/// mod origin { trait Counter { ensures(result == 7) fn peek(&self) -> u64; } }
+/// mod other  { trait Peek    { ensures(result == 9) fn peek(&self) -> u64; } }
+/// use origin::Counter as Peek;
+/// fn probe<T: Peek>(x: T) { assert!(x.peek() == 9u64); }   // FALSE — truth is 7
+/// ```
+///
+/// The bound recorded `"Peek"`, which answered with `other::Peek`, so the FALSE
+/// claim **verified** and its TRUE twin (`== 7u64`) was refuted — this class's
+/// signature, on a program stock `rustc --edition 2021` compiles and runs (it
+/// prints `probe(S) = 7`). Every declaration ident in that file is DISTINCT, so
+/// neither `reject_duplicate_trait_names` nor the bound-vote election in
+/// `prune_shadowed_duplicate_traits` — both of which engage only on a duplicated
+/// ident — ever sees it.
+///
+/// The plain rename (`use origin::Orig as Alias; fn probe<T: Alias>`) was the
+/// benign half of the same defect: `"Alias"` names no declaration, so the method
+/// did not resolve at all and the call errored. Sound, but it cost the entire
+/// generic-dispatch capability for a renamed bound; resolution restores it.
+///
+/// `Foreign` keeps the last segment, which by that variant's own guarantee
+/// collides with no in-file declaration and is therefore inert.
+///
+/// An UNDECIDABLE path records NO bound. Two alternatives were measured and
+/// rejected:
+///
+/// * Falling back to the last segment is precisely the wrong-trait step above.
+/// * Failing the FILE closed costs legal programs. `mod m { trait Debug {..} }`
+///   beside `fn probe<T: core::fmt::Debug>(..)` is undecidable by this index
+///   (the qualifier names no in-file module, the last segment names an in-file
+///   trait) yet is perfectly ordinary Rust, and rejecting it took a file that
+///   verifies today — the deferred-fix shape.
+///
+/// Omitting the bound is NOT the "dropping promotes the shadowed entry" hazard
+/// that `prune_shadowed_duplicate_traits` documents: a bound is a LOOKUP KEY,
+/// not a declaration. Every declaration stays registered, so a sibling site that
+/// names one unambiguously still resolves (pinned by
+/// `trait_use_alias_resolution_soundness`), and the omitted key simply answers
+/// nothing — the call lowers as an unsupported method, which is fail-closed.
+pub(super) fn resolved_trait_bounds_from_signature(
+    file: Option<&File>,
+    scope: Option<&[String]>,
+    sig: &syn::Signature,
+) -> Vec<TraitBound> {
+    // Both halves or neither: an index without the writing module's scope would
+    // resolve a legal module-local bound from the wrong place.
+    let index = match scope {
+        Some(_) => file.map(crate::trait_path_resolution::TraitScopeIndex::build),
+        None => None,
+    };
+    let resolver = index.as_ref().zip(scope);
+
+    let mut bounds = Vec::new();
     for param in sig.generics.type_params() {
-        append_trait_bounds(&mut bounds, &param.ident.to_string(), &param.bounds);
+        append_trait_bounds(
+            &mut bounds,
+            &param.ident.to_string(),
+            &param.bounds,
+            resolver,
+        );
     }
 
     if let Some(where_clause) = &sig.generics.where_clause {
@@ -714,7 +872,12 @@ pub(super) fn trait_bounds_from_signature(sig: &syn::Signature) -> Vec<TraitBoun
             let Some(type_param) = type_path.path.get_ident() else {
                 continue;
             };
-            append_trait_bounds(&mut bounds, &type_param.to_string(), &predicate.bounds);
+            append_trait_bounds(
+                &mut bounds,
+                &type_param.to_string(),
+                &predicate.bounds,
+                resolver,
+            );
         }
     }
 
@@ -725,7 +888,9 @@ fn append_trait_bounds(
     bounds: &mut Vec<TraitBound>,
     type_param: &str,
     predicates: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::token::Plus>,
+    resolver: Option<(&crate::trait_path_resolution::TraitScopeIndex, &[String])>,
 ) {
+    use crate::trait_path_resolution::TraitPathResolution;
     for bound in predicates {
         let syn::TypeParamBound::Trait(trait_bound) = bound else {
             continue;
@@ -733,13 +898,23 @@ fn append_trait_bounds(
         if !matches!(trait_bound.modifier, syn::TraitBoundModifier::None) {
             continue;
         }
-        let Some(trait_name) = trait_bound
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-        else {
-            continue;
+        let trait_name = match resolver {
+            Some((index, scope)) => match index.resolve_impl_trait_path(scope, &trait_bound.path) {
+                TraitPathResolution::Declared(name) | TraitPathResolution::Foreign(name) => name,
+                // Inert: record nothing rather than key the wrong declaration.
+                TraitPathResolution::Undecidable(_) => continue,
+            },
+            None => {
+                let Some(name) = trait_bound
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                else {
+                    continue;
+                };
+                name
+            }
         };
         let bound = TraitBound::new(type_param, trait_name);
         if !bounds.contains(&bound) {
@@ -949,49 +1124,361 @@ pub(super) fn source_function_named_in_items(items: &[syn::Item], name: &str) ->
     })
 }
 
-/// Returns the top-level (or nested-module) free `Item::Fn` named `name`, if any.
-fn find_free_fn_in_items<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a ItemFn> {
-    for item in items {
-        match item {
-            syn::Item::Fn(func) if func.sig.ident == name => return Some(func),
-            syn::Item::Mod(module) => {
-                if let Some((_, inner_items)) = &module.content {
-                    if let Some(found) = find_free_fn_in_items(inner_items, name) {
-                        return Some(found);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+/// A path-call identity on the exact spelling emitted by
+/// `ir_lowering::expr_path_to_string`, plus its arity.  Keeping the full path is
+/// essential: two modules may legally contain same-named helpers with different
+/// contracts, and leaf-name matching would transfer proof authority between
+/// them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CalleePath {
+    full_name: String,
+    segments: Vec<String>,
+    arg_count: usize,
 }
 
-/// Collects the names of free-function calls (`f(args)` with a single-segment
-/// path callee) reachable in `expr`, recursing into every subexpression. Method
-/// calls (`recv.m(..)`) are intentionally excluded — those are handled by the
-/// sibling-default inliner in the conformance pass.
-fn collect_free_call_names(expr: &Expr, out: &mut BTreeSet<String>) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpaqueCallSignature {
+    return_type: TrustVcType,
+    param_types: Vec<TrustVcType>,
+}
+
+/// Collects every path callee (single- and multi-segment) reachable in `expr`.
+/// Method calls remain on the sibling-default conformance lane.
+fn collect_call_paths(expr: &Expr, out: &mut BTreeSet<CalleePath>) {
     use syn::visit::Visit;
 
     struct CallVisitor<'a> {
-        out: &'a mut BTreeSet<String>,
+        out: &'a mut BTreeSet<CalleePath>,
     }
     impl<'ast> Visit<'ast> for CallVisitor<'_> {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
             if let Expr::Path(path_expr) = &*call.func {
-                if path_expr.qself.is_none() && path_expr.path.segments.len() == 1 {
-                    out_insert(self.out, &path_expr.path.segments[0].ident);
+                if path_expr.qself.is_none() && !path_expr.path.segments.is_empty() {
+                    let segments = path_expr
+                        .path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>();
+                    self.out.insert(CalleePath {
+                        full_name: segments.join("::"),
+                        segments,
+                        arg_count: call.args.len(),
+                    });
                 }
             }
             syn::visit::visit_expr_call(self, call);
         }
     }
-    fn out_insert(out: &mut BTreeSet<String>, ident: &Ident) {
-        out.insert(ident.to_string());
-    }
 
     CallVisitor { out }.visit_expr(expr);
+}
+
+/// If the effective body definitionally returns one direct path call, derive an
+/// opaque signature for an unresolved callee from source-typed arguments and the
+/// method return type.  Unsupported argument expressions yield no signature and
+/// remain an addressed `Unknown`, never a guessed sort.
+fn returned_opaque_call_signature(
+    expr: &Expr,
+    method: &crate::ir::TraitMethodDecl,
+) -> Option<(CalleePath, OpaqueCallSignature)> {
+    let expr = unwrap_returned_expr(expr)?;
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Path(path) = &*call.func else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.segments.is_empty() {
+        return None;
+    }
+    let segments = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let param_types = call
+        .args
+        .iter()
+        .map(|arg| infer_default_call_arg_type(arg, method))
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        CalleePath {
+            full_name: segments.join("::"),
+            segments,
+            arg_count: call.args.len(),
+        },
+        OpaqueCallSignature {
+            return_type: method.return_type.clone(),
+            param_types,
+        },
+    ))
+}
+
+fn unwrap_returned_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Paren(paren) => unwrap_returned_expr(&paren.expr),
+        Expr::Group(group) => unwrap_returned_expr(&group.expr),
+        Expr::Block(block) if block.label.is_none() => {
+            let [statement] = block.block.stmts.as_slice() else {
+                return None;
+            };
+            match statement {
+                syn::Stmt::Expr(Expr::Return(ret), _) => {
+                    ret.expr.as_deref().and_then(unwrap_returned_expr)
+                }
+                syn::Stmt::Expr(tail, None) => unwrap_returned_expr(tail),
+                _ => None,
+            }
+        }
+        Expr::Return(ret) => ret.expr.as_deref().and_then(unwrap_returned_expr),
+        other => Some(other),
+    }
+}
+
+fn infer_default_call_arg_type(
+    expr: &Expr,
+    method: &crate::ir::TraitMethodDecl,
+) -> Option<TrustVcType> {
+    match expr {
+        Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            let name = path.path.segments[0].ident.to_string();
+            if name == TRAIT_RECEIVER_NAME {
+                return Some(TrustVcType::Poly);
+            }
+            method
+                .params
+                .iter()
+                .find(|(param_name, _)| param_name == &name)
+                .map(|(_, ty)| ty.clone())
+        }
+        Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Int(int) if !int.suffix().is_empty() => {
+                TrustVcType::try_from_str(int.suffix()).ok()
+            }
+            syn::Lit::Bool(_) => Some(TrustVcType::Bool),
+            _ => None,
+        },
+        Expr::Cast(cast) => Some(TrustVcType::parse_or_opaque(
+            &cast.ty.to_token_stream().to_string(),
+        )),
+        Expr::Paren(paren) => infer_default_call_arg_type(&paren.expr, method),
+        Expr::Group(group) => infer_default_call_arg_type(&group.expr, method),
+        _ => None,
+    }
+}
+
+#[derive(Clone)]
+struct ResolvedCallee {
+    item_fn: ItemFn,
+    is_spec: bool,
+}
+
+/// Resolves a qualified call without suffix guessing.  Module functions are
+/// traversed by their exact inline-module path; inherent associated functions
+/// are matched against the exact module-qualified self type.  `crate::` and a
+/// root-level `self::` are notation-only prefixes here.
+fn resolve_qualified_callee(items: &[syn::Item], callee: &CalleePath) -> Option<ResolvedCallee> {
+    let normalized = normalize_root_path(&callee.segments)?;
+    if normalized.is_empty() {
+        return None;
+    }
+    if let Some(item_fn) = find_free_fn_at_exact_path(items, normalized) {
+        return Some(ResolvedCallee {
+            is_spec: has_trust_vc_attr(&item_fn.attrs, "spec"),
+            item_fn: item_fn.clone(),
+        });
+    }
+    if normalized.len() < 2 {
+        return None;
+    }
+    let (fn_name, type_path) = normalized.split_last()?;
+    let method = find_inherent_assoc_fn_at_exact_path(items, type_path, fn_name)?;
+    Some(ResolvedCallee {
+        is_spec: has_trust_vc_attr(&method.attrs, "spec"),
+        item_fn: impl_item_fn_to_item_fn(method),
+    })
+}
+
+fn normalize_root_path(segments: &[String]) -> Option<&[String]> {
+    match segments.first().map(String::as_str) {
+        Some("crate" | "self") => Some(&segments[1..]),
+        Some("super") | None => None,
+        Some(_) => Some(segments),
+    }
+}
+
+fn find_free_fn_at_exact_path<'a>(items: &'a [syn::Item], path: &[String]) -> Option<&'a ItemFn> {
+    let (function, modules) = path.split_last()?;
+    let mut current = items;
+    for module_name in modules {
+        let mut matches = current.iter().filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == module_name => {
+                module.content.as_ref().map(|(_, inner)| inner.as_slice())
+            }
+            _ => None,
+        });
+        current = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+    }
+    let mut matches = current.iter().filter_map(|item| match item {
+        syn::Item::Fn(item_fn) if item_fn.sig.ident == function => Some(item_fn),
+        _ => None,
+    });
+    let found = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(found)
+}
+
+fn find_inherent_assoc_fn_at_exact_path<'a>(
+    items: &'a [syn::Item],
+    type_path: &[String],
+    fn_name: &str,
+) -> Option<&'a syn::ImplItemFn> {
+    fn collect<'a>(
+        items: &'a [syn::Item],
+        module_path: &mut Vec<String>,
+        wanted_type: &[String],
+        fn_name: &str,
+        out: &mut Vec<&'a syn::ImplItemFn>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        module_path.push(module.ident.to_string());
+                        collect(inner, module_path, wanted_type, fn_name, out);
+                        module_path.pop();
+                    }
+                }
+                syn::Item::Impl(item_impl) if item_impl.trait_.is_none() => {
+                    let syn::Type::Path(self_ty) = item_impl.self_ty.as_ref() else {
+                        continue;
+                    };
+                    let mut actual = self_ty
+                        .path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>();
+                    if matches!(actual.first().map(String::as_str), Some("crate" | "self")) {
+                        actual.remove(0);
+                    } else if actual.len() == 1 {
+                        let mut qualified = module_path.clone();
+                        qualified.extend(actual);
+                        actual = qualified;
+                    }
+                    if actual != wanted_type {
+                        continue;
+                    }
+                    for impl_item in &item_impl.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            if method.sig.ident == fn_name
+                                && method
+                                    .sig
+                                    .inputs
+                                    .iter()
+                                    .all(|input| matches!(input, syn::FnArg::Typed(_)))
+                            {
+                                out.push(method);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(items, &mut Vec::new(), type_path, fn_name, &mut found);
+    let [method] = found.as_slice() else {
+        return None;
+    };
+    Some(*method)
+}
+
+fn impl_item_fn_to_item_fn(method: &syn::ImplItemFn) -> ItemFn {
+    ItemFn {
+        attrs: method.attrs.clone(),
+        vis: method.vis.clone(),
+        sig: method.sig.clone(),
+        block: Box::new(method.block.clone()),
+    }
+}
+
+fn source_callee_arity(item_fn: &ItemFn) -> Option<usize> {
+    item_fn
+        .sig
+        .inputs
+        .iter()
+        .all(|input| matches!(input, syn::FnArg::Typed(_)))
+        .then_some(item_fn.sig.inputs.len())
+}
+
+fn register_opaque_callee(
+    name: &str,
+    signature: &OpaqueCallSignature,
+    vc: &mut VerificationContext,
+) -> TrustVcResult<()> {
+    let params = signature
+        .param_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| (format!("__trust_vc_opaque_arg_{index}"), ty.clone()))
+        .collect::<Vec<_>>();
+    if let Some((return_type, existing_params, _)) = vc.helper_functions_typed.get(name) {
+        let existing_types = existing_params.iter().map(|(_, ty)| ty).collect::<Vec<_>>();
+        let requested_types = signature.param_types.iter().collect::<Vec<_>>();
+        if return_type == &signature.return_type && existing_types == requested_types {
+            return Ok(());
+        }
+        return Err(TrustVcError::Encoding {
+            context: "register default-body helper",
+            detail: format!("conflicting helper signature for '{name}'"),
+        });
+    }
+    vc.declare_helper_function_typed(name, signature.return_type.clone(), params);
+    Ok(())
+}
+
+fn source_signature(
+    item_fn: &ItemFn,
+    source_structs: Option<&SourceStructRegistry>,
+    vc: &VerificationContext,
+) -> TrustVcResult<OpaqueCallSignature> {
+    let return_type = super::helper_return_type(&item_fn.sig, source_structs).ok_or_else(|| {
+        TrustVcError::Encoding {
+            context: "register default-body helper",
+            detail: format!(
+                "helper '{}' has an unsupported return type",
+                item_fn.sig.ident
+            ),
+        }
+    })?;
+    let params = super::helper_params(&item_fn.sig, source_structs, vc)?.ok_or_else(|| {
+        TrustVcError::Encoding {
+            context: "register default-body helper",
+            detail: format!("helper '{}' has unsupported parameters", item_fn.sig.ident),
+        }
+    })?;
+    Ok(OpaqueCallSignature {
+        return_type,
+        param_types: params.into_iter().map(|param| param.ty).collect(),
+    })
+}
+
+fn helper_is_requires_free(item_fn: &ItemFn) -> bool {
+    !has_requires_clause(&item_fn.attrs).unwrap_or(true)
+}
+
+fn helper_body_is_visible(item_fn: &ItemFn) -> bool {
+    !has_trust_vc_attr(&item_fn.attrs, "opaque") && !has_trust_vc_attr(&item_fn.attrs, "uninterp")
 }
 
 /// Registers the free functions called inside the DEFAULT-method bodies of
@@ -1034,58 +1521,192 @@ pub(super) fn register_default_body_free_function_helpers(
         .iter()
         .map(|impl_decl| impl_decl.trait_name.clone())
         .collect();
-    let default_bodies: Vec<String> = vc
+    let default_methods = vc
         .trait_decls()
         .iter()
         .filter(|trait_decl| !impl_trait_names.contains(&trait_decl.name))
         .flat_map(|trait_decl| trait_decl.methods.iter())
-        .filter_map(|method| method.default_body.clone())
-        .collect();
-    if default_bodies.is_empty() {
+        .filter(|method| method.default_body.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if default_methods.is_empty() {
         return Ok(());
     }
 
-    let mut called: BTreeSet<String> = BTreeSet::new();
-    for body in &default_bodies {
-        if let Ok(expr) = syn::parse_str::<Expr>(body) {
-            collect_free_call_names(&expr, &mut called);
+    let mut called = BTreeSet::new();
+    let mut fallback_signatures: BTreeMap<CalleePath, Vec<OpaqueCallSignature>> = BTreeMap::new();
+    for method in &default_methods {
+        let body = method
+            .default_body
+            .as_deref()
+            .expect("filtered default method must retain its body");
+        let expr = syn::parse_str::<Expr>(body).map_err(|source| TrustVcError::Parse {
+            context: "parse trait default helper calls",
+            source,
+        })?;
+        collect_call_paths(&expr, &mut called);
+        if let Some((callee, signature)) = returned_opaque_call_signature(&expr, method) {
+            let evidence = fallback_signatures.entry(callee).or_default();
+            if !evidence.contains(&signature) {
+                evidence.push(signature);
+            }
         }
     }
-    // Keep only genuine free functions declared in the file — never methods,
-    // trait siblings, or std intrinsics.
-    called.retain(|name| source_function_named_in_items(&file.items, name));
     if called.is_empty() {
         return Ok(());
     }
 
+    // One SMT symbol cannot have two arities.  A malformed source that calls one
+    // spelling at multiple arities remains unresolved and therefore fails closed.
+    let mut arities: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for callee in &called {
+        arities
+            .entry(callee.full_name.clone())
+            .or_default()
+            .insert(callee.arg_count);
+    }
+
     let catalog = crate::spec_function_catalog::SpecFunctionCatalog::from_file(file);
-    for name in &called {
-        // Spec function: register transparently (helper decl + defining body
-        // axiom + transitive spec deps).
-        match catalog.apply_explicit_spec(name, vc) {
-            Ok(true) => continue,
-            // Non-spec (exec) free function: fall through to the opaque-signature
-            // path below.
-            Ok(false) => {}
-            // Fail SAFE on a spec-registration error: leave the call unresolved
-            // (the conformance build then fails safe, exactly as before), never
-            // sink an unrelated verification.
-            Err(_) => continue,
+    for callee in &called {
+        if arities
+            .get(&callee.full_name)
+            .is_some_and(|seen| seen.len() != 1)
+        {
+            continue;
         }
-        // Exec free function: register its SIGNATURE as an opaque UF, then — when
-        // it carries a definitional `#[ensures(result == <rhs>)]` — ALSO publish
-        // that postcondition as a body-axiom-shaped broadcast. Registration
-        // failure (unsupported return/parameter type) is non-fatal: skip the
-        // postcondition (no helper to anchor it on) and let the conformance build
-        // Err and fail safe, as before.
-        if let Some(item_fn) = find_free_fn_in_items(&file.items, name) {
-            if super::register_source_function_signature(name, item_fn, source_structs, vc).is_ok()
-            {
-                register_exec_callee_postcondition_axioms(name, item_fn, source_structs, vc);
+
+        let resolved = if callee.segments.len() == 1 {
+            find_free_fn_at_exact_path(&file.items, &callee.segments).map(|item_fn| {
+                ResolvedCallee {
+                    item_fn: item_fn.clone(),
+                    is_spec: has_trust_vc_attr(&item_fn.attrs, "spec"),
+                }
+            })
+        } else {
+            resolve_qualified_callee(&file.items, callee)
+        };
+
+        let Some(resolved) = resolved else {
+            if let Some([signature]) = fallback_signatures.get(callee).map(Vec::as_slice) {
+                register_opaque_callee(&callee.full_name, signature, vc)?;
             }
+            continue;
+        };
+        // Exact arity is part of resolution authority.  A same-path definition
+        // with a different arity is not this call; use only independently typed
+        // opaque fallback evidence when available.
+        if source_callee_arity(&resolved.item_fn) != Some(callee.arg_count) {
+            if let Some([signature]) = fallback_signatures.get(callee).map(Vec::as_slice) {
+                register_opaque_callee(&callee.full_name, signature, vc)?;
+            }
+            continue;
         }
+
+        let signature = match source_signature(&resolved.item_fn, source_structs, vc) {
+            Ok(signature) => signature,
+            Err(_) => continue,
+        };
+        register_opaque_callee(&callee.full_name, &signature, vc)?;
+
+        if resolved.is_spec {
+            // A precondition-bearing, opaque, uninterpreted, malformed, or
+            // otherwise unsupported spec helper remains an opaque UF.  Only a
+            // requires-free visible definition may contribute proof power.
+            if !helper_is_requires_free(&resolved.item_fn)
+                || !helper_body_is_visible(&resolved.item_fn)
+            {
+                continue;
+            }
+            // `SpecFunctionCatalog` keys top-level functions by their bare name.
+            // Its `crate::top` compatibility registration intentionally leaves
+            // the body opaque, so a successful return there does not certify a
+            // defining axiom.  Route notation-prefixed root paths through the
+            // narrow body-justified publisher below instead.
+            let catalog_eligible = !matches!(
+                callee.segments.first().map(String::as_str),
+                Some("crate" | "self")
+            );
+            match catalog_eligible
+                .then(|| catalog.apply_explicit_spec(&callee.full_name, vc))
+                .transpose()
+            {
+                Ok(Some(true)) => continue,
+                Ok(Some(false) | None) => register_callee_body_definition_axiom(
+                    &callee.full_name,
+                    &resolved.item_fn,
+                    source_structs,
+                    vc,
+                ),
+                Err(_) => {}
+            }
+            continue;
+        }
+
+        // Exec functions are opaque by default.  A requires-free, body-justified
+        // definitional ensures may be carried by the existing guarded lane.
+        register_exec_callee_postcondition_axioms(
+            &callee.full_name,
+            &resolved.item_fn,
+            source_structs,
+            vc,
+        );
     }
     Ok(())
+}
+
+/// Adds a narrow, body-justified defining axiom for qualified spec functions
+/// that are not catalog keys (`crate::top`, inherent `Type::assoc`).  The body
+/// must be one pure returned expression whose free names are exactly parameters;
+/// otherwise the already-declared helper remains opaque.
+fn register_callee_body_definition_axiom(
+    name: &str,
+    item_fn: &ItemFn,
+    source_structs: Option<&SourceStructRegistry>,
+    vc: &mut VerificationContext,
+) {
+    if !helper_is_requires_free(item_fn) || !helper_body_is_visible(item_fn) {
+        return;
+    }
+    let Some(body) = body_definitional_expr(&item_fn.block).cloned() else {
+        return;
+    };
+    let Ok(Some(params)) = super::helper_params(&item_fn.sig, source_structs, vc) else {
+        return;
+    };
+    let param_names = params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<BTreeSet<_>>();
+    if !rhs_is_carryable(&body, &param_names) {
+        return;
+    }
+
+    let mut rename = BTreeMap::new();
+    let mut bound_vars = Vec::with_capacity(params.len());
+    for param in &params {
+        if vc.get_variable_type(&param.bound_name).is_none() {
+            vc.declare_var_typed(&param.bound_name, param.ty.clone());
+        }
+        rename.insert(param.name.clone(), format_ident!("{}", param.bound_name));
+        bound_vars.push(param.bound_name.clone());
+    }
+    let trigger = format!("{name}({})", bound_vars.join(", "));
+    let mut rhs = body;
+    syn::visit_mut::VisitMut::visit_expr_mut(&mut ExecParamRenamer { rename: &rename }, &mut rhs);
+    let condition = format!("{trigger} == {}", rhs.to_token_stream());
+    let axiom_name = format!("__body_axiom_{}_spec_definition", name.replace("::", "__"));
+    if vc
+        .obligations()
+        .iter()
+        .any(|obligation| obligation.name() == axiom_name)
+    {
+        return;
+    }
+    vc.push_obligation(
+        ProofObligation::broadcast_assume(axiom_name, condition)
+            .with_bound_vars(bound_vars)
+            .with_trigger_patterns(vec![vec![trigger]]),
+    );
 }
 
 /// Publishes the definitional postcondition of an EXEC free callee (no

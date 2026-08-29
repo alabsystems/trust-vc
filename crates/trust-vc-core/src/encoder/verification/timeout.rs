@@ -7,6 +7,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::solver_budget::ConflictBudget;
+
 /// Hard timeout for BV solver queries that bypass ay-dpll's internal timeout.
 ///
 /// ay-dpll's BV solver calls `SatSolver::solve()` (non-interruptible) instead of
@@ -28,12 +30,110 @@ use std::time::Duration;
 /// finished in 60s is stuck in exponential BV DPLL search.
 pub(in crate::encoder) const BV_HARD_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Default nominal solver budget handed to ay via `with_limits()` when the
-/// verification context carries no explicit `rlimit_ms`. Single source of
-/// truth shared by encoder setup (`setup.rs`) and the far-out watchdog
-/// derivation below — the watchdog must never be derived from a different
-/// nominal than the one the solver was actually configured with.
-pub(in crate::encoder) const DEFAULT_SOLVER_NOMINAL_TIMEOUT_MS: u64 = 30_000;
+/// Default DETERMINISTIC per-solve conflict budget handed to ay via
+/// `with_limits()` when the verification context carries no explicit
+/// `#[verifier::rlimit(N)]`. This — not the wall clock below — is the bound
+/// that is meant to decide a runaway solve.
+///
+/// VALUE, AND WHY IT IS NOT LOWER. 400k is exactly ay's own
+/// `Executor::DEFAULT_GROUND_CONFLICT_ALLOWANCE`, the per-SAT-solve allowance
+/// ay already applies by default. Making it explicit here changes NOTHING
+/// about which proofs succeed — it is deliberately a no-op on capability —
+/// while moving the number under trust-vc's control, into the VC cache key,
+/// and under `#[verifier::rlimit]` override. Lowering it is what would cost
+/// capability (silently converting proofs to `Unknown`), so the migration
+/// does not lower it.
+///
+/// MEASURED HEADROOM (2026-08-20, this repo, debug build, cache off, load
+/// average 7.4). Instrumented every `check_sat` in
+/// `collection_mutation_loop_soundness` — the harness carrying the four
+/// obligations whose verdicts rotate with machine load, and therefore the
+/// worst case that matters here. 205 solves:
+///
+/// | conflicts | solves |
+/// |-----------|--------|
+/// | 0         | 171    |
+/// | 1-12      | 27     |
+/// | 60-143    | 5      |
+/// | 292, 317  | 2      |
+///
+/// Maximum 317 conflicts; maximum 2,872 decisions. This allowance is ~1,260x
+/// the heaviest solve measured. ay's own calibration note records the same
+/// shape from the other side (1,104 check-sat solves across its heavy suite,
+/// max 2,208 conflicts per solver lifetime, nothing above 10k; the heaviest
+/// known real trust-vc workload, the calc.rs line93 seq-chain BV<->LIA
+/// bridge, at ~1,266 conflicts). Nothing legitimate is anywhere near this
+/// number, which is exactly the property a fail-closed budget needs: it
+/// bounds divergence without ever being the reason a real proof fails.
+///
+/// THE SAME MEASUREMENT SHOWS WHAT THIS BUDGET DOES NOT FIX. Those 205 solves
+/// took up to 46,160 MILLISECONDS of wall clock while doing at most 317
+/// conflicts of work, against a 30,000ms wall. So for this family the wall is
+/// still the deciding bound and the work budget is nowhere near spent — their
+/// cost is E-matching, preprocessing and certificate minting, none of which a
+/// conflict budget can see. This budget makes conflict-driven divergence
+/// deterministic; it does not make that family deterministic. See
+/// [`DEFAULT_SOLVER_WALL_BACKSTOP_MS`] for the experiment that established
+/// this and the raise that did NOT fix it.
+pub(in crate::encoder) const DEFAULT_CONFLICT_BUDGET_CONFLICTS: u64 = 400_000;
+
+/// Default WALL-CLOCK backstop handed to ay via `with_limits()` when the
+/// verification context carries no explicit override.
+///
+/// THIS IS A LIVENESS BACKSTOP, NOT A VERDICT BOUNDARY. A pure conflict
+/// budget gives no wall guarantee: a solve can spin in preprocessing, in a
+/// theory-propagation loop, or in certificate minting without accruing
+/// conflicts, so removing the wall entirely would trade nondeterminism for
+/// hangs. It is therefore kept — and deliberately set far enough above the
+/// work budget that it fires only pathologically.
+///
+/// WHY IT IS STILL 30s, AND WHAT THAT COSTS. Raising it was the obvious
+/// companion to this migration and it is deliberately NOT part of it,
+/// because the experiment that would have justified the raise came back
+/// null. Both halves are recorded here so the next attempt does not repeat
+/// the guess.
+///
+/// THE HYPOTHESIS. The four `collection_mutation_loop_soundness`
+/// obligations whose verdicts rotate with machine load do NOT fail with a
+/// timeout reason — measured, they fail with
+/// `unknown ((incomplete self-check-rejected))`, reason text "computed UNSAT
+/// rejected by mandatory strict certification: strict UNSAT proof validation
+/// failed: step t0 uses unverified trust rule; deferred-trust discharge
+/// failed: … the authored assertions could not be independently re-solved as
+/// UNSAT". Reading ay: that discharge step re-solves the authored obligation
+/// in a fresh executor (`unsat_cert.rs` step (4), `reconfirms_unsat_within`)
+/// and the re-solve inherits the CALLER's deadline
+/// (`set_solve_controls(.., self.solve_deadline.get())`). So a caller wall
+/// that expires mid-certification withholds a CORRECT unsat ay already
+/// computed. ay's own note on the same funnel says the margin is thin: a
+/// 5.85s re-solve under an 8s effective wall at 1.37x, and "contention
+/// slowing the box past ~1.4x flips a correct `unsat` to `unknown`".
+///
+/// THE MEASUREMENT THAT SUPPORTED IT. Instrumented wall time over 205 solves
+/// of that harness (load average 7.4): five exceeded 20s and the ceiling was
+/// 46,160ms — already past this 30,000ms bound — while the same solves did at
+/// most 317 conflicts of work.
+///
+/// THE NULL. Raising this constant to 180,000ms (6x, ~3.9x the measured
+/// ceiling) did not stop the rotation: the harness still failed 2 of the 4.
+/// One post-change run against three baseline runs of 3/2/3 failures is not
+/// enough to call it worse, but it is nowhere near enough to call it better,
+/// and the raise is not free — the wall is also the suite's latency floor for
+/// a divergent solve and it feeds the far-out watchdog
+/// (`nominal + min(3 x nominal, 180s) + 10s`), so 180s here would mean a 370s
+/// external hang deadline on every quantified obligation. An envelope
+/// widening on EVERY solve, justified by a mechanism that did not reproduce,
+/// is not a change worth its blast radius.
+///
+/// WHAT THIS LEAVES OPEN, HONESTLY. With the wall at 30s and the work budget
+/// at 400k conflicts, the wall is still the bound that decides these solves —
+/// they are ~0.08% of the way through their budget when it fires. The
+/// deterministic budget genuinely governs a CONFLICT-heavy divergence; it
+/// does not govern this family, whose cost is E-matching, preprocessing and
+/// certificate minting rather than conflicts. Closing that properly needs a
+/// deterministic bound on THAT work — an ay-side concern — not a bigger
+/// number here.
+pub(in crate::encoder) const DEFAULT_SOLVER_WALL_BACKSTOP_MS: u64 = 30_000;
 
 /// Scale factor ay applies to the REMAINING nominal budget at the quantified
 /// entry (`install_quantifier_deadline_backstop`, ay 62695cfe04): the solver's
@@ -87,7 +187,7 @@ pub(in crate::encoder) fn far_out_watchdog_timeout(rlimit_ms: Option<u64>) -> Du
 /// `FAR_OUT_WATCHDOG_GRACE` on top so it can only fire when ay has failed to
 /// honor its own (possibly extended) deadline.
 fn far_out_nominal_timeout(rlimit_ms: Option<u64>) -> Duration {
-    let nominal = Duration::from_millis(rlimit_ms.unwrap_or(DEFAULT_SOLVER_NOMINAL_TIMEOUT_MS));
+    let nominal = Duration::from_millis(rlimit_ms.unwrap_or(DEFAULT_SOLVER_WALL_BACKSTOP_MS));
     let backstop_extra = nominal
         .saturating_mul(AY_QUANTIFIED_BACKSTOP_FACTOR.saturating_sub(1))
         .min(AY_QUANTIFIED_BACKSTOP_MAX_EXTRA);
@@ -109,6 +209,28 @@ pub(in crate::encoder) fn effective_bv_timeout(rlimit_ms: Option<u64>) -> Durati
         None => BV_HARD_TIMEOUT,
     }
 }
+
+/// Resolve the DETERMINISTIC conflict budget for a solve.
+///
+/// `None` (no `#[verifier::rlimit]`) resolves to the calibrated default —
+/// never to "no budget". The distinction matters at the ay boundary, where
+/// "no budget" (`:rlimit 0`) additionally switches off ay's own default
+/// ground allowance; see [`crate::solver_budget::ConflictBudget`].
+pub(in crate::encoder) fn effective_conflict_budget(
+    requested: Option<ConflictBudget>,
+) -> ConflictBudget {
+    requested.unwrap_or(ConflictBudget::Bounded(DEFAULT_CONFLICT_BUDGET))
+}
+
+/// Typed form of [`DEFAULT_CONFLICT_BUDGET_CONFLICTS`].
+const DEFAULT_CONFLICT_BUDGET: std::num::NonZeroU64 =
+    match std::num::NonZeroU64::new(DEFAULT_CONFLICT_BUDGET_CONFLICTS) {
+        Some(budget) => budget,
+        // A zero default would reach ay as `:rlimit 0` — "no limit, and no
+        // default ground budget either" — i.e. the exact opposite of a
+        // default. Fail the build instead.
+        None => panic!("invariant: the default conflict budget must be non-zero"),
+    };
 
 /// Default maximum concurrent solver threads when `TRUST_VC_MAX_SOLVER_THREADS`
 /// is not set. Computed as `available_parallelism() / 2` to avoid memory
@@ -444,6 +566,40 @@ mod tests {
     #[test]
     fn test_far_out_watchdog_default_is_130s() {
         assert_eq!(far_out_watchdog_timeout(None), Duration::from_secs(130));
+    }
+
+    /// The default must resolve to a BOUNDED budget. A `None` that reached ay
+    /// as `:rlimit 0` would mean "no limit, and disable ay's own default
+    /// ground budget too" — strictly weaker than having no override at all.
+    #[test]
+    fn absent_override_resolves_to_the_bounded_default_never_to_unbounded() {
+        assert_eq!(
+            effective_conflict_budget(None).conflicts(),
+            Some(DEFAULT_CONFLICT_BUDGET_CONFLICTS)
+        );
+    }
+
+    #[test]
+    fn explicit_unbounded_override_survives_resolution() {
+        assert_eq!(
+            effective_conflict_budget(Some(ConflictBudget::AyDefault)),
+            ConflictBudget::AyDefault
+        );
+    }
+
+    /// Headroom over the measured ceiling, stated as a test so lowering the
+    /// budget has to confront the number that justified it. Too low silently
+    /// converts proofs into `Unknown`.
+    #[test]
+    fn conflict_budget_keeps_three_orders_of_magnitude_over_measured_worst() {
+        // Measured ceiling over the calibration harness: 317 conflicts.
+        const MEASURED_WORST_CONFLICTS: u64 = 317;
+        assert!(
+            DEFAULT_CONFLICT_BUDGET_CONFLICTS >= 100 * MEASURED_WORST_CONFLICTS,
+            "conflict budget {DEFAULT_CONFLICT_BUDGET_CONFLICTS} leaves less \
+             than 100x margin over the measured {MEASURED_WORST_CONFLICTS}-conflict \
+             worst case"
+        );
     }
 
     #[test]

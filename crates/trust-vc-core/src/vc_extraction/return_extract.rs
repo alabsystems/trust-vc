@@ -22,7 +22,15 @@ pub(super) enum ReturnValue<'a> {
     Expr(&'a Expr),
     Unit,
     Conditional {
-        pattern: &'a Pat,
+        /// The `let PAT = SCRUTINEE else { return … };` statement itself, always
+        /// the second-to-last statement of the enclosing block (see
+        /// [`tail_let_else_return`]). Carried so the renderer can hand the WHOLE
+        /// local to the obligation collector's own let-else handler, which
+        /// resolves the scrutinee's datatype and derives the match condition
+        /// there — rather than re-deriving it from `pattern` alone, which cannot
+        /// see the type and so cannot tell a refutable pattern from an
+        /// irrefutable one.
+        local: &'a Local,
         scrutinee: &'a Expr,
         then_value: &'a Expr,
         else_value: &'a Expr,
@@ -161,7 +169,7 @@ pub(super) fn classify_return_expression<'a>(
 
     if let Some(let_else) = tail_let_else {
         return ReturnExtraction::Single(ReturnValue::Conditional {
-            pattern: &let_else.local.pat,
+            local: let_else.local,
             scrutinee: let_else.scrutinee,
             then_value: let_else.tail_expr,
             else_value: let_else.else_value,

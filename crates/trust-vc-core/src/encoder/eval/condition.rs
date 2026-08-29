@@ -126,6 +126,7 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
@@ -151,6 +152,7 @@ impl AYEncoder {
             .nat_cast_aliases
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
+        ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
@@ -224,6 +226,7 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
@@ -241,6 +244,7 @@ impl AYEncoder {
             .nat_cast_aliases
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
+        ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
@@ -305,6 +309,7 @@ impl AYEncoder {
         ast_parser.poly_context = Some(&mut self.registries.poly_context);
         ast_parser.ground_pool = Some(&mut self.state.ground_pool);
         ast_parser.in_assumption_context = true;
+        ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
         ast_parser.solver_mode = self.state.active_solver_mode;
@@ -322,6 +327,7 @@ impl AYEncoder {
             .nat_cast_aliases
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
+        ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
@@ -442,6 +448,7 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         // Assumption path only: eager-Skolemize a top-level positive assumption
         // existential (never threaded into the refutation/goal path, so a
         // goal-position existential is structurally never Skolemized).
@@ -464,6 +471,7 @@ impl AYEncoder {
             .nat_cast_aliases
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
+        ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);

@@ -322,6 +322,75 @@ pub(super) fn verify_regular_assertions(
             }
         }
 
+        // REFLEXIVE-DISEQUALITY SHORT CIRCUIT (cost only; verdict preserved).
+        //
+        // `a != a` with STRUCTURALLY IDENTICAL operands is false by
+        // reflexivity, independently of the assumption context. That is not a
+        // new judgement: `finish_regular_assertion_step` below ALREADY makes it,
+        // unconditionally on the syntax, and it makes it with no solver at all
+        // (the hypothesis-robust demote that closes the datatype-eq depth-1
+        // UNSAT hole). Deciding it here instead of after the solve removes the
+        // entire encode + solve + retry cascade whose answer that demote was
+        // going to DISCARD.
+        //
+        // The discarded work is not marginal. Measured on
+        // `crates/trust-vc-core/tests/data/datatype_self_neq_probe.rs`
+        // (`reflexive_datatype_neq_under_hyp_must_not_verify`, ay f1f93ed25,
+        // per-`check_sat` timing): ay does not converge on the negated goal —
+        // every attempt runs to `timeout::far_out_watchdog_timeout` (130 s at
+        // the defaults) instead of answering — and
+        // `assertion::verify_main_attempt_with_retries` then re-runs it three
+        // times (BV, int-mode fallback, extended), measured at 136.8 s + 135.3 s
+        // + 130.0 s.
+        //
+        // SOUNDNESS, the diagnostic delta, and why the shape is not generalised:
+        // see `reflexive_disequality_refutation`, the single definition every
+        // verdict-producing lane consults. In one line — it can only ever report
+        // a REFUTATION, so it cannot admit anything on any lane.
+        //
+        // Placed AFTER the `solver_mode` dispatch above so a `by(compute)`
+        // assert keeps its own concrete-evaluation path and diagnostics.
+        if let Some(outcome) = reflexive_disequality_refutation(assertion) {
+            if let Some(result) = finish_reported_regular_assertion(
+                step,
+                start,
+                finish_regular_assertion_step(
+                    Ok(outcome),
+                    active_slices,
+                    assertion,
+                    post_loop_modified_vars,
+                ),
+            ) {
+                return Some(result);
+            }
+            continue;
+        }
+
+        // PRE-SOLVE closed-ground datatype refutation. When the concrete
+        // evaluator already reduces this goal to `false` under an empty
+        // assumption context, the solver's answer is discarded anyway: a
+        // `Verified` is demoted and an `Unknown(Incompleteness)` is recovered,
+        // both to exactly this Counterexample, in `finish_regular_assertion_step`
+        // below. Deciding it here skips the encode + solve + retry cascade for a
+        // verdict that is already determined. It reports only a REFUTATION, never
+        // a `Verified`, so it cannot introduce a false verify; and it strictly
+        // WIDENS the refuted set, because the old post-hoc recovery was reachable
+        // only from `Incompleteness` — a solver `Timeout` on the same
+        // already-refuted goal used to surface as `Unknown`/`NotProved`, which is
+        // precisely the "a genuinely-refuted obligation stops counting" failure.
+        if closed_ground_datatype_goal_computes_false(slices, assertion) {
+            let result = VerifyResult::Counterexample {
+                obligation_name: assertion.name.clone(),
+                model: Some(
+                    "concrete datatype refutation: closed ground goal evaluates to false"
+                        .to_string(),
+                ),
+                bindings: Vec::new(),
+            };
+            verification_report::end_step_with_verify_result(step, &result, start.elapsed());
+            return Some(result);
+        }
+
         // The shared-BV fast path caches one encoder across the batch, so it can
         // only run while the assumption set is the unfiltered, batch-wide slice.
         // A forward-filtered assert (`forward_filtered.is_some()`) drops to the
@@ -568,7 +637,7 @@ fn goal_is_closed_ground(slices: &VerificationSlices<'_>) -> bool {
 /// hole surfaced under a hypothesis) UNLESS the context is vacuous. Demoting it
 /// can only turn an unsound `Verified` into a Counterexample or, at worst,
 /// over-reject a vacuous `a != a` (unsatisfiable context) — never a false-verify.
-fn is_syntactic_self_disequality(expr: &crate::ir::TrustVcExpr) -> bool {
+pub(super) fn is_syntactic_self_disequality(expr: &crate::ir::TrustVcExpr) -> bool {
     matches!(
         expr,
         crate::ir::TrustVcExpr::Compare {
@@ -577,6 +646,65 @@ fn is_syntactic_self_disequality(expr: &crate::ir::TrustVcExpr) -> bool {
             right,
         } if left == right
     )
+}
+
+/// The one refutation that needs NO solver and NO context: `a != a`.
+///
+/// Returns `Some(Counterexample)` iff `assertion`'s goal is a syntactic
+/// self-disequality (`is_syntactic_self_disequality`), `None` otherwise —
+/// so a caller can write `if let Some(outcome) = ..` as a PRE-SOLVE short
+/// circuit and be byte-identical to the post-solve demote in
+/// `finish_regular_assertion_step` for the shape they share.
+///
+/// SOUNDNESS — this is the single definition every verdict-producing lane now
+/// consults, and it can only ever REFUSE:
+///
+/// * It never returns `Verified`. Its only verdict is a refutation, so no goal
+///   can newly verify because of it, on any lane, ever.
+/// * It fires only on a goal that is FALSE IN EVERY MODEL. `a != a` with
+///   structurally identical operands is false by reflexivity, independently of
+///   the assumption context — which is precisely why the demote it mirrors is
+///   "hypothesis-robust" while the neighbouring compute recovery has to gate on
+///   `goal_is_closed_ground`.
+/// * The inherited trade — over-rejecting a VACUOUSLY true `a != a`, i.e. one
+///   under an unsatisfiable context — is the trade the existing demote already
+///   documents and accepts.
+/// * NOT GENERALISED, deliberately. Reflexivity is the only reason a `!=` goal
+///   is refutable without consulting the context; nothing wider may borrow the
+///   exemption. The one shape where reflexivity genuinely fails is IEEE
+///   `NaN != NaN` (TRUE), which today's demote already refuses; narrowing that
+///   is now a ONE-site change rather than the four-site change it used to be.
+///
+/// WHY IT IS CONSULTED ON EVERY LANE (amendment, 2026-08-25). The datatype-eq
+/// depth-1 UNSAT hole can hand back a DIRECT, unsound `Verified` for `a != a`.
+/// Before this amendment the demote lived only in
+/// `finish_regular_assertion_step`, i.e. only on the regular-assertion lane —
+/// but `Verified` is EXPORTED as an assumption from four other lanes:
+///
+/// * an `assert ... by` conclusion is pushed into `verified_assert_by`
+///   (`typed::verify_typed_plan`, gated on `calc_step_exports_after_verification`,
+///   true for every non-calc assert_by), which becomes `verified_post_loop_facts`
+///   and is fed to the postcondition slices and every later obligation — a
+///   strictly WIDER blast radius than the postcondition-forwarding pre-pass;
+/// * an assert_by's scoped assertions are pushed into
+///   `verified_assert_by_for_scope`;
+/// * the postcondition-forwarding PRE-PASS forwards the assert as an assumption;
+/// * a verified loop invariant / loop `ensures` becomes a post-loop fact.
+///
+/// The vacuity probe cannot catch any of them: `vacuity_probe_result` returns
+/// `None` unless `context_publishes_unverified_axiom` holds (a genuine
+/// `#[broadcast]` lemma or a trait-method `ensures` axiom), and a forwarded
+/// assert_by is neither. All of those lanes funnel through
+/// `typed::verify_typed_step` and `invariants::verify_invariant_inductive_step_typed`,
+/// which now call this function BEFORE the solver.
+pub(super) fn reflexive_disequality_refutation(
+    assertion: &PreparedObligation,
+) -> Option<AssertionOutcome> {
+    is_syntactic_self_disequality(&assertion.expr).then(|| AssertionOutcome::Counterexample {
+        obligation_name: assertion.name.clone(),
+        model: Some("reflexive disequality `a != a` is false (hypothesis-robust)".to_string()),
+        bindings: Vec::new(),
+    })
 }
 
 fn is_datatype_eq_goal(expr: &crate::ir::TrustVcExpr) -> bool {
@@ -597,6 +725,46 @@ fn is_datatype_eq_goal(expr: &crate::ir::TrustVcExpr) -> bool {
         }
         _ => false,
     }
+}
+
+/// True iff `assertion` is a CLOSED/GROUND datatype (dis)equality goal that the
+/// concrete evaluator reduces to `false` — i.e. an obligation that is refuted
+/// outright, with no solver required.
+///
+/// This is the exact conjunction `finish_regular_assertion_step` already applies
+/// twice AFTER a solve (once to demote an unsound direct `Verified`, once to
+/// recover a Counterexample from `Unknown(Incompleteness)`); factored out so it
+/// can also be consulted BEFORE the solve. See those two sites for the full
+/// soundness argument. In summary: `goal_is_closed_ground` demands an entirely
+/// empty user-assumption context, so a ground goal that concretely evaluates to
+/// `false` is genuinely refutable (`⊨ ¬G`) and cannot be vacuously true; a
+/// genuinely TRUE goal computes to `true`; a SYMBOLIC operand computes to `None`;
+/// and a suppressed / ill-founded recursive body is absent from the evaluator's
+/// catalog, which also yields `None`. Every outcome other than `Some(false)`
+/// leaves the obligation on its normal path.
+///
+/// DIRECTION: consulting it early can only produce a REFUTATION, never a
+/// `Verified`, so it cannot introduce a false verify. What it removes is solver
+/// work spent on an obligation whose verdict is already determined — measured on
+/// `tests/data/datatype_ne_refutation.rs::f_dbl_one_neq`, two independent
+/// 60-second `Unknown(QuantifierUnhandled)` cascades (one in the postcondition-
+/// forwarding pre-pass, one in the real pass) whose results were both discarded
+/// in favour of precisely this computation.
+pub(super) fn closed_ground_datatype_goal_computes_false(
+    slices: &VerificationSlices<'_>,
+    assertion: &PreparedObligation,
+) -> bool {
+    is_datatype_eq_goal(&assertion.expr)
+        && goal_is_closed_ground(slices)
+        && super::compute::try_compute_with_bindings(
+            &assertion.expr,
+            slices.assumptions,
+            slices.broadcast_assumptions,
+            slices.verified_assert_by,
+            slices.scoped_assumptions,
+            &slices.ctx.revealed_fns,
+            &slices.ctx.hidden_fns,
+        ) == Some(false)
 }
 
 /// On counterexample: attempt to localize via assertion splitting.

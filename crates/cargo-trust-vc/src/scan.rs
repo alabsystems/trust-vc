@@ -19,6 +19,144 @@ pub struct AnnotatedFunction {
     pub attributes: Vec<String>,
 }
 
+/// A `fn` item the scan SAW but that carries no trust_vc verification marker, so
+/// no verdict is ever computed for it.
+///
+/// # Why the scan has to name these
+///
+/// Discovery used to be the silent half of the pipeline: a function without a
+/// recognized attribute was simply never pushed, so it appeared in NO report
+/// bucket. For a plain helper that is correct and unremarkable — but the same
+/// silence covered a function whose ONLY contract was spelled in a way the
+/// toolchain failed to recognize. `use trust_vc::ensures as promises;` on a
+/// FALSE postcondition produced `"functions": []`, an all-zero summary and exit
+/// 0: a clean pass over a file that was never verified. No false proof was
+/// emitted, which is precisely what made it dangerous.
+///
+/// Every `fn` item now leaves the scan in exactly one of two lists, so the
+/// report can state the invariant
+/// `verified + counterexample + unknown + error + skipped + not_analyzed ==
+/// check targets scanned` and a silently-dropped function becomes arithmetically
+/// impossible rather than merely unlikely. (Targets are the `fn` items plus the
+/// trait-impl conformance obligations [`TRAIT_CONFORMANCE_ATTR`] enumerates,
+/// which are obligations of an IMPL and so are counted in their own right.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnanalyzedFunction {
+    pub file_path: PathBuf,
+    pub name: String,
+    pub line: usize,
+    /// Why no verdict exists — always populated, never a bare "unknown".
+    pub reason: String,
+}
+
+/// A source FILE the scan could not turn into buckets AT ALL.
+///
+/// # Why the scan has to name these too
+///
+/// [`UnanalyzedFunction`] closed the function-level silence: every `fn` item the
+/// walk sees now lands in a report bucket. One level up, the same silence
+/// survived — a file that failed to READ or to PARSE returned an EMPTY
+/// [`FileScan`], and an empty scan is exactly what an empty file produces. A
+/// syntax error therefore yielded `"functions": []`, an all-zero summary and
+/// **exit 0**: byte-identical to a clean pass over a file with nothing in it. The
+/// author's contracts were never looked at, and nothing said so.
+///
+/// A file now leaves the scan in one of exactly two states — its buckets, or
+/// this. `Summary::total()` counts an unscannable file as one accounted-for
+/// target and `Summary::has_failures()` treats it as a FAILURE, so the silence
+/// is not merely detected, it is unrepresentable: there is no value of
+/// [`FileScan`] that means "I read nothing and that was fine".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnscannableFile {
+    pub file_path: PathBuf,
+    /// Best-known line of the failure; `1` when the file could not be read at
+    /// all, or when the parse error carries no usable span.
+    pub line: usize,
+    /// What went wrong, verbatim — never a bare "unknown".
+    pub reason: String,
+}
+
+/// Both halves of a scan: the functions that get verdicts, and the ones that do
+/// not (with a reason each) — plus the files that produced neither.
+///
+/// The two function lists are produced by ONE walk over the AST, so they cannot
+/// drift apart. A second, independent enumeration of "all functions" is exactly
+/// the kind of hand-copied predicate that has silently diverged elsewhere in this
+/// tree.
+///
+/// `unscannable` is the third, file-level list: see [`UnscannableFile`]. It is
+/// populated on the SAME early-return paths that used to hand back
+/// `FileScan::default()`, so "the walk could not read this file" and "the report
+/// names this file" are again the same statement.
+#[derive(Debug, Clone, Default)]
+pub struct FileScan {
+    pub analyzed: Vec<AnnotatedFunction>,
+    pub unanalyzed: Vec<UnanalyzedFunction>,
+    pub unscannable: Vec<UnscannableFile>,
+}
+
+impl FileScan {
+    /// A scan that produced NO buckets because the file could not be read or
+    /// parsed.
+    ///
+    /// This is the only way to build such a scan — the failure paths cannot
+    /// return `FileScan::default()` and pass for a clean empty file, because
+    /// `default()` is what a genuinely empty file yields and this is not that.
+    fn unscannable(path: &Path, line: usize, reason: String) -> Self {
+        FileScan {
+            analyzed: Vec::new(),
+            unanalyzed: Vec::new(),
+            unscannable: vec![UnscannableFile {
+                file_path: path.to_path_buf(),
+                line,
+                reason,
+            }],
+        }
+    }
+
+    /// Number of check targets the scan produced — the denominator of the
+    /// report's count invariant.
+    ///
+    /// Equals the number of `fn` items seen, except in a file that registers
+    /// trait items: there `analyzed` also carries the synthetic per-impl
+    /// conformance obligations, which are targets in their own right rather than
+    /// source functions. An unscannable file counts once: its function count is
+    /// not merely zero, it is UNKNOWN, and the one target that stands for it is
+    /// the failure itself.
+    #[cfg(test)]
+    pub fn scanned_target_count(&self) -> usize {
+        self.analyzed.len() + self.unanalyzed.len() + self.unscannable.len()
+    }
+
+    fn sort(&mut self) {
+        self.analyzed
+            .sort_by_key(|entry| (entry.file_path.clone(), entry.line));
+        self.unanalyzed
+            .sort_by_key(|entry| (entry.file_path.clone(), entry.line));
+        self.unscannable
+            .sort_by_key(|entry| (entry.file_path.clone(), entry.line));
+    }
+}
+
+/// Contract spellings that live in the BODY as macro invocations rather than as
+/// attributes.
+///
+/// The source-verification lane reads attribute contracts; when such a function
+/// IS discovered (because it carries some other marker), the extractor rejects
+/// the macro loudly — "unsupported macros are rejected to avoid silently
+/// dropping proof obligations". When it is NOT discovered, that rejection never
+/// runs and the function vanishes instead. Naming the shape here lets the
+/// not-analyzed reason say what actually happened.
+const BODY_CONTRACT_MACROS: &[&str] = &[
+    "requires",
+    "ensures",
+    "recommends",
+    "invariant",
+    "decreases",
+    "ghost_requires",
+    "default_ensures",
+];
+
 /// A trusted source construct rejected by `cargo trust_vc check --no-cheating`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TrustedConstructFinding {
@@ -41,6 +179,30 @@ pub struct TrustedConstructFinding {
 /// (`impl Tr for bool {}`), neither of which carries a `trust_vc` attribute for
 /// the AST scan below to find.
 pub const TRAIT_CONFORMANCE_ATTR: &str = "trait_conformance";
+
+/// Marker on a scan target that is a trait method DECLARATION with no default
+/// block — a contract without a body.
+///
+/// Such an item cannot be body-verified, and until the scan said so the
+/// bare-name resolver quietly answered it with the body of the file's single
+/// `impl` of that trait. That reported ONE proof twice: once under the impl
+/// method's own name and line, and once under the declaration's. A second
+/// impl made the same lookup ambiguous instead, which is how a legal two-impl
+/// file came to fail. Neither answer was about the declaration, because the
+/// declaration has nothing to be about.
+///
+/// Nothing stops being checked: the contract is discharged per impl by the
+/// `trait impl conformance G::m for T` targets, and assumed at call sites
+/// exactly as before.
+pub const TRAIT_DECLARATION_ATTR: &str = "trait_declaration";
+
+/// True when `func` is a bodyless trait method declaration (see
+/// [`TRAIT_DECLARATION_ATTR`]).
+pub fn is_trait_declaration_target(func: &AnnotatedFunction) -> bool {
+    func.attributes
+        .iter()
+        .any(|attr| attr == TRAIT_DECLARATION_ATTR)
+}
 
 /// Target emitted when a file's conformance obligations cannot be ENUMERATED.
 /// Verifying it re-runs the enumeration and surfaces the failure, so an
@@ -107,23 +269,36 @@ const TRUSTED_MACROS_OR_CALLS: &[(&str, &str)] = &[
 
 /// Scans all `.rs` files under `root/src/` and returns functions with trust_vc attributes.
 pub fn scan_crate(root: &Path) -> Vec<AnnotatedFunction> {
+    scan_crate_full(root).analyzed
+}
+
+/// [`scan_crate`] keeping the functions that get NO verdict, with a reason each.
+pub fn scan_crate_full(root: &Path) -> FileScan {
     let src_dir = root.join("src");
     if !src_dir.is_dir() {
-        return Vec::new();
+        return FileScan::default();
     }
-    let mut results = Vec::new();
+    let mut results = FileScan::default();
     walk_rs_files(&src_dir, &mut results);
-    results.sort_by_key(|entry| (entry.file_path.clone(), entry.line));
+    results.sort();
     results
 }
 
 /// Scans a single `.rs` file and returns annotated functions.
 pub fn scan_file(path: &Path) -> Vec<AnnotatedFunction> {
+    scan_file_full(path).analyzed
+}
+
+/// [`scan_file`] keeping the functions that get NO verdict, with a reason each.
+pub fn scan_file_full(path: &Path) -> FileScan {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(err) => {
             eprintln!("trust_vc scan: cannot read {}: {err}", path.display());
-            return Vec::new();
+            // NOT `FileScan::default()`: an empty scan is what an empty FILE
+            // produces, and reporting one for a file we never read is the
+            // all-zero clean pass this bucket exists to make impossible.
+            return FileScan::unscannable(path, 1, format!("cannot read source: {err}"));
         }
     };
     // Strip any `global size_of usize == N` pointer-width directive lines (Verus
@@ -135,12 +310,16 @@ pub fn scan_file(path: &Path) -> Vec<AnnotatedFunction> {
         Ok(a) => a,
         Err(err) => {
             eprintln!("trust_vc scan: parse error in {}: {err}", path.display());
-            return Vec::new();
+            return FileScan::unscannable(
+                path,
+                err.span().start().line.max(1),
+                format!("cannot parse source: {err}"),
+            );
         }
     };
-    let mut functions = extract_annotated_functions(path, &ast);
-    extract_conformance_obligations(path, &ast, &mut functions);
-    functions
+    let mut scan = extract_annotated_functions(path, &ast);
+    extract_conformance_obligations(path, &ast, &mut scan.analyzed);
+    scan
 }
 
 /// Appends the file's trait-impl CONFORMANCE obligations as their own check
@@ -268,7 +447,7 @@ pub fn scan_file_trusted_constructs(path: &Path) -> Vec<TrustedConstructFinding>
     visitor.findings
 }
 
-fn walk_rs_files(dir: &Path, results: &mut Vec<AnnotatedFunction>) {
+fn walk_rs_files(dir: &Path, results: &mut FileScan) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -278,7 +457,10 @@ fn walk_rs_files(dir: &Path, results: &mut Vec<AnnotatedFunction>) {
         if path.is_dir() {
             walk_rs_files(&path, results);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            results.extend(scan_file(&path));
+            let scan = scan_file_full(&path);
+            results.analyzed.extend(scan.analyzed);
+            results.unanalyzed.extend(scan.unanalyzed);
+            results.unscannable.extend(scan.unscannable);
         }
     }
 }
@@ -298,56 +480,121 @@ fn walk_rs_files_for_trusted_constructs(dir: &Path, results: &mut Vec<TrustedCon
     }
 }
 
-fn extract_annotated_functions(file_path: &Path, ast: &syn::File) -> Vec<AnnotatedFunction> {
-    let mut functions = Vec::new();
-    extract_from_items(file_path, &ast.items, &mut functions);
-    functions
+fn extract_annotated_functions(file_path: &Path, ast: &syn::File) -> FileScan {
+    let mut scan = FileScan::default();
+    extract_from_items(file_path, &ast.items, &mut scan);
+    scan
 }
 
-fn extract_from_items(
+/// Records a `fn` item the walk saw but did not mark for verification.
+///
+/// Called on EVERY not-marked branch below, so "the walk saw it" and "the report
+/// mentions it" are the same statement.
+fn push_unanalyzed(
+    scan: &mut FileScan,
     file_path: &Path,
-    items: &[syn::Item],
-    functions: &mut Vec<AnnotatedFunction>,
+    ident: &syn::Ident,
+    attrs: &[syn::Attribute],
+    body: Option<&syn::Block>,
+    extra: Option<&str>,
 ) {
+    scan.unanalyzed.push(UnanalyzedFunction {
+        file_path: file_path.to_path_buf(),
+        name: ident.to_string(),
+        line: ident.span().start().line,
+        reason: unanalyzed_reason(attrs, body, extra),
+    });
+}
+
+fn extract_from_items(file_path: &Path, items: &[syn::Item], scan: &mut FileScan) {
     for item in items {
         match item {
             syn::Item::Fn(func) => {
                 let attrs = trust_vc_attrs_on(&func.attrs);
                 if !attrs.is_empty() {
-                    functions.push(AnnotatedFunction {
+                    scan.analyzed.push(AnnotatedFunction {
                         file_path: file_path.to_path_buf(),
                         name: func.sig.ident.to_string(),
                         line: func.sig.ident.span().start().line,
                         attributes: attrs,
                     });
+                } else {
+                    push_unanalyzed(
+                        scan,
+                        file_path,
+                        &func.sig.ident,
+                        &func.attrs,
+                        Some(&func.block),
+                        None,
+                    );
                 }
             }
             syn::Item::Impl(impl_block) => {
+                // An attribute-less method of a REGISTERED trait impl is not
+                // unchecked: its contract is discharged once per impl by the
+                // `trait impl conformance` targets the conformance pass
+                // enumerates. Saying only "no contract attributes" here would
+                // read as "nothing checked this", which is false.
+                let conformance_covered = impl_block.trait_.is_some()
+                    && attrs_name_trust_vc_trait_item(&impl_block.attrs);
+                let note = conformance_covered.then_some(
+                    "trait-impl conformance for this method is checked separately, as a \
+                     `trait impl conformance` target",
+                );
                 for impl_item in &impl_block.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         let attrs = trust_vc_attrs_on(&method.attrs);
                         if !attrs.is_empty() {
-                            functions.push(AnnotatedFunction {
+                            scan.analyzed.push(AnnotatedFunction {
                                 file_path: file_path.to_path_buf(),
                                 name: method.sig.ident.to_string(),
                                 line: method.sig.ident.span().start().line,
                                 attributes: attrs,
                             });
+                        } else {
+                            push_unanalyzed(
+                                scan,
+                                file_path,
+                                &method.sig.ident,
+                                &method.attrs,
+                                Some(&method.block),
+                                note,
+                            );
                         }
                     }
                 }
             }
             syn::Item::Mod(module) => {
                 if let Some((_, ref items)) = module.content {
-                    extract_from_items(file_path, items, functions);
+                    extract_from_items(file_path, items, scan);
                 }
             }
             syn::Item::Trait(trait_block) => {
                 for trait_item in &trait_block.items {
                     if let syn::TraitItem::Fn(method) = trait_item {
-                        let attrs = trust_vc_attrs_on(&method.attrs);
-                        if !attrs.is_empty() {
-                            functions.push(AnnotatedFunction {
+                        let mut attrs = trust_vc_attrs_on(&method.attrs);
+                        if attrs.is_empty() {
+                            push_unanalyzed(
+                                scan,
+                                file_path,
+                                &method.sig.ident,
+                                &method.attrs,
+                                method.default.as_ref(),
+                                (method.default.is_none())
+                                    .then_some("trait method declaration with no default body"),
+                            );
+                        } else {
+                            // A trait method with NO default block declares a
+                            // contract; it has no body, so there is nothing to
+                            // verify AT this item. Mark it so `verify_one`
+                            // reports that honestly instead of hunting for a
+                            // body. Its contract is still fully checked — once
+                            // per impl, by the `trait impl conformance` targets
+                            // enumerated above, and again at every call site.
+                            if method.default.is_none() {
+                                attrs.push(TRAIT_DECLARATION_ATTR.to_string());
+                            }
+                            scan.analyzed.push(AnnotatedFunction {
                                 file_path: file_path.to_path_buf(),
                                 name: method.sig.ident.to_string(),
                                 line: method.sig.ident.span().start().line,
@@ -360,6 +607,99 @@ fn extract_from_items(
             _ => {}
         }
     }
+}
+
+/// Explain, in the report, why a scanned function has no verdict.
+///
+/// The reasons are ordered by how much the author needs to know:
+///
+/// 1. A contract written as a BODY MACRO (`ensures!(..)`) is a real proof claim
+///    the source-verification lane cannot read. When such a function is
+///    discovered by some other marker the extractor rejects it outright; when it
+///    is not, this is the only place the claim is ever mentioned.
+/// 2. Attributes that are present but unrecognized — the residue after
+///    `trust_vc_core::contract_attr_alias` has already resolved every `use
+///    trust_vc::<clause> as <name>` rename it safely can. Naming the attributes
+///    verbatim is what distinguishes "you wrote something we did not understand"
+///    from "you wrote nothing".
+/// 3. No attributes at all — an ordinary helper. Legitimate and common, so it is
+///    stated plainly and is never an error.
+fn unanalyzed_reason(
+    attrs: &[syn::Attribute],
+    body: Option<&syn::Block>,
+    extra: Option<&str>,
+) -> String {
+    let mut reason = if let Some(macro_name) = body.and_then(body_contract_macro) {
+        format!(
+            "contract written as the body macro `{macro_name}!(..)` — the \
+             source-verification lane reads ATTRIBUTE contracts, so this claim was \
+             not checked; spell it `#[trust_vc::{macro_name}(..)]`"
+        )
+    } else {
+        let seen = reportable_attr_names(attrs);
+        if seen.is_empty() {
+            "no contract attributes".to_string()
+        } else {
+            format!(
+                "no recognized trust_vc contract attribute (attributes seen: {})",
+                seen.join(", ")
+            )
+        }
+    };
+    if let Some(extra) = extra {
+        reason.push_str("; ");
+        reason.push_str(extra);
+    }
+    reason
+}
+
+/// Attribute paths worth echoing back to the author.
+///
+/// `#[doc]` is filtered because every `///` comment lowers to one, and a reason
+/// string reading "attributes seen: doc, doc, doc" hides the attribute that
+/// actually matters.
+fn reportable_attr_names(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter_map(|attr| {
+            let rendered = render_attr_path(attr.path());
+            (rendered != "doc").then_some(rendered)
+        })
+        .collect()
+}
+
+fn render_attr_path(path: &syn::Path) -> String {
+    let joined = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if path.leading_colon.is_some() {
+        format!("::{joined}")
+    } else {
+        joined
+    }
+}
+
+/// The first trust_vc contract macro invoked anywhere in `block`, if any.
+fn body_contract_macro(block: &syn::Block) -> Option<String> {
+    struct MacroFinder(Option<String>);
+    impl<'ast> Visit<'ast> for MacroFinder {
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if self.0.is_none() {
+                if let Some(name) = path_last_ident(&mac.path) {
+                    if BODY_CONTRACT_MACROS.contains(&name.as_str()) {
+                        self.0 = Some(name);
+                    }
+                }
+            }
+            visit::visit_macro(self, mac);
+        }
+    }
+    let mut finder = MacroFinder(None);
+    finder.visit_block(block);
+    finder.0
 }
 
 fn trust_vc_attrs_on(attrs: &[syn::Attribute]) -> Vec<String> {
@@ -841,6 +1181,290 @@ impl<'ast> Visit<'ast> for TrustedConstructVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scan_source(label: &str, source: &str) -> FileScan {
+        let tmp = std::env::temp_dir().join(format!(
+            "trust_vc_scan_{label}_{}_{}.rs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, source).expect("write scan fixture");
+        let scan = scan_file_full(&tmp);
+        std::fs::remove_file(&tmp).ok();
+        scan
+    }
+
+    fn unanalyzed_reason_for<'a>(scan: &'a FileScan, name: &str) -> &'a str {
+        scan.unanalyzed
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.reason.as_str())
+            .unwrap_or_else(|| panic!("`{name}` was not reported as unanalyzed"))
+    }
+
+    /// Drift guard. `TRUST_VC_ATTRS` decides whether a function is DISCOVERED;
+    /// `ALIASABLE_ATTRS` decides whether a rename of that same name can be
+    /// resolved back to it. A name added to the first and forgotten in the
+    /// second would silently lose alias support — the exact class of hand-copied
+    /// list divergence that has produced real false verifies in this tree.
+    ///
+    /// The one permitted gap is the TRUSTED constructs, which the
+    /// `--no-cheating` lane resolves itself and deliberately reports under the
+    /// author's spelling. That exemption is not spelled out twice: it is read
+    /// from `NON_ALIASABLE_TRUSTED_ATTRS` and cross-checked against this file's
+    /// own `TRUSTED_ATTRS`, so the two cannot drift apart either.
+    #[test]
+    fn aliasable_attrs_cover_scanner_attrs() {
+        use trust_vc_core::contract_attr_alias::{ALIASABLE_ATTRS, NON_ALIASABLE_TRUSTED_ATTRS};
+
+        for excluded in NON_ALIASABLE_TRUSTED_ATTRS {
+            assert!(
+                TRUSTED_ATTRS.iter().any(|(name, _)| name == excluded)
+                    || TRUSTED_MACROS_OR_CALLS
+                        .iter()
+                        .any(|(name, _)| name == excluded),
+                "`{excluded}` is exempted from alias resolution as a trusted construct, but \
+                 this scanner does not treat it as one — the exemption has lost its reason"
+            );
+        }
+
+        let missing: Vec<&str> = TRUST_VC_ATTRS
+            .iter()
+            .copied()
+            .filter(|name| {
+                !ALIASABLE_ATTRS.contains(name) && !NON_ALIASABLE_TRUSTED_ATTRS.contains(name)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these scanner attributes cannot be reached through a `use .. as ..` rename, \
+             so a renamed spelling of them would vanish from the report: {missing:?}"
+        );
+    }
+
+    /// The invariant, at the scan layer: every `fn` item lands in exactly one of
+    /// the two lists.
+    #[test]
+    fn every_fn_item_is_analyzed_or_reported_unanalyzed() {
+        let source = r#"
+            #[trust_vc::ensures(result > 0)]
+            fn contracted(x: u32) -> u32 { x + 1 }
+
+            fn plain() {}
+
+            struct S;
+            impl S {
+                fn method(&self) -> u32 { 1 }
+                #[trust_vc::ensures(result > 0)]
+                fn contracted_method(&self) -> u32 { 1 }
+            }
+
+            trait T {
+                fn declared(&self) -> u32;
+                fn defaulted(&self) -> u32 { 2 }
+            }
+
+            mod inner {
+                pub fn nested() {}
+            }
+        "#;
+        let scan = scan_source("partition", source);
+        // Seven `fn` items; the trait-conformance targets appended by the
+        // conformance pass are obligations, not source functions, and this file
+        // declares no `#[trust_vc::trait_spec]` so none are added.
+        assert_eq!(
+            scan.scanned_target_count(),
+            7,
+            "analyzed={:?} unanalyzed={:?}",
+            scan.analyzed.iter().map(|f| &f.name).collect::<Vec<_>>(),
+            scan.unanalyzed.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert_eq!(scan.analyzed.len(), 2);
+        assert_eq!(scan.unanalyzed.len(), 5);
+        let names: Vec<&str> = scan
+            .unanalyzed
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        for expected in ["plain", "method", "declared", "defaulted", "nested"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+    }
+
+    /// The file-level half of the invariant: a file that does not PARSE is not a
+    /// file with zero functions.
+    ///
+    /// Before this, both produced `FileScan::default()`, and the caller had no
+    /// way to tell "there was nothing here" from "I could not read what was
+    /// here". That indistinguishability is the whole defect — an all-zero report
+    /// and exit 0 over a file whose contracts were never examined.
+    #[test]
+    fn a_file_that_does_not_parse_is_reported_not_emptied() {
+        let scan = scan_source(
+            "unparseable",
+            "#[trust_vc::ensures(result == 42u64)]\n\
+             pub fn liar() -> u64 { 7u64 \n",
+        );
+        assert!(scan.analyzed.is_empty(), "{:?}", scan.analyzed);
+        assert!(scan.unanalyzed.is_empty(), "{:?}", scan.unanalyzed);
+        assert_eq!(
+            scan.unscannable.len(),
+            1,
+            "a parse failure must produce exactly one file-level entry"
+        );
+        assert_eq!(
+            scan.scanned_target_count(),
+            1,
+            "the unscannable file is one accounted-for target, not zero"
+        );
+        assert!(
+            scan.unscannable[0].reason.contains("cannot parse source"),
+            "the reason must name the failure: {}",
+            scan.unscannable[0].reason
+        );
+        assert!(scan.unscannable[0].line >= 1);
+    }
+
+    /// The discriminator the defect turns on: an EMPTY file and an UNPARSEABLE
+    /// file must not produce the same scan. If they ever do again, the report
+    /// above them cannot tell them apart either.
+    #[test]
+    fn an_empty_file_and_an_unparseable_file_do_not_scan_alike() {
+        let empty = scan_source("genuinely_empty", "");
+        let broken = scan_source("broken_syntax", "fn f( {\n");
+
+        assert_eq!(empty.scanned_target_count(), 0);
+        assert!(empty.unscannable.is_empty());
+
+        assert_eq!(broken.scanned_target_count(), 1);
+        assert_eq!(broken.unscannable.len(), 1);
+    }
+
+    /// A file the process cannot READ fails the same way a file it cannot parse
+    /// does — the two early returns are the same silence and get the same bucket.
+    #[test]
+    fn an_unreadable_file_is_reported_not_emptied() {
+        let missing = std::env::temp_dir().join(format!(
+            "trust_vc_scan_absent_{}_{}.rs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let scan = scan_file_full(&missing);
+        assert_eq!(scan.unscannable.len(), 1, "{scan:?}");
+        assert!(
+            scan.unscannable[0].reason.contains("cannot read source"),
+            "{}",
+            scan.unscannable[0].reason
+        );
+    }
+
+    /// A crate walk must carry the file-level failure up, not lose it between
+    /// files — one bad file in a tree of good ones stays visible.
+    #[test]
+    fn a_crate_walk_keeps_the_unscannable_file() {
+        let root = std::env::temp_dir().join(format!(
+            "trust_vc_scan_crate_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(
+            src.join("good.rs"),
+            "#[trust_vc::ensures(result == 1u64)]\npub fn good() -> u64 { 1u64 }\n",
+        )
+        .expect("write good");
+        std::fs::write(src.join("bad.rs"), "pub fn bad( -> u64 {\n").expect("write bad");
+
+        let scan = scan_crate_full(&root);
+        assert_eq!(scan.analyzed.len(), 1, "{:?}", scan.analyzed);
+        assert_eq!(scan.unscannable.len(), 1, "{:?}", scan.unscannable);
+        assert!(scan.unscannable[0].file_path.ends_with("bad.rs"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The defect, at the scan layer: a rename must be DISCOVERED, because
+    /// discovery is what decides whether the contract is ever looked at.
+    #[test]
+    fn a_renamed_contract_attribute_is_discovered() {
+        let scan = scan_source(
+            "alias_discovery",
+            "use trust_vc::ensures as promises;\n\
+             #[promises(result == 42u64)]\n\
+             pub fn aliased(x: u64) -> u64 { let _ = x; 7u64 }\n",
+        );
+        assert_eq!(scan.unanalyzed.len(), 0, "{:?}", scan.unanalyzed);
+        assert_eq!(scan.analyzed.len(), 1);
+        assert_eq!(scan.analyzed[0].name, "aliased");
+        assert!(
+            scan.analyzed[0].attributes.contains(&"ensures".to_string()),
+            "the rename must be recorded as the canonical clause it names: {:?}",
+            scan.analyzed[0].attributes
+        );
+    }
+
+    #[test]
+    fn a_plain_helper_says_it_has_no_contract() {
+        let scan = scan_source("plain_reason", "pub fn helper(x: u64) -> u64 { x }\n");
+        assert_eq!(
+            unanalyzed_reason_for(&scan, "helper"),
+            "no contract attributes"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_attribute_is_named_in_the_reason() {
+        let scan = scan_source(
+            "unknown_attr_reason",
+            "/// docs are not noise worth reporting\n\
+             #[some_other::marker]\n\
+             pub fn helper(x: u64) -> u64 { x }\n",
+        );
+        let reason = unanalyzed_reason_for(&scan, "helper");
+        assert!(reason.contains("some_other::marker"), "{reason}");
+        assert!(
+            !reason.contains("doc"),
+            "doc comments must not fill the reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_body_macro_contract_is_named_as_an_unchecked_claim() {
+        let scan = scan_source(
+            "macro_reason",
+            "pub fn f(x: u64) -> u64 {\n\
+             \x20   trust_vc::ensures!(result == 42u64);\n\
+             \x20   let _ = x;\n\
+             \x20   7u64\n\
+             }\n",
+        );
+        let reason = unanalyzed_reason_for(&scan, "f");
+        assert!(reason.contains("body macro"), "{reason}");
+        assert!(reason.contains("not checked"), "{reason}");
+    }
+
+    #[test]
+    fn a_bodyless_trait_declaration_says_so() {
+        let scan = scan_source(
+            "trait_decl_reason",
+            "trait T { fn declared(&self) -> u32; }\n",
+        );
+        let reason = unanalyzed_reason_for(&scan, "declared");
+        assert!(reason.contains("trait method declaration"), "{reason}");
+    }
 
     #[test]
     fn test_scan_file_finds_annotated_functions() {

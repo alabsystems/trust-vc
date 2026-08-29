@@ -10,9 +10,13 @@ carries three capabilities toward that role: (1) the shared **`lower` seam** —
 the toolchain-independent typed-IR bridge every front end reuses; (2) the
 **Verus-compat standalone driver** — a `rustc_driver::Callbacks` front end that
 keeps trust-vc a drop-in Verus replacement (the parity benchmark / evidence
-gate); and (3) the **ay-certificate** capability — independently re-checkable
-UNSAT proofs that are trust-vc's soundness edge over Verus's black-box Z3. The
-north star is `design-trust-proof-backend.md` at the repo root.
+gate); and (3) the **ay-certificate** capability — re-checkable UNSAT proofs that
+are trust-vc's soundness edge over Verus's black-box Z3. Scope that edge
+honestly: `trust-vc-kernel` checks propositional resolution plus structural EUF
+(transitivity/congruence) and LRA (Farkas) lemmas, and accepts **NIA, BV, Array
+and Seq on trust** (`crates/trust-vc-kernel/src/lib.rs:17`); Alethe is one of its
+export formats, not an input it re-checks. The north star is
+`design-trust-proof-backend.md` at the repo root.
 
 See `design-rustc-driver-frontend.md` (repo root) for the full rationale, ROI bounds,
 and migration plan. The short version: the dominant reason 100% Verus parity is

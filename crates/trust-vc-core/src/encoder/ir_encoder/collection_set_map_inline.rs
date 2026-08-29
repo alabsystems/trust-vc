@@ -602,6 +602,13 @@ impl<'a> AstExpressionParser<'a> {
                     dom_term: None,
                 },
             );
+            if len.is_none() {
+                // `|m.dom()| == |m|` is true, but only when `m` HAS a tracked
+                // cardinality. If it declined (e.g. `m.filter_keys(p)`), the
+                // decline must propagate — otherwise the name fallback answers
+                // `.len()` on the domain set with the ORIGINAL map's length.
+                self.decline_collection_len(dom_term);
+            }
             Ok(dom_term)
         } else {
             Err(format!(

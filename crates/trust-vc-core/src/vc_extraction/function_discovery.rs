@@ -11,18 +11,76 @@ pub(super) fn path_last_segment(path: &syn::Path) -> Option<String> {
     path.segments.last().map(|seg| seg.ident.to_string())
 }
 
-/// Finds a function by name in the AST.
+/// Outcome of locating a source function by the single bare name a caller can
+/// spell (`--function NAME`, or a scan-reported function name).
 ///
-/// Searches top-level functions first, then walks into `impl` blocks,
+/// The three cases are kept DISTINCT so a caller can report honestly instead of
+/// silently choosing: "no such function" and "that name denotes several
+/// functions" are different answers, and collapsing them is what let a
+/// hand-copied resolver pick a source-order winner and report its verdict under
+/// the requested name.
+pub enum FunctionResolution<'a> {
+    /// Exactly one function answers to `name`.
+    Unique(&'a ItemFn),
+    /// No function in the file answers to `name`.
+    NotFound,
+    /// `n` (> 1) distinct definitions answer to `name`. Source order must never
+    /// select one of them.
+    Ambiguous(usize),
+}
+
+impl<'a> FunctionResolution<'a> {
+    /// The ONE rendering of "this name does not denote exactly one function".
+    ///
+    /// Both entry points that turn a bare `--function NAME` into a body call
+    /// this: the library gate (`verify_function_from_file`) and the CLI. They
+    /// had already drifted apart on the SAME input. `0a4c9f00` gave the CLI an
+    /// honest ambiguity message but left the library on `find_function`, which
+    /// discards the reason — so a file with two same-named methods was reported
+    /// as `Function 'f' not found`, which is FALSE: the name is present, twice.
+    /// A "not found" diagnostic sends the reader looking for a typo instead of
+    /// at the two declarations that actually caused it, and it is the exact
+    /// symptom a silently-no-oping bare-name resolver produces, so the two are
+    /// indistinguishable from the outside. Keeping one renderer makes the drift
+    /// unrepresentable rather than merely fixed once.
+    ///
+    /// The verdict does NOT change: both misses were, and remain, fail-closed
+    /// errors. Only the reason string does.
+    pub fn require_unique(
+        self,
+        name: &str,
+        file_path: impl std::fmt::Display,
+    ) -> Result<&'a ItemFn, String> {
+        match self {
+            FunctionResolution::Unique(func) => Ok(func),
+            FunctionResolution::NotFound => {
+                Err(format!("Function '{name}' not found in {file_path}"))
+            }
+            FunctionResolution::Ambiguous(count) => Err(format!(
+                "Function '{name}' is ambiguous in {file_path}: {count} definitions share that \
+                 name. A verdict would describe only one of them, so none is reported. Rename \
+                 the target or verify a file where the name is unique."
+            )),
+        }
+    }
+}
+
+/// Resolves a function by name in a parsed file, preserving the candidate COUNT
+/// so ambiguity is reportable.
+///
+/// Searches file-root free functions first, then walks into `impl` blocks,
 /// inline `mod` blocks, and `trait` blocks so that methods annotated with
 /// trust_vc attributes are discoverable by `cargo trust_vc check --function`.
-pub(super) fn find_function<'a>(file: &'a File, name: &str) -> Option<&'a ItemFn> {
+///
+/// This is the ONE resolver: `cargo-trust-vc` calls it too, so the CLI and the
+/// library can never disagree about which body a verdict describes.
+pub fn resolve_function_in_file<'a>(file: &'a File, name: &str) -> FunctionResolution<'a> {
     // A crate-root free function keeps historical precedence over methods with
     // the same name. Its lexical provenance is exact.
     for item in &file.items {
         if let Item::Fn(func) = item {
             if func.sig.ident == name {
-                return Some(func);
+                return FunctionResolution::Unique(func);
             }
         }
     }
@@ -31,12 +89,66 @@ pub(super) fn find_function<'a>(file: &'a File, name: &str) -> Option<&'a ItemFn
     // candidate; source order must never select one of several methods.
     let mut matches = Vec::new();
     collect_named_functions(&file.items, name, &mut matches);
-    if matches.len() == 1 {
-        matches.pop()
-    } else {
-        None
+    match matches.len() {
+        0 => FunctionResolution::NotFound,
+        1 => FunctionResolution::Unique(matches[0]),
+        n => FunctionResolution::Ambiguous(n),
     }
 }
+
+/// Resolves the function whose NAME is `name` and whose signature identifier
+/// begins on source line `line` (1-based, as `Span::start().line` reports it).
+///
+/// This exists because a bare name is the WRONG key for a caller that already
+/// holds exact lexical provenance. `cargo trust-vc check <file>` scans the file,
+/// records each annotated function's ident line, and then used to throw that
+/// line away and re-ask by bare name — so a file with `impl G for P` and
+/// `impl G for Q` reported BOTH `w` methods as "ambiguous, none is reported",
+/// and a legal two-impl program could not be checked at all. The ambiguity was
+/// entirely manufactured by the round-trip: the scan never had any doubt which
+/// item it meant.
+///
+/// This is the FUNCTION-name member of the family fixed for trait names at
+/// `3f12aff3` and for type names at `a10aea13` — a duplicate-name gate that
+/// failed the FILE instead of resolving the name it actually had the
+/// information to resolve.
+///
+/// SOUNDNESS: this RESOLVES, it does not prune, and it never widens what may
+/// answer. A verdict describes the item at `line` and no other, so a sibling
+/// impl's contract cannot be reported under this one's name — the failure mode
+/// that made a bare-name winner dangerous in the first place. There is
+/// deliberately NO fallback to the bare-name resolver: if no candidate's ident
+/// starts at `line`, the answer is `NotFound` and the caller fails closed.
+/// Falling back would reinstate exactly the source-order guess this replaces.
+/// Two candidates sharing one name AND one line (both impls written on a single
+/// source line) stay `Ambiguous` and still fail closed — line is a
+/// disambiguator, not a licence to guess.
+pub fn resolve_function_at_line<'a>(
+    file: &'a File,
+    name: &str,
+    line: usize,
+) -> FunctionResolution<'a> {
+    // No root-function precedence rule here: precedence exists to break ties
+    // between candidates a bare name cannot separate, and the line already
+    // separates them exactly. Collecting uniformly keeps a root `fn` and a
+    // method on equal footing so the line alone decides.
+    let mut matches = Vec::new();
+    collect_named_functions(&file.items, name, &mut matches);
+    matches.retain(|func| func.sig.ident.span().start().line == line);
+    match matches.len() {
+        0 => FunctionResolution::NotFound,
+        1 => FunctionResolution::Unique(matches[0]),
+        n => FunctionResolution::Ambiguous(n),
+    }
+}
+
+// A `find_function(..) -> Option<&ItemFn>` wrapper used to live here. It
+// DISCARDED the reason for a miss, and every caller then had to invent one —
+// which is how the library gate came to report two same-named methods as
+// "Function 'f' not found". It is deleted rather than left unused: while it
+// exists, a future caller can reintroduce exactly that drift by picking the
+// convenient signature. Callers go through `resolve_function_in_file(..)
+// .require_unique(..)`, which cannot lose the reason.
 
 fn collect_named_functions<'a>(items: &'a [Item], name: &str, matches: &mut Vec<&'a ItemFn>) {
     for item in items {
@@ -591,6 +703,137 @@ mod tests {
             EnclosingImplResolution::Unique(ty) => assert_eq!(token_string(ty), "B"),
             _ => panic!("the exact B method should resolve uniquely"),
         }
+    }
+
+    /// NARROWNESS PIN for the shared resolver: a name with exactly one
+    /// candidate must still resolve, in every shape the CLI can be pointed at.
+    /// A resolver that answered `Ambiguous` everywhere would pass the soundness
+    /// half of this file and verify nothing.
+    #[test]
+    fn every_single_candidate_shape_still_resolves_uniquely() {
+        let root: File = parse_quote! { fn target(x: u32) -> u32 { x } };
+        let method: File = parse_quote! {
+            struct S;
+            impl S { fn target(x: u32) -> u32 { x } }
+        };
+        let nested: File = parse_quote! {
+            mod inner { fn target(x: u32) -> u32 { x } }
+        };
+        let trait_default: File = parse_quote! {
+            trait T { fn target(&self) -> u32 { 7 } }
+        };
+        // A bodiless trait declaration is NOT a candidate, so the impl stays
+        // the unique one — the common trait/impl corpus shape must not become
+        // ambiguous.
+        let decl_plus_impl: File = parse_quote! {
+            trait T { fn target(&self) -> u32; }
+            struct S;
+            impl T for S { fn target(&self) -> u32 { 7 } }
+        };
+        for (label, file) in [
+            ("root", &root),
+            ("method", &method),
+            ("nested", &nested),
+            ("trait_default", &trait_default),
+            ("decl_plus_impl", &decl_plus_impl),
+        ] {
+            assert!(
+                matches!(
+                    resolve_function_in_file(file, "target"),
+                    FunctionResolution::Unique(_)
+                ),
+                "{label}: a single candidate must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_name_is_not_found_not_ambiguous() {
+        let file: File = parse_quote! { fn present() {} };
+        assert!(matches!(
+            resolve_function_in_file(&file, "absent"),
+            FunctionResolution::NotFound
+        ));
+    }
+
+    /// The FV-A witness at resolver level: two same-named methods must never be
+    /// separated by source order, and the answer must not depend on which impl
+    /// block was written first.
+    #[test]
+    fn same_named_methods_are_ambiguous_in_either_source_order() {
+        let ab: File = parse_quote! {
+            struct A;
+            struct B;
+            impl A { fn check(x: u32) -> u32 { x } }
+            impl B { fn check(x: u32) -> u32 { x + 1 } }
+        };
+        let ba: File = parse_quote! {
+            struct A;
+            struct B;
+            impl B { fn check(x: u32) -> u32 { x + 1 } }
+            impl A { fn check(x: u32) -> u32 { x } }
+        };
+        for (label, file) in [("ab", &ab), ("ba", &ba)] {
+            assert!(
+                matches!(
+                    resolve_function_in_file(file, "check"),
+                    FunctionResolution::Ambiguous(2)
+                ),
+                "{label}: two same-named methods must report ambiguity, not a winner"
+            );
+        }
+    }
+
+    /// The two resolution MISSES must stay DISTINGUISHABLE in the rendered
+    /// string. Laundering `Ambiguous` into the "not found" wording is what made
+    /// the library gate blame a typo for two same-named methods, and it is
+    /// exactly what a silently-no-oping bare-name resolver looks like from the
+    /// outside — so the strings must not converge.
+    #[test]
+    fn ambiguous_and_missing_render_as_different_reasons() {
+        let two: File = parse_quote! {
+            struct A;
+            struct B;
+            impl A { fn check(x: u32) -> u32 { x } }
+            impl B { fn check(x: u32) -> u32 { x + 1 } }
+        };
+        // `ItemFn` is not `Debug`, so unwrap the two arms by hand.
+        let Err(ambiguous) =
+            resolve_function_in_file(&two, "check").require_unique("check", "f.rs")
+        else {
+            panic!("two candidates must not resolve");
+        };
+        assert!(
+            ambiguous.contains("is ambiguous in f.rs") && ambiguous.contains("2 definitions"),
+            "ambiguity must be reported as ambiguity, with the count: {ambiguous}"
+        );
+        assert!(
+            !ambiguous.contains("not found"),
+            "an ambiguous name is present, not missing: {ambiguous}"
+        );
+
+        let Err(missing) =
+            resolve_function_in_file(&two, "absent").require_unique("absent", "f.rs")
+        else {
+            panic!("a missing name must not resolve");
+        };
+        assert!(
+            missing.contains("Function 'absent' not found in f.rs"),
+            "a genuinely absent name keeps the not-found wording: {missing}"
+        );
+    }
+
+    /// NARROWNESS PIN for `require_unique`: it must still HAND BACK the body for
+    /// a name with exactly one candidate. A renderer that errored unconditionally
+    /// would satisfy every assertion above and verify nothing.
+    #[test]
+    fn require_unique_returns_the_body_for_a_single_candidate() {
+        let file: File = parse_quote! { fn target(x: u32) -> u32 { x } };
+        let Ok(func) = resolve_function_in_file(&file, "target").require_unique("target", "f.rs")
+        else {
+            panic!("a single candidate must resolve");
+        };
+        assert_eq!(func.sig.ident, "target");
     }
 
     #[test]

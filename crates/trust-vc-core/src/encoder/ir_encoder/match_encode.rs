@@ -267,6 +267,46 @@ impl<'a> AstExpressionParser<'a> {
     /// own meaning (ITE pushing is a tautology; constructor-leaf evaluation is the
     /// native datatype axiom). It only *adds* sound equalities — it can never make
     /// a wrong obligation verify.
+    ///
+    /// BINDER CAPTURE (CARDINAL). Every fact above is asserted at the SOLVER TOP
+    /// LEVEL via `try_assert_term`, so `m` is a top-level constant. That is only
+    /// sound while `match_term`'s free variables are themselves top level. When
+    /// this runs while a body is being encoded *inside* a real solver binder —
+    /// the spec-fn defining axiom `∀n. f(n) = match n { .. }` is exactly that
+    /// case — the binder's variable escapes into a top-level definition of `m`
+    /// and the axiom degenerates to `∀n. f(n) = m`, i.e. "f is a CONSTANT
+    /// function". Measured on `tests/data/datatype_ne_refutation.rs`: the emitted
+    /// axiom was `(forall ((n Nat)) (= (dbl n) __trust_vc_match_dt_4))` with
+    /// `__trust_vc_match_dt_4` a top-level `declare-const`. It is unsound (it
+    /// proves `dbl(Zero) == dbl(Succ(Zero))`), it destroys the intended ground
+    /// instances (`dbl(Zero) = Zero` is no longer derivable), and it leaves
+    /// datatype ACYCLICITY as the only route to a refutation — which is what
+    /// produced a 126,548-step / 393M-clause-literal proof and a solve that never
+    /// returned.
+    ///
+    /// So under a real binder we emit NOTHING and hand back the `ite` tree
+    /// itself, which is the correct definitional right-hand side and needs no
+    /// auxiliary constant. This is the fail-closed direction twice over: the
+    /// binding is a set of ASSUMPTIONS, so dropping it only ever weakens the
+    /// solver context (UNSAT gets harder, never easier), and what it dropped here
+    /// was false anyway. `real_quantifier_depth` — not `quantifier_depth` — is the
+    /// right gate: a Skolemized `forall` binds its variables as fresh TOP-LEVEL
+    /// constants, where hoisting stays sound and stays useful.
+    ///
+    /// SCOPE OF THIS GATE — read before quoting it. It closes the DATATYPE-MATCH
+    /// INSTANCE of encode-then-close binder capture, not the class. A static
+    /// sweep finds 47 helpers on `AstExpressionParser` with the same shape (mint
+    /// a fresh const, reach a `try_assert_term` in the same function), and at
+    /// least one other was a live CARDINAL false verify:
+    /// `purified_euclidean_div_mod_literal` let `fn half(n: int) -> int { n / 2 }`
+    /// prove `half(2) == 5` in 0.03 s — worse than this one, because the ground
+    /// replay of the same body pins the hoisted const to a second value and the
+    /// whole axiom set becomes contradictory. That site is gated the same way in
+    /// `arith/int_arith.rs`. The CLASS is closed at the closure boundary instead,
+    /// by `crate::encoder::binder_capture`, which declines any encode-then-close
+    /// axiom whose body encode hoisted a fact mentioning a to-be-bound term. This
+    /// gate remains worth having because it preserves the definition (the
+    /// backstop only preserves soundness).
     fn bind_datatype_match_result(
         &mut self,
         match_term: Term,
@@ -282,6 +322,17 @@ impl<'a> AstExpressionParser<'a> {
         // constant-folded result that is itself a constructor application or a
         // datatype variable) already resolves natively, so skip the extra const.
         if !matches!(self.solver.term_kind(match_term), TermKind::Ite) {
+            return Ok(match_term);
+        }
+
+        // Inside a real solver binder — or while encoding a body the caller is
+        // about to universally close (`add_typed_broadcast`, which is how every
+        // spec-fn defining axiom is built) — the hoist would capture. See the
+        // BINDER CAPTURE note above.
+        if self.real_quantifier_depth > 0 || self.pending_universal_closure {
+            self.diagnostics.record(
+                super::super::diagnostics::EncodingApproximation::DatatypeMatchBindingUnderBinder,
+            );
             return Ok(match_term);
         }
 

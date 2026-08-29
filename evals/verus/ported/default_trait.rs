@@ -181,10 +181,10 @@ pub const DEFAULT_TRAIT_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         3,
     ),
     (
-        "rust_default_u32_ufcs_constructor_currently_blocked",
+        "rust_default_u32_ufcs_constructor_verified",
         "test_default_u32_ok",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
         "rust_default_string_constructor_currently_blocked",
@@ -264,16 +264,22 @@ pub const DEFAULT_TRAIT_RS_FAIL_CLOSED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
         "rust_default_trait_inference_currently_blocked",
         &["unknown return type for function 'Default::default'"],
     ),
+    // `<&'static str>::default()` is a QSELF associated call. Since `49d16b38`
+    // ("Phase A no-self UFCS") a no-arg qself call is rendered with the CONCRETE
+    // self type from `qself.ty` rather than the bare method name — that is the
+    // whole point of the change, because the bare name cannot say which impl is
+    // meant. So the unresolved symbol is `str::default`, not `default`. Every
+    // sibling row in this table is already qualified; this row simply predates the
+    // rendering. The requirement is unchanged and the new fragment is STRICTER: it
+    // pins which type's `default` went unmodeled, not merely that some `default`
+    // did. (`extract_type_string` strips the reference, so `&'static str` renders
+    // as `str`; that conflation is fail-closed here — see the commit message.)
     (
         "rust_default_str_associated_constructor_currently_blocked",
         &[
             "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'default'",
+            "unknown return type for function 'str::default'",
         ],
-    ),
-    (
-        "rust_default_u32_ufcs_constructor_currently_blocked",
-        &["unknown return type for function 'core::default::Default::default'"],
     ),
     (
         "rust_default_string_constructor_currently_blocked",
@@ -477,8 +483,16 @@ fn rust_default_tuple3_associated_constructor_verified() {
     trust_vc::assert!(value.2 == '\0');
 }
 
+// Promoted from `..._currently_blocked` (error) to verified. The trait-qualified
+// UFCS spelling `<u32 as core::default::Default>::default()` now models as the
+// same zero the plain `u32::default()` spelling does. Both DIRECTIONS measured
+// before promoting: `ensures(result == 0u32)` verifies and `ensures(result ==
+// 1u32)` yields a Counterexample, on both spellings; stock `rustc --edition
+// 2021` prints `0`, so the verified claim is the TRUE one. The row was reading
+// `error` only because the harness's fail-closed loop panicked on an earlier row
+// and never reached it.
 #[trust_vc::ensures(result == 0u32)]
-fn rust_default_u32_ufcs_constructor_currently_blocked() -> u32 {
+fn rust_default_u32_ufcs_constructor_verified() -> u32 {
     <u32 as core::default::Default>::default()
 }
 

@@ -417,6 +417,16 @@ fn assoc_concrete_method_candidate(
     if !trait_decl.generics.is_empty() || !method.requires.is_empty() {
         return None;
     }
+    // This candidate points a `recv.m()` call straight at the bare concrete
+    // symbol `Type__method` with NO box receiver — indistinguishable from an
+    // inherent method's registration. When the file resolves that symbol to a
+    // different declaration the trait must not claim it (see
+    // `TraitImplDecl::inherent_shadowed_methods`); the axioms that would give
+    // the symbol its value are gated the same way, so registering it here would
+    // only name an unconstrained function.
+    if !impl_decl.may_claim_concrete_symbol(&method.name) {
+        return None;
+    }
     let has_projection = method
         .params
         .iter()

@@ -1,9 +1,11 @@
 # Vision: trust-vc
 
-> Last updated: 2026-05-24
-> **v1.0 STATUS** — Verus replacement is evidence-gated by `cargo trust-vc evidence`; do not treat 100% replacement as proven until the full report passes. Pure-Rust ay backend; no Z3 and no external SMT solver. (ay itself still links GMP/MPFR/libc and a self-hosted JIT internally — "pure Rust" means the solver algorithms, not a C/FFI-free dependency closure. See README "Dependencies".)
-> **v2 NEXT** — Beyond Verus: performance, proof certificates, ay-unique capabilities.
-> **v2.1 ACTIVE** — Native ay theory adoption: IEEE FP (done), Seq (in progress), String (planned).
+> Last updated: 2026-08-28. The shipped version is the workspace version in
+> `Cargo.toml` (**0.4.0**); the `v1`/`v2`/`v2.1` labels below are ROADMAP PHASE
+> names, not release numbers.
+> **PHASE v1 STATUS** — Verus replacement is evidence-gated by `cargo trust-vc evidence`; do not treat 100% replacement as proven until the full report passes. Pure-Rust ay backend; no Z3 and no external SMT solver. (ay still calls `libc` for resource limits and ships `ay-jit`, a self-hosted native-code JIT, on the default path — "pure Rust" means the solver algorithms, not a C/FFI-free dependency closure. GMP/MPFR via `rug` are NO LONGER in the dependency closure — they left `Cargo.lock` at `9d3f8fc5`; arbitrary precision is `num-bigint`. See README "Dependencies".)
+> **PHASE v2 NEXT** — Beyond Verus: performance, proof certificates, ay-unique capabilities.
+> **PHASE v2.1 ACTIVE** — Native ay theory adoption: IEEE FP, Seq, and String encoder paths have all landed behind opt-in features (`native-seq`, `native-strings`; both `default = []`).
 
 ## Problem Statement
 
@@ -27,8 +29,8 @@ Trust verifier. See `design-trust-proof-backend.md` for the authoritative
 design (north star) and `design-rustc-driver-frontend.md` for the
 Verus-compat front end.
 
-**The Verus-replacement goal is RETIRED (R1, 2026-07-11)** per the ratified
-two-language spec-surface design
+**R1 (2026-07-11) retired the Verus-replacement goal — and was AMENDED two days
+later.** Per the ratified two-language spec-surface design
 (the Trust repo's `docs/design/2026-07-09-two-language-spec-surface.md` §6): Trust's one
 spec surface is first-class Rust clauses + Clean; engines are invisible behind
 trust-router. trust-vc's contribution is the auto-active proof calculus
@@ -36,6 +38,12 @@ trust-router. trust-vc's contribution is the auto-active proof calculus
 encodings — not a Verus-compatible user surface. The 156-file corpus remains
 as regression material (re-keyed at R4); the evidence gate remains as the
 corpus-port instrument.
+`docs/capability-audit-2026-07-13.md` §preamble then reinstated the replacement
+program in two phases, and the ACTIVE GOAL (author-set 2026-07-15, re-affirmed
+2026-07-18) is **100% of Verus functionality at "full or superior"** on the
+native surface. Read `CLAUDE.md` and
+`docs/execution-plan-100-verus-2026-07-15.md` for the live framing; this
+section is kept because the R1 reasoning still governs the *surface* question.
 
 **Why target Verus compatibility:**
 - It is a concrete parity benchmark that exercises the whole proof language
@@ -43,14 +51,21 @@ corpus-port instrument.
 - Independent implementations (independent *from Verus*) discover better approaches
 
 **Why better than Verus:**
-- Independently-checkable proof certificates (ay UNSAT/Alethe proofs re-checked by
-  trust-vc-kernel) vs Verus trusting a black-box Z3 with no checkable artifact
+- Checkable proof certificates (ay's UNSAT resolution trace re-checked by
+  trust-vc-kernel) vs Verus trusting a black-box Z3 with no checkable artifact.
+  Scope it honestly: the kernel checks propositional resolution plus structural
+  EUF (transitivity/congruence) and LRA (Farkas) lemmas; **NIA, BV, Array and
+  Seq lemmas are accepted on trust** (`trust-vc-kernel/src/lib.rs:17`) and stay
+  in the TCB. Alethe is one of the kernel's EXPORT formats, not an input it
+  re-checks.
 - One unified Trust verifier (MIR/exec + borrows + model checking + separation
   logic + proof calculus, one engine, one solver) vs Verus = Rust surface + Z3 only
 - Native ay decision procedures (Seq/Set/Map/Multiset/String/FP/BV) that sidestep
   Z3's MBQI/quantifier fragility
 - No Z3: pure-Rust solver algorithms, reproducible
-- Cross-IR portability + an ay-vs-Z3 differential oracle
+- Cross-IR portability (the ay-vs-Z3 differential oracle itself now lives in
+  ay, as its `ay-z3-parity classify` subcommand — it was extracted out of this
+  repo at R1 and is no longer a trust-vc deliverable)
 
 **Unique value:** ay backend (no Z3 dependency), proof certificates, and a proof
 calculus that plugs into Trust's other verification capabilities.
@@ -144,7 +159,7 @@ fn sum_seq(s: Seq<i32>) -> i32 {
 | `Seq<T>` | `(Seq T)` native or `(Array BV(ptr_width) T)` with length | `native-seq` feature flag; #2680 Slice 2 |
 | `Set<T>` | `(Array T Bool)` | |
 | `Map<K,V>` | `(Array K V)` | |
-| `Multiset<T>` | `(Array T (_ BitVec 64))` | Count-per-element encoding |
+| `Multiset<T>` | `(Array T Int)` | Count-per-element encoding (`encoder/types.rs:49`) |
 
 ## Integration into Trust
 
@@ -159,12 +174,15 @@ infrastructure already in flight:
 3. Trust needs a production consumer plus parity coverage for that bundle (tracked downstream).
 4. After that gate lands, wire trust-vc's proof surface into Trust as its proof backend (alongside trust-mc/trust-wp).
 
-**End state:** Trust = one unified verifier (MIR/exec + borrows + model checking + separation logic + proof calculus) over a single ay solver, emitting independently-checkable proof certificates.
+**End state:** Trust = one unified verifier (MIR/exec + borrows + model checking + separation logic + proof calculus) over a single ay solver, emitting checkable proof certificates. "Independently checkable" is the destination, not today's state: closing the kernel's NIA/BV/Array/Seq trust gap is Workstream B.1 of `docs/ROADMAP.md`.
 
 ## Success Metrics
 
-Canonical status snapshot: `reports/vision-scorecard-current.md`
-generated by `scripts/vision_scorecard.py`.
+Canonical status snapshot: recount from the sources named in `CLAUDE.md`
+("Where the numbers live") — `evals/verus/verus-tests.json` for the corpus
+manifest and `docs/replacement-progress.md` for the running ledger. (The former
+`scripts/vision_scorecard.py` / `reports/vision-scorecard-current.md` pair no
+longer exists in this repo.)
 
 ### Achieved Tracked Surface (Tier 0)
 
@@ -226,8 +244,8 @@ the generated evidence report.
 | **P1** | VC-level caching | done | #2646 | Skip re-verification of unchanged functions |
 | **P2** | Per-assertion SMT pruning | done | #2649 | Tighten the quantifier universe per query |
 | **P2** | Proof failure localization | done (follow-up: #2682) | #2652 | Basic implementation done; fast-path gap filed as P1 #2682 |
-| **P2** | UNSAT proof certificates | done | #2654 | Independently checkable proofs from ay |
-| **P2** | Adaptive E-matching depth | blocked | #2665 | Remains active v2 scope, but is blocked on ay#583 |
+| **P2** | UNSAT proof certificates | done | #2654 | Resolution traces from ay, re-checked by trust-vc-kernel; NIA/BV/Array/Seq lemmas still accepted on trust |
+| **P2** | Adaptive E-matching depth | done | #2665, #2720, #2742 | Shipped as the `EMATCHING_ESCALATION_BUDGETS` retry ladder + `set_ematching_round_limit` (`encoder/verification/assertion.rs:1290-1470`) |
 | **P3** | Demand-driven cross-function inlining | done | #2655 | Inline callees when contracts are too weak |
 
 #### v2.1: Native Theory Adoption
@@ -237,22 +255,27 @@ ay provides native theory solvers that trust_vc's encoder now adopts.
 | Priority | Capability | Status | Tracking | Notes |
 |----------|------------|--------|----------|-------|
 | **P2** | IEEE floating-point verification | done | #2680 Slice 1 | `Float{32,64}` → native `Sort::FloatingPoint` via ay-fp |
-| **P2** | Native sequence theory | in progress | #2680 Slice 2 | `Seq<T>` → native `Sort::Seq(T)` via ay-seq; `native-seq` feature flag |
-| **P3** | Native string theory | planned | #2680 Slice 3 | `String` → `Sort::String` via ay-strings (word equations) |
+| **P2** | Native sequence theory | landed, opt-in | #2680 Slice 2 | `Seq<T>` → native `Sort::Seq(T)` via ay's `ay-seq` theory solver (`encoder/collection_seq_native/`); behind the `native-seq` feature, which is NOT in `default` |
+| **P3** | Native string theory | landed, opt-in | #2680 Slice 3 | `String` → `Sort::String` via ay-strings (word equations); behind the `native-strings` feature, which is NOT in `default` |
 | **P2** | Merge-contract sort parity | done | #2693 | SortMeta now covers FloatingPoint and collection sorts |
 
 #### Deferred research
 
 | Priority | Capability | Why it matters |
 |----------|------------|----------------|
-| **P3** | Verification-aware optimization hints | Use proven assertions to drive codegen hints |
 | **P3** | Proof-guided quantifier instantiation | Feedback loop between verifier and solver |
+
+Verification-aware optimization hints left this table: they SHIPPED as
+`cargo trust-vc check --emit-hints`
+(`crates/cargo-trust-vc/src/emit_hints.rs`, `llvm_hints.rs`,
+`optimization_pipeline.rs`).
 
 ## Scope Boundaries
 
 ### In Scope (v1 tracked surface)
-- Broad Verus-style proof attribute and macro coverage (67 proc macros);
-  replacement proof requires the evidence gate.
+- Broad Verus-style proof attribute and macro coverage (count the
+  `#[proc_macro*]` items in `crates/trust-vc/src/lib.rs` rather than quoting a
+  number here); replacement proof requires the evidence gate.
 - Ghost collections with full higher-order combinators
 - Trait verification, polymorphism, mutable references
 - Recursive termination, broadcast lemmas, SMT pruning
@@ -261,10 +284,9 @@ ay provides native theory solvers that trust_vc's encoder now adopts.
 - Performance: incremental solving, parallelism, VC-level caching, per-assertion pruning
 - Usability: counterexamples, proof failure localization
 - Solver capabilities: proof certificates, adaptive E-matching retries, demand-driven body inlining
-- Native theories (v2.1): IEEE FP verification, native Seq/String via ay theory solvers (#2680)
+- Native theories (v2.1): IEEE FP verification, native Seq/String via ay theory solvers (#2680; Seq/String are opt-in features, not defaults)
 
 ### Deferred Research (not in active v2 lane)
-- Verification-aware optimization hints
 - Proof-guided quantifier instantiation
 
 ### Out of Scope (other Trust capabilities or other tools)

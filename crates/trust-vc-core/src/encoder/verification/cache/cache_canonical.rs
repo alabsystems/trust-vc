@@ -42,6 +42,14 @@ pub(super) fn write_context(
     write_bitshift_behavior(out, ctx.bitshift_behavior);
     let _ = writeln!(out, "has_collection:{}", ctx.has_collection_context);
     let _ = writeln!(out, "rlimit:{:?}", ctx.rlimit_ms);
+    // The DETERMINISTIC budget is verdict-semantic in exactly the way the
+    // wall backstop above is: a Verified obtained under a larger conflict
+    // allowance must never be served to a context that grants less.
+    let _ = writeln!(
+        out,
+        "rlimit_conflicts:{:?}",
+        ctx.rlimit_conflicts.map(|budget| budget.conflicts())
+    );
     // Retry policy is verdict-semantic: demand inlining and the timeout /
     // E-matching cascades can recover an otherwise fail-closed Unknown as
     // Verified. A Verified produced under stronger retry settings must never
@@ -218,7 +226,7 @@ pub(super) fn write_context(
         );
         for key in keys {
             if let Some(body) = ctx.trait_impl_method_bodies.get(key) {
-                write_conformance_method_body(out, key, body);
+                write_conformance_method_body(out, &key.canonical_string(), body);
             }
         }
     }
@@ -241,7 +249,7 @@ pub(super) fn write_context(
         );
         for key in keys {
             if let Some(ensures) = ctx.trait_impl_method_ensures.get(key) {
-                let _ = writeln!(out, "  {key}:{}", ensures.len());
+                let _ = writeln!(out, "  {}:{}", key.canonical_string(), ensures.len());
                 for clause in ensures {
                     let _ = writeln!(out, "    {clause}");
                 }
@@ -353,6 +361,7 @@ fn assert_cache_field_classification_is_exhaustive(ctx: &PreparedVerificationCon
         invariant_mask: _,
         tracked_params: _,
         rlimit_ms: _,
+        rlimit_conflicts: _,
         demand_inline: _,
         counterexample_var_meta: _,
         skip_retry_cascade: _,
@@ -699,6 +708,7 @@ fn write_trait_impl_decl(out: &mut String, decl: &TraitImplDecl) {
         assoc_type_bindings: _,
         is_external: _,
         trait_type_args: _,
+        inherent_shadowed_methods: _,
     } = decl;
     let _ = writeln!(
         out,
@@ -722,6 +732,20 @@ fn write_trait_impl_decl(out: &mut String, decl: &TraitImplDecl) {
     }
     // External impls skip body conformance (trusted specs) — semantic.
     let _ = writeln!(out, "  external:{}", decl.is_external);
+    // SEMANTIC, and it must never be dropped from the key: a shadowed method
+    // publishes NO linking axiom and NO concrete-sorted trait-ensures axiom, so
+    // two otherwise-identical impls with different shadow sets encode to
+    // different formulas. Omitting it would let a cached `Verified` from the
+    // unshadowed encoding answer the shadowed one — reinstating the very false
+    // verify the shadow set exists to close.
+    let _ = writeln!(
+        out,
+        "  inherent_shadowed:{}",
+        decl.inherent_shadowed_methods.len()
+    );
+    for method_name in &decl.inherent_shadowed_methods {
+        let _ = writeln!(out, "    {method_name}");
+    }
 }
 
 fn write_conformance_method_body(out: &mut String, key: &str, body: &ConformanceMethodBody) {

@@ -53,13 +53,21 @@ The triage report reads only the manifest and emits deterministic counts by
 classification and top-level upstream path bucket, plus accepted executable
 entries that still lack `trust_vc_paths` or reference missing TrustVc files. This is
 not replacement evidence and does not relax the fail-closed gate policy below.
-Current manifest state is not proven: 40 executable TrustVc port entries, 112
-unsupported gaps, 4 not-applicable entries, 0 unclassified entries, and 0
-machine-readable `known_gaps` on ported entries. Those accepted entries bind 45
-repo-local TrustVc paths and 170 expected cases. Every `unsupported-gap` entry
-now has partial TrustVc path coverage; across all 112 unsupported rows, the
-manifest records 2015 expected cases and 350 explicit `known_gaps` notes. Those
-cases document progress only and are not accepted replacement evidence. Accepted entries use schema 2 source hash and
+Current manifest state is not proven. **Recount rather than quote this
+paragraph** — it is a snapshot, and it has rotted before:
+
+```sh
+jq '[.entries[].classification]|group_by(.)|map({(.[0]):length})|add' verus-tests.json
+```
+
+As recounted on 2026-08-28: 46 executable TrustVc port entries, 106
+unsupported gaps, 4 not-applicable entries, 0 unclassified entries, and 6
+machine-readable `known_gaps` notes spread over 3 ported entries. Those accepted
+entries bind 51 repo-local TrustVc paths and 259 expected cases. Every
+`unsupported-gap` entry has at least partial TrustVc path coverage (106 of 106);
+across those rows the manifest records 1,990 expected cases and 332 explicit
+`known_gaps` notes. Those cases document progress only and are not accepted
+replacement evidence. Accepted entries use schema 2 source hash and
 proof-obligation fingerprint pins unless they explicitly declare
 `evidence_kind: cargo_trust_vc_integration_test`; cargo-wrapper integration-test
 witnesses are wrapper evidence, not proof-obligation evidence, and TrustVc-only
@@ -85,7 +93,7 @@ replacement evidence. The raw failure lists remain the source of exact blockers.
 For a replacement-proof attempt, include the upstream Verus runner:
 
 ```sh
-TRUST_VC_VERUS_PATH=/path/to/verus ./target/debug/cargo-trust-vc evidence . --strict --run-trust-vc --run-trust-vc-corpus --run-verus --json --markdown
+TRUST_VC_VERUS_PATH=/path/to/verus ./target/debug/cargo-trust-vc evidence . --strict --run-trust_vc --run-trust-vc-corpus --run-verus --json --markdown
 ```
 
 The default runner executes the upstream `rust_verify_test` package and

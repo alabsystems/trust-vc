@@ -116,6 +116,14 @@ impl<'a> AstExpressionParser<'a> {
                         s.encode_trust_vc_expr(condition)
                     })?;
 
+                // BINDER-CAPTURE backstop (see `encoder::binder_capture`):
+                // `condition` is re-encoded below with `witness_var` standing
+                // in as an ORDINARY TOP-LEVEL term and is then closed under
+                // `forall witness_var` — the encode-then-close shape. Watermark
+                // the assertion stack so a helper hoist that mentions the
+                // witness cannot be silently captured by that binder.
+                let capture_watermark = crate::encoder::binder_capture::watermark(self.solver);
+
                 let witness_var = self.solver.fresh_var(var_name, return_sort);
                 if let Some(width) = var_ty.bit_width() {
                     if width > 0 {
@@ -123,9 +131,19 @@ impl<'a> AstExpressionParser<'a> {
                         self.term_widths.insert(witness_var, (width, signed));
                     }
                 }
-                let witness_condition = self.with_local_bindings(
-                    [(var_name.to_string(), witness_var, var_ty.clone())],
-                    |s| s.encode_trust_vc_expr(condition),
+                // The condition is destined for the body of `forall
+                // witness_var`: let the capture-aware helpers (`match_encode.rs`,
+                // `arith/int_arith.rs`) INLINE their result rather than hoist a
+                // fresh const, as every other wired closure boundary does.
+                let witness_condition = crate::encoder::with_flag_unwind_safe!(
+                    self.pending_universal_closure,
+                    true,
+                    {
+                        self.with_local_bindings(
+                            [(var_name.to_string(), witness_var, var_ty.clone())],
+                            |s| s.encode_trust_vc_expr(condition),
+                        )
+                    }
                 )?;
                 let witness_antecedent = if var_ty.bit_width().is_none() {
                     let guards = self.build_range_guards(
@@ -145,19 +163,43 @@ impl<'a> AstExpressionParser<'a> {
                 } else {
                     witness_condition
                 };
-                let guarded_axiom = self
-                    .solver
-                    .try_implies(witness_antecedent, cond_with_skolem)
-                    .map_err(|e| format!("choose: failed to build guarded Skolem axiom: {}", e))?;
-                let guarded_axiom = self
-                    .solver
-                    .try_forall(&[witness_var], guarded_axiom)
-                    .map_err(|e| {
-                        format!("choose: failed to quantify guarded Skolem axiom: {}", e)
-                    })?;
-                self.solver
-                    .try_assert_term(guarded_axiom)
-                    .map_err(|e| format!("choose: failed to assert guarded Skolem axiom: {}", e))?;
+                match crate::encoder::binder_capture::capture_since(
+                    self.solver,
+                    capture_watermark,
+                    &[witness_var],
+                ) {
+                    Some(capture) => {
+                        // Decline the Skolem-witness axiom outright: `result`
+                        // stays an unconstrained const of the right sort, so a
+                        // goal that needs the chosen value's defining property
+                        // gets a counterexample or Unknown — never a false
+                        // `Verified` through a captured hoist.
+                        crate::encoder::binder_capture::record_capture(
+                            &mut self.diagnostics,
+                            "choose:skolem_witness",
+                            &capture,
+                        );
+                    }
+                    None => {
+                        let guarded_axiom = self
+                            .solver
+                            .try_implies(witness_antecedent, cond_with_skolem)
+                            .map_err(|e| {
+                                format!("choose: failed to build guarded Skolem axiom: {}", e)
+                            })?;
+                        let guarded_axiom = self
+                            .solver
+                            .try_forall(&[witness_var], guarded_axiom)
+                            .map_err(|e| {
+                                format!("choose: failed to quantify guarded Skolem axiom: {}", e)
+                            })?;
+                        self.solver
+                            .try_assert_term(guarded_axiom)
+                            .map_err(|e| {
+                                format!("choose: failed to assert guarded Skolem axiom: {}", e)
+                            })?;
+                    }
+                }
             }
 
             // Emit any attached extra axiom (the multi-binder combined Hilbert

@@ -165,6 +165,9 @@ SYN_MAP = {
     "unknown": "Unknown",
     "error": "Error",
     "skipped": "Skipped",
+    # A function the scan saw but never analyzed. Mapped like every other
+    # non-Verified word, so it can never satisfy the `proves_more` test.
+    "not_analyzed": "NotAnalyzed",
 }
 report = json.load(open(syn_json))
 syn = {}

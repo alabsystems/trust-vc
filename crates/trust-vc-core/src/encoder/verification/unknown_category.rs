@@ -136,7 +136,20 @@ impl UnknownCategory {
             // a simplifying constructor (ay 028b53d91), a certified-default
             // model row aliasing the all-zeros point (ay 9ddf1283d), and a
             // nested re-solve forging the authored assertion epoch (ay
-            // 0937e0b18). Set AY_PROBE_CERT_REJECT=1 to see which gate refused.
+            // 0937e0b18), and a fourth on 2026-08-21 (ay: a certified
+            // constant-`true` vacuous-quantifier collapse still set the
+            // conservative translation-incomplete marker, whose read site then
+            // downgraded a computed UNSAT to `Unknown(UnhandledQuantifier)` and
+            // starved the deferred-trust discharge's corroboration re-solve).
+            //
+            // To see WHICH gate refused: there is NO `AY_PROBE_CERT_REJECT` env
+            // var — ay retired the `AY_*` fallbacks for its diagnostic carriers
+            // and `init_misc_cli_flags_from_env` deliberately keeps none. The
+            // supported seam for a library embedder is the typed, process-wide
+            // `ay_core::set_global_misc_cli_flags_with(|f| f.probe_cert_reject
+            // = true)`, called once before the first solve (it is
+            // first-writer-wins and returns `false` if the flags are already
+            // initialized). From the `ay` CLI the flag is `--probe-cert-reject`.
             //
             // SolverUnknown is correct and SOUND either way: an uncertified
             // verdict is not a proof and must not discharge an obligation.

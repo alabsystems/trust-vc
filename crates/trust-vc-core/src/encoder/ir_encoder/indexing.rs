@@ -359,6 +359,12 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        // Cardinality of a union/intersection/difference is not either operand's
+        // (inclusion-exclusion needs the overlap). The result is anonymous, so
+        // without this the name fallback would answer `.len()` with the LEFT
+        // operand's length — `s.union(t).len() == s.len()` verified for disjoint
+        // non-empty `t`.
+        self.decline_collection_len(result);
 
         Ok(result)
     }

@@ -252,6 +252,141 @@ pub fn strip_pointer_width_directives(source: &str) -> String {
     out
 }
 
+/// Conservatively decides whether verifying `func` depends on the target pointer
+/// width, i.e. whether the proof could differ between a 32-bit and a 64-bit
+/// `usize`/`isize` (#2778 dual-arch).
+///
+/// SOUNDNESS DIRECTION. Over-approximating is sound: a width-invariant unit
+/// simply verifies identically at both widths, at the cost of one extra solver
+/// pass. Under-approximating is UNSOUND — a genuinely width-dependent proof
+/// would be discharged at only one width, so a program that is FALSE at a 32-bit
+/// `usize` comes back `verified` on a 64-bit host. This function must therefore
+/// err toward inclusion, and every judgement below is written in that direction.
+///
+/// WHY THE UNIT'S OWN TOKENS ARE NOT ENOUGH (the FV-2 hole). The predicate used
+/// to scan only `func.to_token_stream()`. `usize` reaches a unit through routes
+/// that put no `usize` token inside the function:
+///
+/// * a type alias — `type Idx = usize; fn f(x: Idx) -> Idx`;
+/// * a NESTED alias — `type Idx2 = Idx;`;
+/// * a struct FIELD — `struct H { n: usize } fn f(h: H)`;
+/// * a definition in a sibling module the caller merged into the file AST.
+///
+/// The rest of the pipeline resolves all of these correctly (pinning
+/// `global size_of usize == 4` refutes every one of them), so only the plan
+/// selector was blind — the worst possible place for the blindness, because it
+/// decides whether the refuting pass runs at all. The scan therefore covers the
+/// WHOLE FILE the unit lives in, not just the unit: any `usize`/`isize` reachable
+/// through a file-local (or caller-merged) definition is a token SOMEWHERE in
+/// that file.
+///
+/// A file the caller could not fully materialise is treated as width-dependent:
+/// an out-of-line `mod m;` and a crate-local `use crate::`/`use super::`/`use
+/// self::` import both name definitions that are not in `file`'s tokens, so we
+/// cannot rule out a `usize` behind them. `use` of an EXTERNAL crate is not
+/// included — those items are not resolved into the type environment at all and
+/// fail closed on their own.
+///
+/// Numeric literal suffixes (`4294967295usize`) are part of a `Literal` token,
+/// not a separate `Ident`; missing them verified suffix-only pointer-width
+/// arithmetic at the host width alone. String literals keep their closing quote
+/// in this representation, so they cannot match these suffixes.
+///
+/// Callers pass `None` for `file` only when no file AST exists; that degrades to
+/// the unit-local scan and is strictly weaker — prefer passing the AST.
+#[must_use]
+pub fn unit_is_pointer_width_polymorphic(file: Option<&syn::File>, func: &syn::ItemFn) -> bool {
+    use quote::ToTokens;
+
+    if tokens_mention_pointer_width(func.to_token_stream()) {
+        return true;
+    }
+    let Some(file) = file else {
+        return false;
+    };
+    file_is_pointer_width_polymorphic(file)
+}
+
+/// The FILE half of [`unit_is_pointer_width_polymorphic`], for obligations that
+/// belong to the FILE rather than to any one function.
+///
+/// A trait-impl CONFORMANCE obligation is an obligation of the IMPL: there is no
+/// "current function" to hand over (the impl body lives in an `Item::Impl`, not
+/// an `ItemFn`), and the obligation is checked whether or not any function in
+/// the file calls it. So the conformance lane needs the file scan on its own.
+///
+/// This is deliberately the SAME body [`unit_is_pointer_width_polymorphic`]
+/// runs, not a sibling copy: the unit predicate already existed twice (here and
+/// hand-copied into `cargo-trust-vc`'s `verify.rs`) and the copies drifted into
+/// a false verify. One body, two entry points.
+#[must_use]
+pub(crate) fn file_is_pointer_width_polymorphic(file: &syn::File) -> bool {
+    use quote::ToTokens;
+
+    file.items.iter().any(|item| {
+        item_hides_definitions(item) || tokens_mention_pointer_width(item.to_token_stream())
+    })
+}
+
+/// True when `item` brings names into scope whose definitions are NOT part of
+/// this file's token stream, so a `usize` could hide behind them.
+fn item_hides_definitions(item: &syn::Item) -> bool {
+    match item {
+        // `mod m;` — the module body lives in another file we did not parse.
+        // `mod m { .. }` is inline and IS covered by the token scan.
+        syn::Item::Mod(module) => module.content.is_none(),
+        // Crate-local imports are resolved into the type/spec environment by the
+        // catalog, but their definitions are not in this file's tokens.
+        syn::Item::Use(use_item) => use_tree_is_crate_local(&use_item.tree),
+        _ => false,
+    }
+}
+
+/// True for a `use` whose first path segment is `crate` / `super` / `self`.
+fn use_tree_is_crate_local(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let root = path.ident.to_string();
+            root == "crate" || root == "super" || root == "self"
+        }
+        syn::UseTree::Name(name) => {
+            let root = name.ident.to_string();
+            root == "crate" || root == "super" || root == "self"
+        }
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_is_crate_local),
+        // `use ::*` is not expressible; a rename/glob at the root has no path
+        // prefix to classify, so it names no crate-local module.
+        syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// Recursively scans a token stream for a `usize`/`isize` ident or numeric
+/// literal suffix.
+fn tokens_mention_pointer_width(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    for tree in tokens {
+        match tree {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if name == "usize" || name == "isize" {
+                    return true;
+                }
+            }
+            TokenTree::Literal(literal) => {
+                let text = literal.to_string();
+                if text.ends_with("usize") || text.ends_with("isize") {
+                    return true;
+                }
+            }
+            TokenTree::Group(group) if tokens_mention_pointer_width(group.stream()) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 // Phase 3 compatibility surface: expression IR is currently defined in
 // `ir_expr.rs` but exported here to keep typed IR consumers on `crate::ir::*`.
 pub use crate::ir_expr::{
@@ -457,6 +592,28 @@ pub struct TraitImplDecl {
     /// non-concrete entry (TypeParam-bearing or Opaque) makes every generic
     /// method of the impl non-instantiable, fail-closed.
     pub trait_type_args: Vec<TrustVcType>,
+    /// TRAIT-method names whose shared concrete symbol `Type__method` this impl
+    /// may NOT claim, because the source file resolves that symbol to some
+    /// OTHER declaration — an inherent `impl Type { fn method }` (Rust's
+    /// shadowing rule) or a second trait impl of the same name (unresolvable).
+    ///
+    /// SOUNDNESS-CRITICAL. `method_bindings` maps a trait method to
+    /// `format!("{type}__{method}")`, which carries the self type but NOT the
+    /// trait, so it is not an identity: an inherent `T::w` and `impl B1 for T`
+    /// mint the SAME string. The per-impl linking axiom
+    /// `B1__w(Box_T(t)) == T__w(t)` then equates the trait UF with a symbol the
+    /// inherent method also defines. With the inherent body axiom present
+    /// (`T__w(t) == 4`) and the trait postcondition axiom present
+    /// (`B1__w(_) == 9`), the context asserts `4 == 9` — a CONTRADICTION, which
+    /// proves every claim in the file. With the inherent body axiom suppressed
+    /// instead, the trait's `ensures` silently answers the INHERENT call site:
+    /// measured as a cardinal false verify where `ensures(result == 9)` over
+    /// `t.w()` VERIFIED while the true `result == 4` was refuted.
+    ///
+    /// Populated by the file lane, which is the only lane that can see the
+    /// competing declarations; empty elsewhere, which is exactly today's
+    /// behaviour for a single-item expansion.
+    pub inherent_shadowed_methods: std::collections::BTreeSet<String>,
 }
 
 impl TraitImplDecl {
@@ -474,7 +631,57 @@ impl TraitImplDecl {
             assoc_type_bindings: Vec::new(),
             is_external: false,
             trait_type_args: Vec::new(),
+            inherent_shadowed_methods: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Records the trait-method names whose shared concrete symbol this impl may
+    /// not claim (see [`Self::inherent_shadowed_methods`]).
+    #[must_use]
+    pub fn with_inherent_shadowed_methods(
+        mut self,
+        shadowed: std::collections::BTreeSet<String>,
+    ) -> Self {
+        self.inherent_shadowed_methods = shadowed;
+        self
+    }
+
+    /// Equality on every field EXCEPT [`Self::inherent_shadowed_methods`].
+    ///
+    /// Used by `VerificationContext::register_trait_impl` to recognise that two
+    /// producers described the SAME impl and merge their shadow sets, rather
+    /// than storing both and letting the unshadowed copy re-publish the axioms
+    /// the shadowed copy withheld. Written as an exhaustive destructure so that
+    /// a field added later must be classified deliberately — either it
+    /// distinguishes two impls (compare it) or it is merged metadata like the
+    /// shadow set (union it) — instead of being silently ignored.
+    #[must_use]
+    pub fn matches_ignoring_shadowed_methods(&self, other: &Self) -> bool {
+        let Self {
+            trait_name,
+            concrete_type,
+            method_bindings,
+            assoc_type_bindings,
+            is_external,
+            trait_type_args,
+            inherent_shadowed_methods: _,
+        } = self;
+        *trait_name == other.trait_name
+            && *concrete_type == other.concrete_type
+            && *method_bindings == other.method_bindings
+            && *assoc_type_bindings == other.assoc_type_bindings
+            && *is_external == other.is_external
+            && *trait_type_args == other.trait_type_args
+    }
+
+    /// Whether this impl may publish a contract about the shared concrete
+    /// symbol `Type__method` for `trait_method_name`. `false` means the file
+    /// resolves that symbol to a different declaration, so the impl must
+    /// publish NOTHING about it — the linking axiom and the concrete-sorted
+    /// trait-ensures axiom both consult this.
+    #[must_use]
+    pub fn may_claim_concrete_symbol(&self, trait_method_name: &str) -> bool {
+        !self.inherent_shadowed_methods.contains(trait_method_name)
     }
 
     /// Attaches the ordered trait-path type arguments (`impl T<u64> for S`).
@@ -637,6 +844,66 @@ impl ConformanceMethodBody {
             body_text: body_text.into(),
             param_count,
         }
+    }
+}
+
+/// Identity of one TRAIT-IMPL method, for the maps the conformance lane keys.
+///
+/// The concrete UF name alone (`format!("{type}__{method}")`, produced by
+/// `parse_trait_impl_decl`) is NOT an identity: it carries the self type but not
+/// the trait, so `impl A1 for S` and `impl A2 for S` both mint `S__v`. The maps
+/// keyed by that string are first-registration-wins, and their doc comments used
+/// to assert "unique per concrete name" — which THREE traits for one type
+/// falsify. Measured through the production CLI, cache off, with `A1/A2/A3`
+/// each declaring `fn v(&self) -> u64` for one struct `S` returning `1/2/3`:
+///
+/// ```text
+/// trait impl conformance A1::v for S -> verified
+/// trait impl conformance A2::v for S -> counterexample   (model: result = 1)
+/// trait impl conformance A3::v for S -> counterexample   (model: result = 1)
+/// ```
+///
+/// The counterexample model naming `1` is the proof of misattribution: A1's
+/// captured body answered A2's and A3's conformance obligations. Fail-closed in
+/// direction, but it makes multi-trait code unverifiable.
+///
+/// Carrying the trait makes the collision unrepresentable rather than merely
+/// detected. There is deliberately no `Default` and no field-by-field literal
+/// constructor: [`Self::new`] is the only way to build one, so a caller cannot
+/// forget the trait and silently re-create the trait-erased key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImplMethodKey {
+    trait_name: String,
+    concrete_fn: String,
+}
+
+impl ImplMethodKey {
+    /// Keys a trait-impl method by its declaring TRAIT and its concrete UF name.
+    #[must_use]
+    pub fn new(trait_name: impl Into<String>, concrete_fn: impl Into<String>) -> Self {
+        Self {
+            trait_name: trait_name.into(),
+            concrete_fn: concrete_fn.into(),
+        }
+    }
+
+    /// The declaring trait's name.
+    #[must_use]
+    pub fn trait_name(&self) -> &str {
+        &self.trait_name
+    }
+
+    /// The concrete UF name (`Type__method`) this method encodes to. NOT unique
+    /// on its own — see the type's doc comment.
+    #[must_use]
+    pub fn concrete_fn(&self) -> &str {
+        &self.concrete_fn
+    }
+
+    /// A stable, collision-free rendering for cache keys and diagnostics.
+    #[must_use]
+    pub fn canonical_string(&self) -> String {
+        format!("{}::{}", self.trait_name, self.concrete_fn)
     }
 }
 

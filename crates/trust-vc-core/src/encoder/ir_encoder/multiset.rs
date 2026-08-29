@@ -29,7 +29,15 @@ impl<'a> AstExpressionParser<'a> {
         receiver_term: Term,
         receiver_name: Option<&str>,
     ) -> TrustVcResult<Term> {
-        self.lookup_collection_len(receiver_term, receiver_name)
+        // `|seq.to_multiset()| == |seq|` EXACTLY — `Multiset::len` is the total
+        // multiplicity, so every sequence position contributes one. Bind the
+        // source length into the result's metadata rather than leaving
+        // `len_term: None` and letting `lookup_collection_len`'s name fallback
+        // re-derive it: the fallback resolves the BASE receiver's name, which is
+        // only accidentally right here and is outright wrong one link further
+        // down a chain (`s.to_multiset().insert(x)`).
+        let source_len = self
+            .lookup_collection_len(receiver_term, receiver_name)
             .ok_or_else(|| {
                 format!(
                     "No length tracking for Seq '{}' in to_multiset()",
@@ -54,7 +62,7 @@ impl<'a> AstExpressionParser<'a> {
             result,
             CollectionMeta {
                 kind: CollectionKind::Multiset,
-                len_term: None,
+                len_term: Some(source_len),
                 len_guard: None,
                 elem_ty: Some(elem_ty.clone()),
                 key_ty: None,
@@ -645,6 +653,10 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_store(receiver_term, elem, new_count)
             .map_err(|e| e.to_string())?;
+        // `|ms.remove(v)| == |ms| - ite(count(ms, v) > 0, 1, 0)`. That IS
+        // computable, but it is a capability add rather than the soundness fix;
+        // DECLINE keeps it fail-closed. (Before this, the name fallback answered
+        // `a.remove(x).len()` with `a.len()` — false whenever `x` is present.)
         self.register_multiset_meta(result, receiver_term, receiver_name, None);
         self.register_multiset_operand_sources(result, &[receiver_term]);
         Ok(result)
@@ -733,7 +745,14 @@ impl<'a> AstExpressionParser<'a> {
             }
         }
 
-        self.register_multiset_meta(result, receiver_term, receiver_name, None);
+        // EXACT cardinality: `|a.union(b)| == |a| + |b|` (total multiplicity,
+        // pointwise sum). `None` when either operand's own length is unknown,
+        // and `register_multiset_meta` then DECLINES — without that decline the
+        // name fallback answers `a.union(b).len()` with `a.len()` (FV-3's
+        // Multiset arm).
+        let len_meta =
+            self.multiset_union_len_metadata(receiver_term, receiver_name, other, other_name)?;
+        self.register_multiset_meta(result, receiver_term, receiver_name, len_meta);
         self.register_multiset_operand_sources(result, &[receiver_term, other]);
         Ok(result)
     }
@@ -814,6 +833,10 @@ impl<'a> AstExpressionParser<'a> {
                 .map_err(|e| e.to_string())?;
         }
 
+        // Pointwise MIN: the total is the sum of `min(a_k, b_k)`, which is not
+        // a function of `|a|` and `|b|` — DECLINE (via `register_multiset_meta`)
+        // rather than approximate. Unconstrained is sound; the false
+        // `a.intersect(b).len() == a.len()` stops verifying.
         self.register_multiset_meta(result, receiver_term, receiver_name, None);
         self.register_multiset_operand_sources(result, &[receiver_term, other]);
         Ok(result)
@@ -912,6 +935,9 @@ impl<'a> AstExpressionParser<'a> {
                 multiset_argument_name(arg).map(str::to_owned),
             ),
         );
+        // Pointwise SATURATING subtraction: the total is the sum of
+        // `max(0, a_k - b_k)`, which is not `|a| - |b|` (it is `>=` it, and
+        // clamps per element) — DECLINE.
         self.register_multiset_meta(result, receiver_term, receiver_name, None);
         self.register_multiset_operand_sources(result, &[receiver_term, other]);
         Ok(result)
@@ -1172,7 +1198,85 @@ impl<'a> AstExpressionParser<'a> {
         }
     }
 
+    /// Exact length metadata for `ms.union(other)` / `ms.add(other)`:
+    /// `len(a.union(b)) == len(a) + len(b)`.
+    ///
+    /// `Multiset::len` is the TOTAL multiplicity (`trust_vc_types::Multiset::len`
+    /// — "returns the total element count") and `union` is the pointwise SUM
+    /// (see `encode_multiset_union`'s axiom), so additivity is exact, not an
+    /// approximation. This is the one derived-Multiset cell whose cardinality is
+    /// computable: `intersect` needs a pointwise `min` sum, `difference` a
+    /// saturating one, and neither is a function of the two total counts — those
+    /// decline.
+    ///
+    /// Returns `None` (⇒ the caller declines) whenever either operand's own
+    /// cardinality is unknown, so a declined source can never be laundered into
+    /// a known sum.
+    fn multiset_union_len_metadata(
+        &mut self,
+        lhs: Term,
+        lhs_name: Option<&str>,
+        rhs: Term,
+        rhs_name: Option<&str>,
+    ) -> TrustVcResult<MultisetAccessInfo> {
+        let Some(lhs_len) = self.exact_multiset_len(lhs, lhs_name)? else {
+            return Ok(None);
+        };
+        let Some(rhs_len) = self.exact_multiset_len(rhs, rhs_name)? else {
+            return Ok(None);
+        };
+        match (
+            self.solver.term_sort(lhs_len),
+            self.solver.term_sort(rhs_len),
+        ) {
+            (Sort::Int, Sort::Int) => {
+                // Route A (#2779): unbounded Int length; `+` is exact, so the
+                // wrap obligation is vacuous (mirrors `insert`).
+                let sum = self
+                    .solver
+                    .try_add(lhs_len, rhs_len)
+                    .map_err(|e| format!("Multiset union length sum: {e}"))?;
+                let truth = self.solver.bool_const(true);
+                Ok(Some((
+                    sum,
+                    ("Multiset union length no overflow".into(), truth),
+                )))
+            }
+            (Sort::BitVec(l), Sort::BitVec(r)) if l.width == r.width => {
+                let sum = self
+                    .solver
+                    .try_bvadd(lhs_len, rhs_len)
+                    .map_err(|e| format!("Multiset union length sum: {e}"))?;
+                self.term_widths.insert(sum, (l.width, false));
+                let no_overflow = self
+                    .solver
+                    .try_bvuge(sum, lhs_len)
+                    .map_err(|e| format!("Multiset union length overflow guard: {e}"))?;
+                Ok(Some((
+                    sum,
+                    ("Multiset union length no overflow".into(), no_overflow),
+                )))
+            }
+            // Mixed or non-numeric length sorts: decline rather than coerce.
+            _ => Ok(None),
+        }
+    }
+
     /// Register collection metadata for a Multiset result term.
+    ///
+    /// Every caller passes a term produced by a Multiset operation — an
+    /// ANONYMOUS `fresh_var` (`union`/`intersect`/`difference`) or an array
+    /// `store` (`insert`/`remove`) — never a declared variable. So when the
+    /// exact cardinality is unavailable (`len_meta == None`) the result must
+    /// also be entered in `len_declined_terms`: `lookup_collection_len`'s name
+    /// fallback keys on `lowered_receiver_name`, which walks a chained
+    /// `CollectionOp` down to its BASE receiver, and would otherwise answer
+    /// `a.union(b).len()` with `a.len()` (FV-3's Multiset arm — cardinal, fully
+    /// inverted: `a.len() == 2 /\ b.len() == 3 |- a.union(b).len() == 2`
+    /// verified, and the true `== 5` did not).
+    ///
+    /// This is the single funnel for the whole Multiset arm: `insert`, `remove`,
+    /// `union`/`add`, `intersect` and `difference`/`sub` all pass through here.
     fn register_multiset_meta(
         &mut self,
         result: Term,
@@ -1196,6 +1300,9 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: None,
             },
         );
+        if len_term.is_none() {
+            self.decline_collection_len(result);
+        }
     }
 
     fn ensure_matching_multiset_operand(

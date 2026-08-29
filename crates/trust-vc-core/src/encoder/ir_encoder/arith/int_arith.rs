@@ -48,13 +48,50 @@ impl<'a> AstExpressionParser<'a> {
             resolve_expr_wrap(ty, scope_sem)
         };
 
+        // Quantifier bodies are SPEC arithmetic, and spec arithmetic on `uN`/`iN`
+        // is MATHEMATICAL — Verus lowers `i + 1` on a `u64` binder to unbounded
+        // `int` addition; there is no modulus and no overflow.
+        //
+        // Wrapping a quantifier body was a CARDINAL FALSE VERIFY, because the
+        // overflow obligation that would have caught the wrap is *structurally*
+        // unavailable here: the predicate would reference the bound variable,
+        // which becomes free at the outer assertion scope (#2557), so every
+        // `quantifier_depth == 0` guard below suppresses it. The body therefore
+        // got neither faithful semantics nor a check, and
+        //   `forall|i: u64| i + 1 <= u64::MAX`   (false: i = MAX)
+        //   `forall|i: i8|  0 - i <= 127`        (false: i = i8::MIN)
+        //   `exists|i: i8|  i + 1 == -128`       (false)
+        // all reported `verified`, while the TRUE `forall|i: u64| i + 1 > i` was
+        // refuted. Declining the wrap fixes both directions at once.
+        //
+        // This does NOT under-constrain: `build_range_guards` still pins each
+        // binder to its own type's range (`0 <= i < 2^64` for `u64`), so the
+        // binder stays a `u64`-valued Int — only the RESULT of the body's
+        // arithmetic is unbounded, exactly as in Verus.
+        //
+        // Scope pins:
+        //  * `Div`/`Rem` keep `wrap_ctx`: it is not a wrap there, it selects the
+        //    signed MIN/-1 "undefined" guard (#1873), which stays.
+        //  * Explicit `wrapping_*`/`checked_*`/`saturating_*` (`WrappingArith`)
+        //    are DEFINED as finite-width and keep truncating — `encode_int_checked`
+        //    / `encode_int_saturating` compute their own wrap context, and the
+        //    `Wrapping` arm in `wrapping.rs` now applies the type-derived wrap
+        //    itself instead of relying on this one.
+        //  * Outside a quantifier (`quantifier_depth == 0`) nothing changes; the
+        //    machine-semantics BV path and its obligations are untouched.
+        let arith_wrap_ctx = if self.quantifier_depth > 0 {
+            None
+        } else {
+            wrap_ctx
+        };
+
         match op {
             ArithOp::Add => {
                 let result = self
                     .solver
                     .try_add(left, right)
                     .map_err(|e| e.to_string())?;
-                let wrapped = self.wrap_int_with_ctx(result, wrap_ctx)?;
+                let wrapped = self.wrap_int_with_ctx(result, arith_wrap_ctx)?;
                 // Guard: only collect overflow predicates at quantifier_depth==0.
                 // Inside quantifier bodies, the predicate references bound variables;
                 // asserting it at the outer scope constrains those variables globally,
@@ -78,7 +115,7 @@ impl<'a> AstExpressionParser<'a> {
                     .solver
                     .try_sub(left, right)
                     .map_err(|e| e.to_string())?;
-                let wrapped = self.wrap_int_with_ctx(result, wrap_ctx)?;
+                let wrapped = self.wrap_int_with_ctx(result, arith_wrap_ctx)?;
                 if self.overflow_behavior.should_check()
                     && wrap_ctx.is_some()
                     && !right_is_zero
@@ -98,7 +135,7 @@ impl<'a> AstExpressionParser<'a> {
                     .solver
                     .try_mul(left, right)
                     .map_err(|e| e.to_string())?;
-                let wrapped = self.wrap_int_with_ctx(result, wrap_ctx)?;
+                let wrapped = self.wrap_int_with_ctx(result, arith_wrap_ctx)?;
                 if self.overflow_behavior.should_check()
                     && wrap_ctx.is_some()
                     && !right_is_zero
@@ -152,7 +189,7 @@ impl<'a> AstExpressionParser<'a> {
                     // Inside quantifier bodies keep the native term (ay
                     // fail-closes to Unknown there; asserting the ground
                     // lemmas would reference bound variables).
-                    if self.quantifier_depth == 0 {
+                    if self.quantifier_depth == 0 && !self.pending_universal_closure {
                         let (q, _r) = self.guarded_euclidean_div_mod_symbolic(left, right)?;
                         return Ok(q);
                     }
@@ -203,7 +240,7 @@ impl<'a> AstExpressionParser<'a> {
                     }
                     // SYMBOLIC divisor: same guarded UF encoding as the Div
                     // arm (#2778).
-                    if self.quantifier_depth == 0 {
+                    if self.quantifier_depth == 0 && !self.pending_universal_closure {
                         let (_q, r) = self.guarded_euclidean_div_mod_symbolic(left, right)?;
                         return Ok(r);
                     }
@@ -239,7 +276,18 @@ impl<'a> AstExpressionParser<'a> {
     ///   (status quo). This mirrors the `quantifier_depth == 0` gate already used
     ///   for overflow side-checks.
     fn euclidean_literal_divisor(&self, divisor_literal: Option<i128>) -> Option<i128> {
-        if self.quantifier_depth != 0 {
+        // BINDER CAPTURE (CARDINAL), same root cause as
+        // `bind_datatype_match_result`: `purified_euclidean_div_mod_literal`
+        // hoists `dividend == q*d + r` to the SOLVER TOP LEVEL. That is only
+        // sound while `dividend`'s free variables are themselves top level.
+        // `add_typed_broadcast` encodes a spec-fn body BEFORE closing its
+        // `forall`, so `quantifier_depth` is 0 there even though a binder IS
+        // coming — the hoisted definition keeps the free constant while the
+        // axiom's occurrence gets bound, and the axiom degenerates to
+        // `forall n. f(n) == __euclid_q`. Combined with the ground replay of
+        // the same body it makes the whole context INCONSISTENT (measured:
+        // `fn half(n: int) -> int { n / 2 }` verifies `half(2) == 5`).
+        if self.quantifier_depth != 0 || self.pending_universal_closure {
             return None;
         }
         match divisor_literal {

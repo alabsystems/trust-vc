@@ -229,3 +229,239 @@ fn dbl_pinned(x: usize) -> usize { x * 2 }
     assert_verifies(&root, "dbl_pinned");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// FV-2: the width PLAN under-approximated.
+//
+// `width_plan_for` decided dual-vs-single by scanning the FUNCTION's token
+// stream for a literal `usize`/`isize`. `usize` reaches a unit through routes
+// that leave no such token inside the function — a type alias, a nested alias, a
+// struct field, a numeric literal suffix — so the selector answered `Host`, the
+// 32-bit pass that refutes never ran, and a program that is FALSE at a 32-bit
+// `usize` came back `"verified"` from `cargo trust-vc check --json` on a 64-bit
+// host.
+//
+// The rest of the pipeline was never blind: prepending `global size_of usize ==
+// 4;` to each of these files yields a counterexample for every one of them
+// (measured before the fix). Only the plan selector could not see the route —
+// the worst place for the blindness, because it decides whether the refuting
+// pass runs at all.
+//
+// Each reproducer below is paired with a control of the SAME shape that is true
+// at both widths, so a fix that simply rejects everything with an alias or a
+// struct field fails the pair.
+// ---------------------------------------------------------------------------
+
+/// `usize` behind a type alias — no `usize` token in `dbl`.
+#[test]
+fn width_behind_a_type_alias_is_rejected() {
+    let root = write_crate(
+        r#"type Idx = usize;
+
+#[trust_vc::requires(x <= 4294967295)]
+#[trust_vc::ensures(result >= x)]
+fn dbl_alias(x: Idx) -> Idx { x * 2 }
+
+#[trust_vc::requires(x <= 100)]
+#[trust_vc::ensures(result >= x)]
+fn dbl_alias_small(x: Idx) -> Idx { x * 2 }
+"#,
+    );
+    assert_rejected(&root, "dbl_alias");
+    // NARROWNESS PIN: the same alias route, true at both widths, still verifies.
+    assert_verifies(&root, "dbl_alias_small");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `usize` behind a NESTED alias — two hops from any `usize` token.
+#[test]
+fn width_behind_a_nested_type_alias_is_rejected() {
+    let root = write_crate(
+        r#"type Idx = usize;
+type Idx2 = Idx;
+
+#[trust_vc::requires(x <= 4294967295)]
+#[trust_vc::ensures(result >= x)]
+fn dbl_nested(x: Idx2) -> Idx2 { x * 2 }
+"#,
+    );
+    assert_rejected(&root, "dbl_nested");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `isize` behind an alias. `2 * 1073741824` overflows a 32-bit `isize`
+/// (`isize::MAX == 2^31 - 1`) but not a 64-bit one.
+#[test]
+fn isize_behind_a_type_alias_is_rejected() {
+    let root = write_crate(
+        r#"type SIdx = isize;
+
+#[trust_vc::requires(x >= 0)]
+#[trust_vc::requires(x <= 1073741824)]
+#[trust_vc::ensures(result >= x)]
+fn dbl_isize(x: SIdx) -> SIdx { x * 2 }
+"#,
+    );
+    assert_rejected(&root, "dbl_isize");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `usize` reached through a STRUCT FIELD. The function's tokens name only the
+/// struct and the field.
+#[test]
+fn width_behind_a_struct_field_is_rejected() {
+    let root = write_crate(
+        r#"struct Holder { n: usize }
+
+#[trust_vc::requires(h.n <= 4294967295)]
+fn field_dbl(h: Holder) { assert!(h.n * 2 >= h.n); }
+
+#[trust_vc::requires(h.n <= 100)]
+fn field_dbl_small(h: Holder) { assert!(h.n * 2 >= h.n); }
+"#,
+    );
+    assert_rejected(&root, "field_dbl");
+    // NARROWNESS PIN: same struct-field route, true at both widths.
+    assert_verifies(&root, "field_dbl_small");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `usize` present ONLY as a numeric literal suffix.
+///
+/// This one was a CLI-ONLY hole: the library's copy of the predicate handled
+/// `Literal` tokens, the CLI's hand-copied twin did not. Both entry points now
+/// call the one implementation in `trust_vc_core::ir`, so the copies cannot
+/// drift apart again.
+#[test]
+fn width_from_a_numeric_literal_suffix_is_rejected() {
+    let root = write_crate(
+        r#"#[trust_vc::ensures(result == 4294967296)]
+fn suffix_add() -> u64 { (4294967295usize + 1) as u64 }
+"#,
+    );
+    assert_rejected(&root, "suffix_add");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// FV-4: the width plan was not consulted by the trait-impl CONFORMANCE lane.
+//
+// The two fixes above widened the PREDICATE and unified its two copies. They did
+// not widen WHO CALLS IT. `width_plan_for` / `run_under_width_plan` are reached
+// only from `load_context_and_report` and `verify_result_for` — the FUNCTION
+// lane. The conformance lane (`verify_conformance_obligation`) instead installed
+// `install_pointer_width_for`, which returns ONLY a pinned `global size_of
+// usize` directive and otherwise leaves the host's 64-bit `usize` in force, and
+// the library entry point it delegates to
+// (`trust_vc_core::verify_trait_conformance_obligation`) did exactly the same.
+// So a trait-impl conformance obligation that is FALSE at a 32-bit `usize`
+// reported `"verified"` — and the conformance lane is, by design, the ONLY
+// channel through which a non-conforming impl is reported.
+//
+// The reproducer below is unmasked: with TWO impls the function lane no longer
+// flags anything, so before the fix `cargo trust-vc check --json` returned
+// `"verified": 3, "counterexample": 0` for the whole file.
+//
+// The plan now lives in the library, so BOTH entry points get it, and each
+// reproducer is paired with a control of the same shape that is true at both
+// widths.
+// ---------------------------------------------------------------------------
+
+/// A trait `ensures` that the impl body satisfies at a 64-bit `usize` and
+/// violates at a 32-bit one. `x * 2` with `x <= 4294967295` overflows a 32-bit
+/// `usize`, so `result >= x` is false there.
+const CONFORMANCE_WIDTH_SOURCE: &str = r#"#[trust_vc::trait_spec]
+trait Doubler {
+    #[trust_vc::requires(x <= 4294967295)]
+    #[trust_vc::ensures(result >= x)]
+    fn dbl(x: usize) -> usize;
+}
+
+struct Honest;
+struct Wide;
+
+#[trust_vc::trait_impl]
+impl Doubler for Honest {
+    fn dbl(x: usize) -> usize { x }
+}
+
+#[trust_vc::trait_impl]
+impl Doubler for Wide {
+    fn dbl(x: usize) -> usize { x * 2 }
+}
+"#;
+
+/// THE REPRODUCER. Addressed by the exact obligation name `cargo trust-vc check`
+/// reports, which is the same name `list_trait_conformance_obligations` emits.
+#[test]
+fn conformance_false_at_32_bits_is_rejected_by_the_cli() {
+    let root = write_crate(CONFORMANCE_WIDTH_SOURCE);
+    assert_rejected(&root, "trait impl conformance Doubler::dbl for Wide");
+    // NARROWNESS PIN, same file, same trait, same `usize` contract: the honest
+    // impl conforms at BOTH widths and must still verify. A fix that rejected
+    // the whole width-polymorphic file would pass the line above and fail here.
+    assert_verifies(&root, "trait impl conformance Doubler::dbl for Honest");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// NARROWNESS PIN — a width-polymorphic conformance obligation that holds at 32
+/// AND 64 bits must still verify. `x + 1` under `x < 100` cannot overflow at
+/// either width, so both passes discharge.
+#[test]
+fn conformance_true_at_both_widths_still_verifies() {
+    let root = write_crate(
+        r#"#[trust_vc::trait_spec]
+trait Inc {
+    #[trust_vc::requires(x < 100)]
+    #[trust_vc::ensures(result > x)]
+    fn inc(x: usize) -> usize;
+}
+
+struct S;
+
+#[trust_vc::trait_impl]
+impl Inc for S {
+    fn inc(x: usize) -> usize { x + 1 }
+}
+"#,
+    );
+    assert_verifies(&root, "trait impl conformance Inc::inc for S");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// NARROWNESS PIN — a conformance obligation over `u32` names no
+/// `usize`/`isize`, so the file stays on the single-solve plan and its verdict
+/// is untouched.
+#[test]
+fn conformance_non_width_polymorphic_is_unchanged() {
+    let root = write_crate(
+        r#"#[trust_vc::trait_spec]
+trait Adder {
+    #[trust_vc::requires(x <= 100)]
+    #[trust_vc::ensures(result >= x)]
+    fn add(x: u32) -> u32;
+}
+
+struct Plain;
+
+#[trust_vc::trait_impl]
+impl Adder for Plain {
+    fn add(x: u32) -> u32 { x + 1 }
+}
+"#,
+    );
+    assert_verifies(&root, "trait impl conformance Adder::add for Plain");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// NARROWNESS PIN — `global size_of usize == 8` pins the target architecture for
+/// the conformance lane too, so the otherwise-rejected impl verifies again. The
+/// dual path must never override an explicit directive.
+#[test]
+fn conformance_pinned_directive_width_still_wins() {
+    let mut source = String::from("global size_of usize == 8;\n\n");
+    source.push_str(CONFORMANCE_WIDTH_SOURCE);
+    let root = write_crate(&source);
+    assert_verifies(&root, "trait impl conformance Doubler::dbl for Wide");
+    let _ = std::fs::remove_dir_all(&root);
+}

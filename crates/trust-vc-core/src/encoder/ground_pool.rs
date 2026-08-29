@@ -413,17 +413,26 @@ impl AYEncoder {
 
             for work in pending {
                 let instance = if let Some(bound_exprs) = work.bound_exprs.as_ref() {
-                    let substitutions: HashMap<&str, &TrustVcExpr> = work
-                        .axiom
-                        .bound_vars
-                        .iter()
-                        .map(String::as_str)
-                        .zip(bound_exprs.iter())
-                        .collect();
-                    let substituted = crate::encoder::eval::substitute_vars_in_expr(
-                        &work.axiom.expr,
-                        &substitutions,
-                    );
+                    // SOUNDNESS (cardinal class). These bindings come from
+                    // matching a trigger's argument patterns against a REGISTERED
+                    // GROUND TERM's argument expressions, or from the
+                    // equality-assumption map — neither of which is constrained
+                    // to the axiom's own bound-variable types. Substituting a
+                    // wider-typed expression for a narrow bound variable asserts
+                    // a consistent but unjustified ground fact (see
+                    // `encoder::witness_sort`), which is a false verify, not a
+                    // completeness loss. Same shared gate as every other witness
+                    // source; an out-of-sort tuple is DECLINED.
+                    let Some(substituted) =
+                        crate::encoder::witness_sort::instantiate_bound_vars_in_sort(
+                            &work.axiom.expr,
+                            &work.axiom.bound_vars,
+                            bound_exprs,
+                            &self.var_types,
+                        )
+                    else {
+                        continue;
+                    };
                     // Skip ground instances that capture a binder no longer in
                     // scope. A ground entry can be registered while a *transient*
                     // binder is live — e.g. an `assert_forall_by` universal
@@ -472,6 +481,32 @@ impl AYEncoder {
                         .map(String::as_str)
                         .zip(work.arg_terms.iter().copied())
                         .collect();
+                    // SOUNDNESS (cardinal class, term-level arm). This branch
+                    // binds a bound variable positionally to the ARGUMENT TERM of
+                    // any registered application of a seed symbol. Nothing forces
+                    // that symbol's parameter sorts to be the axiom's bound-var
+                    // sorts, and `resolve_condition_typed_with_bindings` keeps the
+                    // DECLARED type in `local_var_types` while using the supplied
+                    // term — so a `BV64` term under a `u8` bound variable is
+                    // exactly the out-of-sort substitution the IR gate rejects,
+                    // one representation lower. No IR witness exists here, so the
+                    // check is the term-sort counterpart.
+                    let all_in_sort = bindings.iter().all(|(name, term)| {
+                        match self.var_types.get(*name) {
+                            Some(declared) => {
+                                crate::encoder::witness_sort::term_sort_inhabits_type(
+                                    &self.solver.term_sort(*term),
+                                    declared,
+                                )
+                            }
+                            // Undeclared bound variable: the sort cannot be
+                            // established, so this is not a provable instantiation.
+                            None => false,
+                        }
+                    });
+                    if !all_in_sort {
+                        continue;
+                    }
                     self.resolve_condition_typed_with_bindings(&work.axiom.expr, &bindings)
                         .map_err(|e| TrustVcError::Encoding {
                             context: "flush ground axioms",

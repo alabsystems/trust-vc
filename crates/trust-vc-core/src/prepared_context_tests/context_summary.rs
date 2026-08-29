@@ -211,6 +211,7 @@ fn test_synthesize_impl_method_contexts_from_trait_impl_decl() {
     // Register impl WITHOUT adding concrete fn to helper_functions_typed.
     // This matches the real pipeline (trait_registry::apply_registered_traits_to_context).
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Valued".to_string(),
         concrete_type: TrustVcType::Int { width: 32 },
         method_bindings: vec![("get_value".to_string(), "IntImpl__get_value".to_string())],
@@ -373,6 +374,7 @@ fn test_synthesize_impl_method_contexts_skips_existing_helpers() {
     );
 
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Valued".to_string(),
         concrete_type: TrustVcType::Int { width: 32 },
         method_bindings: vec![("get_value".to_string(), "IntImpl__get_value".to_string())],
@@ -435,6 +437,7 @@ fn test_synthesize_deduplicates_across_multiple_trait_impls() {
     });
 
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TraitA".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("do_thing".to_string(), "SharedImpl__do_thing".to_string())],
@@ -443,6 +446,7 @@ fn test_synthesize_deduplicates_across_multiple_trait_impls() {
         trait_type_args: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "TraitB".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("do_thing".to_string(), "SharedImpl__do_thing".to_string())],
@@ -491,6 +495,7 @@ fn test_synthesize_skips_opaque_concrete_type() {
 
     // Opaque concrete type — no ay sort available.
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Valued".to_string(),
         concrete_type: TrustVcType::Opaque("Widget".to_string()),
         method_bindings: vec![("get_value".to_string(), "WidgetImpl__get_value".to_string())],
@@ -539,6 +544,7 @@ fn test_synthesize_multi_param_method() {
     });
 
     ctx.register_trait_impl(TraitImplDecl {
+        inherent_shadowed_methods: Default::default(),
         trait_name: "Updater".to_string(),
         concrete_type: TrustVcType::Int { width: 64 },
         method_bindings: vec![("update".to_string(), "I64Impl__update".to_string())],

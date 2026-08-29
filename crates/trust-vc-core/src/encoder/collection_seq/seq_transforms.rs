@@ -159,6 +159,54 @@ impl<'a> AstExpressionParser<'a> {
             self.overflow_checks
                 .push(("shifted seq non-negative length".into(), nonneg));
         }
+        // ELEMENT-DEMAND PRUNE. Everything below this block is the *definition*
+        // of the fresh carrier `__seq_shifted`; it is worth stating only if
+        // something in the query can read an element. When
+        // `pruning::context_element_demand` proved that nothing does, the
+        // carrier stays uninterpreted and only its LENGTH metadata survives.
+        // That deletes the guarded `forall`, its five ground `select` instances
+        // and both length->index bridges, which are what drag a pure-length
+        // goal into AUFBV with `int2bv`/`bv2nat` companions. Dropping
+        // assertions can only weaken the context, so a verdict can move from
+        // `Verified` toward `Counterexample`/`Unknown` and never the other way.
+        //
+        // The demanded path below is left byte-for-byte as it was: these
+        // encodings are order-sensitive (ay decision order follows term
+        // creation order), so the pruned path returns EARLY rather than
+        // reordering the shared prefix.
+        if !self.seq_element_model_demanded {
+            // OBLIGATION PARITY: the demanded path reaches
+            // `push_index_representability_check` through `len_as_index_bv`.
+            // Pruning must drop ASSERTIONS ONLY, never a proof obligation, or a
+            // caller that consults the pruned context first would silently skip
+            // a check. Calling it directly here keeps the obligation set a
+            // superset of the demanded path's (the helper's own folded/static
+            // early-outs mirror `len_as_index_bv`'s).
+            self.push_index_representability_check(new_len)?;
+            let elem_sort = self.seq_element_sort(source, receiver_name)?;
+            let result_sort = Sort::Array(Box::new(ArraySort {
+                index_sort: Sort::bitvec(crate::ir::pointer_width()),
+                element_sort: elem_sort,
+            }));
+            let result = self.solver.fresh_var("__seq_shifted", result_sort);
+            if let Some(name) = receiver_name {
+                self.collection_lengths.insert(name.to_string(), new_len);
+            }
+            let elem_ty = self.resolve_source_elem_ty(source, receiver_name);
+            self.register_collection_meta(
+                result,
+                super::super::parser_state::CollectionMeta {
+                    kind: super::super::parser_state::CollectionKind::Seq,
+                    len_term: Some(new_len),
+                    len_guard: None,
+                    elem_ty,
+                    key_ty: None,
+                    dom_term: None,
+                },
+            );
+            return Ok(result);
+        }
+
         // BV companion of the (Int) result length for the FORALL range guard —
         // kept in pure BV (no `int2bv` subterm) so ay-dpll can model-validate
         // the quantifier (Route A #2779). The result of a shift/take/skip/
@@ -387,6 +435,31 @@ impl<'a> AstExpressionParser<'a> {
         // is GONE. The Array(BV,T) carrier is BV-indexed, so derive BV views of
         // the lengths for the index arithmetic / range guard below.
         let new_len = self.len_add(lhs_len, rhs_len)?;
+
+        // Obligation parity (#pruned-concat): these two overflow OBLIGATIONS must be
+        // pushed BEFORE the element-demand early-return below. The pruned path is
+        // licensed by "pruning drops assertions only, never an obligation"; leaving
+        // them after the return silently broke that invariant. Mirrors the ordering
+        // in `encode_index_shifted_seq`.
+        if !self.len_is_int(new_len) {
+            // Legacy BV-length path keeps the bounded-width guards.
+            let zero = self
+                .solver
+                .try_bv_const(0, crate::ir::pointer_width())
+                .map_err(|e| e.to_string())?;
+            let nonneg = self
+                .solver
+                .try_bvuge(new_len, zero)
+                .map_err(|e| format!("concat length non-negativity: {}", e))?;
+            self.overflow_checks
+                .push(("concat length non-negative".into(), nonneg));
+            let no_overflow = self
+                .solver
+                .try_bvuge(new_len, lhs_len)
+                .map_err(|e| format!("concat length overflow: {}", e))?;
+            self.overflow_checks
+                .push(("concat length no overflow".into(), no_overflow));
+        }
         // Operand lengths get BV companions (bv2int(companion)==len) so the
         // element forall's index arithmetic stays in pure BV — an `int2bv(len)`
         // subterm inside a quantifier forces ay-dpll's model validator to
@@ -413,6 +486,34 @@ impl<'a> AstExpressionParser<'a> {
         // operands are unchanged while a violated precondition leaves the bridge
         // inert and refutes (#soundness skip/subrange/drop — concat operand
         // bridge site).
+        // ELEMENT-DEMAND PRUNE — see `encode_index_shifted_seq`. The concat
+        // element model is the worst of the family: its ground instances are
+        // `ite(idx <u lhs_len_bv, ...)` over a free BV companion tied to an Int
+        // length only through `bv2nat`. The LENGTH axiom
+        // (`assert_concat_length_axiom`) is emitted on BOTH paths.
+        if !self.seq_element_model_demanded {
+            let elem_sort = self.seq_element_sort(lhs, Some(lhs_name))?;
+            let result_sort = Sort::Array(Box::new(ArraySort {
+                index_sort: Sort::bitvec(crate::ir::pointer_width()),
+                element_sort: elem_sort,
+            }));
+            let result = self.solver.fresh_var("__seq_concat", result_sort);
+            let elem_ty = self.resolve_source_elem_ty(lhs, Some(lhs_name));
+            self.register_collection_meta(
+                result,
+                super::super::parser_state::CollectionMeta {
+                    kind: super::super::parser_state::CollectionKind::Seq,
+                    len_term: Some(new_len),
+                    len_guard: None,
+                    elem_ty,
+                    key_ty: None,
+                    dom_term: None,
+                },
+            );
+            self.assert_concat_length_axiom(new_len, lhs_len, rhs_len)?;
+            return Ok(result);
+        }
+
         let lhs_len_bv = self.len_index_companion_maybe_negative(lhs_len)?;
         let rhs_len_bv = self.len_index_companion_maybe_negative(rhs_len)?;
         let new_len_bv = self
@@ -490,25 +591,6 @@ impl<'a> AstExpressionParser<'a> {
             .map_err(|e| e.to_string())?;
         self.assert_concat_seq_ground_instance(result, lhs, rhs, lhs_len_bv, last_idx)?;
 
-        if !self.len_is_int(new_len) {
-            // Legacy BV-length path keeps the bounded-width guards.
-            let zero = self
-                .solver
-                .try_bv_const(0, crate::ir::pointer_width())
-                .map_err(|e| e.to_string())?;
-            let nonneg = self
-                .solver
-                .try_bvuge(new_len, zero)
-                .map_err(|e| format!("concat length non-negativity: {}", e))?;
-            self.overflow_checks
-                .push(("concat length non-negative".into(), nonneg));
-            let no_overflow = self
-                .solver
-                .try_bvuge(new_len, lhs_len)
-                .map_err(|e| format!("concat length overflow: {}", e))?;
-            self.overflow_checks
-                .push(("concat length no overflow".into(), no_overflow));
-        }
         let elem_ty = self.resolve_source_elem_ty(lhs, Some(lhs_name));
         self.register_collection_meta(
             result,

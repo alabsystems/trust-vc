@@ -4,10 +4,15 @@
 
 //! Output formatting for verification results (human-readable and JSON).
 
+use crate::scan::UnscannableFile;
 use crate::verify::{FunctionVerdict, LocalizedFailure, VerdictKind};
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::path::Path;
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
 
 /// Summary counts across all verified functions.
 #[derive(Debug, Default, Serialize)]
@@ -17,11 +22,30 @@ pub struct Summary {
     pub unknown: usize,
     pub error: usize,
     pub skipped: usize,
+    /// Functions the scan saw but never verified — see [`VerdictKind::NotAnalyzed`].
+    pub not_analyzed: usize,
+    /// Input FILES that produced no buckets at all — see [`UnscannableFile`].
+    ///
+    /// Serialized only when nonzero, so the report for a scannable file is
+    /// byte-identical to the one that predates this bucket. Its presence is the
+    /// signal; a run with nothing to report says nothing new.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub file_error: usize,
 }
 
 impl Summary {
     /// Tally verification outcomes from a slice of function verdicts.
+    ///
+    /// Equivalent to [`Summary::from_parts`] with no unscannable files. Callers
+    /// that HAVE a scan must use `from_parts`: a file that could not be read is
+    /// not represented by any verdict, so tallying verdicts alone would drop it.
     pub fn from_verdicts(verdicts: &[FunctionVerdict]) -> Self {
+        Self::from_parts(verdicts, &[])
+    }
+
+    /// Tally BOTH halves of what a run accounted for: the per-function verdicts
+    /// and the per-file scan failures.
+    pub fn from_parts(verdicts: &[FunctionVerdict], unscannable: &[UnscannableFile]) -> Self {
         let mut s = Summary::default();
         for v in verdicts {
             match v.result {
@@ -30,20 +54,81 @@ impl Summary {
                 VerdictKind::Unknown => s.unknown += 1,
                 VerdictKind::Error => s.error += 1,
                 VerdictKind::Skipped => s.skipped += 1,
+                VerdictKind::NotAnalyzed => s.not_analyzed += 1,
             }
         }
+        s.file_error = unscannable.len();
         s
     }
 
-    /// Returns `true` if any function had a counterexample, unknown, or error result.
+    /// Total check targets accounted for — every bucket, summed.
+    ///
+    /// # The invariant
+    ///
+    /// ```text
+    /// verified + counterexample + unknown + error + skipped + not_analyzed
+    ///     + file_error
+    ///     == number of check targets the scan produced
+    /// ```
+    ///
+    /// "Check targets" is every `fn` item the scan saw, PLUS the trait-impl
+    /// conformance obligations the scan enumerates as targets in their own right
+    /// (see `scan::TRAIT_CONFORMANCE_ATTR` — an obligation of the impl, not of
+    /// any one function, so it is counted separately and is not a `fn` item),
+    /// PLUS one target for each file the scan could not read or parse, whose
+    /// function count is not zero but UNKNOWN.
+    /// For a file that declares no `#[trust_vc::trait_spec]`/`trait_impl` and
+    /// parses, the counts coincide.
+    ///
+    /// This is the whole point of the `not_analyzed` and `file_error` buckets. A
+    /// function whose only contract was spelled in a way discovery failed to
+    /// recognize used to appear in NO bucket, and so did EVERY function in a file
+    /// with a syntax error: the summary read all-zero, the exit code was 0, and
+    /// the output was indistinguishable from a clean pass over a file with
+    /// nothing in it. Making the buckets a PARTITION of the scanned set turns
+    /// that silence into an arithmetic impossibility — a dropped function now
+    /// breaks the sum, and the sum is pinned by
+    /// `report::tests::every_scanned_function_lands_in_exactly_one_bucket` and
+    /// by `tests/not_analyzed_count_invariant.rs` end to end.
+    pub fn total(&self) -> usize {
+        self.verified
+            + self.counterexample
+            + self.unknown
+            + self.error
+            + self.skipped
+            + self.not_analyzed
+            + self.file_error
+    }
+
+    /// Returns `true` if any function had a counterexample, unknown, or error
+    /// result, or if any input file could not be scanned at all.
+    ///
+    /// `not_analyzed` is deliberately NOT a failure: an uncontracted helper is
+    /// legitimate and common, and turning a crate full of them red would make
+    /// the honest report unusable. The signal is the reported entry, not the
+    /// exit code.
+    ///
+    /// `file_error` IS a failure, and the asymmetry is deliberate. "This helper
+    /// carries no contract" is a complete, true statement about a function we
+    /// read. "This file did not parse" is an admission that we do not know what
+    /// the file claims — every contract in it, true or false, went unexamined.
+    /// Exiting 0 on that is the fail-silent shape itself.
     pub fn has_failures(&self) -> bool {
-        self.counterexample > 0 || self.unknown > 0 || self.error > 0
+        self.counterexample > 0 || self.unknown > 0 || self.error > 0 || self.file_error > 0
     }
 }
 
 /// Prints human-readable verification results to stdout.
-pub fn print_human(verdicts: &[FunctionVerdict], crate_root: &Path, show_localization: bool) {
-    println!("{}", format_human(verdicts, crate_root, show_localization));
+pub fn print_human(
+    verdicts: &[FunctionVerdict],
+    unscannable: &[UnscannableFile],
+    crate_root: &Path,
+    show_localization: bool,
+) {
+    println!(
+        "{}",
+        format_human(verdicts, unscannable, crate_root, show_localization)
+    );
 }
 
 pub(crate) fn print_progress(function_name: &str, index: usize, total: usize) {
@@ -54,16 +139,36 @@ pub(crate) fn print_progress_result(function_name: &str, index: usize, total: us
     println!("[{index}/{total}] {function_name}: {result}");
 }
 
+fn display_path(path: &Path, crate_root: &Path) -> String {
+    path.strip_prefix(crate_root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 fn format_human(
     verdicts: &[FunctionVerdict],
+    unscannable: &[UnscannableFile],
     crate_root: &Path,
     show_localization: bool,
 ) -> String {
     let total = verdicts.len();
     let mut output = String::new();
+    // The count is qualified the moment a file went unread: "0 functions found"
+    // over a file that did not parse is the exact sentence this bucket exists to
+    // stop the tool from saying on its own.
+    let unscanned_note = if unscannable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ({} file{} not scanned, so this count is incomplete)",
+            unscannable.len(),
+            if unscannable.len() == 1 { "" } else { "s" }
+        )
+    };
     let _ = writeln!(
         output,
-        "trust_vc check: {total} function{} found\n",
+        "trust_vc check: {total} function{} found{unscanned_note}\n",
         if total == 1 { "" } else { "s" }
     );
 
@@ -80,6 +185,7 @@ fn format_human(
             VerdictKind::Unknown => "Unknown",
             VerdictKind::Error => "Error",
             VerdictKind::Skipped => "Skipped",
+            VerdictKind::NotAnalyzed => "NotAnalyzed",
         };
         let _ = writeln!(
             output,
@@ -120,7 +226,20 @@ fn format_human(
         }
     }
 
-    let summary = Summary::from_verdicts(verdicts);
+    // Stated as its own section rather than folded into the function list: these
+    // are not functions, and their function count is unknown rather than zero.
+    for failure in unscannable {
+        let _ = writeln!(
+            output,
+            "  {}:{:<4}  {:<24} {}",
+            display_path(&failure.file_path, crate_root),
+            failure.line,
+            "FileError",
+            failure.reason,
+        );
+    }
+
+    let summary = Summary::from_parts(verdicts, unscannable);
     let _ = writeln!(output);
     let _ = write!(output, "{}", format_summary_line(&summary));
     output
@@ -142,6 +261,16 @@ fn format_summary_line(s: &Summary) -> String {
     }
     if s.skipped > 0 {
         parts.push(format!("{} skipped", s.skipped));
+    }
+    if s.not_analyzed > 0 {
+        parts.push(format!("{} not analyzed", s.not_analyzed));
+    }
+    if s.file_error > 0 {
+        parts.push(format!(
+            "{} file{} not scanned",
+            s.file_error,
+            if s.file_error == 1 { "" } else { "s" }
+        ));
     }
     format!("Summary: {}", parts.join(", "))
 }
@@ -357,7 +486,29 @@ struct JsonReport {
     #[serde(rename = "crate")]
     crate_name: String,
     functions: Vec<JsonFunction>,
+    /// Input files that produced no `functions` entries because they could not
+    /// be read or parsed.
+    ///
+    /// Serialized only when non-empty, so a report over scannable input is
+    /// byte-identical to the schema that predates this key. When it IS present,
+    /// `summary.file_error` is nonzero and the process exits nonzero: an
+    /// all-zero report and exit 0 can no longer mean "your syntax error was
+    /// invisible".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    file_errors: Vec<JsonFileError>,
     summary: Summary,
+}
+
+/// A file-level failure entry: the report's statement that it has NOTHING to say
+/// about this file, and why.
+#[derive(Debug, Serialize)]
+struct JsonFileError {
+    file: String,
+    line: usize,
+    /// Always `"error"` — a fixed discriminator so a consumer filtering on
+    /// `result` treats these uniformly with failing function entries.
+    result: &'static str,
+    detail: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,8 +535,13 @@ struct JsonBinding {
 }
 
 /// Prints JSON verification results to stdout.
-pub fn print_json(verdicts: &[FunctionVerdict], crate_root: &Path, show_localization: bool) {
-    let report = json_report(verdicts, crate_root, show_localization);
+pub fn print_json(
+    verdicts: &[FunctionVerdict],
+    unscannable: &[UnscannableFile],
+    crate_root: &Path,
+    show_localization: bool,
+) {
+    let report = json_report(verdicts, unscannable, crate_root, show_localization);
     match serde_json::to_string_pretty(&report) {
         Ok(json) => println!("{json}"),
         Err(err) => eprintln!("failed to serialize verification report: {err}"),
@@ -394,6 +550,7 @@ pub fn print_json(verdicts: &[FunctionVerdict], crate_root: &Path, show_localiza
 
 fn json_report(
     verdicts: &[FunctionVerdict],
+    unscannable: &[UnscannableFile],
     crate_root: &Path,
     show_localization: bool,
 ) -> JsonReport {
@@ -405,13 +562,7 @@ fn json_report(
     let functions: Vec<JsonFunction> = verdicts
         .iter()
         .map(|v| {
-            let file = v
-                .function
-                .file_path
-                .strip_prefix(crate_root)
-                .unwrap_or(&v.function.file_path)
-                .display()
-                .to_string();
+            let file = display_path(&v.function.file_path, crate_root);
             JsonFunction {
                 file,
                 line: v.function.line,
@@ -438,10 +589,21 @@ fn json_report(
         })
         .collect();
 
-    let summary = Summary::from_verdicts(verdicts);
+    let file_errors: Vec<JsonFileError> = unscannable
+        .iter()
+        .map(|failure| JsonFileError {
+            file: display_path(&failure.file_path, crate_root),
+            line: failure.line,
+            result: "error",
+            detail: failure.reason.clone(),
+        })
+        .collect();
+
+    let summary = Summary::from_parts(verdicts, unscannable);
     JsonReport {
         crate_name,
         functions,
+        file_errors,
         summary,
     }
 }
@@ -510,9 +672,180 @@ mod tests {
         assert!(s.has_failures());
     }
 
+    fn verdict_named(name: &str, result: VerdictKind) -> FunctionVerdict {
+        FunctionVerdict {
+            function: AnnotatedFunction {
+                file_path: PathBuf::from("/project/src/lib.rs"),
+                name: name.to_string(),
+                line: 1,
+                attributes: Vec::new(),
+            },
+            result,
+            duration_ms: 0,
+            detail: None,
+            localized_failure: None,
+            bindings: Vec::new(),
+        }
+    }
+
+    /// THE accounting pin: the buckets partition the verdict set.
+    ///
+    /// Every `VerdictKind` is exercised, so a variant added later without a
+    /// `Summary` arm fails here (and fails to compile in `from_verdicts`),
+    /// rather than quietly falling out of the totals the way an
+    /// unrecognized-contract function once fell out of the report.
+    #[test]
+    fn every_scanned_function_lands_in_exactly_one_bucket() {
+        let verdicts = vec![
+            verdict_named("a", VerdictKind::Verified),
+            verdict_named("b", VerdictKind::Counterexample),
+            verdict_named("c", VerdictKind::Unknown),
+            verdict_named("d", VerdictKind::Error),
+            verdict_named("e", VerdictKind::Skipped),
+            verdict_named("f", VerdictKind::NotAnalyzed),
+            verdict_named("g", VerdictKind::NotAnalyzed),
+        ];
+        let s = Summary::from_verdicts(&verdicts);
+        assert_eq!(
+            s.total(),
+            verdicts.len(),
+            "buckets must sum to the number of functions accounted for"
+        );
+        assert_eq!(s.not_analyzed, 2);
+
+        let report = json_report(&verdicts, &[], Path::new("/project"), false);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert_eq!(json["functions"].as_array().unwrap().len(), verdicts.len());
+        assert_eq!(json["summary"]["not_analyzed"], 2);
+        let summed: u64 = [
+            "verified",
+            "counterexample",
+            "unknown",
+            "error",
+            "skipped",
+            "not_analyzed",
+        ]
+        .iter()
+        .map(|k| json["summary"][*k].as_u64().unwrap())
+        .sum();
+        assert_eq!(summed, verdicts.len() as u64);
+    }
+
+    fn unscannable_sample() -> Vec<UnscannableFile> {
+        vec![UnscannableFile {
+            file_path: PathBuf::from("/project/src/broken.rs"),
+            line: 4,
+            reason: "cannot parse source: expected `}`".to_string(),
+        }]
+    }
+
+    /// The file-level half of the accounting invariant.
+    ///
+    /// A file that did not parse contributes exactly one accounted-for target
+    /// carrying its failure — not zero targets and a clean bill of health.
+    #[test]
+    fn an_unscannable_file_is_counted_and_named() {
+        let unscannable = unscannable_sample();
+        let s = Summary::from_parts(&[], &unscannable);
+        assert_eq!(s.file_error, 1);
+        assert_eq!(s.total(), 1, "the failed file must be an accounted target");
+        assert!(
+            s.has_failures(),
+            "a file we could not read must never exit 0 — that IS the fail-silent shape"
+        );
+
+        let report = json_report(&[], &unscannable, Path::new("/project"), false);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        let errors = json["file_errors"]
+            .as_array()
+            .expect("file_errors must be present when a file failed");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["file"], "src/broken.rs");
+        assert_eq!(errors[0]["line"], 4);
+        assert_eq!(errors[0]["result"], "error");
+        assert_eq!(errors[0]["detail"], "cannot parse source: expected `}`");
+        assert_eq!(json["summary"]["file_error"], 1);
+    }
+
+    /// No drift for the ordinary case: a run with nothing to report about files
+    /// emits the schema it always did, key for key.
+    #[test]
+    fn a_scannable_run_emits_neither_new_key() {
+        let report = json_report(&sample_verdicts(), &[], Path::new("/project"), false);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert!(
+            json.get("file_errors").is_none(),
+            "the file-error array must be absent, not empty, when nothing failed"
+        );
+        assert!(
+            json["summary"].get("file_error").is_none(),
+            "the file-error count must be absent, not zero, when nothing failed"
+        );
+        // Asserted on the SERIALIZED text, not on a parsed `Value`: parsing sorts
+        // object keys, so a `Value` cannot witness emission order and would pass
+        // this test even if the new key were emitted in the middle.
+        let raw = serde_json::to_string_pretty(&report).unwrap();
+        assert!(
+            !raw.contains("file_error"),
+            "no file-error key may appear in a scannable run's report:\n{raw}"
+        );
+        let summary_keys = [
+            "\"verified\"",
+            "\"counterexample\"",
+            "\"unknown\"",
+            "\"error\"",
+            "\"skipped\"",
+            "\"not_analyzed\"",
+        ];
+        let mut cursor = raw
+            .find("\"summary\"")
+            .expect("the report carries a summary");
+        for key in summary_keys {
+            let at = raw[cursor..]
+                .find(key)
+                .unwrap_or_else(|| panic!("summary lost `{key}`:\n{raw}"));
+            cursor += at + key.len();
+        }
+    }
+
+    #[test]
+    fn the_summary_line_names_the_unscanned_file() {
+        let s = Summary::from_parts(&[], &unscannable_sample());
+        assert_eq!(format_summary_line(&s), "Summary: 1 file not scanned");
+    }
+
+    #[test]
+    fn the_human_report_names_the_unscanned_file_and_its_reason() {
+        let output = format_human(&[], &unscannable_sample(), Path::new("/project"), false);
+        assert!(output.contains("src/broken.rs:4"), "{output}");
+        assert!(output.contains("FileError"), "{output}");
+        assert!(output.contains("cannot parse source"), "{output}");
+    }
+
+    /// A not-analyzed function is reported, but it is not a FAILURE — a crate of
+    /// ordinary uncontracted helpers must still exit 0.
+    #[test]
+    fn not_analyzed_alone_is_not_a_failure() {
+        let s = Summary::from_verdicts(&[
+            verdict_named("a", VerdictKind::NotAnalyzed),
+            verdict_named("b", VerdictKind::Verified),
+        ]);
+        assert!(!s.has_failures());
+        assert_eq!(s.total(), 2);
+    }
+
+    #[test]
+    fn the_summary_line_names_the_not_analyzed_bucket() {
+        let s = Summary::from_verdicts(&[verdict_named("a", VerdictKind::NotAnalyzed)]);
+        assert_eq!(format_summary_line(&s), "Summary: 1 not analyzed");
+    }
+
     #[test]
     fn test_human_output_includes_localized_failure_when_requested() {
-        let output = format_human(&sample_verdicts(), Path::new("/project"), true);
+        let output = format_human(&sample_verdicts(), &[], Path::new("/project"), true);
 
         assert!(output.contains("bottleneck: postcondition [assertion]"));
         assert!(output.contains("at src/lib.rs:30:5"));
@@ -522,7 +855,7 @@ mod tests {
     fn test_json_output_parses() {
         let verdicts = sample_verdicts();
         let crate_root = Path::new("/project");
-        let report = json_report(&verdicts, crate_root, true);
+        let report = json_report(&verdicts, &[], crate_root, true);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -539,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_json_output_omits_localized_failure_without_flag() {
-        let report = json_report(&sample_verdicts(), Path::new("/project"), false);
+        let report = json_report(&sample_verdicts(), &[], Path::new("/project"), false);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -573,7 +906,7 @@ mod tests {
             bindings: Vec::new(),
         }];
 
-        let output = format_human(&verdicts, Path::new("/project"), true);
+        let output = format_human(&verdicts, &[], Path::new("/project"), true);
 
         assert!(output.contains("used assumptions: gt_zero, lt_zero"));
         assert!(output.contains("category: timeout"));
@@ -596,7 +929,7 @@ mod tests {
             bindings: sample_bindings(),
         }];
 
-        let output = format_human(&verdicts, Path::new("/project"), false);
+        let output = format_human(&verdicts, &[], Path::new("/project"), false);
 
         assert!(output.contains("The verifier found concrete values that violate nonneg:"));
         assert!(output.contains("old(x) = 5"));
@@ -632,7 +965,7 @@ mod tests {
             bindings: Vec::new(),
         }];
 
-        let report = json_report(&verdicts, Path::new("/project"), true);
+        let report = json_report(&verdicts, &[], Path::new("/project"), true);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -658,7 +991,7 @@ mod tests {
             bindings: sample_bindings(),
         }];
 
-        let report = json_report(&verdicts, Path::new("/project"), false);
+        let report = json_report(&verdicts, &[], Path::new("/project"), false);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -735,7 +1068,7 @@ mod tests {
             bindings: vec![CounterexampleBinding::new("x", "x", "i32", "-1")],
         }];
 
-        let output = format_human(&verdicts, Path::new("/project"), false);
+        let output = format_human(&verdicts, &[], Path::new("/project"), false);
 
         assert!(output.contains("The verifier found concrete values that violate nonneg:"));
         assert!(output.contains(

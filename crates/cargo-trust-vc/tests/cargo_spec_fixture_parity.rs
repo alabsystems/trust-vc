@@ -571,9 +571,9 @@ fn unverified_spec_use_fixture_typechecks_upstream_calling_shape() {
     let fixture = fixture_path("cargo_unverified_spec_use");
     // Run from a NEUTRAL cwd with --manifest-path: cargo discovers config
     // from the current directory upward, so an in-fixture cwd picks up the
-    // repo's untracked `.cargo/config.toml` sibling `[patch]` override on
-    // co-development machines, which changes resolution and makes the
-    // committed canonical Cargo.lock unsatisfiable under `--locked`. The
+    // repo's committed `.cargo/config.toml` sibling `[patch]` override, which
+    // changes resolution and makes the canonical Git-source Cargo.lock
+    // unsatisfiable under `--locked`. The
     // neutral cwd checks exactly what the lock pins: the git-source deps.
     let output = Command::new(cargo_command())
         .current_dir(std::env::temp_dir())
@@ -1060,9 +1060,8 @@ fn consume_machines_fixture_typechecks_upstream_shaped_support_crate() {
     let fixture = fixture_path("cargo_unverified_consume_machines");
     // Neutral cwd + --manifest-path: see
     // unverified_spec_use_fixture_typechecks_upstream_calling_shape — the
-    // in-fixture cwd picks up the repo's untracked sibling `[patch]` on
-    // co-development machines and breaks `--locked` against the committed
-    // canonical lock.
+    // in-fixture cwd picks up the active repo-local sibling `[patch]` and
+    // breaks `--locked` against the canonical Git-source lock.
     let output = Command::new(cargo_command())
         .current_dir(std::env::temp_dir())
         .arg("check")

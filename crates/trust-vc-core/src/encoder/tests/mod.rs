@@ -189,6 +189,7 @@ mod rewrite_variant_coverage;
 mod rlimit;
 mod saturating_clamp_coverage;
 mod saturating_missing_bounds;
+mod seq_ext_eq_vacuous_quantifier;
 mod seq_from_fn;
 mod shift_soundness;
 mod signedness_and_coercion;

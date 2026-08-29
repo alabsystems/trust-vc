@@ -179,10 +179,28 @@ pub(super) fn encode_fuel_axioms(
         right: Box::new(body_rhs.clone()),
     };
 
-    let direct_term =
-        crate::encoder::with_flag_unwind_safe!(encoder.state.in_assumption_context, true, {
-            encoder.resolve_condition_typed(&direct_axiom)
-        });
+    // BINDER CAPTURE (CARDINAL), same shape as `add_typed_broadcast`: the body is
+    // encoded here with every bound variable resolved as an ordinary top-level
+    // term, and the `forall` over those terms is only built below. Announce the
+    // pending closure so encoder helpers that would hoist a derived fact to the
+    // solver top level decline instead of letting that binder capture it. See
+    // `ir_encoder::match_encode::bind_datatype_match_result` for the measured
+    // instance ("f is a CONSTANT function").
+    //
+    // The flag is a per-site OPT-IN and only two helpers take it, so the CLASS
+    // is closed by the watermark instead: after the encode, before the
+    // `forall`, ask whether anything asserted in between mentions a term the
+    // binder will bind. See `crate::encoder::binder_capture`.
+    let capture_watermark = encoder.assertion_watermark();
+    let direct_term = crate::encoder::with_flag_unwind_safe!(
+        encoder.state.pending_universal_closure,
+        !var_terms.is_empty(),
+        {
+            crate::encoder::with_flag_unwind_safe!(encoder.state.in_assumption_context, true, {
+                encoder.resolve_condition_typed(&direct_axiom)
+            })
+        }
+    );
     let direct_term = direct_term.map_err(|e| TrustVcError::Encoding {
         context: "fuel encoding: direct defining axiom",
         detail: format!("Failed to encode direct axiom: {}", e),
@@ -196,6 +214,19 @@ pub(super) fn encode_fuel_axioms(
                 context: "fuel encoding: direct assert",
                 detail: format!("Failed to assert direct axiom: {}", e),
             })?;
+        return Ok(());
+    }
+
+    if let Some(capture) = encoder.binder_capture_since(capture_watermark, &var_terms) {
+        // The defining axiom would be captured (measured instance:
+        // `forall n. half(n) == __euclid_q_0`, which combined with the ground
+        // replay of the same body makes the whole context INCONSISTENT and lets
+        // `half(2) == 5` verify). Decline it: `func_name` stays uninterpreted
+        // for symbolic reasoning while the ground-pool registration above —
+        // which re-encodes per concrete instance and therefore cannot be
+        // captured — is untouched.
+        let site = format!("fuel:{func_name}");
+        encoder.record_binder_capture(&site, &capture);
         return Ok(());
     }
 

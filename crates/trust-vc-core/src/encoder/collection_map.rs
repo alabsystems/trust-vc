@@ -229,6 +229,14 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: dom,
             },
         );
+        if len.is_none() {
+            // `map_values` preserves the key domain, so inheriting the source's
+            // length is correct — but only when the source HAS one. If the
+            // source declined (e.g. `m.filter_keys(p)`), the decline must
+            // propagate, or the name fallback re-acquires the ORIGINAL map's
+            // length through the chained receiver name.
+            self.decline_collection_len(result);
+        }
 
         // forall k. dom[k] => result[k] == f(source[k])
         // Safe quantification: native-sorted bound var (#2531)
@@ -340,6 +348,11 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: dom,
             },
         );
+        if len.is_none() {
+            // See `map_values`: a declined source cardinality must not be
+            // re-acquired through the chained receiver name.
+            self.decline_collection_len(result);
+        }
 
         // Safe quantification: native-sorted bound var (#2531)
         let (quant_key, key_term) = self.safe_element_quantifier("__map_me_k", &key_ty)?;
@@ -433,7 +446,9 @@ impl<'a> AstExpressionParser<'a> {
         }));
         let result_dom = self.solver.fresh_var("__map_fk_dom", dom_sort);
 
-        // No len metadata for filtered maps (fail-closed on cardinality)
+        // No len metadata for filtered maps (fail-closed on cardinality).
+        // Same shape as `Set::filter`: the result is anonymous, so the name
+        // fallback would otherwise hand back the SOURCE map's length.
         self.register_collection_meta(
             result,
             super::parser_state::CollectionMeta {
@@ -445,6 +460,7 @@ impl<'a> AstExpressionParser<'a> {
                 dom_term: Some(result_dom),
             },
         );
+        self.decline_collection_len(result);
 
         // Safe quantification: native-sorted bound var (#2531)
         let (quant_key, key_term) = self.safe_element_quantifier("__map_fk_k", &key_ty)?;

@@ -279,9 +279,120 @@ impl<'a> AstExpressionParser<'a> {
                 return_ty,
             } if args.is_empty()
                 && Self::is_empty_collection_constructor_name(name)
-                && name.contains("Seq_")
                 && matches!(return_ty, TrustVcType::Seq(_)) =>
             {
+                // THE GATE IS `return_ty`, NOT THE SYMBOL'S SPELLING.
+                //
+                // A `name.contains("Seq_")` conjunct used to stand here. It was
+                // a SPELLING proxy for a semantic condition the surrounding
+                // guards already enforce exactly, and it rejected the most
+                // common exec root there is.
+                //
+                // WHY THE SURVIVING GUARDS ARE THE WHOLE CONDITION.
+                // `lower_collection_constructor`
+                // (ir_lowering/dispatch/collections/constructors.rs:36) is the
+                // only producer of a `COLLECTION_CONSTRUCTOR_PREFIX` `FnCall`
+                // on the source path: it accepts the method segment `empty` or
+                // `new` ONLY, always emits `args: vec![]`, and takes
+                // `return_ty` from `collection_type_from_segment`, which maps
+                // `"Seq" | "Vec"` to `Seq`, `"Set" | "HashSet"` to `Set`,
+                // `"Map" | "HashMap"` to `Map`, `"Multiset"` to `Multiset`.
+                // One more producer reaches this renderer:
+                // `ir_lowering/dispatch/calls.rs::lower_collection_singleton` synthesizes an
+                // `empty` segment, so `Vec::<T>::singleton(v)` mints a
+                // `..._ctor_Vec_u32_empty` name only the widened gate accepts —
+                // the conclusion is unchanged (it IS the empty Seq, and the
+                // fold has no `Insert` arm, so the enclosing expression is not
+                // folded).
+                // The five other render points (ir_lowering/arrays.rs:112,
+                // dispatch/macros.rs:568/575/582, control_flow.rs:878) likewise
+                // denote the EMPTY container of their own return type. So
+                // `args.is_empty()` + `_empty|_new` + `Seq(_)` return type
+                // already says "this is the empty sequence", whose length is 0
+                // by construction. Map/Set constructors keep a Map/Set
+                // `return_ty` and are still rejected; zero arity keeps
+                // `Vec::with_capacity(n)` out. Removing the conjunct WIDENS
+                // acceptance, and the widened answer cannot be wrong.
+                //
+                // The encoder ALREADY relies on exactly this, without any
+                // spelling test: `collection_shared.rs::is_finite_chain_len_name`
+                // (:1036) accepts any `__trust_vc_len_` + `is_empty_collection_
+                // constructor_name` symbol and `chain_interval` pins it to
+                // EXACTLY 0. This arm was the outlier, not the frontier.
+                //
+                // WHAT THE SPELLING GATE ACTUALLY REJECTED. Constructor symbols
+                // come from two renderers. `arrays.rs`/`macros.rs` hardcode the
+                // sort (`{PREFIX}Seq_{T}_empty`) and `control_flow.rs::
+                // targeted_empty_collection_constructor_name` renders the TARGET
+                // type (`{PREFIX}Vec_Seq_u32_new`); all of those carry "Seq_"
+                // and always passed. But `constructors.rs::
+                // collection_constructor_symbol_name` (:172) renders the SOURCE
+                // PATH, so `Vec::<u32>::new` mints `{PREFIX}Vec_u32_new` — no
+                // "Seq" anywhere — even though its `return_ty` IS a `Seq`.
+                // That is not an exotic corner: an exec
+                // `let mut v: Vec<u32> = Vec::new();` is turbofished from its
+                // type annotation before lowering, so it lands in the SOURCE
+                // renderer, not the target-typed one. Every fixture in
+                // `tests/vec_pop_capability.rs` uses that spelling.
+                //
+                // Rejected, the root reported "length unknown", the push chain
+                // above it fell to fresh `__seq_len_push` witnesses chained by
+                // symbolic `+ 1`, the F3 point-interval folds never fired, index
+                // guards kept an undecidable `int2bv`/`bv2nat` bridge, and
+                // `encode_seq_contains` took its quantified existential instead
+                // of the ground unroll.
+                //
+                // MEASURED at trust-vc 7eb96392 / ay f1f93ed25, prebuilt
+                // binaries invoked directly with `--test-threads=1` (no cargo
+                // in the loop), arms STRICTLY INTERLEAVED, 3 reps each. The box
+                // was under heavy concurrent load throughout (1-minute average
+                // 24-74), so the absolute seconds are contended — both arms
+                // share that contention, which is the point of interleaving.
+                // "MU" is published-but-unvalidated models, an Unknown source
+                // that turns a refuted obligation into `VerifyResult::Unknown`.
+                //
+                //   tests/vec_pop_capability.rs — 18 passed / 0 failed on BOTH
+                //     gate present  213.90 / 276.20 / 253.05 s   MU 32 each rep
+                //     gate removed    3.49 /   3.21 /   3.16 s   MU  0 each rep
+                //   tests/seq_static_length_fold.rs (the pins below)
+                //     gate present   83.72 /  84.69 /  87.52 s   MU  8, 6 passed 1 FAILED
+                //     gate removed    0.09 /   0.09 /   0.10 s   MU  0, 7 passed
+                //   tests/map_letlocal_value_capability.rs — 9/9 on BOTH
+                //     gate present    0.96 /   0.99 /   0.99 s   MU  8
+                //     gate removed    0.36 /   0.40 /   0.37 s   MU  0
+                //
+                // Verdicts are unchanged everywhere they were already decided:
+                // every CARDINAL refusal in vec_pop_capability and
+                // map_letlocal_value_capability still refuses by name on both
+                // arms, and the two poison suites are bit-identical in verdict
+                // and MU count (collections_view_transform_unsat_poison_
+                // soundness 19/19 MU 56 both; collections_precond_unsat_poison_
+                // soundness 27/27 MU 48 both).
+                //
+                // Pinned in both directions by `tests/seq_static_length_fold.rs`.
+                // Its `turbofish_spelling_costs_the_same_as_the_ghost_spelling`
+                // is a genuine pre/post DISCRIMINATOR: with the substring gate
+                // restored it FAILS — 17.73s for the turbofish spelling against
+                // 87.8ms for the identical claim spelled `Seq::<u32>::empty()`,
+                // a ~200x spread bought by nothing but the symbol's name — and
+                // it passes with the gate removed.
+                // `turbofish_vec_new_absent_element_does_not_verify` is the
+                // CARDINAL companion on the ground unroll this enables, and
+                // `turbofish_vec_new_fold_does_not_poison_the_context` is the
+                // vacuity probe.
+                //
+                // KNOWN REMAINING DIVERGENCE (pre-existing, deliberately NOT
+                // fixed here): `extensional_eq.rs::seq_static_len` (:143) is a
+                // second static-length fold and still carries its own
+                // `name.contains("Seq_")` + `_empty` gate, so the turbofish
+                // spelling still falls off the ext-eq finite unroll. Widening
+                // it is the same argument as above, but it moves a different
+                // population and belongs in its own measured change. A THIRD
+                // sibling recognizer carries the same gate:
+                // `arith/compare.rs finite_seq_literal_elements` (driving
+                // `encode_finite_seq_literal_eq`) — after this change,
+                // `finite_seq_literal_len` is the odd one out among three, not
+                // two; both siblings fail closed.
                 Some(0)
             }
             TrustVcExpr::CollectionOp {
@@ -478,11 +589,19 @@ impl<'a> AstExpressionParser<'a> {
         if constructor_backed {
             // Constructor-backed push-chain witnesses are fresh and unbounded;
             // anchor non-negativity so chained .len() reasoning stays sound.
+            // Guard the result-length fact by the source length. A violated
+            // length-decreasing-view precondition can make `len_term`
+            // negative; asserting both `new_len == len_term + 1` and an
+            // unconditional `new_len >= 0` would then poison the context to
+            // UNSAT and could vacuously discharge the missing precondition.
+            // For every valid source the antecedent holds, so the usual push
+            // reasoning is unchanged.
             let zero = self.solver.int_const(0);
             let nonneg = self
                 .solver
                 .try_ge(new_len, zero)
                 .map_err(|e| format!("push length non-negativity: {}", e))?;
+            let nonneg = self.guard_len_fact_nonneg(len_term, nonneg)?;
             self.solver
                 .try_assert_term(nonneg)
                 .map_err(|e| e.to_string())?;

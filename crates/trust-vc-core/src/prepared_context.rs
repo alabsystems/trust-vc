@@ -22,6 +22,7 @@ use crate::ir::{StructDef, TraitDecl, TraitImplDecl, TrustVcExpr, TrustVcType};
 use crate::ir_expr_traversal::{walk_expr, TrustVcExprVisitor};
 use crate::ir_lowering::TypeEnv;
 use crate::ir_lowering::COLLECTION_CONSTRUCTOR_PREFIX;
+use crate::solver_budget::ConflictBudget;
 use crate::vc::{
     BitshiftBehavior, DemandInlineConfig, Div0Behavior, FunctionContext, InvariantMask,
     ObligationKind, OverflowBehavior, VariableDecl, VerificationContext, VerificationMode,
@@ -44,12 +45,13 @@ pub(crate) struct PreparedVerificationContext {
     /// the auxiliary conformance pass can bind an impl method's result to its
     /// actual body even when the verified function never references it. Part of
     /// the trait-conformance generic-result over-rejection fix.
-    pub trait_impl_method_bodies: HashMap<String, crate::ir::ConformanceMethodBody>,
+    pub trait_impl_method_bodies:
+        HashMap<crate::ir::ImplMethodKey, crate::ir::ConformanceMethodBody>,
     /// Impl methods' OWN declared `ensures` postconditions, keyed by concrete UF
     /// name. Threaded from `VerificationContext`; populated only for non-exempt
     /// impl methods with a captured body. The conformance pass VERIFIES
     /// `body ⊨ impl_ensures`; the encoder propagates it to callers only after.
-    pub trait_impl_method_ensures: HashMap<String, Vec<String>>,
+    pub trait_impl_method_ensures: HashMap<crate::ir::ImplMethodKey, Vec<String>>,
     /// Concrete UF names of trait-impl methods the conformance pass must SKIP
     /// because they are blocked by a dedicated ill-formedness error (own
     /// `requires`, or a `returns`-on-both conflict). Threaded from
@@ -129,10 +131,14 @@ pub(crate) struct PreparedVerificationContext {
     /// Metadata for mode checking — tracked params carry proof-mode ownership.
     /// Part of #2427 Slice 3.
     pub tracked_params: HashSet<String>,
-    /// Per-function solver timeout override in milliseconds.
-    /// When `Some(ms)`, overrides the default 30,000ms solver timeout.
-    /// Set by `#[trust_vc::rlimit(N)]`. Part of #2489.
+    /// Per-function WALL-CLOCK backstop override, in milliseconds — the
+    /// LIVENESS bound, not the work budget. Set by `#[trust_vc::rlimit(N)]`
+    /// (milliseconds, #2489) and floored up by `#[verifier::rlimit(N)]`.
     pub rlimit_ms: Option<u64>,
+    /// Per-function DETERMINISTIC work budget, in SAT conflicts. `None` means
+    /// "use the calibrated default", never "unbounded". Set by
+    /// `#[verifier::rlimit(N)]`.
+    pub rlimit_conflicts: Option<ConflictBudget>,
     /// Demand-driven body-inlining retry policy copied from the unprepared
     /// verification context. Part of #2655.
     pub demand_inline: DemandInlineConfig,
@@ -784,6 +790,7 @@ pub(crate) fn prepare_context(
         invariant_mask: ctx.invariant_mask.clone(),
         tracked_params: ctx.tracked_params.clone(),
         rlimit_ms: ctx.rlimit_ms,
+        rlimit_conflicts: ctx.rlimit_conflicts,
         demand_inline: ctx.demand_inline,
         counterexample_var_meta: ctx.counterexample_var_meta.clone(),
         skip_retry_cascade: ctx.skip_retry_cascade,
