@@ -36,6 +36,69 @@ fn receiver_expr_is_seq(expr: &TrustVcExpr) -> bool {
     }
 }
 
+/// Bind the arguments of `receiver.op(args)` that stand for an element, a key
+/// or a value of the receiver at that type (`ir_lowering::bind_call_argument`,
+/// §5b rule 6): a value of the element type as is, a literal the element type
+/// holds at it, a fixed-width value whose every value it holds widened by the
+/// value's OWN sign (`Seq<i64>::contains(x_i32)` sign-extends `x`), anything
+/// else refused. Every other argument (an index, a count, a closure) passes
+/// unchanged.
+///
+/// The widening used to happen on TERMS, by the value term's `term_widths`
+/// entry — which for a hash-consed constant answers for whichever occurrence
+/// registered last — after `contains`/`index_of` had registered the value
+/// with the ELEMENT's sign when it had no entry of its own; and a value wider
+/// than the element was truncated to it.
+fn bind_element_arguments(
+    op: CollectionOp,
+    receiver: &TrustVcExpr,
+    args: &[TrustVcExpr],
+) -> TrustVcResult<Vec<TrustVcExpr>> {
+    let receiver_ty = crate::ir_lowering::infer_expr_type(receiver);
+    let slots: Vec<(usize, TrustVcType)> = match (&receiver_ty, op) {
+        (
+            TrustVcType::Seq(elem) | TrustVcType::Array(elem, _),
+            CollectionOp::Contains | CollectionOp::Count | CollectionOp::Push,
+        ) => vec![(0, *elem.clone())],
+        (TrustVcType::Seq(elem) | TrustVcType::Array(elem, _), CollectionOp::Update) => {
+            vec![(1, *elem.clone())]
+        }
+        (
+            TrustVcType::Set(elem) | TrustVcType::Multiset(elem),
+            CollectionOp::Contains
+            | CollectionOp::Count
+            | CollectionOp::Insert
+            | CollectionOp::Remove,
+        ) => vec![(0, *elem.clone())],
+        (
+            TrustVcType::Map(key, _),
+            CollectionOp::ContainsKey | CollectionOp::Get | CollectionOp::Remove,
+        ) => vec![(0, *key.clone())],
+        (TrustVcType::Map(_, value), CollectionOp::ContainsValue) => vec![(0, *value.clone())],
+        (TrustVcType::Map(key, value), CollectionOp::Insert) => {
+            vec![(0, *key.clone()), (1, *value.clone())]
+        }
+        _ => Vec::new(),
+    };
+    let mut bound = args.to_vec();
+    for (index, elem_ty) in slots {
+        let Some(arg) = args.get(index) else { continue };
+        let bound_arg =
+            crate::ir_lowering::bind_call_argument(arg, &elem_ty).map_err(|arg_ty| {
+                format!(
+                    "`{op:?}` on a `{}` is passed a value of type `{}`, which its element type \
+                 cannot hold",
+                    receiver_ty.to_type_string(),
+                    arg_ty.to_type_string()
+                )
+            })?;
+        if let Some(slot) = bound.get_mut(index) {
+            *slot = bound_arg;
+        }
+    }
+    Ok(bound)
+}
+
 impl<'a> AstExpressionParser<'a> {
     // =================================================================
     // Collections (Seq/Set/Multiset/Map)
@@ -53,6 +116,13 @@ impl<'a> AstExpressionParser<'a> {
         args: &[TrustVcExpr],
         _ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
+        // An argument that stands for an ELEMENT (or key, or value) of the
+        // receiver is bound at that type here, where its own expression is
+        // still known — widened by ITS OWN sign where the element type holds
+        // it, refused otherwise (`bind_element_arguments`). The term-level
+        // encoders below neither widen nor narrow a value.
+        let bound_args = bind_element_arguments(op, receiver, args)?;
+        let args = bound_args.as_slice();
         #[cfg(feature = "native-strings")]
         if matches!(
             crate::ir_lowering::infer_expr_type(receiver),
@@ -241,7 +311,7 @@ impl<'a> AstExpressionParser<'a> {
                 args,
                 Self::finite_seq_literal_len(receiver),
             ),
-            CollectionOp::Update => self.encode_seq_update(receiver_term, rname, args),
+            CollectionOp::Update => self.encode_seq_update(receiver, receiver_term, rname, args),
             CollectionOp::First => self.encode_seq_first(receiver_term, receiver_name, rname),
             CollectionOp::Last => self.encode_seq_last(receiver_term, receiver_name, rname),
             CollectionOp::DropLast => {

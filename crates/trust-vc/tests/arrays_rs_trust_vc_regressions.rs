@@ -313,6 +313,34 @@ const EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "error",
         0,
     ),
+    // RE-PINNED 2026-09-13: four false array-view claims that were parked as
+    // "currently unknown" scouts (referenced by neither the suite nor the
+    // manifest) are refuted with a model by the engine and are pinned as
+    // Counterexamples beside their verified twins.
+    (
+        "array_to_slice_literal_view_wrong_contains_counterexample",
+        "test_array_to_slice",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_to_slice_wrong_len_counterexample",
+        "test_array_to_slice",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_literal_view_seq_binding_wrong_contains_counterexample",
+        "test_array_literals",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_named_view_wrong_contains_counterexample",
+        "test_array_literals",
+        "counterexample",
+        2,
+    ),
 ];
 
 const VERIFIED_CASES: &[(&str, &str)] = &[
@@ -488,6 +516,23 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
     (
         "array_named_view_contains_false_tail_counterexample",
         "test_array_literals named-array contains false-tail surrogate",
+    ),
+    // RE-PINNED 2026-09-13 (formerly unreferenced `*_currently_unknown` scouts).
+    (
+        "array_to_slice_literal_view_wrong_contains_counterexample",
+        "test_array_to_slice borrowed literal view wrong contains",
+    ),
+    (
+        "array_to_slice_wrong_len_counterexample",
+        "test_array_to_slice wrong view length",
+    ),
+    (
+        "array_literal_view_seq_binding_wrong_contains_counterexample",
+        "test_array_literals Seq binding wrong contains",
+    ),
+    (
+        "array_named_view_wrong_contains_counterexample",
+        "test_array_literals named-array wrong contains",
     ),
 ];
 

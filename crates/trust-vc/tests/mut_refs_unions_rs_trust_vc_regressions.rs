@@ -317,16 +317,34 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
     ),
 ];
 
+// WHAT THESE PATTERNS MEASURE, and what they no longer can. Every native-union
+// case is now refused at EXTRACTION ENTRY (the union taint closure in
+// `vc_extraction::reject_union_use`), which PREEMPTS the four later boundaries
+// these cases used to land on — the `get_union_field` builtin, `is_variant`, the
+// native destructuring pattern, and the unsafe-block/unknown-type path. Those
+// downstream messages are unreachable for a union-declaring file and cannot be
+// asserted here any more; asserting them would be asserting a diagnostic the
+// engine no longer emits. `expected_error_patterns` is an AND-conjunction over
+// the case's own joined diagnostic context, so each case instead pins the
+// blanket boundary AND its own SUBJECT line, which keeps the eight assertions
+// distinguishable: a case passes only when the refusal named THAT function and
+// the union it reached, not merely when some union refusal appeared somewhere.
 const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "mut_refs_unions_native_field_access_currently_blocked",
         "test_basic::test_assign native union field access boundary",
-        &["unsafe block", "unknown type", "unsupported"],
+        &[
+            "does not model Rust unions",
+            "`mut_refs_unions_native_field_access_currently_blocked` names the union `MutRefsUnionsNative`",
+        ],
     ),
     (
         "mut_refs_unions_is_variant_currently_blocked",
         "two_phase_borrows_to_union_fields is_variant boundary",
-        &["string literals are not yet supported", "is_variant"],
+        &[
+            "does not model Rust unions",
+            "`mut_refs_unions_is_variant_currently_blocked` names the union `MutRefsUnionsNative`",
+        ],
     ),
     (
         "mut_refs_unions_has_resolved_currently_blocked",
@@ -336,12 +354,18 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "mut_refs_unions_get_union_field_currently_blocked",
         "two_phase_borrows_to_union_fields get_union_field boundary",
-        &["string literals are not yet supported", "get_union_field"],
+        &[
+            "does not model Rust unions",
+            "`mut_refs_unions_get_union_field_currently_blocked` names the union `MutRefsUnionsNative`",
+        ],
     ),
     (
         "mut_refs_unions_native_struct_update_tail_wrong_variant_currently_blocked",
         "ctor_update_tail::wrong_variant native union struct-update-tail boundary",
-        &["unsafe block", "unknown type", "unsupported"],
+        &[
+            "does not model Rust unions",
+            "`mut_refs_unions_native_struct_update_tail_wrong_variant_currently_blocked` names the union `MutRefsUnionsNative`",
+        ],
     ),
 ];
 

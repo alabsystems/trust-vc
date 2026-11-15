@@ -280,16 +280,24 @@ fn test_step_meta_display_label_in_counterexample() {
     expect_counterexample(&result, "assert_by with step_meta should fail");
 
     if let VerifyResult::Counterexample {
-        obligation_name, ..
+        obligation_name,
+        location,
+        ..
     } = &result
     {
-        assert!(
-            obligation_name.contains("calc step 2 of 3"),
-            "obligation_name should contain display label 'calc step 2 of 3', got: {obligation_name}"
+        // The NAME channel carries the display label and NOTHING else: the
+        // position used to be glued in here, which broke every consumer that
+        // matches an obligation by name (the `proof_note`/`custom_err`
+        // diagnostic channel among them). Both halves are still pinned, each
+        // against the channel that owns it.
+        assert_eq!(
+            obligation_name, "calc step 2 of 3",
+            "obligation_name should be the display label alone, got: {obligation_name}"
         );
-        assert!(
-            obligation_name.contains("src/test.rs:7:1"),
-            "obligation_name should contain location, got: {obligation_name}"
+        assert_eq!(
+            location.as_deref(),
+            Some("src/test.rs:7:1"),
+            "the location travels in its own field, got: {location:?}"
         );
     }
 }

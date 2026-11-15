@@ -135,6 +135,52 @@ pub(super) struct PushReadback {
     pub(super) store_index_int: Option<Term>,
 }
 
+/// Alpha-equivalence memo for the quantified `Seq::contains` term
+/// `not (forall i: Int. 0 <= i < len => s[int2bv(i)] != v)` (the dual spelling of
+/// `exists i. 0 <= i < len && s[int2bv(i)] == v`; see
+/// `encode_seq_contains_quantified` for why the spelling matters).
+///
+/// Two occurrences of `s.contains(v)` in one encoder (a `requires` hypothesis
+/// and a `to_set().contains(v)` goal, say) are built by different parser
+/// instances, each with its own fresh bound variable. ay does not
+/// alpha-normalize, so without this memo they are two quantifiers ay has to
+/// relate by E-matching through `int2bv`, whereas `P` and `not P` over ONE term
+/// are propositional. This memo makes alpha-equivalent occurrences one term.
+/// It is a SPEED lever, not the proof route: measured 2026-09-14 with memo hits
+/// disabled, seqs.rs `test1_seq_to_set_contains_matches_source_contains` and its
+/// `_variable` sibling still verify (11 s and 67 s in the debug test profile,
+/// against 0.19 s and 0.13 s with the memo), and their liar twins are still
+/// refuted. (The 2026-09-13 note that the pair was `Unknown (incomplete)`
+/// without the memo measured the OLD `exists` spelling, whose negated goal
+/// reached ay as `(not (exists ..))`.)
+///
+/// The KEY is the fully built, fully COERCED body with its fresh bound
+/// variable renamed to [`Self::placeholder`] (a private Int constant that is
+/// never bound, asserted or returned). Two bodies share a key only if, after
+/// the renaming, they intern to the same term — i.e. they are the same formula
+/// up to the name of the bound variable (ay's `substitute` rebuilds through its
+/// semantics-preserving simplifier, so an identical key still implies
+/// logically equivalent bodies). The key therefore captures everything the
+/// body depends on: the receiver, the length, and the value AFTER the
+/// signedness-directed `sext`/`zext` width coercions. An earlier key
+/// `(receiver, value, length)` taken BEFORE those coercions was UNSOUND: ay
+/// interns `-1i32` and `4294967295u32` as the same `#xffffffff`, so a
+/// `requires(s.contains(-1i32))` hypothesis on a `Seq<i64>` (body
+/// `s[i] == sext(#xffffffff)`) was handed back for the goal
+/// `s.contains(4294967295u32)` (body `s[i] == zext(#xffffffff)`), and the
+/// false claim verified (adversarial review of `e57a3039`, 2026-09-13).
+///
+/// A hit is valid in any solver scope: the memo stores TERMS, never
+/// assertions, and ay's term store is not scoped by push/pop.
+#[derive(Debug, Default)]
+pub(super) struct SeqContainsQuantifiedMemo {
+    /// The Int constant substituted for each body's bound variable to form
+    /// the key; minted on first use and never appears in any asserted term.
+    pub(super) placeholder: Option<Term>,
+    /// Renamed guarded body -> the `contains` term first built for it.
+    pub(super) by_renamed_body: std::collections::HashMap<Term, Term>,
+}
+
 /// AST-based expression parser — the sole expression parser.
 /// Parses `syn::Expr` AST nodes into ay SMT terms.
 #[doc(hidden)]
@@ -154,7 +200,12 @@ pub struct AstExpressionParser<'a> {
         Option<&'a std::collections::HashMap<String, crate::ir::TrustVcType>>,
     /// Track BitVec widths and signedness of created terms for width coercion.
     /// Maps terms to (width, is_signed). Non-BitVec terms are not tracked.
-    pub(super) term_widths: std::collections::HashMap<Term, (u32, bool)>,
+    ///
+    /// Terms are hash-consed, so one entry can stand for several operands; a
+    /// SIGNEDNESS is answered only while every registration agreed (see
+    /// [`super::term_widths`]). Encoders that hold the operand's IR type take
+    /// its signedness from that type instead (`ir_type_signedness`).
+    pub(super) term_widths: super::term_widths::TermWidths,
     /// Locally-bound variables from quantifier scopes (forall/exists).
     /// These shadow the outer `variables` map while parsing quantifier bodies.
     pub(super) local_vars: std::collections::HashMap<String, Term>,
@@ -204,6 +255,32 @@ pub struct AstExpressionParser<'a> {
     /// passed iterative depth validation. Recursive re-entry must skip the
     /// validator to avoid re-scanning every subtree.
     pub(super) expr_depth_guard_active: bool,
+    /// Nesting depth of CLOSED default-width integer-literal arithmetic being
+    /// encoded (an `Arith` / `SpecialArith` node whose every leaf is an
+    /// `Int { width: 32 }` literal — see
+    /// `AstExpressionParser::is_closed_default_int_literal_tree`). While > 0,
+    /// `encode_int_lit` does NOT narrow an `Int { width: 32 }` literal to the
+    /// variable-context width: narrowing is value-preserving for a lone literal
+    /// (the fit check re-widens), but an operation over two narrowed literals
+    /// is then computed — and WRAPS — at the narrow width, while the IR type
+    /// (and the constant-fold overflow verdict) says 32 bits. `21i32 * 21i32`
+    /// next to an `i8` variable encoded as BV8 `185`, so `r != 441i32`
+    /// verified (rank-5 soundness cluster, member 31).
+    pub(super) default_int_literal_narrowing_suppressed: usize,
+    /// True while encoding a subexpression whose operand context type is a
+    /// bounded integer NARROWER than the default 32-bit literal placeholder
+    /// (`z + (100 + 100)` with `z: u8`, `y == 100 + 100` with `y: i8`).
+    ///
+    /// SOUNDNESS (rank-5 regression): in that position the closed literal tree
+    /// is NOT an independent 32-bit value — Rust types it at the narrow type of
+    /// its peer, so the narrowing in `encode_int_lit` is the CORRECT reading and
+    /// suppressing it would compute the enclosing narrow operation at 32 bits,
+    /// silently dropping its overflow obligation. The flag therefore CANCELS
+    /// `default_int_literal_narrowing_suppressed` for such a tree. It is sticky
+    /// downward (a closed literal tree is uniformly typed), and it never widens
+    /// what is encoded: where it is set, the encoding is exactly the pre-rank-5
+    /// one.
+    pub(super) narrow_typed_literal_operand_context: bool,
     /// When true, forces Int arithmetic mode (same as quantifier_depth > 0).
     /// Set when all variables in the context use Sort::Int (no BV variables).
     /// Used for termination proofs where mathematical integers are appropriate (#1605).
@@ -248,6 +325,11 @@ pub struct AstExpressionParser<'a> {
     /// a real `solver.forall()` quantifier to preserve universal strength.
     /// Skolemization is only correct for assertions (negated by refutation).
     pub(super) in_assumption_context: bool,
+    /// The obligations this encoding pushes are neither checked nor assumed:
+    /// an assumption encoded without its side conditions, or a demand-inline
+    /// retry (`EncoderState::demand_inlined_bodies`), which expands bodies the
+    /// checked pass never saw. See `drops_domain_obligations`.
+    pub(super) obligations_unchecked: bool,
     /// Mirror of `EncoderState::pending_universal_closure`: the expression being
     /// encoded will be universally closed over its free variables once encoding
     /// returns. Top-level `try_assert_term` of any fact mentioning them would be
@@ -298,6 +380,16 @@ pub struct AstExpressionParser<'a> {
     /// Same-index read-back provenance for `Seq::push` result terms (see
     /// [`PushReadback`]). Keyed by the push result (`store(..)`) term.
     pub(super) push_readback_by_term: std::collections::HashMap<Term, PushReadback>,
+    /// Alpha-equivalence memo for the quantified `Seq::contains` existential
+    /// (see [`SeqContainsQuantifiedMemo`]).
+    ///
+    /// Owned by the ENCODER (`AYEncoder::seq_contains_quantified_memo`) and
+    /// threaded in, because one obligation is encoded by several parser
+    /// instances — the hypotheses and the goal each get their own — and the
+    /// memo only helps across them. `None` (direct parser tests) falls back to
+    /// [`Self::seq_contains_quantified_memo_local`].
+    pub(super) seq_contains_quantified_memo: Option<&'a mut SeqContainsQuantifiedMemo>,
+    pub(super) seq_contains_quantified_memo_local: SeqContainsQuantifiedMemo,
     /// Canonical aliases for repeated concrete native-seq element accesses.
     ///
     /// Keyed by `(receiver_term, concrete_index)` so repeated `seq.nth(s, 1)`
@@ -399,6 +491,12 @@ pub struct AstExpressionParser<'a> {
     /// carrier and its LENGTH metadata but emit no element axioms.
     /// Defaults to `true` (full model) for every parser that is not seeded.
     pub(super) seq_element_model_demanded: bool,
+    /// Mirror of `VerificationState::demand_inline_overrides_active`. Read by
+    /// `encode_choose` to keep the combined Hilbert axiom's `no_mbqi` trigger
+    /// gate when the spec-fn call it used to key on was erased by a
+    /// DEMAND-INLINE retry rather than by the program's own `#[inline]`.
+    /// Defaults to `false` for every parser that is not seeded.
+    pub(super) demand_inline_overrides_active: bool,
     /// Memoizes pure, deterministic spec-collection constructors
     /// (`Set::new`/`Set::map`/`Set::filter`) within one verification query.
     ///
@@ -418,6 +516,21 @@ pub struct AstExpressionParser<'a> {
     /// syntax under different bindings may denote different values. Persisted
     /// across `AstExpressionParser` instances through `VerificationState`.
     pub(super) pure_collection_cache: std::collections::HashMap<String, Term>,
+    /// Dom/len companions minted for a collection reached by PROJECTION rather
+    /// than declared as a variable — a struct FIELD read, or any other
+    /// collection-typed UF application (`ensure_projected_collection_meta`).
+    ///
+    /// `collection_meta_by_term` is rebuilt from `var_types` for every
+    /// `AstExpressionParser`, so without this the assumption round and the
+    /// assertion round of ONE query would mint two INDEPENDENT dom arrays for
+    /// the same `self.m`, and `requires(self.m.contains_key(k))` would not
+    /// discharge `assert!(self.m.contains_key(k))` — measured: COUNTEREXAMPLE.
+    /// Persisted across instances through `VerificationState`, exactly like
+    /// `pure_collection_cache`, and keyed by the ay carrier `Term` so it is the
+    /// PLACE, not the spelling, that shares a companion. Carries no asserted
+    /// equality of its own, so (unlike `map_dom_bridges`/`nat_cast_aliases`) it
+    /// survives an encoder recycle that pops the previous assertion's scope.
+    pub(super) projected_collection_meta: std::collections::HashMap<Term, CollectionMeta>,
     /// Memoizes the purified Euclidean quotient/remainder pair for a div/mod by
     /// a LITERAL constant divisor within one encoded expression (#2778).
     ///
@@ -526,7 +639,7 @@ impl<'a> AstExpressionParser<'a> {
         overflow_behavior: crate::vc::OverflowBehavior,
     ) -> Self {
         // Pre-populate term_widths from known variables
-        let mut term_widths = std::collections::HashMap::new();
+        let mut term_widths = super::term_widths::TermWidths::new();
         for (name, term) in variables {
             if let Some(ty) = var_types.get(name) {
                 if let Some(w) = ty.bit_width() {
@@ -668,6 +781,8 @@ impl<'a> AstExpressionParser<'a> {
             symbolic_quantifier_depth: 0,
             real_quantifier_depth: 0,
             expr_depth_guard_active: false,
+            default_int_literal_narrowing_suppressed: 0,
+            narrow_typed_literal_operand_context: false,
             use_int_arithmetic,
             solver_mode: None,
             quantifier_scopes: Vec::new(),
@@ -677,12 +792,15 @@ impl<'a> AstExpressionParser<'a> {
             overflow_checks: Vec::new(),
             const_fold_overflow_verdicts: Vec::new(),
             in_assumption_context: false,
+            obligations_unchecked: false,
             pending_universal_closure: false,
             skolemize_top_level_assumption_exists: false,
             preserve_assumption_quantifier_sorts: false,
             collection_meta_by_term,
             len_declined_terms: std::collections::HashSet::new(),
             push_readback_by_term: std::collections::HashMap::new(),
+            seq_contains_quantified_memo: None,
+            seq_contains_quantified_memo_local: SeqContainsQuantifiedMemo::default(),
             #[cfg(feature = "native-seq")]
             native_seq_ground_element_aliases: std::collections::HashMap::new(),
             diagnostics: super::diagnostics::EncodingDiagnostics::default(),
@@ -707,7 +825,9 @@ impl<'a> AstExpressionParser<'a> {
             map_dom_bridges: std::collections::HashMap::new(),
             map_subset_seen: false,
             seq_element_model_demanded: true,
+            demand_inline_overrides_active: false,
             pure_collection_cache: std::collections::HashMap::new(),
+            projected_collection_meta: std::collections::HashMap::new(),
             euclid_div_mod_aliases: std::collections::HashMap::new(),
             euclid_guarded_lemma_pairs: std::collections::HashSet::new(),
             euclid_ufs: None,

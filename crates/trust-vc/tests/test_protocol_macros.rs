@@ -8,7 +8,7 @@
 //! Tests that `#[trust_vc::protocol]`, `#[trust_vc::action]`, `#[trust_vc::safety]`
 //! generate correct registration code and verify through the ty pipeline.
 //!
-//! Requires the `ty` feature: `cargo test -p trust_vc --features ty`
+//! Requires the `ty` feature: `targo --unverified test -p trust-vc --features ty`
 
 #![cfg(feature = "ty")]
 
@@ -22,11 +22,13 @@ use trust_vc_core::VerifyResult;
 // --- Protocol struct with macro-generated registration ---
 
 #[trust_vc::protocol]
+#[derive(Default)]
 struct BoundedCounter {
     x: u8,
 }
 
 #[trust_vc::protocol]
+#[derive(Default)]
 struct SimpleMutex {
     in_cs1: bool,
     in_cs2: bool,
@@ -64,7 +66,7 @@ fn test_protocol_macro_generates_registration() {
         register_protocol_action(
             "BoundedCounter",
             "Increment",
-            "{ self.x < 5 ; self.x = self.x + 1 }",
+            "{ if self.x >= 5 { return; } self.x = self.x + 1 }",
         );
         register_protocol_invariant("BoundedCounter", "Bounded", "{ self.x <= 5 }");
 
@@ -86,13 +88,13 @@ fn test_protocol_macro_multi_field_registration() {
         register_protocol_action(
             "SimpleMutex",
             "Enter1",
-            "{ self.in_cs2 == false ; self.in_cs1 = true }",
+            "{ if self.in_cs2 { return; } self.in_cs1 = true }",
         );
         register_protocol_action("SimpleMutex", "Leave1", "{ self.in_cs1 = false }");
         register_protocol_action(
             "SimpleMutex",
             "Enter2",
-            "{ self.in_cs1 == false ; self.in_cs2 = true }",
+            "{ if self.in_cs1 { return; } self.in_cs2 = true }",
         );
         register_protocol_action("SimpleMutex", "Leave2", "{ self.in_cs2 = false }");
         register_protocol_invariant(

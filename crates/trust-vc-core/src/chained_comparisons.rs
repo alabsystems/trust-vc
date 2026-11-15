@@ -26,6 +26,19 @@ pub(crate) const IMPLIES_MARKER_MACRO: &str = "__trust_vc_implies";
 /// operand sub-streams are re-parsed (chain-normalized) at lowering time.
 pub(crate) const IFF_MARKER_MACRO: &str = "__trust_vc_iff";
 
+/// Callee name the reserved-keyword spec op `final(..)` is rewritten to before
+/// `syn` parsing.
+///
+/// `final` is a RESERVED Rust keyword, so `syn` rejects `final(x)` outright
+/// ("expected an expression") — measured 2026-09-20, this is why every upstream
+/// `&mut` case spelled `*final(a)` was unportable. The rewrite is purely
+/// syntactic: `final ( ARGS )` becomes `__trust_vc_mut_ref_final ( ARGS )`, an
+/// ordinary call `syn` parses, and the MEANING is assigned later, with context,
+/// by the two-state resolver in `vc_extraction.rs` (ensures-only, supported
+/// scalar `&mut` parameters only). Anything the resolver does not resolve hits a
+/// NAMED refusal in `ir_lowering`, never a silent acceptance.
+pub const MUT_REF_FINAL_MARKER: &str = "__trust_vc_mut_ref_final";
+
 /// Parse a token stream, normalizing chained comparisons into conjunctions.
 pub fn parse_expr_tokens_with_chains(tokens: TokenStream) -> syn::Result<syn::Expr> {
     // Lower Verus "bulleted" prefix disjunctions (`||| e1 ||| e2 …`, upstream
@@ -36,7 +49,21 @@ pub fn parse_expr_tokens_with_chains(tokens: TokenStream) -> syn::Result<syn::Ex
     // parens groups are then recursed into by every later pass. See
     // `rewrite_verus_big_or_tokens` for the exact (leading-position-only)
     // trigger shape.
+    // The reserved-keyword spec op `final(..)` must lose its keyword spelling
+    // before ANY `syn` parse is attempted (including the ones the passes below
+    // perform on sub-streams): `syn` rejects `final` as a path segment, so the
+    // whole clause dies with "expected an expression". Purely syntactic; see
+    // `MUT_REF_FINAL_MARKER`.
+    let tokens = rewrite_final_keyword_tokens(tokens);
     let tokens = rewrite_verus_big_or_tokens(tokens)?;
+    // SOUNDNESS: the same for `&&&` bullets. Without this pass a leading
+    // `&&&` sequence reached `syn` as `&(&(&e1)) & (&(&e2))` — a chain of
+    // bitwise `&` over erased references — so the bullets bound TIGHTER than
+    // `==>`/`<==>` instead of loosest: `{ &&& a ==> b &&& c ==> d }` read as
+    // `a ==> ((b && c) ==> d)`, and the FALSE claim
+    // `{ &&& false ==> true &&& true ==> false }` verified (the upstream
+    // adts.rs `get_syntax_2_pass` / `matches_syntax_1_pass` requires shapes). See `rewrite_verus_big_and_tokens`.
+    let tokens = rewrite_verus_big_and_tokens(tokens)?;
     let tokens = rewrite_verus_quantifier_tokens(tokens)?;
     let tokens = rewrite_verus_choose_tuple_tokens(tokens)?;
     let tokens = rewrite_verus_result_variant_tokens(tokens)?;
@@ -66,6 +93,76 @@ pub fn parse_expr_tokens_with_chains(tokens: TokenStream) -> syn::Result<syn::Ex
         }
         Err(err) => Err(err),
     }
+}
+
+/// Rewrite the reserved-keyword call form `final ( .. )` into the ordinary call
+/// `__trust_vc_mut_ref_final ( .. )` so `syn` can parse the clause at all.
+///
+/// Recognized spellings (each followed by a parenthesized group):
+/// * bare `final(..)`
+/// * qualified `trust_vc :: final(..)` / `builtin :: final(..)` / `vstd :: .. :: final(..)`
+///   — any path whose LAST segment is `final`, since a reserved keyword can be
+///   nothing else.
+///
+/// `final` is a reserved keyword, so it can never be a user identifier, field or
+/// method name in valid Rust; an unconditional rewrite therefore cannot capture
+/// a legitimate program token. A `final` NOT followed by a parenthesized group
+/// is left untouched and still fails the `syn` parse (fail-closed).
+fn rewrite_final_keyword_tokens(tokens: TokenStream) -> TokenStream {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut out: Vec<TokenTree> = Vec::with_capacity(trees.len());
+    let mut i = 0;
+    while i < trees.len() {
+        // Recurse into every group first so nested clauses are covered.
+        let current = match &trees[i] {
+            TokenTree::Group(group) => {
+                let inner = rewrite_final_keyword_tokens(group.stream());
+                let mut rewritten = proc_macro2::Group::new(group.delimiter(), inner);
+                rewritten.set_span(group.span());
+                TokenTree::Group(rewritten)
+            }
+            other => other.clone(),
+        };
+        if let TokenTree::Ident(ident) = &current {
+            if *ident == "final" {
+                let followed_by_parens = matches!(
+                    trees.get(i + 1),
+                    Some(TokenTree::Group(group))
+                        if group.delimiter() == Delimiter::Parenthesis
+                );
+                if followed_by_parens {
+                    // Drop any qualifying `::` path prefix we already emitted
+                    // (`trust_vc::final(x)`, `a::b::final(x)`) so the callee
+                    // collapses onto the BARE marker ident the resolver matches.
+                    loop {
+                        let colons = out.len() >= 2
+                            && matches!(&out[out.len() - 1], TokenTree::Punct(p) if p.as_char() == ':')
+                            && matches!(&out[out.len() - 2], TokenTree::Punct(p) if p.as_char() == ':');
+                        if !colons {
+                            break;
+                        }
+                        let qualifier = matches!(
+                            out.get(out.len().wrapping_sub(3)),
+                            Some(TokenTree::Ident(_))
+                        );
+                        if !qualifier {
+                            break;
+                        }
+                        out.truncate(out.len() - 3);
+                    }
+                    out.push(TokenTree::Ident(proc_macro2::Ident::new(
+                        MUT_REF_FINAL_MARKER,
+                        ident.span(),
+                    )));
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        out.push(current);
+        i += 1;
+    }
+    out.into_iter().collect()
 }
 
 /// Split a token stream at top-level commas (commas not nested inside any
@@ -265,6 +362,185 @@ fn lower_big_or_segment(trees: &[TokenTree]) -> syn::Result<TokenStream> {
             proc_macro2::Group::new(Delimiter::Parenthesis, operand.into_iter().collect());
         group.set_span(operand_span);
         lowered.extend(std::iter::once(TokenTree::Group(group)));
+    }
+    Ok(lowered)
+}
+
+/// Rewrite Verus "bulleted" prefix conjunctions into plain conjunctions —
+/// the exact mirror of [`rewrite_verus_big_or_tokens`] for `&&&`
+/// (verus-syn `parse_prefix_binop` + builtin_macros BigAnd lowering:
+/// `&&& e1 &&& e2` is a LEADING-position prefix expression whose operands
+/// each parse at `Precedence::Assign`, i.e. below `==>`/`<==>`, and lower to
+/// the left-associated `((e1) && (e2))`).
+///
+/// * Recognized only when a token sequence (the whole stream, a delimiter
+///   group's inner stream, or a `;`-separated statement segment thereof)
+///   STARTS with a `&&&` triple (three `&` puncts, the first two `Joint`).
+///   An infix `a &&& b` is left untouched, exactly like the `|||` pass.
+/// * Each operand is wrapped in parentheses and the operands are joined with
+///   `&&`; the later passes recurse into the synthesized groups, so a `==>`
+///   / `<==>` INSIDE a bullet stays inside it — bullets bind loosest.
+/// * A top-level `|||` inside the sequence is the upstream mixing error;
+///   an empty bullet operand fails closed.
+/// * ONE Verus-specific ownership rule, preserved from the variant pass
+///   (which used to see the raw bullets): a bullet operand that is EXACTLY
+///   `EXPR matches PAT` owns every FOLLOWING bullet — its pattern bindings
+///   scope over them (`&&& e matches A(x) &&& p(x) &&& q(x)`) — so the tail
+///   is folded into the `matches … && RHS` form, `(e matches A(x) && ((p(x))
+///   && (q(x))))`, which `rewrite_verus_result_variant_sequence` turns into
+///   the binding `match e { A(x) => { … }, _ => false }`.
+fn rewrite_verus_big_and_tokens(tokens: TokenStream) -> syn::Result<TokenStream> {
+    let trees = rewrite_verus_big_and_groups(tokens.into_iter().collect())?;
+    rewrite_verus_big_and_sequence(trees)
+}
+
+fn rewrite_verus_big_and_groups(trees: Vec<TokenTree>) -> syn::Result<Vec<TokenTree>> {
+    trees
+        .into_iter()
+        .map(|tt| match tt {
+            TokenTree::Group(group) => {
+                let inner = rewrite_verus_big_and_tokens(group.stream())?;
+                let mut rewritten = proc_macro2::Group::new(group.delimiter(), inner);
+                rewritten.set_span(group.span());
+                Ok(TokenTree::Group(rewritten))
+            }
+            other => Ok(other),
+        })
+        .collect()
+}
+
+fn rewrite_verus_big_and_sequence(trees: Vec<TokenTree>) -> syn::Result<TokenStream> {
+    let mut rewritten = TokenStream::new();
+    let mut index = 0;
+    let mut segment_start = true;
+
+    while index < trees.len() {
+        if segment_start && big_and_bullet_at(&trees, index) {
+            let segment_end = trees[index..]
+                .iter()
+                .position(|tt| matches!(tt, TokenTree::Punct(p) if p.as_char() == ';'))
+                .map(|offset| index + offset)
+                .unwrap_or(trees.len());
+            let lowered = lower_big_and_segment(&trees[index..segment_end])?;
+            rewritten.extend(lowered);
+            index = segment_end;
+            segment_start = false;
+            continue;
+        }
+        segment_start = matches!(&trees[index], TokenTree::Punct(p) if p.as_char() == ';');
+        rewritten.extend(std::iter::once(trees[index].clone()));
+        index += 1;
+    }
+
+    Ok(rewritten)
+}
+
+/// Whether a flat bullet operand is EXACTLY `RECEIVER matches PAT`: a
+/// top-level `matches` whose pattern span reaches the operand's end and whose
+/// receiver is the whole prefix. Such an operand owns the following bullets
+/// (see [`rewrite_verus_big_and_tokens`]).
+fn operand_is_bare_matches_test(operand: &[TokenTree]) -> bool {
+    let Some(index) = operand
+        .iter()
+        .position(|tt| matches!(tt, TokenTree::Ident(id) if id == "matches"))
+    else {
+        return false;
+    };
+    if index == 0 || verus_matches_pattern_span(operand, index) != Some(operand.len()) {
+        return false;
+    }
+    matches!(
+        find_verus_result_left_operand_start(operand, index, true),
+        Ok(0)
+    )
+}
+
+fn parenthesized_operand(operand: Vec<TokenTree>, fallback_span: Span) -> TokenTree {
+    let operand_span = operand.first().map(token_span).unwrap_or(fallback_span);
+    let mut group = proc_macro2::Group::new(Delimiter::Parenthesis, operand.into_iter().collect());
+    group.set_span(operand_span);
+    TokenTree::Group(group)
+}
+
+fn logical_and_puncts(span: Span) -> [TokenTree; 2] {
+    let mut first = proc_macro2::Punct::new('&', Spacing::Joint);
+    first.set_span(span);
+    let mut second = proc_macro2::Punct::new('&', Spacing::Alone);
+    second.set_span(span);
+    [TokenTree::Punct(first), TokenTree::Punct(second)]
+}
+
+/// Lower one leading-`&&&` bullet segment (`&&& e1 &&& e2 …`, no top-level
+/// `;`) to `(e1) && (e2) && …`, mirroring the upstream BigAnd lowering, with
+/// the `matches`-ownership fold documented on [`rewrite_verus_big_and_tokens`].
+#[allow(clippy::indexing_slicing)] // cursor movement is guarded by big_and_bullet_at
+fn lower_big_and_segment(trees: &[TokenTree]) -> syn::Result<TokenStream> {
+    debug_assert!(big_and_bullet_at(trees, 0));
+    let bullet_span = token_span(&trees[0]);
+    let mut operands: Vec<Vec<TokenTree>> = Vec::new();
+    let mut current: Vec<TokenTree> = Vec::new();
+    let mut index = 3; // consume the leading bullet
+
+    while index < trees.len() {
+        if big_and_bullet_at(trees, index) {
+            operands.push(std::mem::take(&mut current));
+            index += 3;
+            continue;
+        }
+        if big_or_bullet_at(trees, index) {
+            return Err(syn::Error::new(
+                token_span(&trees[index]),
+                "cannot mix `&&&` and `|||` in a bulleted expression; \
+                 group the inner bullets in a block",
+            ));
+        }
+        current.push(trees[index].clone());
+        index += 1;
+    }
+    operands.push(current);
+
+    if operands.iter().any(Vec::is_empty) {
+        return Err(syn::Error::new(
+            bullet_span,
+            "`&&&` requires an expression after each bullet",
+        ));
+    }
+
+    // The `matches`-ownership fold: the first bare `EXPR matches PAT` operand
+    // absorbs every later operand into a parenthesized `&&` tail.
+    let mut folded: Vec<Vec<TokenTree>> = Vec::new();
+    let mut position = 0;
+    while position < operands.len() {
+        let operand = &operands[position];
+        if position + 1 < operands.len() && operand_is_bare_matches_test(operand) {
+            let mut tail = TokenStream::new();
+            for (offset, owned) in operands[position + 1..].iter().enumerate() {
+                if offset > 0 {
+                    tail.extend(logical_and_puncts(bullet_span));
+                }
+                tail.extend(std::iter::once(parenthesized_operand(
+                    owned.clone(),
+                    bullet_span,
+                )));
+            }
+            let mut owner = operand.clone();
+            owner.extend(logical_and_puncts(bullet_span));
+            let mut tail_group = proc_macro2::Group::new(Delimiter::Parenthesis, tail);
+            tail_group.set_span(bullet_span);
+            owner.push(TokenTree::Group(tail_group));
+            folded.push(owner);
+            break;
+        }
+        folded.push(operand.clone());
+        position += 1;
+    }
+
+    let mut lowered = TokenStream::new();
+    for (position, operand) in folded.into_iter().enumerate() {
+        if position > 0 {
+            lowered.extend(logical_and_puncts(bullet_span));
+        }
+        lowered.extend(std::iter::once(parenthesized_operand(operand, bullet_span)));
     }
     Ok(lowered)
 }
@@ -606,16 +882,33 @@ fn rewrite_verus_result_variant_sequence(trees: Vec<TokenTree>) -> syn::Result<T
                 quote! { #base_pattern { .. } }
             };
             if is_verus_implies_arrow_at(&trees, pat_end) {
+                if prefix_ends_with_binary_operator(&trees[..left_start]) {
+                    return Err(syn::Error::new(
+                        token_span(&trees[index]),
+                        "matches with ==> is currently not allowed on the right-hand-side of \
+                         most binary operators (use parentheses)",
+                    ));
+                }
                 // `EXPR matches PAT ==> RHS`: the pattern's bindings scope into
                 // the implication RHS (Verus's binding-into-implication). Desugar
                 // to `match EXPR { PAT => RHS, _ => true }` (a non-matching
-                // receiver makes the implication vacuously true). The RHS is the
-                // remainder of the scope (`==>` binds loosest), recursively
-                // rewritten; the connective pass later normalizes any `==>`
-                // inside it.
-                let rhs = rewrite_verus_result_variant_sequence(trees[pat_end + 3..].to_vec())?;
+                // receiver makes the implication vacuously true). The RHS runs
+                // to the end of the `==>` scope — `==>` binds looser than every
+                // operator EXCEPT `<==>` (and the bullet / statement / argument
+                // boundaries), so a top-level `<==>` ends it. SOUNDNESS: the RHS
+                // used to be the unbounded remainder, so
+                // `E::A matches E::B ==> true <==> false` read as
+                // `A matches B ==> (true <==> false)` and the FALSE claim
+                // verified (upstream adts.rs `matches_syntax_precedence_3`).
+                // The connective pass later normalizes
+                // any `==>` inside the RHS.
+                let rhs_start = pat_end + 3;
+                let rhs_end = find_verus_matches_implies_rhs_end(&trees, rhs_start);
+                let rhs =
+                    rewrite_verus_result_variant_sequence(trees[rhs_start..rhs_end].to_vec())?;
+                let rest = rewrite_verus_result_variant_sequence(trees[rhs_end..].to_vec())?;
                 return Ok(quote! {
-                    #prefix (match (#receiver) { #pattern => { #rhs }, _ => true })
+                    #prefix (match (#receiver) { #pattern => { #rhs }, _ => true }) #rest
                 });
             }
             // verus-syn checks `&&&` before `&&`: the first two ampersands of
@@ -634,6 +927,13 @@ fn rewrite_verus_result_variant_sequence(trees: Vec<TokenTree>) -> syn::Result<T
                 });
             }
             if is_logical_and_at(&trees, pat_end) {
+                if prefix_ends_with_binary_operator(&trees[..left_start]) {
+                    return Err(syn::Error::new(
+                        token_span(&trees[index]),
+                        "matches with && is currently not allowed on the right-hand-side of \
+                         most binary operators (use parentheses)",
+                    ));
+                }
                 // `EXPR matches PAT && RHS`: as in verus-syn's
                 // `MatchesOpToken::AndAnd`, bindings from PAT scope through
                 // the maximal `&&`-precedence RHS.  Lower-precedence `||` and
@@ -930,6 +1230,118 @@ fn normalize_verus_unary_operand_for_syn(trees: &[TokenTree]) -> TokenStream {
     normalized
 }
 
+/// Whether the flat token prefix before a `matches` receiver ends in a BINARY
+/// operator applied to a left operand — i.e. the `matches` expression would
+/// be that operator's RIGHT operand.
+///
+/// Verus (`builtin_macros` `handle_binary_ops`) rejects a `matches` carrying an
+/// `==>` or `&&` tail in that position ("matches with ==> is currently not
+/// allowed on the right-hand-side of most binary operators (use parentheses)";
+/// upstream adts.rs `matches_syntax_precedence_4a` / `_4b` / `_5` / `_6` /
+/// `_nonsensical_1` / `_2`), because the binding scope and the operator
+/// precedence disagree. The flat rewrite used to pick one reading silently —
+/// `!(false && E::A matches E::A ==> true)` verified under
+/// `false && (E::A matches E::A ==> true)` — so the shape now fails closed as
+/// upstream does. Unambiguous binary spellings count (`&&`, `||`, `==`,
+/// `!=`, `<`, `<=`, `>`, `>=`, `==>`, `<==>`, `<<`, `>>`, `/`, `%`, `^`, `+`);
+/// the unary-capable `-` / `*` / `&` count when a left OPERAND precedes them
+/// (a literal, a bracketed group, or an identifier that is not a keyword), and
+/// a single `|` counts when a literal precedes it or the prefix holds an odd
+/// number of single `|` tokens (an even count may be a closure binder list
+/// `forall|x| ..`, whose body is not a binary operand). A leading `&&` / `||` /
+/// `&&&` / `|||` bullet (no left operand), a match-arm `=>`, a `,` / `;` / `=`
+/// boundary, `!`, and a unary `-` / `*` / `&` keep the established lowering.
+/// (`!(false & E::A matches E::A ==> true)` used to reach the
+/// solver as a Bool `bvand` sort mismatch instead of the upstream rejection.)
+fn prefix_ends_with_binary_operator(prefix: &[TokenTree]) -> bool {
+    let run_len = prefix
+        .iter()
+        .rev()
+        .take_while(|tree| matches!(tree, TokenTree::Punct(_)))
+        .count();
+    if run_len == 0 || run_len == prefix.len() {
+        return false;
+    }
+    let run: String = prefix[prefix.len() - run_len..]
+        .iter()
+        .filter_map(|tree| match tree {
+            TokenTree::Punct(punct) => Some(punct.as_char()),
+            _ => None,
+        })
+        .collect();
+    if matches!(
+        run.as_str(),
+        "&&" | "||"
+            | "=="
+            | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "==>"
+            | "<==>"
+            | "<<"
+            | ">>"
+            | "/"
+            | "%"
+            | "^"
+            | "+"
+    ) {
+        return true;
+    }
+    let operand = &prefix[prefix.len() - run_len - 1];
+    let operand_is_value = match operand {
+        TokenTree::Literal(_) | TokenTree::Group(_) => true,
+        TokenTree::Ident(ident) => !matches!(
+            ident.to_string().as_str(),
+            "return"
+                | "break"
+                | "in"
+                | "let"
+                | "if"
+                | "else"
+                | "match"
+                | "move"
+                | "mut"
+                | "ref"
+                | "yield"
+                | "box"
+                | "as"
+                | "dyn"
+                | "impl"
+                | "where"
+                | "static"
+                | "const"
+                | "unsafe"
+                | "async"
+                | "await"
+                | "forall"
+                | "exists"
+                | "choose"
+        ),
+        TokenTree::Punct(_) => false,
+    };
+    match run.as_str() {
+        "-" | "*" | "&" => operand_is_value,
+        "|" => {
+            let single_pipes = prefix
+                .iter()
+                .enumerate()
+                .filter(|(index, tree)| {
+                    let is_pipe = |tree: Option<&TokenTree>| {
+                        matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == '|')
+                    };
+                    is_pipe(Some(tree))
+                        && !is_pipe(index.checked_sub(1).and_then(|i| prefix.get(i)))
+                        && !is_pipe(prefix.get(index + 1))
+                })
+                .count();
+            matches!(operand, TokenTree::Literal(_)) || single_pipes % 2 == 1
+        }
+        _ => false,
+    }
+}
+
 /// If `trees[index]` starts a `matches PAT` operator, returns the exclusive end
 /// index of the pattern. `PAT` is a variant path (`A`, `E::A`) with an optional
 /// binding/field group (`A(x)`, `A { x }`) — enough for Verus's variant-matching
@@ -1017,6 +1429,39 @@ fn find_verus_matches_and_rhs_end(trees: &[TokenTree], start: usize) -> usize {
     trees.len()
 }
 
+/// Whether the raw `<==>` equivalence (four puncts: `<` joint, `=` joint,
+/// `=` joint, `>`) starts at `index` — the same shape
+/// [`find_first_top_level_iff`] matches.
+fn is_verus_iff_at(trees: &[TokenTree], index: usize) -> bool {
+    matches!(trees.get(index), Some(TokenTree::Punct(p)) if p.as_char() == '<' && p.spacing() == Spacing::Joint)
+        && matches!(trees.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=' && p.spacing() == Spacing::Joint)
+        && matches!(trees.get(index + 2), Some(TokenTree::Punct(p)) if p.as_char() == '=' && p.spacing() == Spacing::Joint)
+        && matches!(trees.get(index + 3), Some(TokenTree::Punct(p)) if p.as_char() == '>')
+}
+
+/// Exclusive end of the RHS captured by `EXPR matches PAT ==> RHS`: the whole
+/// remainder of the `==>` scope, which stops only at a top-level `<==>` (the
+/// one operator looser than `==>`), a bullet, or an argument / statement
+/// boundary. Delimiter groups are opaque tokens, so every boundary here is
+/// top-level.
+fn find_verus_matches_implies_rhs_end(trees: &[TokenTree], start: usize) -> usize {
+    let mut index = start;
+    while index < trees.len() {
+        if big_and_bullet_at(trees, index) || big_or_bullet_at(trees, index) {
+            return index;
+        }
+        if let TokenTree::Punct(punct) = &trees[index] {
+            match punct.as_char() {
+                ',' | ';' => return index,
+                '<' if is_verus_iff_at(trees, index) => return index,
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    trees.len()
+}
+
 /// The variant identifier in an `EXPR !is Variant` negated test (`!` `is` V).
 /// Matched at the `!` so the receiver is the operand before the `!`.
 fn verus_notis_operator_variant(trees: &[TokenTree], index: usize) -> Option<proc_macro2::Ident> {
@@ -1073,6 +1518,12 @@ fn find_verus_result_left_operand_start(
             // is `=`) bounds the left operand of a downstream `is`/`matches`/`has`/
             // `->`. (The projection arrow `->` has `-` before its `>`, so it is
             // NOT a boundary — a projected receiver like `a->b is C` stays whole.)
+            // It is a FLOOR, not the receiver start: the longest-legal-suffix
+            // selection below still has to strip a comparison/arithmetic
+            // prefix. Returning here directly made `p ==> result == e->0`
+            // project off the receiver `result == e` ("requires a datatype
+            // receiver, got 'bool'", on the upstream
+            // adts.rs `test_is_variant_get_2`-style callee ensures).
             '>' if angle_depth == 0
                 && is_arrow_suffix(trees, index)
                 && matches!(
@@ -1080,7 +1531,8 @@ fn find_verus_result_left_operand_start(
                     Some(TokenTree::Punct(p)) if p.as_char() == '='
                 ) =>
             {
-                return Ok(index + 1);
+                floor = index + 1;
+                break;
             }
             '>' if !is_arrow_suffix(trees, index) => {
                 angle_depth = angle_depth.saturating_add(1);
@@ -2498,9 +2950,134 @@ mod tests {
     #[test]
     fn test_verus_matches_binding_scopes_through_big_and_tail() {
         let compact = normalized("{ &&& value matches A(x) &&& x == 5 }").replace(' ', "");
+        assert!(
+            compact.contains("match(value){A(x)=>{((x==5))},_=>false}"),
+            "the following `&&&` bullet must be consumed whole inside the pattern scope: {compact}"
+        );
+        let three = normalized("{ &&& value matches A(x) &&& x == 5 &&& x < 9 }").replace(' ', "");
+        assert!(
+            three.contains("match(value){A(x)=>{((x==5)&&(x<9))},_=>false}"),
+            "every following bullet is owned by the matches bullet: {three}"
+        );
+        // A bullet BEFORE the matches bullet is an ordinary conjunct.
+        let led = normalized("{ &&& p &&& value matches A(x) &&& x == 5 }").replace(' ', "");
+        assert!(
+            led.contains("(p)&&((match(value){A(x)=>{((x==5))},_=>false}))"),
+            "a leading non-matches bullet stays a plain conjunct: {led}"
+        );
+    }
+
+    #[test]
+    fn test_big_and_bullets_bind_loosest_over_implies() {
+        // SOUNDNESS: `{ &&& a ==> b &&& c ==> d }` is `(a ==> b) && (c ==> d)`,
+        // never `a ==> ((b && c) ==> d)`.
+        let compact = normalized("{ &&& a ==> b &&& c ==> d }").replace(' ', "");
         assert_eq!(
-            compact, "{&&&(match(value){A(x)=>{x==5},_=>false})}",
-            "the following `&&&` bullet must be consumed whole inside the pattern scope"
+            compact, "{(__trust_vc_implies!(a,b))&&(__trust_vc_implies!(c,d))}",
+            "each bullet is connective-lowered on its own"
+        );
+        let iff = normalized("{ &&& a <==> b &&& c }").replace(' ', "");
+        assert_eq!(iff, "{(__trust_vc_iff!(a,b))&&(c)}");
+        // Statement segment: bullets after a `let` are still leading.
+        let stmt = normalized("{ let x = 1; &&& x == 1 ==> y &&& z }").replace(' ', "");
+        assert!(
+            stmt.contains("(__trust_vc_implies!(x==1,y))&&(z)"),
+            "got: {stmt}"
+        );
+    }
+
+    #[test]
+    fn test_big_and_mixing_and_empty_bullets_fail_closed() {
+        let err = normalized_err("{ &&& a ||| b }");
+        assert!(err.contains("cannot mix `&&&` and `|||`"), "got: {err}");
+        let err = normalized_err("{ &&& a &&& &&& b }");
+        assert!(
+            err.contains("`&&&` requires an expression after each bullet"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_big_and_infix_untouched() {
+        // A non-leading `&&&` is not a bullet sequence (upstream: parse error);
+        // it keeps its pre-existing plain-Rust reading.
+        assert_eq!(normalized("a &&& b"), "a && & b");
+    }
+
+    #[test]
+    fn test_projection_receiver_after_connective_stops_at_comparison() {
+        // `p ==> result == e->0`: the projection receiver is `e`, not
+        // `result == e` (the connective arrow is a floor for the scan, and the
+        // longest LEGAL suffix excludes the comparison).
+        let result = normalized("p ==> result == e->0").replace(' ', "");
+        assert!(
+            result.contains("result==::trust_vc_core::__trust_vc_field_proj_x30(e)"),
+            "got: {result}"
+        );
+        let is_form = normalized("p ==> flag == value is V").replace(' ', "");
+        assert!(
+            is_form.contains("flag==(match(value){V{..}=>true,_=>false})"),
+            "got: {is_form}"
+        );
+    }
+
+    #[test]
+    fn test_matches_with_tail_as_binary_right_operand_fails_closed() {
+        // Upstream adts.rs matches_syntax_precedence_4a / 4b / 5 / 6 /
+        // nonsensical_1 / nonsensical_2: rejected, not silently read one way.
+        for source in [
+            "false && E::A matches E::A ==> true",
+            "false || E::A matches E::A ==> true",
+            "false == E::A matches E::A && true",
+            "false <==> E::A matches E::A ==> true",
+            "3 < E::A matches E::A ==> true",
+            "3 >> E::A matches E::A ==> true",
+            "false & E::A matches E::A ==> true",
+            "false | E::A matches E::A ==> true",
+            "1 + E::A matches E::A ==> true",
+            "a - E::A matches E::A ==> true",
+            "(a) * E::A matches E::A && true",
+        ] {
+            let tokens: TokenStream = source.parse().expect("tokens");
+            let err = rewrite_verus_result_variant_sequence(tokens.into_iter().collect())
+                .expect_err(source);
+            assert!(
+                err.to_string()
+                    .contains("is currently not allowed on the right-hand-side"),
+                "{source}: {err}"
+            );
+        }
+        // Still accepted: a bullet-led / arm-led / parenthesized receiver, a
+        // bare `matches` (no tail) under a binary operator, and a `matches`
+        // nested in another `matches ==>` RHS.
+        for source in [
+            "&& t matches A { v: a } && a == 3",
+            "&&& t matches A(x) &&& x == 4",
+            "false && E::A matches E::A",
+            "false && (E::A matches E::A ==> true)",
+            "b matches B::B1(a) ==> a matches A::A1 { v } ==> v == 3",
+            "forall | e : E | e matches E::A ==> true",
+            "x == & E::A matches E::A",
+            "- E::A matches E::A ==> true",
+        ] {
+            let tokens: TokenStream = source.parse().expect("tokens");
+            assert!(
+                rewrite_verus_result_variant_sequence(tokens.into_iter().collect()).is_ok(),
+                "{source} must still lower"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matches_implies_rhs_stops_at_iff() {
+        // SOUNDNESS: `e matches A ==> b <==> c` is `(e matches A ==> b) <==> c`.
+        let compact = normalized("e matches A ==> b <==> c").replace(' ', "");
+        assert_eq!(compact, "__trust_vc_iff!((match(e){A{..}=>{b},_=>true}),c)");
+        // Without a `<==>` the RHS is still the whole remainder (right-assoc `==>`).
+        let plain = normalized("e matches A(x) ==> x == 1 ==> y").replace(' ', "");
+        assert_eq!(
+            plain,
+            "(match(e){A(x)=>{__trust_vc_implies!(x==1,y)},_=>true})"
         );
     }
 

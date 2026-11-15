@@ -48,25 +48,53 @@ pub type TrusTrustIrMemoryObligation = TrustMirMemoryObligation;
 #[allow(clippy::upper_case_acronyms)]
 pub type TrusTrustIrMemoryProofUnit = TrustMirMemoryProofUnit;
 pub mod native_artifact;
+/// The EXPORT SEAM's assertion-id corroboration (adversarial review round 8).
+pub(crate) mod native_assertion_id;
+/// The DERIVED enumeration of every producer field that crosses into this crate.
+///
+/// Public because it is an AUDIT artifact: it is the census a reviewer reads to
+/// answer "what does trust-vc read off a producer bundle, and is the lane's
+/// invariant kept there", and it is checked against the code by its own tests.
+pub mod producer_fields;
 pub use native_artifact::{
-    TrustVcNativeArtifactAdmission, TrustVcNativeArtifactAdmissionStatus,
-    TrustVcNativeArtifactExpectation, TrustVcNativeArtifactObligationStatus,
-    TrustVcNativeArtifactRejection, TrustVcNativeArtifactReplayStatus,
+    corroborated_assertion_id, TrustVcNativeArtifactAdmission,
+    TrustVcNativeArtifactAdmissionStatus, TrustVcNativeArtifactExpectation,
+    TrustVcNativeArtifactObligationStatus, TrustVcNativeArtifactRejection,
+    TrustVcNativeArtifactReplayStatus, TrustVcNativeAssertionIdRendering,
     TrustVcNativeCompilerFactKind, TrustVcNativeCompilerFactRef, TrustVcNativeCompilerFactsBinding,
     TrustVcNativeObligationCause, TrustVcNativeProofArtifact, TrustVcNativeProofArtifactInput,
     TrustVcNativeSolverIdentity, TrustVcNativeSourceSpan, TrustVcNativeToolIdentity,
     TrustVcNativeVerifierSuite, TrustVcNativeVerifierSuiteIdentity,
     TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION,
 };
+pub mod native_coverage;
+pub use native_coverage::{TrustVcNativeCoverageBasis, TrustVcNativeKernelClaimFamily};
+pub mod native_discharge;
 pub mod native_trust_ir_bundle;
 pub use native_trust_ir_bundle::{
+    TrustVcNativeTrustIrAdvisoryOutcome, TrustVcNativeTrustIrBodyReading,
     TrustVcNativeTrustIrBundleReport, TrustVcNativeTrustIrCertificateAdmission,
     TrustVcNativeTrustIrCertificateAdmissionStatus, TrustVcNativeTrustIrCertificateEvidence,
-    TrustVcNativeTrustIrCertificateRejection, TrustVcNativeTrustIrEvidenceKind,
-    TrustVcNativeTrustIrInputKind, TrustVcNativeTrustIrObligationKind,
-    TrustVcNativeTrustIrReplayMetadata, TrustVcNativeTrustIrReplayMetadataSource,
-    TrustVcNativeTrustIrRequestMode, TrustVcNativeTrustIrRequestReport,
+    TrustVcNativeTrustIrCertificateRejection, TrustVcNativeTrustIrDischargeAnswer,
+    TrustVcNativeTrustIrDischargeAuthority, TrustVcNativeTrustIrDischargeIgnoredInputs,
+    TrustVcNativeTrustIrDischargeObligation, TrustVcNativeTrustIrDischargeOutcome,
+    TrustVcNativeTrustIrDischargeStatus, TrustVcNativeTrustIrEvidenceKind,
+    TrustVcNativeTrustIrExitClass, TrustVcNativeTrustIrInputKind,
+    TrustVcNativeTrustIrLoweringWitness, TrustVcNativeTrustIrObligationKind,
+    TrustVcNativeTrustIrPremise, TrustVcNativeTrustIrPremiseKind,
+    TrustVcNativeTrustIrProducedCertificate, TrustVcNativeTrustIrReplayMetadata,
+    TrustVcNativeTrustIrReplayMetadataSource, TrustVcNativeTrustIrRequestMode,
+    TrustVcNativeTrustIrRequestReport, TrustVcNativeTrustIrUnexaminedAssert,
     TrustVcNativeTrustIrVerdict,
+};
+pub mod trust_ir_body;
+pub use trust_ir_body::{
+    trust_ir_body_semantic_digest, AssertPosition, BodyReading, HavocSeedPosition, IgnoredInputs,
+    LoweringWitness, TrustIrBodyAuthority, TrustIrBodyBinding, TrustIrBodyCertificate,
+    TrustIrBodyError, TrustIrBodyObligationReport, TrustIrBodyOptions, TrustIrBodyRefusal,
+    TrustIrBodyReport, TrustIrBodyVerdict, TrustIrBodyWitness, TrustIrScalar,
+    HAVOC_INSTANTIATION_NOTE, TRUST_IR_BODY_BINDING_SCHEMA, TRUST_IR_BODY_LANE_SCHEMA,
+    TRUST_IR_BODY_TRUST_IR_PIN, UNOBLIGATED_ASSERT_LABEL,
 };
 pub mod trust_ir_adapter;
 pub use trust_ir_adapter::{
@@ -1126,6 +1154,25 @@ pub struct TrustVerificationUnit {
     native_context: Option<TrustNativeContext>,
     variables: Vec<TrustVariable>,
     obligations: Vec<TrustObligation>,
+    /// Verify this unit under EXEC arithmetic: `OverflowBehavior::Error`,
+    /// `Div0Behavior::Error` and `BitshiftBehavior::Error`, the same three the
+    /// `trust-vc-driver` seam's `verify_exec` sets for a rustc-driver exec body.
+    ///
+    /// WHAT THIS ACTUALLY BUYS, measured rather than assumed. The division and
+    /// shift PARTIALITY obligations (`y != 0`, signed `MIN / -1`, shift amount
+    /// in range) are emitted from `div0_behavior`/`bitshift_behavior` and are
+    /// therefore live for every obligation kind. Arithmetic OVERFLOW checking is
+    /// not: `obligation_carries_spec_arithmetic` disables it for `Requires` /
+    /// `Ensures` / `Recommends` obligations, because a contract clause's `+` is
+    /// SPEC arithmetic (mathematical), not an exec operation. That is deliberate
+    /// upstream behaviour and this flag does not override it — so a caller must
+    /// not read a verified `ensures` as a no-overflow claim about the body. The
+    /// body's arithmetic safety is a separate panic-freedom obligation.
+    ///
+    /// `serde(default)` is FALSE, which preserves every existing unit's
+    /// behaviour: a caller that wants the checks says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exec_arithmetic: bool,
 }
 
 impl TrustVerificationUnit {
@@ -1137,6 +1184,7 @@ impl TrustVerificationUnit {
             native_context: None,
             variables: Vec::new(),
             obligations: Vec::new(),
+            exec_arithmetic: false,
         }
     }
 
@@ -1187,6 +1235,20 @@ impl TrustVerificationUnit {
     pub fn with_obligation(mut self, obligation: TrustObligation) -> Self {
         self.obligations.push(obligation);
         self
+    }
+
+    /// Verify this unit under exec arithmetic semantics.
+    ///
+    /// See the `exec_arithmetic` field's documentation for exactly which checks
+    /// this turns on and which one it deliberately does not.
+    pub const fn with_exec_arithmetic(mut self) -> Self {
+        self.exec_arithmetic = true;
+        self
+    }
+
+    /// Return whether this unit is verified under exec arithmetic semantics.
+    pub const fn exec_arithmetic(&self) -> bool {
+        self.exec_arithmetic
     }
 }
 
@@ -2041,7 +2103,8 @@ impl TrustSort {
         matches!(self, Self::BitVector { .. } | Self::MathInt | Self::Nat)
     }
 
-    fn display_label(&self) -> String {
+    /// A short human label for this sort, used in decline and diagnostic text.
+    pub fn display_label(&self) -> String {
         match self {
             Self::Bool => "bool".to_string(),
             Self::Char => "char".to_string(),
@@ -2644,6 +2707,13 @@ pub enum TrustExpr {
         right: Box<TrustExpr>,
         sort: TrustSort,
     },
+    /// A typed conditional. All three children remain part of validation and identity.
+    Ite {
+        condition: Box<TrustExpr>,
+        then_expr: Box<TrustExpr>,
+        else_expr: Box<TrustExpr>,
+        sort: TrustSort,
+    },
     Compare {
         op: TrustCompareOp,
         left: Box<TrustExpr>,
@@ -2716,6 +2786,21 @@ impl TrustExpr {
             op,
             left: Box::new(left),
             right: Box::new(right),
+            sort,
+        }
+    }
+
+    /// Typed conditional over the supported scalar carrier sorts.
+    pub fn ite(
+        condition: TrustExpr,
+        then_expr: TrustExpr,
+        else_expr: TrustExpr,
+        sort: TrustSort,
+    ) -> Self {
+        Self::Ite {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
             sort,
         }
     }
@@ -2845,6 +2930,20 @@ impl TrustExpr {
                 right: Box::new(right.to_trust_vc_expr()?),
                 ty: sort.to_trust_vc_type()?,
             }),
+            Self::Ite {
+                condition,
+                then_expr,
+                else_expr,
+                sort,
+            } => {
+                require_supported_ite_sort("<trust-vc-expr>", "<expr>", sort)?;
+                Ok(TrustVcExpr::Ite {
+                    cond: Box::new(condition.to_trust_vc_expr()?),
+                    then_branch: Box::new(then_expr.to_trust_vc_expr()?),
+                    else_branch: Box::new(else_expr.to_trust_vc_expr()?),
+                    ty: sort.to_trust_vc_type()?,
+                })
+            }
             Self::Compare { op, left, right } => Ok(TrustVcExpr::Compare {
                 op: (*op).into(),
                 left: Box::new(left.to_trust_vc_expr()?),
@@ -2957,6 +3056,21 @@ impl TrustExpr {
                 Self::from_trust_vc_expr_for_obligation(unit_id, obligation_id, right)?,
                 TrustSort::from_trust_vc_type(unit_id, obligation_id, ty)?,
             )),
+            TrustVcExpr::Ite {
+                cond,
+                then_branch,
+                else_branch,
+                ty,
+            } => {
+                let sort = TrustSort::from_trust_vc_type(unit_id, obligation_id, ty)?;
+                require_supported_ite_sort(unit_id, obligation_id, &sort)?;
+                Ok(Self::ite(
+                    Self::from_trust_vc_expr_for_obligation(unit_id, obligation_id, cond)?,
+                    Self::from_trust_vc_expr_for_obligation(unit_id, obligation_id, then_branch)?,
+                    Self::from_trust_vc_expr_for_obligation(unit_id, obligation_id, else_branch)?,
+                    sort,
+                ))
+            }
             TrustVcExpr::Compare { op, left, right } => Ok(Self::compare(
                 TrustCompareOp::from_trust_vc(*op).ok_or_else(|| {
                     TrustEngineError::UnsupportedTypedProofObligation {
@@ -3087,6 +3201,17 @@ impl TrustExpr {
                     right.display_label()
                 )
             }
+            Self::Ite {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => format!(
+                "if {} {{ {} }} else {{ {} }}",
+                condition.display_label(),
+                then_expr.display_label(),
+                else_expr.display_label()
+            ),
             Self::Compare { op, left, right } => {
                 format!(
                     "({} {} {})",
@@ -4190,6 +4315,10 @@ impl Default for TrustReleaseProofAdmission {
 
 impl TrustReleaseProofAdmission {
     /// Build a release-admission verdict from proof-certificate metrics.
+    ///
+    /// `strict_verified` and `kernel_verified` are the checkers' verdicts on
+    /// the DERIVATION. Whether its premises are the obligation's own query is
+    /// a separate condition, added by [`Self::with_premise_binding`].
     pub fn from_certificate_metrics(
         strict_verified: bool,
         kernel_verified: bool,
@@ -4218,6 +4347,19 @@ impl TrustReleaseProofAdmission {
             },
             rejection_reasons,
         }
+    }
+
+    /// Add the premise-binding condition: a certificate whose `assume`
+    /// premises are not the obligation's own query (a premise trust-vc did not
+    /// assert) is not release-admissible, whatever the checkers said about its
+    /// derivation.
+    pub fn with_premise_binding(mut self, premises_bound: bool) -> Self {
+        if !premises_bound {
+            self.rejection_reasons
+                .push(TrustReleaseProofRejection::PremisesNotBoundToObligation);
+            self.status = TrustReleaseProofAdmissionStatus::Rejected;
+        }
+        self
     }
 
     /// Return the release-admission status.
@@ -4263,6 +4405,20 @@ pub enum TrustReleaseProofRejection {
     ProofHolesPresent,
     /// The artifact contains solver trust steps.
     TrustedSolverStepsPresent,
+    /// The certificate's `assume` premises are not the obligation's own query
+    /// (a premise trust-vc did not assert), so it is no evidence for the
+    /// obligation.
+    PremisesNotBoundToObligation,
+}
+
+/// Serde skip predicate for a count that defaults to zero.
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Serde skip predicate for a flag that defaults to `false`.
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Replayable TrustVc proof artifact bound to one verified assertion step.
@@ -4280,6 +4436,18 @@ pub struct TrustReplayableProofArtifact {
     strict_verified: bool,
     clean_supported: bool,
     kernel_verified: bool,
+    /// Clauses the kernel took as given (theory lemmas and unchecked rule
+    /// steps); AY's strict checker checks them. Absent in older payloads.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    kernel_trusted_steps: u32,
+    /// The query collapsed to `false` while trust-vc built it (see
+    /// [`Self::query_collapsed`]). Absent in older payloads.
+    #[serde(default, skip_serializing_if = "is_false")]
+    query_collapsed: bool,
+    /// Premises trust-vc proved by a separate, uncertified solve (see
+    /// [`Self::assumed_lemma_premises`]). Absent in older payloads.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    assumed_lemma_premises: u32,
     trust_count: u32,
     hole_count: u32,
     resolution_count: u32,
@@ -4300,18 +4468,43 @@ impl TrustReplayableProofArtifact {
             return Ok(Vec::new());
         }
 
-        Self::from_verified_report(unit, policy, report)
+        let assertion_ids = unit
+            .obligations
+            .iter()
+            .filter(|obligation| obligation.role == TrustObligationRole::Assertion)
+            .map(|obligation| obligation.id.clone())
+            .collect::<Vec<_>>();
+        let assumption_ids = unit
+            .obligations
+            .iter()
+            .filter(|obligation| obligation.role == TrustObligationRole::Assumption)
+            .map(|obligation| obligation.id.clone())
+            .collect::<Vec<_>>();
+        Self::from_verified_report(
+            &unit.unit_id,
+            policy,
+            report,
+            &assertion_ids,
+            &assumption_ids,
+        )
     }
 
+    /// Mint per-assertion artifacts from a verified report.
+    ///
+    /// Takes the binding identity (`unit_id`) and the assertion/assumption id
+    /// lists directly, so callers without a [`TrustVerificationUnit`] (the
+    /// trust-ir body lane) share the exact refusal logic below.
     #[cfg(not(feature = "proof-certificates"))]
-    fn from_verified_report(
-        unit: &TrustVerificationUnit,
+    pub(crate) fn from_verified_report(
+        unit_id: &str,
         policy: TrustProofPolicy,
         _report: &VerificationReport,
+        _assertion_ids: &[String],
+        _assumption_ids: &[String],
     ) -> Result<Vec<Self>, TrustEngineError> {
         if policy.requires_replayable_artifact() {
             return Err(TrustEngineError::ReplayableProofCertificateUnavailable {
-                unit_id: unit.unit_id.clone(),
+                unit_id: unit_id.to_string(),
                 policy,
                 reason: "trust-vc-trust-engine was built without the proof-certificates feature",
             });
@@ -4319,17 +4512,20 @@ impl TrustReplayableProofArtifact {
         Ok(Vec::new())
     }
 
+    /// Mint per-assertion artifacts from a verified report.
+    ///
+    /// Takes the binding identity (`unit_id`) and the assertion/assumption id
+    /// lists directly, so callers without a [`TrustVerificationUnit`] (the
+    /// trust-ir body lane) share the exact refusal logic below.
     #[cfg(feature = "proof-certificates")]
-    fn from_verified_report(
-        unit: &TrustVerificationUnit,
+    pub(crate) fn from_verified_report(
+        unit_id: &str,
         policy: TrustProofPolicy,
         report: &VerificationReport,
+        assertion_ids: &[String],
+        assumption_ids: &[String],
     ) -> Result<Vec<Self>, TrustEngineError> {
-        let assertion_obligations = unit
-            .obligations
-            .iter()
-            .filter(|obligation| obligation.role == TrustObligationRole::Assertion)
-            .collect::<Vec<_>>();
+        let assertion_obligations = assertion_ids.iter().collect::<Vec<_>>();
         let mut artifacts = Vec::new();
         // Assertions whose label covered SEVERAL verified queries. Distinct from
         // "no artifact bound", which is why it is counted separately.
@@ -4358,7 +4554,7 @@ impl TrustReplayableProofArtifact {
             // that must compare the REFUTED formula against the step's goal —
             // comparing label strings cannot see this defect.
             let mut matching = report.steps().iter().filter(|step| {
-                step.label() == assertion.id
+                step.label() == assertion.as_str()
                     && matches!(step.result(), trust_vc_core::StepResultKind::Verified)
             });
             let Some(step) = matching.next() else {
@@ -4378,12 +4574,21 @@ impl TrustReplayableProofArtifact {
             let Some(proof) = step.proof() else {
                 continue;
             };
+            // #2654: the certificate must be the solver's refutation of THIS
+            // assertion's own negated goal, not of some sub-query that ran under
+            // the same report step. `refutes_obligation` compares against the
+            // obligation identity captured at the solve site. `capture` already
+            // enforces this before attaching, so a mismatch here means the two
+            // layers disagree — refuse rather than mint.
+            if !proof.refutes_obligation(assertion.as_str()) {
+                continue;
+            }
             if let Some(artifact) = Self::from_certificate(
-                unit,
+                unit_id,
                 policy,
                 proof,
-                assumption_obligation_ids_for_step(unit, step.used_assumptions()),
-                vec![assertion.id.clone()],
+                assumption_obligation_ids_for_step(assumption_ids, step.used_assumptions()),
+                vec![(*assertion).clone()],
             )? {
                 artifacts.push(artifact);
             }
@@ -4391,8 +4596,9 @@ impl TrustReplayableProofArtifact {
 
         // The single-assertion fallback mints from `report.proof()`, which is
         // `collector.proof` — OVERWRITTEN on every recorded certificate
-        // (trust-vc-core capture.rs:340), so it is the LAST one. That is fine
-        // when the sole assertion simply had no per-step certificate recorded.
+        // on every query, so it is the LAST one. Cardinality alone never
+        // justified reading it as the sole assertion's evidence: a unit with
+        // one ASSERTION can still run solver queries for other obligation roles.
         //
         // It is NOT fine when the per-assertion loop refused for AMBIGUITY: a
         // unit whose one assertion is a loop invariant has two verified steps
@@ -4403,17 +4609,21 @@ impl TrustReplayableProofArtifact {
         // the other door.
         //
         // So the fallback is suppressed whenever any assertion was refused for
-        // ambiguity. The unit then fails the completeness check below and the
-        // policy declines, which is the fail-closed outcome.
+        // ambiguity. It also requires #2654's solve-site identity to match the
+        // assertion exactly. Either refusal makes the completeness check below
+        // decline, which is the fail-closed outcome.
         if artifacts.is_empty() && assertion_obligations.len() == 1 && ambiguous_assertions == 0 {
-            if let Some(proof) = report.proof() {
-                let assertion = assertion_obligations[0];
+            let assertion = assertion_obligations[0];
+            let bound_proof = report
+                .proof()
+                .filter(|proof| proof.refutes_obligation(assertion.as_str()));
+            if let Some(proof) = bound_proof {
                 if let Some(artifact) = Self::from_certificate(
-                    unit,
+                    unit_id,
                     policy,
                     proof,
-                    all_assumption_obligation_ids(unit),
-                    vec![assertion.id.clone()],
+                    assumption_ids.to_vec(),
+                    vec![assertion.clone()],
                 )? {
                     artifacts.push(artifact);
                 }
@@ -4422,7 +4632,7 @@ impl TrustReplayableProofArtifact {
 
         if policy.requires_replayable_artifact() && artifacts.len() != assertion_obligations.len() {
             return Err(TrustEngineError::ReplayableProofCertificateUnavailable {
-                unit_id: unit.unit_id.clone(),
+                unit_id: unit_id.to_string(),
                 policy,
                 reason: "TrustVc verified the unit but did not return a proof certificate for every verified assertion",
             });
@@ -4433,7 +4643,7 @@ impl TrustReplayableProofArtifact {
 
     #[cfg(feature = "proof-certificates")]
     fn from_certificate(
-        unit: &TrustVerificationUnit,
+        unit_id: &str,
         policy: TrustProofPolicy,
         proof: &trust_vc_core::ProofCertificate,
         assumption_obligation_ids: Vec<String>,
@@ -4442,7 +4652,7 @@ impl TrustReplayableProofArtifact {
         if proof.alethe().is_empty() {
             if policy.requires_replayable_artifact() {
                 return Err(TrustEngineError::ReplayableProofCertificateUnavailable {
-                    unit_id: unit.unit_id.clone(),
+                    unit_id: unit_id.to_string(),
                     policy,
                     reason: "TrustVc returned an empty Alethe proof certificate",
                 });
@@ -4452,9 +4662,13 @@ impl TrustReplayableProofArtifact {
 
         if policy.requires_strict_replayable_artifact() && !proof.strict_verified() {
             return Err(TrustEngineError::ReplayableProofCertificateUnavailable {
-                unit_id: unit.unit_id.clone(),
+                unit_id: unit_id.to_string(),
                 policy,
-                reason: "the Alethe proof certificate was not accepted by the strict checker",
+                reason: if proof.premises_bound() {
+                    "the Alethe proof certificate was not accepted by the strict checker"
+                } else {
+                    "the Alethe proof certificate's premises are not the obligation's own query"
+                },
             });
         }
 
@@ -4466,20 +4680,24 @@ impl TrustReplayableProofArtifact {
         let binding_fingerprint = proof_artifact_binding_fingerprint(
             &artifact_id,
             &digest,
-            &unit.unit_id,
+            unit_id,
             &assumption_obligation_ids,
             &assertion_obligation_ids,
         );
+        // Release admission: AY's strict check of every step (theory lemmas
+        // included) and the trust-vc-kernel's replay of the refutation, on
+        // premises that are this obligation's own query.
         let release_admission = TrustReleaseProofAdmission::from_certificate_metrics(
-            proof.strict_verified(),
-            proof.kernel_verified(),
+            proof.derivation_strict_verified(),
+            proof.kernel_skeleton_accepted(),
             proof.trust_count(),
             proof.hole_count(),
-        );
+        )
+        .with_premise_binding(proof.premises_bound());
 
         let artifact = Self {
             artifact_id,
-            unit_id: unit.unit_id.clone(),
+            unit_id: unit_id.to_string(),
             format: TrustProofArtifactFormat::Alethe,
             digest,
             binding_fingerprint,
@@ -4487,6 +4705,9 @@ impl TrustReplayableProofArtifact {
             strict_verified: proof.strict_verified(),
             clean_supported: proof.clean_supported(),
             kernel_verified: proof.kernel_verified(),
+            kernel_trusted_steps: proof.kernel_trusted_steps(),
+            query_collapsed: proof.query_collapsed(),
+            assumed_lemma_premises: proof.assumed_lemma_premises(),
             trust_count: proof.trust_count(),
             hole_count: proof.hole_count(),
             resolution_count: proof.resolution_count(),
@@ -4500,7 +4721,7 @@ impl TrustReplayableProofArtifact {
             && !artifact.release_admission.is_admissible()
         {
             return Err(TrustEngineError::ReplayableProofCertificateUnavailable {
-                unit_id: unit.unit_id.clone(),
+                unit_id: unit_id.to_string(),
                 policy,
                 reason: "the proof certificate is replayable but not release-admissible",
             });
@@ -4549,9 +4770,38 @@ impl TrustReplayableProofArtifact {
         self.clean_supported
     }
 
-    /// Return whether the independent TrustVc kernel accepted the proof.
+    /// Return whether the independent TrustVc kernel accepted the proof as a
+    /// refutation of its obligation's own query. Clauses it took as given are
+    /// [`Self::kernel_trusted_steps`].
     pub const fn kernel_verified(&self) -> bool {
         self.kernel_verified
+    }
+
+    /// Return how many clauses the kernel took as given (theory lemmas and
+    /// generic rule steps it has no checker for). AY's strict checker checks
+    /// them; zero means the kernel derived the whole refutation.
+    pub const fn kernel_trusted_steps(&self) -> u32 {
+        self.kernel_trusted_steps
+    }
+
+    /// Return whether the query collapsed to `false` while trust-vc built it:
+    /// AY's term builder folded the negated goal (for example `result == body`
+    /// with the body substituted, `e == e`) to the constant `false`. The
+    /// refutation is then trivial, and the evidence for the obligation is that
+    /// builder rewrite, which is trusted as every builder rewrite is. This
+    /// discloses; it withholds no claim and no admission.
+    pub const fn query_collapsed(&self) -> bool {
+        self.query_collapsed
+    }
+
+    /// Return how many of the certificate's premises are predicates trust-vc
+    /// proved by a separate solve and then assumed (the no-overflow and
+    /// collection-precondition predicates of the obligation). Those solves
+    /// record no certificate, so the certificate shows the obligation given
+    /// them. This discloses; release admission does not yet require them to
+    /// be certified.
+    pub const fn assumed_lemma_premises(&self) -> u32 {
+        self.assumed_lemma_premises
     }
 
     /// Return the number of solver trust steps in the artifact.
@@ -5138,6 +5388,9 @@ fn configure_trust_verification_context(
     {
         context.set_verification_mode(trust_vc_core::vc::VerificationMode::CallSite);
     }
+    if unit.exec_arithmetic {
+        context.enable_overflow_checks();
+    }
 }
 
 /// Aggregate report counts.
@@ -5188,6 +5441,7 @@ impl From<VerifyResult> for TrustOutcome {
                 obligation_name,
                 model,
                 bindings,
+                ..
             } => Self::Refuted {
                 obligation_id: obligation_name,
                 model,
@@ -5436,8 +5690,81 @@ pub enum TrustEngineError {
     },
     #[error("invalid native TrustIr verification bundle: {errors}")]
     InvalidNativeTrustIrBundle { errors: String },
+    /// The PRODUCER's own validator rejected the incoming module.
+    ///
+    /// `trust-ir-build::validate_module` is the well-formedness authority for
+    /// the format this crate consumes. A module it rejects is not a module this
+    /// lane may reason about: adversarial review rounds 1-4 each found a false
+    /// `Discharged` whose shape that validator already refuses (a signature that
+    /// disagrees with its entry block, a duplicate `ProofId`, a value defined
+    /// twice, a constant out of its sort). Kept SEPARATE from
+    /// `InvalidNativeTrustIrBundle` so a caller can tell a malformed *module*
+    /// from a malformed *request envelope*.
+    #[error("native TrustIr module `{module}` is rejected by the producer validator: {errors}")]
+    NativeTrustIrModuleRejectedByProducerValidator { module: String, errors: String },
+    /// The module carries a construct trust-ir's canonical binary writer
+    /// cannot encode (an instruction ahead of its wire tag — e.g. `MemCopy` /
+    /// `MemSet` at trust-ir `0.14.0@4f09dab8` — or a scope's inlining-chain
+    /// link). Such a module has no `stable_digest`: hashing it would abort the
+    /// process, so it is refused here, before anything is hashed or answered.
+    #[error(
+        "native TrustIr module has no wire identity ({construct} at {location}); nothing \
+         can be bound to it, so it is refused"
+    )]
+    NativeTrustIrModuleHasNoWireIdentity { location: String, construct: String },
     #[error("native TrustIr bundle for module `{module}` contains no TrustVc requests")]
     NativeTrustIrBundleHasNoTrustVcRequests { module: String },
+    /// THE EXPORT SEAM refused: two renderings of one assertion identity
+    /// disagree, a present one is unreadable, or a TrustVc request's replay
+    /// atom states another formula or another id than the obligation it cites.
+    ///
+    /// The bundle carries the same assertion identity in up to five places;
+    /// an edit to one of them must not re-attribute a real proof to an
+    /// assertion trust-vc never proved. See [`crate::native_assertion_id`] for
+    /// the table of renderings and the one corroboration.
+    #[error(
+        "native TrustIr module `{module}` obligation {obligation_id} carries assertion-id \
+         renderings that disagree: {reason} [{renderings}]"
+    )]
+    NativeTrustIrAssertionIdRenderingsDisagree {
+        module: String,
+        obligation_id: u32,
+        reason: String,
+        renderings: String,
+    },
+    /// THE EXPORT SEAM refused: a certificate this lane produced names an
+    /// obligation the module does not carry, so there is nothing to describe it.
+    ///
+    /// Adversarial review round 9. The evidence row used to DEFAULT here
+    /// (`obligation_kind = Postcondition`, empty description). Absence never
+    /// defaults at this seam.
+    #[error(
+        "native TrustIr module `{module}` has no proof obligation {obligation_id}, but the \
+         discharge lane produced a certificate for it under unit `{unit_id}`"
+    )]
+    NativeTrustIrProducedCertificateUnknownObligation {
+        module: String,
+        obligation_id: u32,
+        unit_id: String,
+    },
+    /// THE EXPORT SEAM refused: the obligation's KIND and the compiler fact's
+    /// CAUSE are two renderings of one datum and they contradict each other.
+    ///
+    /// Adversarial review round 9. The kind decides whether a row is a callee
+    /// contract; the cause is republished on the artifact binding and folded
+    /// into its digest. Only flat contradictions are refused (a precondition
+    /// caused `Postcondition`, or the reverse) — see
+    /// [`crate::native_assertion_id::validate_obligation_kind_renderings`] for
+    /// why a total correspondence would over-reject.
+    #[error(
+        "native TrustIr module `{module}` obligation {obligation_id} is a `{kind}` whose          compiler-fact source row gives cause `{cause}`: two renderings of one obligation kind          that contradict each other"
+    )]
+    NativeTrustIrObligationKindRenderingsDisagree {
+        module: String,
+        obligation_id: u32,
+        kind: String,
+        cause: String,
+    },
     #[error(
         "native TrustIr TrustVc request {request_id} does not provide a certificate for obligation {obligation_id}"
     )]
@@ -5461,6 +5788,113 @@ pub enum TrustEngineError {
         request_id: u32,
         obligation_id: u32,
         prover: String,
+    },
+    // ---- Discharge-mode refusals (native_trust_ir_bundle) --------------------
+    // Appended, never interleaved: the certificate-mode variants above keep
+    // their exact rendered strings, which several suites assert on verbatim.
+    #[error(
+        "native TrustIr request {request_id} was routed to the advisory discharge lane in mode {mode}"
+    )]
+    NativeTrustIrDischargeRequestWrongMode { request_id: u32, mode: String },
+    #[error(
+        "native TrustIr discharge request {request_id} names no function; a discharge request must \
+         name the function its obligations are discharged against"
+    )]
+    NativeTrustIrDischargeRequestMissingFunction { request_id: u32 },
+    #[error(
+        "native TrustIr discharge request {request_id} carries certificate {obligation_id}/{prover}; \
+         a discharge request asks trust-vc to produce proofs, not to import them"
+    )]
+    NativeTrustIrDischargeRequestCarriesCertificate {
+        request_id: u32,
+        obligation_id: u32,
+        prover: String,
+    },
+    #[error("native TrustIr discharge request {request_id} cites no obligations")]
+    NativeTrustIrDischargeRequestWithoutObligations { request_id: u32 },
+    #[error(
+        "native TrustIr discharge request {request_id} cites obligation {obligation_id}, which is \
+         not sited in function {function_id}"
+    )]
+    NativeTrustIrDischargeRequestObligationOutsideFunction {
+        request_id: u32,
+        obligation_id: u32,
+        function_id: u32,
+    },
+    #[error(
+        "native TrustIr discharge request {request_id} cites obligation {obligation_id}, which \
+         declares function {declared_function_id} but is sited in function {function_id}"
+    )]
+    NativeTrustIrDischargeRequestObligationFunctionDisagrees {
+        request_id: u32,
+        obligation_id: u32,
+        declared_function_id: u32,
+        function_id: u32,
+    },
+    #[error(
+        "native TrustIr discharge request {request_id} was refused by the body lane: {detail}"
+    )]
+    NativeTrustIrDischargeLaneRefusedRequest { request_id: u32, detail: String },
+    /// A discharge request names one obligation more than once. A request
+    /// names a set (upstream `validate_requests` refuses the same), and its
+    /// report's obligation list is decoded against exactly that set.
+    #[error(
+        "native TrustIr discharge request {request_id} names obligation {obligation_id} more \
+         than once"
+    )]
+    NativeTrustIrDischargeRequestDuplicateObligation { request_id: u32, obligation_id: u32 },
+    /// [`TrustVcTrustEngine::rejudge_native_trust_ir_discharge_report`] was
+    /// handed a report that does not answer the given request against the
+    /// given module (another request id, digest or module; a renamed, dropped
+    /// or duplicated obligation), so nothing is re-derived for it.
+    #[error(
+        "native TrustIr discharge report does not answer request {request_id} against this \
+         module: {detail}"
+    )]
+    NativeTrustIrDischargeReportNotBound { request_id: u32, detail: String },
+    /// [`TrustVcTrustEngine::validate_native_trust_ir_bundle`] consumed the
+    /// bundle and the rollup verdict was not a clean pass.
+    ///
+    /// A function called `validate_` must not answer `Ok(())` for a bundle
+    /// whose own report says a request was refuted or could not be answered,
+    /// or that a certificate was refused release admission
+    /// (`CertificatesRejected`); the verdict used to be discarded by a
+    /// `.map(|_| ())`, and later a rejected rollup still passed as `Ok`.
+    #[error(
+        "native TrustIr bundle for module `{module}` does not validate: rollup verdict {verdict} \
+         is not a clean pass"
+    )]
+    NativeTrustIrBundleVerdictNotClean { module: String, verdict: String },
+    // ---- Import/Merge obligation refusals (native_trust_ir_bundle) ----------
+    /// An imported certificate's obligation names the temporal property it
+    /// would discharge (`ProofObligation::spec`, trust-ir v46). An import
+    /// report has nowhere to carry that attribution, so admitting the
+    /// certificate would drop it silently; refused instead, as the body lane
+    /// refuses it (`TrustIrBodyRefusal::TemporalPropertyAttributed`).
+    #[error(
+        "native TrustIr TrustVc request {request_id} imports a certificate for obligation \
+         {obligation_id}, which is attributed to temporal property `{temporal}` of machine \
+         `{machine}`; an import cannot carry that attribution, so it is refused"
+    )]
+    NativeTrustIrImportObligationAttributesTemporalProperty {
+        request_id: u32,
+        obligation_id: u32,
+        machine: String,
+        temporal: String,
+    },
+    /// An imported certificate's obligation is of a kind the native report
+    /// cannot state faithfully (temporal safety, liveness, termination,
+    /// ownership, give-back refinement, a producer-namespaced kind, or a kind
+    /// trust-ir added later). It used to be filed as `panic_freedom`.
+    #[error(
+        "native TrustIr TrustVc request {request_id} imports a certificate for obligation \
+         {obligation_id} of kind `{kind}`, which the import cannot represent faithfully, so it \
+         is refused"
+    )]
+    NativeTrustIrImportObligationKindUnrepresentable {
+        request_id: u32,
+        obligation_id: u32,
+        kind: String,
     },
     #[error("unsupported TrustIr adapter schema version {actual}; expected {expected}")]
     UnsupportedTrustIrAdapterSchemaVersion { actual: u32, expected: u32 },
@@ -5569,27 +6003,17 @@ fn sha256_digest(payload: &str) -> String {
 }
 
 #[cfg(feature = "proof-certificates")]
-fn all_assumption_obligation_ids(unit: &TrustVerificationUnit) -> Vec<String> {
-    unit.obligations
-        .iter()
-        .filter(|obligation| obligation.role == TrustObligationRole::Assumption)
-        .map(|obligation| obligation.id.clone())
-        .collect()
-}
-
-#[cfg(feature = "proof-certificates")]
 fn assumption_obligation_ids_for_step(
-    unit: &TrustVerificationUnit,
+    all_assumptions: &[String],
     used_assumptions: &[String],
 ) -> Vec<String> {
-    let all_assumptions = all_assumption_obligation_ids(unit);
     let used = all_assumptions
         .iter()
         .filter(|id| used_assumptions.iter().any(|used| used == *id))
         .cloned()
         .collect::<Vec<_>>();
     if used.is_empty() {
-        all_assumptions
+        all_assumptions.to_vec()
     } else {
         used
     }
@@ -5678,6 +6102,25 @@ fn validate_proof_lineage(
     Ok(())
 }
 
+fn require_supported_ite_sort(
+    unit_id: &str,
+    obligation_id: &str,
+    sort: &TrustSort,
+) -> Result<(), TrustEngineError> {
+    if matches!(sort, TrustSort::Bool | TrustSort::MathInt | TrustSort::Nat) {
+        Ok(())
+    } else {
+        Err(TrustEngineError::InvalidTypedExpr {
+            unit_id: unit_id.to_string(),
+            obligation_id: obligation_id.to_string(),
+            message: format!(
+                "typed conditional result sort {} is outside Bool/MathInt/Nat",
+                sort.display_label()
+            ),
+        })
+    }
+}
+
 fn infer_trust_expr_sort(
     unit_id: &str,
     obligation_id: &str,
@@ -5686,6 +6129,54 @@ fn infer_trust_expr_sort(
     old_snapshots: &BTreeMap<String, (String, TrustSort)>,
 ) -> Result<TrustSort, TrustEngineError> {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            sort,
+        } => {
+            require_supported_ite_sort(unit_id, obligation_id, sort)?;
+            let condition_sort = infer_trust_expr_sort(
+                unit_id,
+                obligation_id,
+                condition,
+                variable_sorts,
+                old_snapshots,
+            )?;
+            let then_sort = infer_trust_expr_sort(
+                unit_id,
+                obligation_id,
+                then_expr,
+                variable_sorts,
+                old_snapshots,
+            )?;
+            let else_sort = infer_trust_expr_sort(
+                unit_id,
+                obligation_id,
+                else_expr,
+                variable_sorts,
+                old_snapshots,
+            )?;
+            require_bool_sort(
+                unit_id,
+                obligation_id,
+                "conditional condition",
+                &condition_sort,
+            )?;
+            if then_sort != *sort || else_sort != *sort {
+                return Err(TrustEngineError::InvalidTypedExpr {
+                    unit_id: unit_id.to_string(),
+                    obligation_id: obligation_id.to_string(),
+                    message: format!(
+                        "conditional arms must both have result sort {}; got {} and {}",
+                        sort.display_label(),
+                        then_sort.display_label(),
+                        else_sort.display_label()
+                    ),
+                });
+            }
+            Ok(sort.clone())
+        }
         TrustExpr::BoolLiteral { .. } => Ok(TrustSort::Bool),
         TrustExpr::IntLiteral { sort, .. } => {
             sort.to_trust_vc_type()?;
@@ -6045,6 +6536,16 @@ fn infer_trust_expr_sort(
 
 fn trust_expr_references_any_variable_name(expr: &TrustExpr, names: &BTreeSet<String>) -> bool {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            trust_expr_references_any_variable_name(condition, names)
+                || trust_expr_references_any_variable_name(then_expr, names)
+                || trust_expr_references_any_variable_name(else_expr, names)
+        }
         TrustExpr::Variable { name, .. } => names.contains(name),
         TrustExpr::BoolLiteral { .. } | TrustExpr::IntLiteral { .. } | TrustExpr::Old { .. } => {
             false
@@ -6373,6 +6874,16 @@ struct CastFactShape {
 
 fn collect_cast_fact_shape(expr: &TrustExpr, shape: &mut CastFactShape) {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_cast_fact_shape(condition, shape);
+            collect_cast_fact_shape(then_expr, shape);
+            collect_cast_fact_shape(else_expr, shape);
+        }
         TrustExpr::BoolLiteral { .. }
         | TrustExpr::IntLiteral { .. }
         | TrustExpr::Variable { .. }
@@ -6418,6 +6929,16 @@ fn expr_contains_variable(expr: &TrustExpr) -> bool {
 
 fn expr_contains_free_variable(expr: &TrustExpr, bound_names: &BTreeSet<String>) -> bool {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_contains_free_variable(condition, bound_names)
+                || expr_contains_free_variable(then_expr, bound_names)
+                || expr_contains_free_variable(else_expr, bound_names)
+        }
         TrustExpr::Variable { name, .. } => !bound_names.contains(name),
         TrustExpr::Old { .. } => true,
         TrustExpr::BoolLiteral { .. } | TrustExpr::IntLiteral { .. } => false,
@@ -6472,6 +6993,16 @@ fn collect_pointer_fact_shape(
     shape: &mut PointerFactShape,
 ) {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_pointer_fact_shape(condition, flavor, shape);
+            collect_pointer_fact_shape(then_expr, flavor, shape);
+            collect_pointer_fact_shape(else_expr, flavor, shape);
+        }
         TrustExpr::BoolLiteral { .. }
         | TrustExpr::IntLiteral { .. }
         | TrustExpr::Variable { .. }
@@ -6515,6 +7046,16 @@ fn collect_pointer_fact_shape(
 
 fn expr_contains_pointer_sort(expr: &TrustExpr, flavor: PointerBootstrapFlavor) -> bool {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_contains_pointer_sort(condition, flavor)
+                || expr_contains_pointer_sort(then_expr, flavor)
+                || expr_contains_pointer_sort(else_expr, flavor)
+        }
         TrustExpr::BoolLiteral { .. } | TrustExpr::IntLiteral { .. } => false,
         TrustExpr::Variable { sort, .. } | TrustExpr::Old { sort, .. } => {
             sort_is_pointer_like(sort, flavor)
@@ -6738,6 +7279,16 @@ fn collect_callable_fact_shape(
     shape: &mut CallableFactShape,
 ) {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_callable_fact_shape(condition, flavor, declared_callable_evidence, shape);
+            collect_callable_fact_shape(then_expr, flavor, declared_callable_evidence, shape);
+            collect_callable_fact_shape(else_expr, flavor, declared_callable_evidence, shape);
+        }
         TrustExpr::BoolLiteral { .. }
         | TrustExpr::IntLiteral { .. }
         | TrustExpr::Variable { .. }
@@ -7343,6 +7894,7 @@ fn parse_spec_fn_sort_label(label: &str) -> Option<TrustSort> {
 
 fn trust_expr_static_sort(expr: &TrustExpr) -> TrustSort {
     match expr {
+        TrustExpr::Ite { sort, .. } => sort.clone(),
         TrustExpr::BoolLiteral { .. } => TrustSort::Bool,
         TrustExpr::IntLiteral { sort, .. }
         | TrustExpr::Variable { sort, .. }
@@ -7505,6 +8057,16 @@ fn collect_adt_fact_shape_scoped<'a>(
     bound_names: &BTreeSet<String>,
 ) {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_adt_fact_shape_scoped(condition, declared_datatypes, shape, bound_names);
+            collect_adt_fact_shape_scoped(then_expr, declared_datatypes, shape, bound_names);
+            collect_adt_fact_shape_scoped(else_expr, declared_datatypes, shape, bound_names);
+        }
         TrustExpr::BoolLiteral { .. } | TrustExpr::IntLiteral { .. } => {}
         TrustExpr::Variable { name, sort } => {
             observe_adt_sort(sort, !bound_names.contains(name), declared_datatypes, shape);
@@ -7632,6 +8194,16 @@ fn expr_contains_declared_datatype<'a>(
     declared_datatypes: &BTreeMap<&'a str, &'a TrustDatatype>,
 ) -> bool {
     match expr {
+        TrustExpr::Ite {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_contains_declared_datatype(condition, declared_datatypes)
+                || expr_contains_declared_datatype(then_expr, declared_datatypes)
+                || expr_contains_declared_datatype(else_expr, declared_datatypes)
+        }
         TrustExpr::BoolLiteral { .. } | TrustExpr::IntLiteral { .. } => false,
         TrustExpr::Variable { sort, .. } | TrustExpr::Old { sort, .. } => {
             sort_is_declared_datatype(sort, declared_datatypes)
@@ -7992,6 +8564,9 @@ fn validate_float_width(width: u32) -> Result<(), TrustEngineError> {
 }
 
 #[cfg(test)]
+mod multi_assertion_proof_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -8296,6 +8871,9 @@ mod tests {
             strict_verified,
             clean_supported: strict_verified,
             kernel_verified,
+            kernel_trusted_steps: 0,
+            query_collapsed: false,
+            assumed_lemma_premises: 0,
             trust_count,
             hole_count,
             resolution_count: 1,
@@ -9209,7 +9787,10 @@ mod tests {
             .proof_artifacts()
             .iter()
             .filter(|artifact| {
-                artifact.assertion_obligation_ids().iter().any(|id| id == "inv.non_negative")
+                artifact
+                    .assertion_obligation_ids()
+                    .iter()
+                    .any(|id| id == "inv.non_negative")
             })
             .map(|artifact| artifact.artifact_id().to_string())
             .collect();
@@ -9235,110 +9816,6 @@ mod tests {
              whole obligation's id.",
             bound.len(),
         );
-    }
-
-    #[test]
-    fn multi_assertion_full_verification_binds_distinct_step_artifacts() {
-        let _env_lock = trust_vc_core::env::lock_env();
-        let _vc_cache = trust_vc_core::env::ScopedEnvVar::set("TRUST_VC_DISABLE_VC_CACHE", "1");
-        let engine = TrustVcTrustEngine::new();
-        let i32_sort = TrustSort::signed(32);
-        let x = TrustExpr::variable("x", i32_sort.clone());
-        let positive = TrustExpr::compare(
-            TrustCompareOp::Gt,
-            x.clone(),
-            TrustExpr::int_literal(0, i32_sort.clone()),
-        );
-        let non_negative = TrustExpr::compare(
-            TrustCompareOp::Ge,
-            x.clone(),
-            TrustExpr::int_literal(0, i32_sort.clone()),
-        );
-        let self_equal = TrustExpr::compare(TrustCompareOp::Eq, x.clone(), x);
-        let request = TrustVerificationRequest::new("unit-test")
-            .for_full_verification()
-            .require_replayable_proof_artifacts()
-            .with_unit(
-                TrustVerificationUnit::new("crate::proof")
-                    .with_variable(TrustVariable::new("x", i32_sort))
-                    .with_obligation(TrustObligation::requires_typed("pre", positive))
-                    .with_obligation(TrustObligation::ensures_typed(
-                        "post.non_negative",
-                        non_negative,
-                    ))
-                    .with_obligation(TrustObligation::ensures_typed(
-                        "post.self_equal",
-                        self_equal,
-                    )),
-            );
-
-        let report = engine
-            .verify(&request)
-            .expect("each assertion should produce a replayable proof artifact");
-        let unit = &report.units()[0];
-
-        assert_eq!(unit.proof_artifacts().len(), 2);
-        assert!(
-            unit.proof_artifact().is_none(),
-            "multi-assertion reports must not expose a misleading singleton artifact"
-        );
-
-        for assertion_id in ["post.non_negative", "post.self_equal"] {
-            let evidence = unit
-                .proof_evidence()
-                .iter()
-                .find(|evidence| evidence.obligation_id() == assertion_id)
-                .expect("assertion evidence present");
-            let artifact_id = evidence
-                .proof_artifact_id()
-                .expect("assertion evidence should bind to its own artifact");
-            let artifact = unit
-                .proof_artifacts()
-                .iter()
-                .find(|artifact| artifact.artifact_id() == artifact_id)
-                .expect("bound artifact should be serialized in the unit report");
-
-            assert_eq!(artifact.unit_id(), "crate::proof");
-            assert_eq!(
-                artifact.assertion_obligation_ids(),
-                &[assertion_id.to_string()]
-            );
-            assert_eq!(artifact.assumption_obligation_ids(), &["pre".to_string()]);
-            assert!(artifact.binding_fingerprint().starts_with("sha256:"));
-            assert_eq!(
-                evidence.proof_artifact_binding_fingerprint(),
-                Some(artifact.binding_fingerprint())
-            );
-        }
-
-        let coverage = unit
-            .proof_artifact_coverage()
-            .expect("multi-assertion artifact request should report coverage");
-        assert_eq!(
-            coverage.assertion_obligation_ids(),
-            &[
-                "post.non_negative".to_string(),
-                "post.self_equal".to_string()
-            ]
-        );
-        assert_eq!(
-            coverage.covered_assertion_obligation_ids(),
-            &[
-                "post.non_negative".to_string(),
-                "post.self_equal".to_string()
-            ]
-        );
-        assert!(coverage.missing_assertion_obligation_ids().is_empty());
-        assert_eq!(coverage.artifact_count(), 2);
-        assert!(coverage.is_complete());
-
-        let pre = unit
-            .proof_evidence()
-            .iter()
-            .find(|evidence| evidence.obligation_id() == "pre")
-            .expect("precondition evidence present");
-        assert_eq!(pre.proof_artifact_id(), None);
-        assert_eq!(pre.proof_artifact_binding_fingerprint(), None);
     }
 
     #[test]
@@ -11290,11 +11767,91 @@ mod unique_or_none_tests {
     #[test]
     fn stops_at_the_second_candidate() {
         let mut pulled = 0usize;
-        let counted = (0u8..200).map(|v| {
+        let counted = (0u8..200).inspect(|_| {
             pulled += 1;
-            v
         });
         assert_eq!(unique_or_none(counted), None);
         assert_eq!(pulled, 2, "answering `ambiguous` must need only two pulls");
+    }
+}
+
+#[cfg(test)]
+mod typed_ite_tests {
+    use super::*;
+
+    fn infer(expr: &TrustExpr) -> Result<TrustSort, TrustEngineError> {
+        infer_trust_expr_sort(
+            "ite-test",
+            "ite-question",
+            expr,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn typed_ite_roundtrips_the_existing_core_conditional() {
+        for sort in [TrustSort::MathInt, TrustSort::Nat] {
+            let expr = TrustExpr::ite(
+                TrustExpr::bool_literal(false),
+                TrustExpr::int_literal(0, sort.clone()),
+                TrustExpr::int_literal(7, sort.clone()),
+                sort.clone(),
+            );
+            assert_eq!(infer(&expr).unwrap(), sort);
+            let core = expr.to_trust_vc_expr().unwrap();
+            assert!(matches!(core, TrustVcExpr::Ite { .. }));
+            assert_eq!(TrustExpr::from_trust_vc_expr(&core).unwrap(), expr);
+            let bytes = serde_json::to_string(&expr).unwrap();
+            assert_eq!(serde_json::from_str::<TrustExpr>(&bytes).unwrap(), expr);
+        }
+    }
+
+    #[test]
+    fn typed_ite_checks_condition_both_arms_and_result_sort() {
+        let t = TrustExpr::bool_literal(true);
+        let m = TrustExpr::int_literal(1, TrustSort::MathInt);
+        for expr in [
+            TrustExpr::ite(m.clone(), m.clone(), m.clone(), TrustSort::MathInt),
+            TrustExpr::ite(t.clone(), m.clone(), t.clone(), TrustSort::MathInt),
+            TrustExpr::ite(t.clone(), t.clone(), m.clone(), TrustSort::MathInt),
+            TrustExpr::ite(
+                t.clone(),
+                TrustExpr::int_literal(1, TrustSort::signed(8)),
+                TrustExpr::int_literal(2, TrustSort::signed(8)),
+                TrustSort::signed(8),
+            ),
+            TrustExpr::ite(
+                t.clone(),
+                m.clone(),
+                TrustExpr::variable("unselected", TrustSort::MathInt),
+                TrustSort::MathInt,
+            ),
+            TrustExpr::ite(
+                TrustExpr::bool_literal(false),
+                TrustExpr::variable("unselected", TrustSort::MathInt),
+                m,
+                TrustSort::MathInt,
+            ),
+        ] {
+            assert!(infer(&expr).is_err(), "{expr:?}");
+        }
+    }
+
+    #[test]
+    fn typed_ite_guards_see_variables_in_every_child() {
+        let key = "visible".to_string();
+        let names = BTreeSet::from([key.clone()]);
+        let t = TrustExpr::bool_literal(true);
+        let v = TrustExpr::variable(key, TrustSort::Bool);
+        for expr in [
+            TrustExpr::ite(v.clone(), t.clone(), t.clone(), TrustSort::Bool),
+            TrustExpr::ite(t.clone(), v.clone(), t.clone(), TrustSort::Bool),
+            TrustExpr::ite(t.clone(), t.clone(), v, TrustSort::Bool),
+        ] {
+            assert!(trust_expr_references_any_variable_name(&expr, &names));
+            assert!(expr_contains_free_variable(&expr, &BTreeSet::new()));
+            assert!(!expr_contains_free_variable(&expr, &names));
+        }
     }
 }

@@ -150,6 +150,19 @@ impl<'a> AstExpressionParser<'a> {
         Ok(result)
     }
 
+    /// The inserted elements of a `Set::<T>::empty().insert(e_1)…insert(e_n)`
+    /// store chain, innermost-first, or `None` for anything else.
+    ///
+    /// The root must be a zero-arity `…_empty` collection constructor REGISTERED
+    /// with a `Set<T>` return type — exactly the constant that
+    /// `register_zero_arity_collection_metadata` pins to `const-array(false)`.
+    /// The `Set::fold` finite arm spells membership as the disjunction over
+    /// these elements and is exact ONLY over that base, so a `Seq`/`Map`
+    /// constructor, or a name with no registered `Set` type, is refused. (The
+    /// type is read from the registration, not the name: a path-spelled
+    /// `trust_vc_types::Set::<i32>::empty()` sanitizes to
+    /// `…trust_vc_types_Set_i32_empty`, and `Seq::<Set<i32>>::empty()` to a
+    /// name that also contains `Set_`.)
     fn finite_empty_set_insert_chain(&mut self, receiver: Term) -> Option<Vec<Term>> {
         let true_term = self.solver.bool_const(true);
         let mut current = receiver;
@@ -170,7 +183,8 @@ impl<'a> AstExpressionParser<'a> {
                 }
                 TermKind::Var { name }
                     if name.starts_with(crate::ir_lowering::COLLECTION_CONSTRUCTOR_PREFIX)
-                        && name.ends_with("_empty") =>
+                        && name.ends_with("_empty")
+                        && matches!(self.var_types.get(&name), Some(TrustVcType::Set(_))) =>
                 {
                     elems.reverse();
                     return Some(elems);
@@ -245,7 +259,53 @@ impl<'a> AstExpressionParser<'a> {
             .ok_or_else(|| format!("No length tracked for Set '{}' in fold()", rname))?;
         // Set cardinality is Int (Route A #2779); the linearization ordering is
         // a BV-indexed array, so use a BV view for the index range/select below.
-        let set_len_bv = self.len_as_index_bv(set_len)?;
+        //
+        // FINITE INSTANTIATION for a CONCRETE receiver (2026-09-13). The sets.rs
+        // `test_set_fold_singleton` fold over `Set::<usize>::empty().insert(9)`
+        // timed out at the 30 s wall in every retry (724 s for the suite). The
+        // dumped query is decided GROUND: with the two quantifiers below removed
+        // ay 0.26.0 answers Unsat in 5.7 s, and with the length's BV view spelt
+        // as the literal `#x1` instead of `int2bv(__set_len_insert_N)` it answers
+        // in 0.4 s. So for a pure `Set::empty().insert(e_1)…insert(e_n)` chain
+        // (`finite_empty_set_insert_chain`):
+        //   * when the `e_i` are pairwise-distinct BV LITERALS the cardinality is
+        //     `n` (ay hash-conses and normalizes BV constants, so distinct term ids
+        //     are distinct values; the base is `const-array(false)`), and the fold
+        //     ranges over the literal `n` directly. No fact about the tracked
+        //     `set_len` term is asserted — the fold never reads it — so a
+        //     mis-resolved length can at worst mis-state this fold, never make the
+        //     context contradictory;
+        //   * membership is the literal disjunction over the `e_i` (Step 2);
+        //   * the surjection facts are omitted for a literal cardinality `n <= 4`
+        //     and otherwise instantiated at exactly `e_1..e_n` (Step 3b);
+        //   * the quantified step axiom is dropped when `n <= 4`: the ground
+        //     instances at `i = 0..3` below already cover every `i < len <= n`.
+        // Each is either an equivalence under the chain's own semantics or the
+        // omission of a hypothesis, so none can turn a false claim into
+        // `Verified`. A symbolic set, a `remove`, or an opaque op-result keeps the
+        // quantified encoding unchanged.
+        let finite_chain = self.finite_empty_set_insert_chain(receiver);
+        let literal_cardinality = finite_chain.as_ref().and_then(|elems| {
+            let all_bv_literals = elems.iter().all(|&e| {
+                matches!(self.solver.term_kind(e), TermKind::Const)
+                    && matches!(self.solver.term_sort(e), Sort::BitVec(_))
+            });
+            let pairwise_distinct = elems
+                .iter()
+                .enumerate()
+                .all(|(i, a)| elems[i + 1..].iter().all(|b| a != b));
+            (all_bv_literals && pairwise_distinct).then_some(elems.len())
+        });
+        let set_len_bv = if let Some(n) = literal_cardinality {
+            let bv = self
+                .solver
+                .try_bv_const(n as i64, pw)
+                .map_err(|e| e.to_string())?;
+            self.term_widths.insert(bv, (pw, false));
+            bv
+        } else {
+            self.len_as_index_bv(set_len)?
+        };
         let elem_ty = self.set_element_trust_vc_type(receiver, receiver_name)?;
         let elem_sort = self.set_element_sort(receiver, receiver_name)?;
 
@@ -268,10 +328,27 @@ impl<'a> AstExpressionParser<'a> {
                 .solver
                 .try_select(ordering, ci)
                 .map_err(|e| e.to_string())?;
-            let set_has = self
-                .solver
-                .try_select(receiver, oi)
-                .map_err(|e| e.to_string())?;
+            // Membership of a CONCRETE chain is the literal disjunction
+            // `oi == e_1 ∨ … ∨ oi == e_n` (read-over-write on the const-false
+            // empty base), not a symbolic-index `select` over the store chain:
+            // under the encoder's unsat-core mode ay 0.26.0 answers the
+            // `test_set_fold_two_insert_sum` query `Unknown (incomplete)` in
+            // 20 ms with the symbolic reads and Unsat in 3.6 s with the
+            // disjunctions (measured 2026-09-13; the same query without core
+            // mode is Unsat either way). An equivalence over the chain's
+            // `const-array(false)` base, not a strengthening.
+            let set_has = if let Some(elems) = finite_chain.as_deref() {
+                let mut member = self.solver.bool_const(false);
+                for &elem in elems {
+                    let hit = self.solver.try_eq(oi, elem).map_err(|e| e.to_string())?;
+                    member = self.solver.try_or(member, hit).map_err(|e| e.to_string())?;
+                }
+                member
+            } else {
+                self.solver
+                    .try_select(receiver, oi)
+                    .map_err(|e| e.to_string())?
+            };
             let in_range = self
                 .solver
                 .try_bvult(ci, set_len_bv)
@@ -331,43 +408,92 @@ impl<'a> AstExpressionParser<'a> {
             element_sort: Sort::bitvec(pw),
         }));
         let inv = self.solver.fresh_var("__set_fold_inv", inv_sort);
-        let (quant_x, elem_x) = self.safe_element_quantifier("__set_fold_surj_x", &elem_ty)?;
-        let set_has_x = self
-            .solver
-            .try_select(receiver, elem_x)
-            .map_err(|e| e.to_string())?;
-        let inv_x = self
-            .solver
-            .try_select(inv, elem_x)
-            .map_err(|e| e.to_string())?;
-        let inv_in_range = self
-            .solver
-            .try_bvult(inv_x, set_len_bv)
-            .map_err(|e| e.to_string())?;
-        let ordering_at_inv = self
-            .solver
-            .try_select(ordering, inv_x)
-            .map_err(|e| e.to_string())?;
-        let ordering_eq_x = self
-            .solver
-            .try_eq(ordering_at_inv, elem_x)
-            .map_err(|e| e.to_string())?;
-        let surj_consequent = self
-            .solver
-            .try_and(inv_in_range, ordering_eq_x)
-            .map_err(|e| e.to_string())?;
-        let surj_body = self
-            .solver
-            .try_implies(set_has_x, surj_consequent)
-            .map_err(|e| e.to_string())?;
-        let guarded_surj = self.guard_element_quantifier(&elem_ty, quant_x, surj_body)?;
-        let surj_axiom = self
-            .solver
-            .try_forall(&[quant_x], guarded_surj)
-            .map_err(|e| e.to_string())?;
-        self.solver
-            .try_assert_term(surj_axiom)
-            .map_err(|e| e.to_string())?;
+        if literal_cardinality.is_some_and(|n| n <= 4) {
+            // No surjection facts at all for a literal cardinality `n <= 4`: the
+            // ordering's first `n` cells are pairwise-distinct MEMBERS of an
+            // `n`-element set (Steps 2 and 3 constrain exactly the cells `0..4`),
+            // so they already enumerate every element and the inverse witness
+            // adds nothing — except a NESTED
+            // read `ordering[inv[x]]`, which ay 0.26.0 quarantines: the
+            // sets.rs `test_set_fold_two_insert_sum` query is Unsat in 3.2 s
+            // without these facts and `Unknown (incomplete)` ("nested-array
+            // UNSAT is quarantined pending a trust-free theory-combination
+            // proof") with them. Omitting a hypothesis can only lose
+            // completeness, never soundness.
+        } else if let Some(elems) = finite_chain.as_deref() {
+            // Ground surjection at the chain's own elements (see above).
+            for &elem_x in elems {
+                let set_has_x = self
+                    .solver
+                    .try_select(receiver, elem_x)
+                    .map_err(|e| e.to_string())?;
+                let inv_x = self
+                    .solver
+                    .try_select(inv, elem_x)
+                    .map_err(|e| e.to_string())?;
+                let inv_in_range = self
+                    .solver
+                    .try_bvult(inv_x, set_len_bv)
+                    .map_err(|e| e.to_string())?;
+                let ordering_at_inv = self
+                    .solver
+                    .try_select(ordering, inv_x)
+                    .map_err(|e| e.to_string())?;
+                let ordering_eq_x = self
+                    .solver
+                    .try_eq(ordering_at_inv, elem_x)
+                    .map_err(|e| e.to_string())?;
+                let surj_consequent = self
+                    .solver
+                    .try_and(inv_in_range, ordering_eq_x)
+                    .map_err(|e| e.to_string())?;
+                let surj_instance = self
+                    .solver
+                    .try_implies(set_has_x, surj_consequent)
+                    .map_err(|e| e.to_string())?;
+                self.solver
+                    .try_assert_term(surj_instance)
+                    .map_err(|e| e.to_string())?;
+            }
+        } else {
+            let (quant_x, elem_x) = self.safe_element_quantifier("__set_fold_surj_x", &elem_ty)?;
+            let set_has_x = self
+                .solver
+                .try_select(receiver, elem_x)
+                .map_err(|e| e.to_string())?;
+            let inv_x = self
+                .solver
+                .try_select(inv, elem_x)
+                .map_err(|e| e.to_string())?;
+            let inv_in_range = self
+                .solver
+                .try_bvult(inv_x, set_len_bv)
+                .map_err(|e| e.to_string())?;
+            let ordering_at_inv = self
+                .solver
+                .try_select(ordering, inv_x)
+                .map_err(|e| e.to_string())?;
+            let ordering_eq_x = self
+                .solver
+                .try_eq(ordering_at_inv, elem_x)
+                .map_err(|e| e.to_string())?;
+            let surj_consequent = self
+                .solver
+                .try_and(inv_in_range, ordering_eq_x)
+                .map_err(|e| e.to_string())?;
+            let surj_body = self
+                .solver
+                .try_implies(set_has_x, surj_consequent)
+                .map_err(|e| e.to_string())?;
+            let guarded_surj = self.guard_element_quantifier(&elem_ty, quant_x, surj_body)?;
+            let surj_axiom = self
+                .solver
+                .try_forall(&[quant_x], guarded_surj)
+                .map_err(|e| e.to_string())?;
+            self.solver
+                .try_assert_term(surj_axiom)
+                .map_err(|e| e.to_string())?;
+        }
 
         // Step 4: State-array fold over the linearized ordering
         let state_sort = Sort::Array(Box::new(ArraySort {
@@ -440,9 +566,14 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_forall_with_triggers(&[fold_i], step_guarded, &[&[state_next_raw]])
             .map_err(|e| e.to_string())?;
-        self.solver
-            .try_assert_term(step_axiom)
-            .map_err(|e| e.to_string())?;
+        // The ground instances at `i = 0..3` below cover every `i < len` of a
+        // concrete chain with at most four inserts (see above).
+        let step_ground_covers = finite_chain.as_ref().is_some_and(|elems| elems.len() <= 4);
+        if !step_ground_covers {
+            self.solver
+                .try_assert_term(step_axiom)
+                .map_err(|e| e.to_string())?;
+        }
 
         // Ground instantiation for small indices (same pattern as Seq fold)
         for i in 0i64..4 {

@@ -26,11 +26,12 @@ impl AYEncoder {
     /// Emits a per-impl body axiom for a default trait method that the impl
     /// does not override. The axiom shape is:
     /// ```text
-    /// ∀(p:Poly, params). {Trait__method(p, params...)}
-    ///   Trait__method(p, params...) == <default body with self=p>
+    /// ∀(s:T, params). {Trait__method(Box_T(s), params...)}
+    ///   Trait__method(Box_T(s), params...) == <default body with self=Box_T(s)>
     /// ```
-    /// Uses Poly-sorted bound variable for ay-dpll E-matching compatibility.
-    /// Part of #2442.
+    /// where `T` is this impl's own type. The default body is this impl's
+    /// behaviour and no other receiver's: another impl may override the
+    /// method, and a generic caller's receiver may be of any implementing type.
     pub(super) fn assert_default_body_axiom(
         &mut self,
         encoding: &TraitEncoding,
@@ -52,23 +53,31 @@ impl AYEncoder {
             ))
         })?;
 
-        // Use Poly-sorted bound variable — ay-dpll E-matching only fires
-        // for uninterpreted-sort variables (Poly), not Bool-sorted ones.
-        let poly_sort = sort_for_type(&TrustVcType::Poly);
-        let self_poly = self.solver.fresh_var(
+        // `self` ranges over this impl's type and reaches the trait UF as
+        // `Box_T(self)`, so the axiom says nothing about the receiver of an
+        // impl that overrides the method, or of a generic caller.
+        let (box_fn, _unbox_fn) = self
+            .registries
+            .poly_context
+            .ensure_box_unbox(&mut self.solver, &impl_decl.concrete_type)?;
+        let self_var = self.solver.fresh_var(
             &format!(
-                "__default_{}_{}_self",
+                "__default_{}_{}_self_{}",
                 sanitize_symbol(&encoding.name),
                 sanitize_symbol(&method.name),
+                sanitize_symbol(&impl_decl.concrete_type.to_type_string()),
             ),
-            poly_sort,
+            sort_for_type(&impl_decl.concrete_type),
         );
+        let boxed_self = self.solver.try_apply(&box_fn, &[self_var]).map_err(|e| {
+            trait_encoding_error(format!("Default body: box application failed: {e}"))
+        })?;
 
-        let mut bound_vars = vec![self_poly];
-        let mut trait_args = vec![self_poly];
+        let mut bound_vars = vec![self_var];
+        let mut trait_args = vec![boxed_self];
 
-        // Build local bindings for encoding the body: self -> self_poly (Poly-typed)
-        let mut local_bindings: Vec<(&str, Term)> = vec![(TRAIT_RECEIVER_NAME, self_poly)];
+        // The body is encoded with `self` bound to the Poly term `Box_T(self)`.
+        let mut local_bindings: Vec<(&str, Term)> = vec![(TRAIT_RECEIVER_NAME, boxed_self)];
         let mut local_types: Vec<(String, TrustVcType)> =
             vec![(TRAIT_RECEIVER_NAME.to_string(), TrustVcType::Poly)];
 
@@ -89,7 +98,7 @@ impl AYEncoder {
             local_types.push((param_name.clone(), param_ty.clone()));
         }
 
-        // LHS: Trait__method(self_poly, params...)
+        // LHS: Trait__method(Box_T(self), params...)
         let lhs = self
             .solver
             .try_apply(trait_method_fn, &trait_args)
@@ -137,7 +146,7 @@ impl AYEncoder {
             { self.encode_trait_expr_with_bindings(&body_expr, &local_bindings, &local_types) }
         )?;
 
-        // Assert: ∀(p:Poly, params). {Trait__method(p, ...)} lhs == rhs
+        // Assert: ∀(self:T, params). {Trait__method(Box_T(self), ...)} lhs == rhs
         let eq = self
             .solver
             .try_eq(lhs, rhs)
@@ -426,10 +435,24 @@ impl AYEncoder {
     /// SOUNDNESS: this axiom is justified ENTIRELY by the conformance-extension
     /// (`build_impl_ensures_assert_obligations`) having verified `body ⊨
     /// impl_ensures` — exactly as the trait postcondition axiom is justified by
-    /// the trait-`ensures` conformance check. It is emitted only for impl methods
-    /// whose captured body the conformance pass checks; a body that violates its
-    /// declared `ensures` Counterexamples in that pass (which runs after the main
-    /// verification), so this axiom can never yield a lasting false `Verified`.
+    /// the trait-`ensures` conformance check. It is emitted only for a
+    /// NON-external impl (conformance skips an external one, so nothing would
+    /// check the clause) and only for impl methods whose captured body the
+    /// conformance pass checks; a body that violates its declared `ensures`
+    /// Counterexamples in that pass (which runs after the main verification), so
+    /// this axiom can never yield a lasting false `Verified`.
+    ///
+    /// PARAMETER SCOPE: the impl `ensures` is written in the IMPL's parameter
+    /// names, which may rename or permute the trait's; it is registered only in
+    /// its positional canonical form (`canonicalize_impl_method_ensures`), naming
+    /// the i-th non-receiver parameter `__trust_vc_conf_arg_{i}` exactly as the
+    /// captured body does. Here placeholder `i` binds UF argument `i`, and it is
+    /// lowered and encoded in an env that holds ONLY `self`, `result` and the
+    /// placeholders; the trait `requires` guard keeps the TRAIT's names in a
+    /// separate env. The two scopes never meet, so no trait name can capture an
+    /// identifier of the impl clause. An arity disagreement with the captured
+    /// body skips the axiom. Reading the raw clause in the trait's names was a
+    /// measured false verify (`impl_ensures_positional_binding_capability.rs`).
     ///
     /// A requires-bearing trait method is NOT skipped; it is GUARDED. The
     /// conformance pass assumes the trait `requires` (`build_contract_obligations`
@@ -456,8 +479,12 @@ impl AYEncoder {
         &mut self,
         impl_decl: &TraitImplDecl,
         impl_ensures_by_fn: &HashMap<crate::ir::ImplMethodKey, Vec<String>>,
+        impl_bodies: &HashMap<crate::ir::ImplMethodKey, crate::ir::ConformanceMethodBody>,
     ) -> TrustVcResult<()> {
-        if impl_ensures_by_fn.is_empty() {
+        // External impls are TRUSTED, not conformance-checked, so an impl
+        // `ensures` published from one is an axiom nothing ever checks. Mirrors
+        // `assert_impl_trait_ensures_concrete_axioms`.
+        if impl_decl.is_external || impl_ensures_by_fn.is_empty() {
             return Ok(());
         }
         let Some(encoding) = self
@@ -577,10 +604,9 @@ impl AYEncoder {
             if !impl_decl.may_claim_concrete_symbol(trait_method_name) {
                 continue;
             }
-            let Some(impl_ensures) = impl_ensures_by_fn.get(&crate::ir::ImplMethodKey::new(
-                &impl_decl.trait_name,
-                concrete_fn_name,
-            )) else {
+            let impl_method_key =
+                crate::ir::ImplMethodKey::new(&impl_decl.trait_name, concrete_fn_name);
+            let Some(impl_ensures) = impl_ensures_by_fn.get(&impl_method_key) else {
                 continue;
             };
             if impl_ensures.is_empty() {
@@ -607,13 +633,37 @@ impl AYEncoder {
             {
                 continue;
             }
+            // POSITIONAL SCOPE (see doc comment): the registered clauses name the
+            // impl's parameters only as `__trust_vc_conf_arg_{i}`. Publish only
+            // when the captured body — the conformance pass's positional anchor —
+            // agrees on the arity, and only when no trait name can collide with
+            // the receiver/result/placeholder names.
+            if impl_bodies
+                .get(&impl_method_key)
+                .is_none_or(|body| body.param_count != method.params.len())
+            {
+                continue;
+            }
+            if method.params.iter().any(|(param_name, _)| {
+                param_name == TRAIT_RECEIVER_NAME
+                    || param_name == TRAIT_RESULT_NAME
+                    || param_name.starts_with("__trust_vc_")
+            }) {
+                continue;
+            }
             let Some(method_fn) = encoding.method_fns.get(trait_method_name).cloned() else {
                 continue;
             };
+            let placeholder_names: Vec<String> = (0..method.params.len())
+                .map(|index| format!("__trust_vc_conf_arg_{index}"))
+                .collect();
 
             let mut bound_terms: Vec<Term> = Vec::new();
             let mut app_args: Vec<Term> = Vec::new();
-            let mut local_bindings: Vec<(&str, Term)> = Vec::new();
+            // `self`/`result` go into BOTH binding lists; the impl `ensures` sees
+            // the positional placeholders, the trait `requires` the trait names.
+            let mut ensures_bindings: Vec<(&str, Term)> = Vec::new();
+            let mut requires_bindings: Vec<(&str, Term)> = Vec::new();
             let mut local_types: Vec<(String, TrustVcType)> = Vec::new();
 
             // Box the concrete self so the axiom is guarded to THIS impl. Every
@@ -642,11 +692,14 @@ impl AYEncoder {
                 };
                 bound_terms.push(self_var);
                 app_args.push(boxed);
-                local_bindings.push((TRAIT_RECEIVER_NAME, self_var));
+                ensures_bindings.push((TRAIT_RECEIVER_NAME, self_var));
+                requires_bindings.push((TRAIT_RECEIVER_NAME, self_var));
                 local_types.push((TRAIT_RECEIVER_NAME.to_string(), concrete_type.clone()));
             }
 
-            for (param_name, param_ty) in &method.params {
+            for ((param_name, param_ty), placeholder) in
+                method.params.iter().zip(placeholder_names.iter())
+            {
                 let param_var = self.solver.fresh_var(
                     &format!(
                         "__implpost_{}_{}_{}",
@@ -658,7 +711,9 @@ impl AYEncoder {
                 );
                 bound_terms.push(param_var);
                 app_args.push(param_var);
-                local_bindings.push((param_name.as_str(), param_var));
+                ensures_bindings.push((placeholder.as_str(), param_var));
+                requires_bindings.push((param_name.as_str(), param_var));
+                local_types.push((placeholder.clone(), param_ty.clone()));
                 local_types.push((param_name.clone(), param_ty.clone()));
             }
 
@@ -666,18 +721,26 @@ impl AYEncoder {
                 Ok(term) => term,
                 Err(_) => continue,
             };
-            local_bindings.push((TRAIT_RESULT_NAME, app));
+            ensures_bindings.push((TRAIT_RESULT_NAME, app));
+            requires_bindings.push((TRAIT_RESULT_NAME, app));
             local_types.push((TRAIT_RESULT_NAME.to_string(), method.return_type.clone()));
 
-            // Minimal env: self (concrete), result, params. Intentionally carries
-            // NO trait-method metadata, so a clause invoking `self.m()` fails to
+            // Minimal envs: self (concrete), result, and the parameters under the
+            // naming of the scope that WROTE the clause. Intentionally carry NO
+            // trait-method metadata, so a clause invoking `self.m()` fails to
             // lower and is skipped — conservative, since conformance still checks
             // it and the caller simply doesn't gain that (harder) clause.
-            let mut env = TypeEnv::new();
-            env.insert(TRAIT_RECEIVER_NAME.to_string(), concrete_type.clone());
-            env.insert(TRAIT_RESULT_NAME.to_string(), method.return_type.clone());
+            let mut ensures_env = TypeEnv::new();
+            ensures_env.insert(TRAIT_RECEIVER_NAME.to_string(), concrete_type.clone());
+            ensures_env.insert(TRAIT_RESULT_NAME.to_string(), method.return_type.clone());
+            for ((_, param_ty), placeholder) in method.params.iter().zip(placeholder_names.iter()) {
+                ensures_env.insert(placeholder.clone(), param_ty.clone());
+            }
+            let mut requires_env = TypeEnv::new();
+            requires_env.insert(TRAIT_RECEIVER_NAME.to_string(), concrete_type.clone());
+            requires_env.insert(TRAIT_RESULT_NAME.to_string(), method.return_type.clone());
             for (param_name, param_ty) in &method.params {
-                env.insert(param_name.clone(), param_ty.clone());
+                requires_env.insert(param_name.clone(), param_ty.clone());
             }
 
             let mut lowered_clauses = Vec::with_capacity(impl_ensures.len());
@@ -690,7 +753,7 @@ impl AYEncoder {
                         break;
                     }
                 };
-                match lower_syn_expr(&parsed, &env) {
+                match lower_syn_expr(&parsed, &ensures_env) {
                     Ok(expr) => lowered_clauses.push(expr),
                     Err(_) => {
                         lowering_ok = false;
@@ -722,7 +785,7 @@ impl AYEncoder {
                         break;
                     }
                 };
-                match lower_syn_expr(&parsed, &env) {
+                match lower_syn_expr(&parsed, &requires_env) {
                     Ok(expr) => lowered_requires.push(expr),
                     Err(_) => {
                         requires_lowering_ok = false;
@@ -733,21 +796,38 @@ impl AYEncoder {
             if !requires_lowering_ok {
                 continue;
             }
-            let guarded = match conjunction(lowered_requires) {
-                Some(required) => TrustVcExpr::Implies {
-                    premise: Box::new(required),
-                    conclusion: Box::new(ensured),
-                },
-                None => ensured,
-            };
+            let required = conjunction(lowered_requires);
 
             // See `crate::encoder::binder_capture` — encode-then-close, so the
             // pending closure must be announced and the hoist watermark taken.
+            // The conclusion and the premise are ENCODED in their own scopes and
+            // joined as terms, so neither binding list can reach the other's
+            // clause.
             let capture_watermark = self.assertion_watermark();
             let body = match crate::encoder::with_flag_unwind_safe!(
                 self.state.pending_universal_closure,
                 !bound_terms.is_empty(),
-                { self.encode_trait_expr_with_bindings(&guarded, &local_bindings, &local_types) }
+                {
+                    self.encode_trait_expr_with_bindings(&ensured, &ensures_bindings, &local_types)
+                        .and_then(|ensured_term| match &required {
+                            None => Ok(ensured_term),
+                            Some(required) => {
+                                let required_term = self.encode_trait_expr_with_bindings(
+                                    required,
+                                    &requires_bindings,
+                                    &local_types,
+                                )?;
+                                self.solver
+                                    .try_implies(required_term, ensured_term)
+                                    .map_err(|err| {
+                                        trait_encoding_error(format!(
+                                            "Failed to guard impl ensures for '{}': {err}",
+                                            method.name
+                                        ))
+                                    })
+                            }
+                        })
+                }
             ) {
                 Ok(term) => term,
                 Err(_) => continue,
@@ -1018,6 +1098,8 @@ impl AYEncoder {
         bindings: &[(&str, Term)],
         local_types: &[(String, TrustVcType)],
     ) -> TrustVcResult<Term> {
+        let locals: HashMap<String, TrustVcType> = local_types.iter().cloned().collect();
+        self.validate_ir_typing(expr, Some(&locals))?;
         let normalized = if !self.state.equality_assumptions.is_empty() {
             normalize::substitute_and_normalize(expr, &self.state.equality_assumptions)
         } else {
@@ -1039,6 +1121,8 @@ impl AYEncoder {
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = true;
+        // A trait axiom is asserted without its side conditions.
+        ast_parser.obligations_unchecked = true;
         ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         // See `eval::condition` — every parser that can encode a collection
         // length must agree about which lengths are `usize`-bounded, or two
@@ -1103,6 +1187,14 @@ fn build_trait_contract_env(
                     .collect(),
                 box_receiver: None,
             },
+        );
+        // H10 (method half): the call site refuses a method whose own generic
+        // parameters no argument carries, and needs the declaration order to
+        // map a turbofish onto the carrying positions.
+        env.insert_method_generic_params(
+            TRAIT_RECEIVER_TYPE_NAME.to_string(),
+            trait_method.name.clone(),
+            trait_method.generic_params.clone(),
         );
     }
     env

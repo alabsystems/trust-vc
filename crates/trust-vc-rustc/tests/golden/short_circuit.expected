@@ -1,0 +1,37 @@
+exit: 1
+outcome: "verification-failed"
+diagnostics:
+  error - assertion failed @[15:assertion failed]
+functions:
+  f verified -
+  g failed -
+vcir:
+exec fn test_crate::f(a: exec bool, b: exec bool) -> result: exec ()
+  let mut x: exec u64 = 0u64
+  let y: exec bool = (a && b)
+  let mut tmp%5: exec bool
+  if a {
+    tmp%5 := true
+  } else {
+    x := (x +[#1] 1u64)
+    tmp%5 := b
+  }
+  let z: exec bool = tmp%5
+  ghost {
+    {
+      assert[#2] (y ==> z)
+    }
+  }
+  return[#3]
+proof fn test_crate::g(a: spec bool, b: spec bool) -> result: spec ()
+  let mut x: spec u64 = 0u64
+  let mut tmp%4: spec bool
+  if !a {
+    tmp%4 := true
+  } else {
+    x := (((x as= int) + (1u64 as= int)) as u64)
+    tmp%4 := b
+  }
+  let z: spec bool = tmp%4
+  assert[#1] (z || !a)
+  return[#2]

@@ -1,0 +1,45 @@
+exit: 1
+outcome: "verus-rejected"
+diagnostics:
+  error - reveal_with_fuel statements require a spec function with a decreases clause @[30]
+functions:
+  f1 rejected -
+  f2 rejected -
+  f3 rejected -
+  g rejected -
+  uses rejected -
+vcir:
+spec fn test_crate::f1(i: spec int, j: spec int) -> result: spec bool
+  = (i <= j)
+spec fn test_crate::f2(i: spec int, j: spec int) -> result: spec bool
+  = (let x = i in (let y = j in (x < y)))
+spec fn test_crate::f3(i: spec int, j: spec int) -> result: spec bool
+  #[opaque=true external_body=false rlimit=None]
+  = test_crate::f1(j, i)
+spec fn test_crate::g(i: spec int) -> result: spec bool
+  #[opaque=false external_body=true rlimit=None]
+  (no body)
+exec fn test_crate::uses(a: exec int, b: exec int) -> result: exec ()
+  hide test_crate::f2
+  ghost {
+    {
+      assume test_crate::f2(a, b)
+    }
+  }
+  ghost {
+    reveal test_crate::f2 fuel=None
+  }
+  ghost {
+    {
+      assert[#1] test_crate::f1(a, b)
+    }
+  }
+  ghost {
+    reveal test_crate::f3 fuel=Some(3)
+  }
+  ghost {
+    {
+      assert[#2] (test_crate::g(a) ==> test_crate::g(a))
+    }
+  }
+  return[#3]

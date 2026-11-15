@@ -63,6 +63,7 @@ mod parser_state;
 pub(crate) mod polymorphism;
 mod quantifier_scope;
 mod quantifiers;
+mod term_widths;
 pub(crate) mod trait_encoding;
 pub(crate) mod trait_self_fields;
 pub(crate) mod types;
@@ -78,6 +79,7 @@ use parser_state::native_seq_shadow_var_name;
 pub(crate) use parser_state::AstExpressionParser;
 pub use types::VerifyResult;
 pub(crate) use verification::outcome::AssertionOutcome;
+pub(crate) use verification::query::{solve_bitvector_query, solve_query};
 pub use verification::unknown_category::UnknownCategory;
 
 /// The default WALL-CLOCK liveness backstop, in milliseconds.
@@ -126,6 +128,10 @@ pub struct AYEncoder {
     /// Mapping from collection variable names to their length/cardinality terms.
     /// For Seq/Set/Map types, we track length separately from the array content.
     collection_lengths: std::collections::HashMap<String, Term>,
+    /// One quantified `Seq::contains` existential per alpha-equivalence class
+    /// of its coerced body, across every parser this encoder spawns
+    /// (hypotheses and goal alike); see `parser_state::SeqContainsQuantifiedMemo`.
+    seq_contains_quantified_memo: parser_state::SeqContainsQuantifiedMemo,
     /// Function declarations and type metadata. Part of #2447 Slice 1.
     pub(crate) fn_ctx: EncoderFunctionContext,
     /// Mutable verification state and caches. Part of #2447 Slice 3.
@@ -161,6 +167,47 @@ pub(in crate::encoder) fn configured_term_memory_mb() -> Option<usize> {
     })
 }
 
+/// Optional VSIDS tie-breaking seed for ay (#6961), read once from
+/// `TRUST_VC_AY_RANDOM_SEED`.
+///
+/// **Unset by default, deliberately.** ay already applies a fixed seed of its
+/// own (`Executor::current_random_seed` returns 0 when the option is absent),
+/// so installing `(set-option :random-seed 0)` reads like a no-op pin — and it
+/// was written as one on 2026-09-15, then WITHDRAWN the same day because it
+/// could not be shown to be inert: two loaded runs of the ground
+/// overflow-check family came back `(incomplete self-check-rejected)` with the
+/// option installed, and a paired 5-vs-5 A/B at a lower load reproduced
+/// nothing either way. Unproven is not the same as harmless, and an envelope
+/// fix is no place to carry an unmeasured solver-configuration change.
+///
+/// What the hook is FOR is the question that keeps getting asked of this
+/// repo's flaky controls — "is this VSIDS non-determinism?" — which is
+/// falsifiable only by running one obligation under several seeds
+/// (`for s in 0 7 42; do TRUST_VC_AY_RANDOM_SEED=$s ...`). ay's own doc on
+/// `set_random_seed` names exactly that use. A seed-stable verdict says the
+/// flake is not tie-breaking.
+///
+/// The value travels as an OPTION, not through the typed
+/// `Solver::set_random_seed`: `current_random_seed` reads the ctx option table
+/// (ay `executor.rs:2491`), while the typed setter writes a separate executor
+/// field (`executor/lifecycle.rs:1099`).
+pub(in crate::encoder) fn configured_ay_random_seed() -> Option<u64> {
+    static SEED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *SEED.get_or_init(|| {
+        std::env::var("TRUST_VC_AY_RANDOM_SEED")
+            .ok()
+            .and_then(|value| parse_ay_random_seed(&value))
+    })
+}
+
+/// Parse half of [`configured_ay_random_seed`], split out so the parse rule is
+/// testable without touching process environment. An unparsable value means
+/// "no seed", never "seed 0" — the two differ at the ay boundary (one leaves
+/// the option absent, the other installs it).
+fn parse_ay_random_seed(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
 impl AYEncoder {
     /// Returns the solver's interrupt handle for cross-thread cancellation.
     ///
@@ -176,7 +223,8 @@ impl AYEncoder {
     /// Mirrors the scan ay itself performs at check-sat entry to decide whether
     /// the solve enters the quantified pipeline (whose termination is governed
     /// by deterministic instantiation budgets with a far-out wall-clock
-    /// backstop, ay 62695cfe04). Used by the assertion watchdog to pick the
+    /// backstop, ay 62695cfe04 — OPT-IN since ay 6226726f3, and installed by
+    /// [`Self::with_limits`]). Used by the assertion watchdog to pick the
     /// matching far-out hang-protection budget instead of the tight ground-BV
     /// cap — see `verification::timeout::far_out_watchdog_timeout`.
     ///
@@ -232,6 +280,7 @@ impl AYEncoder {
             variables: std::collections::HashMap::new(),
             var_types: std::collections::HashMap::new(),
             collection_lengths: std::collections::HashMap::new(),
+            seq_contains_quantified_memo: parser_state::SeqContainsQuantifiedMemo::default(),
             fn_ctx: EncoderFunctionContext::new(),
             state: VerificationState::new(),
             registries: FeatureRegistries::new(),
@@ -241,9 +290,9 @@ impl AYEncoder {
 
     /// Sets the E-matching round limit for adaptive escalation (#2720).
     ///
-    /// Overrides the ay-dpll default of 8 rounds. Lower values speed up
+    /// Overrides the ay-dpll default of 16 rounds. Lower values speed up
     /// easy proofs; higher values allow deeper quantifier instantiation
-    /// chains. Clamped to [1, 64] by ay-dpll.
+    /// chains. Clamped to [1, 128] by ay-dpll.
     pub fn set_ematching_round_limit(&mut self, n: usize) {
         self.solver.set_ematching_round_limit(n);
     }
@@ -265,6 +314,19 @@ impl AYEncoder {
     ///   `timeout`. The two reasons are distinct strings and distinct
     ///   `UnknownCategory`s precisely so a user debugging a failure can tell
     ///   "I ran out of work" from "the box was too slow".
+    /// * `wall_backstop_ms` is ONE envelope for the whole transaction, not
+    ///   just for the search. ay copies it into both its `solve_deadline` and
+    ///   its `certification_deadline`, so it bounds the search, the mandatory
+    ///   strict certification funnel, and the publication gate alike. This
+    ///   method therefore does NOT opt in to ay's quantified deadline
+    ///   backstop, which would widen the first of those cells and leave the
+    ///   other two at the nominal — see the comment at the call below and
+    ///   `verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS`, whose
+    ///   default is now the 120 s that widener used to buy. The external hang
+    ///   watchdog (`verification::timeout::far_out_watchdog_timeout`) is the
+    ///   same wall plus a grace period.
+    /// * No seed is installed unless `TRUST_VC_AY_RANDOM_SEED` says so; ay
+    ///   applies its own. See [`configured_ay_random_seed`].
     ///
     /// BOTH FAIL CLOSED. Neither bound can produce `Verified`: ay reports
     /// exhaustion as `Unknown`, and trust-vc maps both to a non-`Verified`
@@ -277,6 +339,48 @@ impl AYEncoder {
     ) -> Self {
         self.solver
             .set_timeout(Some(std::time::Duration::from_millis(wall_backstop_ms)));
+        // #quantifier-determinism, WITHDRAWN 2026-09-15 (later the same day
+        // it was armed). ay's quantified deadline backstop widens the SEARCH
+        // wall and NOTHING else, and that is exactly why trust-vc must not ask
+        // for it: `Executor::set_solve_controls` copies the caller's
+        // `set_timeout` into BOTH `solve_deadline` and `certification_deadline`
+        // (ay `executor/check_sat.rs:2949-2958`), while
+        // `install_quantifier_deadline_backstop` (`check_sat.rs:3125-3172`)
+        // extends `solve_deadline` ALONE. A quantified solve then runs past the
+        // nominal on a certification envelope that has already expired, and ay
+        // — correctly, fail-closed — refuses to publish what it computed:
+        // `certify_unsat_for_publication` declines the UNSAT ("step tN uses
+        // unverified trust rule"), or `restore_timeout_deadline_after_call`
+        // hands the expired nominal back and
+        // `decline_definite_publication_on_external_stop` revokes the verdict
+        // as `Unknown(Timeout)`. Measured at `3287a67f`: the two realbody
+        // read-back controls were red 11 of 14 runs, 8 Timeout and 3
+        // ConfirmationDisagree, the two exit doors of that one boundary.
+        //
+        // So the wall trust-vc wants is asked for ONCE, through `set_timeout`
+        // above, which is the only control that moves both cells — the default
+        // is now 120 s, exactly the envelope this backstop used to buy on top
+        // of a 30 s nominal. The call below is deliberately explicit rather
+        // than omitted: ay's default is already `false`, and this line is the
+        // record that the `false` is a decision. Turning it back on without
+        // reading `DEFAULT_SOLVER_WALL_BACKSTOP_MS` re-creates the skew.
+        self.solver.set_quantifier_deadline_backstop(false);
+        // Seed-perturbation hook, OFF unless `TRUST_VC_AY_RANDOM_SEED` is set;
+        // see `configured_ay_random_seed` for why this is not a default. With
+        // the variable unset ay keeps its own seed and this call does not
+        // happen, so the default configuration is unchanged. Same `try_`/warn
+        // shape as the conflict budget below: a solver that will not take a
+        // seed must report, not abort.
+        if let Some(seed) = configured_ay_random_seed() {
+            if let Err(error) = self.solver.try_set_option("random-seed", &seed.to_string()) {
+                tracing::warn!(
+                    %error,
+                    seed,
+                    "ay rejected the requested VSIDS seed; this solve's search order is \
+                     ay's default, so a seed sweep is not measuring what it claims"
+                );
+            }
+        }
         // There is no typed `set_resource_limit` on ay's `Solver`; the option
         // handler is the whole public route
         // (`executor.rs`, `key == "rlimit"` -> `Executor::set_resource_limit`).

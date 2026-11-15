@@ -24,14 +24,14 @@
 // `trust_vc::requires!` source) is the cargo `--frontend=driver` increment,
 // which needs the target crate's dep graph built with the Trust toolchain.
 //
-// Feature-gated: empty on the default (stable) build. Run via
-// `scripts/build-trust-vc-driver.sh test` (which builds the bin with the
-// rustc_private `-L` flags and exports the runtime DYLD path the subprocess
-// inherits).
+// Feature-gated: empty on the default build. Run via
+// `targo --unverified test -p trust-vc-driver --features rustc-driver` (cargo
+// builds the bin for the integration test; build.rs bakes the rpath to the
+// compiler's lib dir into it, so the subprocess needs no DYLD path).
 #![cfg(feature = "rustc-driver")]
 // Linking the feature-on `trust-vc-driver` lib pulls in `rustc_driver`, which
-// this test binary must opt into (same as `driver_oracle_diff.rs`); the build
-// script supplies `-Cprefer-dynamic` + `RUSTC_BOOTSTRAP=1` so it resolves.
+// this test binary must opt into (same as `driver_oracle_diff.rs`); build.rs
+// bakes the rpath so it resolves.
 #![cfg_attr(feature = "rustc-driver", feature(rustc_private))]
 
 use std::collections::HashMap;
@@ -84,18 +84,16 @@ fn driver_bin() -> PathBuf {
     manifest
         .join("../../target/debug/trust-vc-driver")
         .canonicalize()
-        .expect("trust-vc-driver bin should exist (build via scripts/build-trust-vc-driver.sh bin)")
+        .expect(
+            "trust-vc-driver bin should exist (build via `targo --unverified build -p \
+             trust-vc-driver --features rustc-driver --bin trust-vc-driver`)",
+        )
 }
 
+/// The sysroot of the compiler this driver links (baked in by build.rs), not
+/// whatever `rustc` PATH carries.
 fn rustc_sysroot() -> String {
-    let out = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .expect("run rustc --print sysroot");
-    String::from_utf8(out.stdout)
-        .expect("utf8 sysroot")
-        .trim()
-        .to_string()
+    env!("VC_DRIVER_COMPILER_SYSROOT").to_string()
 }
 
 /// Runs the compiled bin on `SOURCE`; returns `(exit_code, verdicts, raw_stdout)`.
@@ -107,9 +105,8 @@ fn run_bin() -> (Option<i32>, HashMap<String, String>, String) {
     std::fs::write(&src, SOURCE).expect("write source");
 
     // `driver::run` (inside the bin) injects `-Zno-steal-thir` + `--cfg
-    // trust_vc_driver`; the subprocess inherits RUSTC_BOOTSTRAP + DYLD from the
-    // build-script `test` environment. We pass the standard rustc args cargo
-    // would for a lib crate.
+    // trust_vc_driver`; the bin finds librustc_driver through the rpath build.rs
+    // baked in. We pass the standard rustc args cargo would for a lib crate.
     let output = Command::new(driver_bin())
         .arg(&src)
         .arg("--edition=2021")

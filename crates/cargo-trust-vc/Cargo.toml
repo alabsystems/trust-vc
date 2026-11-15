@@ -65,6 +65,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+# Reads a package manifest as Cargo does, for the crate lane's source root.
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 
 [lints]
 workspace = true

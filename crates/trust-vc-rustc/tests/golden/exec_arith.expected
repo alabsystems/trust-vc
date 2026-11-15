@@ -1,0 +1,30 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - possible arithmetic underflow/overflow @[18]
+  error - possible arithmetic underflow/overflow @[19]
+  note - function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function @[16]
+  error - trust-vc refused: nonlinear-arith: not proved with nonlinear arithmetic left uninterpreted @[20]
+functions:
+  sum verified -
+  compound refused nonlinear-arith
+  ghost_arith verified -
+vcir:
+exec fn test_crate::sum(x: exec u64, y: exec u64) -> z: exec u64
+  requires ((x as= int) < (100nat as= int))
+  requires ((y as= int) < (100nat as= int)) @note("small y")
+  ensures ((z as= int) == ((x as= int) + (y as= int)))
+  return[#2] (x +[#1] y)
+exec fn test_crate::compound(a: exec u8, s: exec i16) -> result: exec ()
+  let mut b: exec u8 = a
+  b := (b +[#1] 1u8)
+  b := (b /[#3] (b +[#2] 1u8))
+  let c: exec i16 = -[#4]s
+  let d: exec u16 = (a as= u16)
+  return[#5]
+proof fn test_crate::ghost_arith(x: spec u8) -> result: spec ()
+  let mut y: spec u8 = x
+  y := (((y as= int) + (100u8 as= int)) as u8)
+  y := (((y as= int) * (3nat as= int)) as u8)
+  assert[#1] ((y as= int) < (256nat as= int))
+  return[#2]

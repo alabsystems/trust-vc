@@ -59,7 +59,7 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "contrib_auto_spec_mut_ref_body_fails_closed",
         "test_auto_spec_unsupported_body",
-        &["assignment through a dereferenced reference is unsupported"],
+        &["dereference expressions are not supported in verification syntax"],
     ),
 ];
 

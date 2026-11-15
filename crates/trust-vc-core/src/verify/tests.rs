@@ -82,6 +82,7 @@ fn test_result_helper_methods() {
 
     let counterexample = VerifyResult::Counterexample {
         obligation_name: "test".into(),
+        location: None,
         model: None,
         bindings: Vec::new(),
     };

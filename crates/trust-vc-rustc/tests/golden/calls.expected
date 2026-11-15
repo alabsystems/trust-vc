@@ -1,0 +1,30 @@
+exit: 0
+outcome: "checked"
+diagnostics:
+functions:
+  double verified -
+  lemma verified -
+  caller verified -
+vcir:
+exec fn test_crate::double(x: exec u32) -> r: exec u32
+  requires ((x as= int) < (1000nat as= int))
+  ensures ((r as= int) == ((2nat as= int) * (x as= int)))
+  return[#2] (x +[#1] x)
+proof fn test_crate::lemma(a: spec int, b: spec int) -> result: spec ()
+  requires (a <= b)
+  ensures ((a + (1nat as= int)) <= (b + (1nat as= int)))
+  return[#1]
+exec fn test_crate::caller(a: exec int) -> result: exec ()
+  let mut tmp%2: exec u32
+  tmp%2 := call[#1] test_crate::double(3u32)
+  let d: exec u32 = tmp%2
+  call[#2] test_crate::double(4u32)
+  ghost {
+    call[#3] test_crate::lemma(a, (a + (1nat as= int)))
+  }
+  ghost {
+    {
+      assert[#4] ((d as= int) == (6nat as= int))
+    }
+  }
+  return[#5]

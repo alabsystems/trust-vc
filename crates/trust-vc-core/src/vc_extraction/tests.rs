@@ -35,6 +35,8 @@ mod exec_index_bounds_faithful;
 mod generic_adt_destructure;
 #[path = "tests/ghost_collection_reuse_after_combinator.rs"]
 mod ghost_collection_reuse_after_combinator;
+#[path = "tests/impl_ensures_canonicalization.rs"]
+mod impl_ensures_canonicalization;
 #[path = "tests/inherent_impl_methods.rs"]
 mod inherent_impl_methods;
 #[path = "tests/match_arm_scope_soundness.rs"]
@@ -45,6 +47,8 @@ mod match_plain_tuple_expression_soundness;
 mod match_rest_pattern_expression_soundness;
 #[path = "tests/mut_ref_two_state.rs"]
 mod mut_ref_two_state;
+#[path = "tests/mut_ref_vocabulary.rs"]
+mod mut_ref_vocabulary;
 #[path = "tests/pointer_width_directive.rs"]
 mod pointer_width_directive;
 #[path = "tests/proof_block_ghost_add.rs"]
@@ -61,6 +65,8 @@ mod seq_map_index_cast;
 mod silent_drop_regressions;
 #[path = "tests/spec_function_catalog.rs"]
 mod spec_function_catalog;
+#[path = "tests/unsafe_signature_rejection.rs"]
+mod unsafe_signature_rejection;
 #[path = "tests/verifier_rlimit_attr.rs"]
 mod verifier_rlimit_attr;
 

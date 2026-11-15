@@ -34,7 +34,7 @@
 //! ay. We point it at our own path via `file!()` so the example is self-contained.
 //!
 //! ```bash
-//! cargo run --example proof_macro_quickstart
+//! targo --unverified run -p trust-vc --example proof_macro_quickstart
 //! ```
 
 use trust_vc_core::{verify_function_from_file, VerifyResult};

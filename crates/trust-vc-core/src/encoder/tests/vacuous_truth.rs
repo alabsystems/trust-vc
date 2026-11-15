@@ -56,13 +56,52 @@ fn test_contradictory_requires_detected() {
     );
 }
 
-/// Contradictory assumptions that are only contradictory under int-mode.
+/// The vacuous precheck must RERUN in int-mode: a measure obligation is the
+/// only obligation here, and it is discharged in the `Int` universe, so nothing
+/// else would ever look at this hypothesis set.
 ///
-/// For `u8`, `x == 255 && x + 1 == 0` is satisfiable in BV mode due to wrap,
-/// but contradictory in int-mode where arithmetic is mathematical. Measure
-/// obligations verify in int-mode, so the vacuous precheck must rerun there.
+/// The contradiction is drawn from `requires` clauses, which are SPEC code and
+/// therefore read as mathematical integers on both sides of a call
+/// (`crate::spec_arith`): for a `u8`, `x == 255` and `x + 1 == 0` cannot both
+/// hold of the integers, and that is true of the ONE reading both facts carry.
 #[test]
-fn test_int_mode_only_contradiction_is_detected_as_vacuous() {
+fn test_int_mode_vacuity_fires_on_a_contradiction_real_in_that_reading() {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("u8"));
+    ctx.obligations
+        .push(ProofObligation::requires("max_u8", "x == 255"));
+    ctx.obligations
+        .push(ProofObligation::requires("successor_zero", "x + 1 == 0"));
+    ctx.obligations
+        .push(ProofObligation::measure_non_negative("nonneg", "x >= 0"));
+
+    let result = AYEncoder::verify(&ctx);
+    expect_unknown(
+        &result,
+        "int-mode contradictions must be caught by the vacuous precheck",
+    );
+    if let VerifyResult::Unknown { reason, .. } = &result {
+        assert!(
+            reason.contains("contradictory") || reason.contains("vacuous"),
+            "int-mode vacuity should report the standard contradictory-context message, got: {reason}",
+        );
+    }
+}
+
+/// LIAR TWIN, and a correction of record. This test previously asserted that
+/// the SAME two facts written as fixed-width `assume!`s were "contradictory in
+/// int-mode", and it passed because the int lane re-read a bit-vector fact over
+/// the unbounded integers. That re-reading is the cross-lane false-verify this
+/// tree closed (`encoder::verification::arith_reading`): `x + 1 == 0` was
+/// ESTABLISHED under the wrapping reading, where `x == 255` satisfies it, and
+/// the int lane may not re-read it.
+///
+/// So the hypotheses are consistent, and `Verified` is the right answer — not a
+/// vacuous one: `x >= 0` is true of every `u8`, in either reading, with or
+/// without the hypotheses. The pin is that the precheck does not invent a
+/// contradiction out of a change of reading.
+#[test]
+fn test_a_fixed_width_assumption_is_not_re_read_as_an_int_contradiction() {
     let mut ctx = VerificationContext::new();
     ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("u8"));
     ctx.push_obligation(ProofObligation::assume("max_u8", "x == 255"));
@@ -71,16 +110,10 @@ fn test_int_mode_only_contradiction_is_detected_as_vacuous() {
         .push(ProofObligation::measure_non_negative("nonneg", "x >= 0"));
 
     let result = AYEncoder::verify(&ctx);
-    expect_unknown(
+    expect_verified(
         &result,
-        "int-mode-only contradictions must be caught by the vacuous precheck",
+        "a wrapping-established `assume!` must not read as an int contradiction",
     );
-    if let VerifyResult::Unknown { reason, .. } = &result {
-        assert!(
-            reason.contains("contradictory") || reason.contains("vacuous"),
-            "int-mode vacuity should report the standard contradictory-context message, got: {reason}",
-        );
-    }
 }
 
 /// Non-contradictory assumptions with a true assertion: should Verify normally.

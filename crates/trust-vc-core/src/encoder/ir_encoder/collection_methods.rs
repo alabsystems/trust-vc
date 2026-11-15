@@ -231,7 +231,6 @@ impl<'a> AstExpressionParser<'a> {
                                 .map_err(|e| e.to_string())?;
                             if let Some(info) = self.element_width_info(source_seq, source_name) {
                                 self.term_widths.insert(candidate, info);
-                                self.term_widths.entry(value).or_insert(info);
                             }
                             let (candidate, coerced_value) =
                                 self.coerce_bv_widths(candidate, value)?;
@@ -631,8 +630,10 @@ impl<'a> AstExpressionParser<'a> {
             .ok_or_else(|| format!("No length tracked for collection '{}'", rname))?;
         let start = self.encode_subexpr(&args[0])?;
         let end = self.encode_subexpr(&args[1])?;
-        let start_pw = self.coerce_to_len_width(start)?;
-        let end_pw = self.coerce_to_len_width(end)?;
+        let start_own = self.own_sign(&args[0], None);
+        let end_own = self.own_sign(&args[1], None);
+        let start_pw = self.coerce_to_len_width(start, start_own)?;
+        let end_pw = self.coerce_to_len_width(end, end_own)?;
         // `start <= end` across possibly-mixed BV/Int sorts: a length-derived
         // bound (`(v).len()`, `(v).len() - 1`) stays Sort::Int under Route A
         // (#2779) and `coerce_to_len_width` passes it through outside
@@ -675,7 +676,39 @@ impl<'a> AstExpressionParser<'a> {
         // carrier remains a BV index.
         let end_len = self.len_match_sort(len, end_pw)?;
         let start_len = self.len_match_sort(len, start_pw)?;
-        let new_len = self.len_sub(end_len, start_len)?;
+        let exact_len = self.len_sub(end_len, start_len)?;
+        // Specified only for `0 <= start <= end <= len`, each bound read at
+        // ITS OWN value (a signed `start` of -1 is -1, not its sign-extended
+        // bits read unsigned).
+        let (new_len, domain) = if self.len_is_int(len) {
+            let start_exact = self.lift_bv_operand_to_int(start, start_own)?;
+            let end_exact = self.lift_bv_operand_to_int(end, end_own)?;
+            let zero = self.solver.int_const(0);
+            let conjuncts = [
+                self.solver.try_le(zero, start_exact),
+                self.solver.try_le(start_exact, end_exact),
+                self.solver.try_le(end_exact, len),
+            ];
+            let mut in_domain = self.solver.bool_const(true);
+            for conjunct in conjuncts {
+                let conjunct = conjunct.map_err(|e| e.to_string())?;
+                in_domain = self
+                    .solver
+                    .try_and(in_domain, conjunct)
+                    .map_err(|e| e.to_string())?;
+            }
+            let new_len = self.length_within_domain(
+                "subrange",
+                receiver_term,
+                len,
+                exact_len,
+                in_domain,
+                &[start_exact, end_exact],
+            )?;
+            (new_len, Some(in_domain))
+        } else {
+            (exact_len, None)
+        };
 
         // The carrier shift offset must be a BitVec(pw) index. An Int start
         // (e.g. `subrange((v).len(), (v).len())` from the Vec::append model)
@@ -688,6 +721,6 @@ impl<'a> AstExpressionParser<'a> {
             start_pw
         };
         let receiver_name = Some(rname);
-        self.encode_index_shifted_seq(receiver_term, receiver_name, start_idx, new_len)
+        self.encode_index_shifted_seq(receiver_term, receiver_name, start_idx, new_len, domain)
     }
 }

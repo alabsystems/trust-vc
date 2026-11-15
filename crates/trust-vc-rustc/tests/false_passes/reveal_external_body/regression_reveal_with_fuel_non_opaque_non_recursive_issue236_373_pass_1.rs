@@ -1,0 +1,7 @@
+::verus_builtin_macros::verus!{
+#[verifier::external_body] spec fn is_true(a: bool) -> bool { a }
+
+proof fn foo() {
+    reveal_with_fuel(is_true, 1);
+}
+}

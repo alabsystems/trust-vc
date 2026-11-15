@@ -1,0 +1,4 @@
+::verus_builtin_macros::verus!{
+spec fn is_true(a: bool) -> bool { a }
+fn foo() { hide(is_true); proof { } reveal(is_true); assert(is_true(true)); }
+}

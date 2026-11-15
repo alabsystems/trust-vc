@@ -57,6 +57,14 @@ fn fail_closed_message(path: &str, case: &str, upstream_case: &str) -> String {
 }
 
 const VERIFIED_CASES: &[(&str, &str, usize)] = &[
+    // 2026-09-13: the tuple-typed field write-back renders as a tuple literal
+    // now (it used to emit a struct-update literal on a tuple type, which
+    // failed to parse), so the loop-then-write-back shape verifies.
+    (
+        "mut_refs_loop_tuple_field_writeback_boundary_currently_errors",
+        "future_preserved_in_loop",
+        2,
+    ),
     (
         "mut_refs_loop_body_local_write_verified",
         "control_flow_loops",
@@ -232,16 +240,6 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
         &[
             "assignment through a dereferenced reference is unsupported",
             "* x_ref",
-        ],
-    ),
-    (
-        "mut_refs_loop_tuple_field_writeback_boundary_currently_errors",
-        "future_preserved_in_loop",
-        &[
-            "assignment through a mutable-reference projection is unsupported",
-            "tuple-field",
-            "pair_ref . 0",
-            "field '0'",
         ],
     ),
     (

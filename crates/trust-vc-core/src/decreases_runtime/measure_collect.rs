@@ -98,7 +98,7 @@ pub fn collect_loop_decreases_measure(measure: String, location: Option<String>)
         // `LoopDecreaseBinding` to register the decrease as a loop-inductive
         // obligation (see `body_extract.rs`). Keeping ONE builder prevents the
         // two paths from drifting.
-        let _ = build_loop_decreases_obligations(context, measure, location);
+        let _ = build_loop_decreases_obligations(context, measure, location, None);
     }) {
         Ok(()) => {}
         Err(_) => record_obligation_drop(),
@@ -169,6 +169,7 @@ pub(crate) fn build_loop_decreases_obligations(
     context: &mut VerificationContext,
     measure: String,
     location: Option<String>,
+    type_hint: Option<crate::ir::TrustVcType>,
 ) -> Result<Option<LoopDecreaseBinding>, LoopDecreaseBuildError> {
     let trimmed = measure.trim();
     let tuple_components = if trimmed.starts_with('(') && trimmed.ends_with(')') {
@@ -212,10 +213,13 @@ pub(crate) fn build_loop_decreases_obligations(
             let sanitized = sanitize_measure_name(component);
             let entry_var = format!("{}_entry", sanitized);
             if !context.has_variable(&entry_var) {
-                let Some(measure_type) = infer_measure_type(context, component) else {
-                    return Err(LoopDecreaseBuildError::UninferableType);
+                let measure_type = match infer_measure_type(context, component) {
+                    Some(ty) => ty.clone(),
+                    None => type_hint
+                        .clone()
+                        .ok_or(LoopDecreaseBuildError::UninferableType)?,
                 };
-                context.declare_var_typed(&entry_var, measure_type.clone());
+                context.declare_var_typed(&entry_var, measure_type);
                 context.push_obligation(ProofObligation::assume(
                     format!("{}_entry_nonneg", sanitized),
                     format!("{} >= 0", entry_var),
@@ -273,7 +277,7 @@ pub(crate) fn build_loop_decreases_obligations(
         if single.is_empty() || !is_valid_measure_component(&single) {
             return Err(LoopDecreaseBuildError::InvalidMeasure);
         }
-        add_loop_decrease_obligations(context, &single, location.as_deref())
+        add_loop_decrease_obligations(context, &single, location.as_deref(), type_hint)
     }
 }
 
@@ -292,6 +296,7 @@ fn add_loop_decrease_obligations(
     context: &mut VerificationContext,
     measure_name: &str,
     location: Option<&str>,
+    type_hint: Option<crate::ir::TrustVcType>,
 ) -> Result<Option<LoopDecreaseBinding>, LoopDecreaseBuildError> {
     // Only add obligations once per measure (guard against duplicate obligations
     // when loop_decreases! runs multiple iterations at runtime).
@@ -302,12 +307,18 @@ fn add_loop_decrease_obligations(
         context.add_measure_nonneg(measure_name);
         // Infer the measure type from component variables to avoid sort mismatches.
         // Fail closed if type cannot be inferred. Part of #1955.
-        let Some(measure_type) = infer_measure_type(context, measure_name) else {
-            return Err(LoopDecreaseBuildError::UninferableType);
+        // A measure that rendered to a bare literal (a loop that never modifies
+        // its own measure variable — upstream loop_decreases2 test2/test3) has
+        // no identifier to infer from; the file path supplies the variable's
+        // declared scalar type as `type_hint` so the strict-descent obligation
+        // is emitted (and refuted) instead of failing closed.
+        let measure_type = match infer_measure_type(context, measure_name) {
+            Some(ty) => ty.clone(),
+            None => type_hint.ok_or(LoopDecreaseBuildError::UninferableType)?,
         };
 
         // Declare entry variable with the same type as the measure variable
-        context.declare_var_typed(&entry_var, measure_type.clone());
+        context.declare_var_typed(&entry_var, measure_type);
 
         // NOTE: entry_var is intentionally left unconstrained HERE. On the
         // RUNTIME path the relationship between entry_var and measure_name comes

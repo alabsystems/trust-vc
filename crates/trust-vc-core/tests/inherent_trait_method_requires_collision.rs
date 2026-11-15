@@ -89,15 +89,21 @@ fn verify(tmp_id: &str, func: &str, src: &str) -> VerifyResult {
 }
 
 /// The control. One candidate, precondition satisfied, call verifies — so the
-/// merge did not simply start rejecting inherent method calls.
+/// merge did not simply start rejecting inherent method calls. `m` is a proof
+/// method, which panics when the exec body calls it at run time, so the
+/// ghost-call rule refuses the answer; it refuses only a `Verified` answer.
 #[test]
 fn a_non_colliding_inherent_call_satisfying_its_precondition_still_verifies() {
     let result = verify("ok", "calls_satisfying", INHERENT_ONLY);
     assert!(
-        matches!(result, VerifyResult::Verified),
-        "control: `s.m(5)` against a lone inherent `requires(k < 10)` must still verify — \
-         without this the subject's verdict would not be attributable to the collision: \
-         {result:?}"
+        matches!(
+            &result,
+            VerifyResult::Error { message }
+                if message.contains("ghost function called from exec code")
+        ),
+        "control: `s.m(5)` against a lone inherent `requires(k < 10)` must still verify (a \
+         `Verified` answer, refused by the ghost-call rule) — without this the subject's \
+         verdict would not be attributable to the collision: {result:?}"
     );
 }
 

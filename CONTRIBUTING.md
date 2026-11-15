@@ -6,7 +6,8 @@ trust-vc is a formal verification tool for Rust, created by Andrew Yates. This g
 ## Repository Structure
 ```
 crates/
-  trust-vc/           — Proc macros (67 macros)
+  trust-vc/           — Proc macros (count them, do not quote a number:
+                        `grep -c '^#\[proc_macro' crates/trust-vc/src/lib.rs`)
   trust-vc-core/      — Verification engine
   trust-vc-types/     — Ghost types (Seq, Set, Map, etc.)
   trust-vc-std/       — Verified lemma specifications
@@ -50,10 +51,10 @@ expect_verified(&result, "description");
 Available result oracles: expect_verified, expect_not_verified, expect_counterexample, expect_error, expect_unknown, expect_fail_closed, expect_verified_or_unknown.
 
 ## Code Style
-- Follow Rust standard formatting — run it as `scripts/rust_frontend.sh fmt --all`
-  (`--check` to gate). Never bare `cargo fmt` or `targo fmt`: the pinned `trust`
-  toolchain ships no `cargo-fmt`, and off the rustup shim the spelling silently
-  falls through to a stock rustfmt. The script refuses instead.
+- Follow Rust standard formatting with the Trust toolchain: `targo fmt --all`
+  (`targo fmt --all --check` to gate) and lint with
+  `targo tippy --locked --workspace --all-targets -- -D warnings`. Never bare
+  `cargo fmt` / `cargo clippy`: those names resolve to a stock toolchain.
 - 500 line max per file
 - pub(crate) by default; pub only for crate API
 - Use thiserror for error types
@@ -69,17 +70,23 @@ checking a different file-size threshold. Test, example, bench, and fuzz code is
 excluded from the production unwrap/expect/panic/todo policy unless
 `--strict-tests` is passed.
 
-CI enforces the no-cruft and no-local-path subset immediately:
+There is **no CI** in this repository — no `.github/workflows`, nothing runs on
+push. Every gate above is a local script you must run yourself. The fast subset,
+which is the one worth running on every change, is:
 ```bash
 python3 scripts/quality_audit.py --skip-rust-size --skip-production-policy
 ```
+Either run can report findings that already exist on `main` (home paths quoted
+inside internal, unexported receipts; the size and production-policy backlogs).
+Compare against `main` before assuming you broke something — and do not add
+new ones.
 
 ## Commit Messages
 - Include what changed, why, and test results
 - Reference issue numbers (#N)
 
 ## Architecture Overview
-See README.md and VISION.md for the current pipeline overview.
+See README.md for the pipeline overview and `design-trust-proof-backend.md` for the design.
 
 ## Adding a New Lemma to trust-vc-std
 1. Choose the right module (seq.rs, set.rs, map.rs, arithmetic.rs)
@@ -97,4 +104,3 @@ See README.md and VISION.md for the current pipeline overview.
 Open an issue or contact Andrew Yates <andrewyates.name@gmail.com>.
 
 Copyright 2026 Andrew Yates Author: Andrew Yates <andrewyates.name@gmail.com>. Apache 2.0.
-Do NOT add Co-Authored-By lines.

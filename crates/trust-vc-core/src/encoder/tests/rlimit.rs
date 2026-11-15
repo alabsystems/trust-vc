@@ -117,8 +117,10 @@ fn test_setup_from_prepared_applies_explicit_rlimit_to_solver_timeout() {
     );
 }
 
-/// Absent an rlimit override, `setup_from_prepared` should keep the default
-/// 30-second solver timeout on the fresh encoder.
+/// Absent an rlimit override, `setup_from_prepared` installs the default wall
+/// from [`crate::encoder::verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS`]
+/// — read from the constant, not restated, because that number is the whole
+/// envelope (search AND ay's certification funnel) and it moved once already.
 #[test]
 fn test_setup_from_prepared_uses_default_solver_timeout_without_rlimit() {
     let mut ctx = VerificationContext::new();
@@ -134,7 +136,9 @@ fn test_setup_from_prepared_uses_default_solver_timeout_without_rlimit() {
 
     assert_eq!(
         encoder.solver.timeout(),
-        Some(Duration::from_millis(30_000)),
-        "setup_from_prepared should use the default 30s timeout when no rlimit is set"
+        Some(Duration::from_millis(
+            crate::encoder::verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS
+        )),
+        "setup_from_prepared should use the default wall when no rlimit is set"
     );
 }

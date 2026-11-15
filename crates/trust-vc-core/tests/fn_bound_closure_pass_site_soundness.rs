@@ -52,6 +52,20 @@ fn verdict(func: &str) -> VerifyResult {
     verify(func).unwrap_or_else(|e| panic!("extract+verify `{func}` failed: {e:?}"))
 }
 
+/// Assert the refusal of a `Verified` answer for a callable parameter evaluated
+/// more than once. Only a `Verified` answer produces it, so a refutation here
+/// still fails the assertion.
+fn assert_refused(func: &str) {
+    let v = verdict(func);
+    assert!(
+        matches!(
+            &v,
+            VerifyResult::Error { message } if message.starts_with("bodiless call repeated")
+        ),
+        "`{func}` should be REFUSED (a callable parameter evaluated twice); got {v:?}"
+    );
+}
+
 fn assert_verified(func: &str) {
     let v = verdict(func);
     assert!(
@@ -73,13 +87,10 @@ fn assert_counterexample(func: &str) {
 }
 
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("FN-BOUND PASS-SITE FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (deferred / fail-closed lowering) or any solver
-        // non-Verified verdict (incl. Unknown) is a sound non-verify.
-        _ => {}
+    // An extraction Err (deferred / fail-closed lowering) or any solver
+    // non-Verified verdict (incl. Unknown) is a sound non-verify.
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("FN-BOUND PASS-SITE FALSE-VERIFY: `{func}` must not verify")
     }
 }
 
@@ -126,11 +137,26 @@ fn t5_param_repass_fail_closed() {
 }
 
 #[test]
-fn t6_determinism_regression_verified() {
-    // REGRESSION (Increment 1 intact): determinism `f(3) == f(3)` still verifies
-    // from the congruent term alone, with a local (unpassed) closure in scope. A
+fn t6_determinism_regression_refused() {
+    // REGRESSION (Increment 1 intact): `f(3) == f(3)` is still proved from the
+    // congruent term alone, and that `Verified` answer is refused. A
     // Counterexample here = the pass-site pass over-constrained an unrelated call.
-    assert_verified("fnbound_2b_determinism_regression");
+    assert_refused("fnbound_2b_determinism_regression");
+}
+
+#[test]
+fn t6b_determinism_no_requires_counterexample() {
+    // H6 twin: without the requires the call-site prove-requires is refuted.
+    let v = verdict("fnbound_2b_determinism_no_requires_cx");
+    match &v {
+        VerifyResult::Counterexample {
+            obligation_name, ..
+        } if obligation_name.starts_with("__call_requires_pp") => {}
+        _ => panic!(
+            "`fnbound_2b_determinism_no_requires_cx` should COUNTEREXAMPLE on the \
+             call-site `__call_requires_pp*` obligation; got {v:?}"
+        ),
+    }
 }
 
 #[test]

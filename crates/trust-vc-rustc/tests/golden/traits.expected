@@ -1,0 +1,61 @@
+exit: 0
+outcome: "checked"
+diagnostics:
+functions:
+  concrete verified -
+  generic verified -
+  T::val declared -
+  T::get declared -
+  T::twice verified -
+  <S as T>::val verified -
+  <S as T>::get verified -
+vcir:
+Struct S S { x: u8 }
+exec fn test_crate::concrete(s: exec &S) -> result: exec ()
+  requires (((*s).0:0 as= int) < (10nat as= int))
+  let mut tmp%2: exec u8
+  tmp%2 := call[#1] test_crate::S::get(&(*s))
+  let r: exec u8 = tmp%2
+  ghost {
+    {
+      assert[#2] (r == (*s).0:0)
+    }
+  }
+  ghost {
+    {
+      assert[#3] (test_crate::T::twice::<[S]>(&(*s)) == ((2nat as= int) * ((*s).0:0 as= int)))
+    }
+  }
+  return[#4]
+exec fn test_crate::generic<A>(a: exec &T0) -> result: exec ()
+  requires (test_crate::T::val::<T0>(&(*a)) == (5nat as= int))
+  let mut tmp%2: exec u8
+  tmp%2 := call[#1] test_crate::T::get::<T0>(&(*a))
+  let r: exec u8 = tmp%2
+  ghost {
+    {
+      assert[#2] ((r as= int) == (5nat as= int))
+    }
+  }
+  return[#3]
+spec fn test_crate::T::val<Self>(self: spec &T0) -> result: spec int
+  #[trait-decl]
+  (no body)
+exec fn test_crate::T::get<Self>(self: exec &T0) -> r: exec u8
+  #[trait-decl]
+  requires (test_crate::T::val::<T0>(&(*self)) < (100nat as= int))
+  ensures ((r as= int) == test_crate::T::val::<T0>(&(*self)))
+  (no body)
+spec fn test_crate::T::twice<Self>(self: spec &T0) -> result: spec int
+  #[trait-decl]
+  = ((2nat as= int) * test_crate::T::val::<T0>(&(*self)))
+spec fn test_crate::S::val(self: spec &S) -> result: spec int
+  = ((*self).0:0 as= int)
+exec fn test_crate::S::get(self: exec &S) -> r: exec u8
+  requires (test_crate::S::val(&(*self)) < (100nat as= int))
+  ensures ((r as= int) == test_crate::S::val(&(*self)))
+  ensures (r == (*self).0:0)
+  return[#1] (*self).0:0
+spec fn test_crate::T::twice::<[S]>(self: spec &S) -> result: spec int
+  #[instance]
+  = ((2nat as= int) * test_crate::S::val(&(*self)))

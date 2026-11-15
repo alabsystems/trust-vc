@@ -69,7 +69,7 @@ fn cargo_trust_vc_bin() -> PathBuf {
     let fallback = repo_root().join("target/debug").join(&binary_name);
     assert!(
         fallback.exists(),
-        "cargo-trust-vc binary not found; run `targo build -p targo-trust-vc --bin cargo-trust-vc` first"
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc --bin cargo-trust-vc` first"
     );
     fallback
 }

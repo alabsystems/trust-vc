@@ -3,7 +3,7 @@
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
 //! New-mut-ref **Phase 1**: the first real semantic slice of the prophecy /
-//! `new-mut-ref` core (`design-new-mut-ref.md`).
+//! `new-mut-ref` core (`docs/archive/design-new-mut-ref.md`).
 //!
 //! For each scalar (`bool`/integer) `&mut T` parameter `P`, Verus' snapshot
 //! model exposes two ground values of `sort_for_type(T)`:
@@ -25,36 +25,88 @@
 //! | bare `P` in a postcondition / `final(*P)` | `fin_P` |
 //! | `has_resolved(P)`                      | `cur_P == fin_P` |
 //!
-//! At **every** function exit we emit a single **resolution** assumption,
+//! The DESIGN calls for a **resolution** assumption at *every* function exit,
 //! `fin_P == current_SSA_value`, encoded as an `Assume` over
-//! `eq(ProphecyNew{fin_P}, current)`. Because `fin_P` is otherwise touched
-//! nowhere, this single equality is the *only* fact the solver ever learns
-//! about the future value — which is exactly the soundness invariant Verus'
-//! prophecy variables rely on.
+//! `eq(ProphecyNew{fin_P}, current)`; `fin_P` is touched nowhere else, so those
+//! equalities are the only facts the solver ever learns about the future value.
+//! What this module actually SHIPS is a builder for ONE such equality
+//! (`exit_resolution_obligation`) and no notion of an exit set, so "at every
+//! exit" is an obligation on a caller that does not exist. Read the next
+//! section before treating that as a detail — it is the whole soundness
+//! argument, and it is not implemented.
 //!
 //! This module is intentionally a pure, side-effect-free *builder* over the
-//! VC layer (`VerificationContext` + `TrustVcExpr`). It reuses the already
-//! tested prophecy primitive end-to-end and adds **no** new solver behavior of
-//! its own, so it cannot introduce an unsound encoding the prophecy primitive
-//! did not already permit. The live string-substitution `ErasedMutRefTarget`
-//! path in `body_extract.rs` is left untouched (the design retires, never
-//! extends it); this builder is the sound `(cur, fin)` substrate later phases
-//! route onto.
+//! VC layer (`VerificationContext` + `TrustVcExpr`). The live
+//! string-substitution `ErasedMutRefTarget` path in `body_extract.rs` is left
+//! untouched (the design retires, never extends it).
 //!
-//! # Soundness tripwires (enforced here, asserted by tests)
+//! # DO NOT WIRE THIS AS IT STANDS — measured 2026-09-16
 //!
-//! - `fin_P` is constrained by **exactly one** equality — the exit resolution.
+//! An earlier version of this header claimed the builders "cannot introduce an
+//! unsound encoding the prophecy primitive did not already permit". That is
+//! **false**, and it is the sentence most likely to get this module wired. The
+//! unsoundness is not in the primitive; it is in the OBLIGATION SHAPE the
+//! builders hand back.
+//!
+//! `exit_resolution_obligation` emits an **unguarded** `Assume(fin_P == v)`.
+//! It carries no path condition, and nothing anywhere checks that the exits a
+//! caller emitted cover every path. Measured consequences, each pinned by a
+//! test in this file's exit-totality block:
+//!
+//! - **One exit emitted out of two → false `Verified`.** `fin_P == v` then
+//!   holds unconditionally, so a postcondition about the final value is proved
+//!   on the paths the caller dropped. This is the branch-join and the
+//!   zero-trip-loop case, i.e. exactly the refusal class a wiring would be
+//!   trying to dissolve.
+//! - **Both exits emitted with different values → contradictory assumptions.**
+//!   The engine's vacuity guard catches this and refuses; it is the only thing
+//!   standing between this shape and "prove anything". So the builders cannot
+//!   model a differing-arm branch *at all*: one resolution is unsound, two are
+//!   vacuous.
+//! - **No place algebra.** Two `&mut` params that alias one location get
+//!   independent prophecy constants, so contradictory finals for a single
+//!   place are jointly satisfiable.
+//!
+//! # The fix shape, also measured
+//!
+//! All three hazards come from one missing ingredient: the exit's PATH
+//! CONDITION. `Assume(path_cond => fin_P == v)` instead of `Assume(fin_P == v)`
+//! and, pinned by the `guarded_*` tests below: an agreeing two-arm branch
+//! VERIFIES its join (the case the live path over-rejects today), a
+//! differing-arm branch gives a real counterexample instead of the vacuity
+//! refusal, and — the load-bearing one — an INCOMPLETE exit set becomes
+//! fail-closed by construction, with no separate totality check needed.
+//!
+//! So the guard is not a detail, it is the whole soundness argument, and it is
+//! cheap to add to this signature. What is not cheap is supplying a real path
+//! condition: `body_extract.rs` has **no exit set** at all
+//! (`docs/archive/design-mutref-mode-wiring.md` records this as the prerequisite). Build the
+//! exit set first, thread path conditions through it, then revisit these pins.
+//!
+//! Note also that the live path already implements the two-state `&mut`
+//! parameter contract by SSA substitution
+//! (`vc_extraction.rs::apply_mut_ref_final_state_to_postconditions` +
+//! `body_extract.rs::capture_mut_ref_param_finals`), fail-closed on early
+//! exit, escape and branch/loop havoc. Measured 2026-09-16: bare `x` and `*x`
+//! in an `ensures`, and `old(*x)`, already denote the right states and refute
+//! their liar twins. This module would be replacing a working mechanism, not
+//! adding a missing one.
+//!
+//! # Soundness tripwires (design intent; only the first two are enforced here)
+//!
+//! - `fin_P` is constrained by **exactly one** equality per emitted exit.
 //!   Nothing in this module emits any other constraint on the prophecy term.
 //! - There is **no extensional `==`** for the `&mut` place itself; equalities
 //!   are always between the *scalar* coordinates `cur_P` / `fin_P`.
-//! - The exit resolution is materialized once per requested exit value, so a
-//!   caller that wires every exit path gets resolution on every exit path.
+//! - Exit-resolution completeness is **NOT** enforced — see the block above.
+//!   It is a comment, and a comment is not a tripwire.
 
-// Phase 1 lands the sound `(cur, fin)` builder substrate plus its full
-// solver-backed test battery. The live `body_extract.rs` extraction path is
-// routed onto these builders in Phase 2+ (per `design-new-mut-ref.md`);
-// until then the only non-test consumers are the tests below, so the builders
-// would otherwise read as dead code.
+// Phase 1 landed the `(cur, fin)` builder substrate plus its solver-backed
+// test battery, deliberately unwired (`88858fc6`, 2026-06-02 — no revert, no
+// disabling commit; it was staged this way on purpose). The routing onto
+// `body_extract.rs` was Phase 2+ of `docs/archive/design-new-mut-ref.md` and never
+// happened. It must NOT happen as the builders stand — see the DO NOT WIRE
+// block in the module header. The only consumers are the tests below.
 #![allow(dead_code)]
 
 use crate::ir::{TrustVcExpr, TrustVcType};
@@ -361,5 +413,315 @@ mod tests {
             "ret",
         ));
         assert_eq!(vc.verify(), VerifyResult::Verified);
+    }
+
+    // ============ EXIT-TOTALITY HAZARD PINS (measured 2026-09-16) ============
+    //
+    // These pin the MEASURED behaviour of the builders when a caller supplies
+    // an INCOMPLETE or CONTRADICTORY exit set. They are not capability tests:
+    // three of them pin an outcome that is FALSE in real Rust. They exist so
+    // that the "do not wire this without exit totality" finding is executable
+    // rather than a comment, and so that a future change which adds guarding
+    // or totality checking FAILS here and forces a re-read of this block.
+    //
+    // Root cause: `exit_resolution_obligation` emits an UNGUARDED
+    // `Assume(fin_P == v)`. Nothing carries the exit's path condition, and
+    // nothing checks that the emitted exits cover every path. So:
+    //   * one exit emitted out of two  -> `fin_P == v` holds unconditionally
+    //     (hazard_*), a false `Verified` for every path the caller dropped;
+    //   * both exits emitted with different values -> the assumption set is
+    //     contradictory and the engine's vacuity guard fires (the one thing
+    //     that saves this shape today).
+    // A sound wiring must emit `Assume(path_cond => fin_P == v)` per exit plus
+    // a totality fact over the guards. Neither exists in this module or on the
+    // live extraction path (`body_extract.rs` has no exit set at all).
+
+    /// GUARD PIN: two exits resolving `fin_x` to DIFFERENT values make the
+    /// assumption set contradictory, and the engine refuses rather than
+    /// proving the blatantly false `cur_x == 999`. This is the only thing
+    /// standing between the unguarded-`Assume` shape and "prove anything".
+    ///
+    /// Liar twin: `two_agreeing_exit_resolutions_verify` above — the same two
+    /// resolutions with the SAME value stay consistent and verify.
+    #[test]
+    fn disagreeing_exit_resolutions_are_refused_not_vacuously_proved() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64())],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                // FALSE: the entry value is pinned to 0 by the requires.
+                TypedProofObligation::ensures("post_false", ir_builder::eq(cur(), lit(999))),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(5), "then"));
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(7), "else"));
+        let verdict = vc.verify();
+        assert!(
+            !matches!(verdict, VerifyResult::Verified),
+            "contradictory exit resolutions must never publish a Verified -> {verdict:?}"
+        );
+    }
+
+    /// HAZARD PIN (false in real Rust): only the taken branch's exit is
+    /// resolved. `fin_x == 7` then verifies unconditionally, even though the
+    /// unemitted exit leaves `*x` at its entry value 0.
+    ///
+    /// This is the false `Verified` that wiring this module to a branch join
+    /// would introduce. It is pinned, not fixed, because fixing it needs the
+    /// path-guarded resolution + exit totality that do not exist yet.
+    #[test]
+    fn hazard_incomplete_exit_set_proves_a_false_final_value() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64())],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                TypedProofObligation::ensures("post_fin", ir_builder::eq(fin(), lit(7))),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        // Only ONE of the two real exits is resolved.
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(7), "then"));
+        assert_eq!(
+            vc.verify(),
+            VerifyResult::Verified,
+            "hazard pin drifted: an incomplete exit set is now detected — if this \
+             is a deliberate fix, re-read the exit-totality block above and \
+             promote these pins"
+        );
+    }
+
+    /// HAZARD PIN (false in real Rust): the zero-trip-loop instance of the
+    /// same hole. A resolution emitted from inside a loop body holds even when
+    /// the loop runs zero times.
+    #[test]
+    fn hazard_zero_trip_loop_exit_resolution_proves_the_loop_body_value() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64()), VariableDecl::new("n", u64())],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                TypedProofObligation::ensures("post_fin", ir_builder::eq(fin(), lit(7))),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(7), "loop_body"));
+        assert_eq!(
+            vc.verify(),
+            VerifyResult::Verified,
+            "hazard pin drifted: a zero-trip loop resolution is now guarded"
+        );
+    }
+
+    /// HAZARD PIN (false in real Rust): two `&mut` params that alias one place
+    /// get INDEPENDENT prophecy constants, so `fin_x == 5 && fin_y == 6` is
+    /// jointly satisfiable for a single location. The builders carry no place
+    /// algebra, so nothing relates `fin_x` and `fin_y`.
+    ///
+    /// Liar twin below: once the alias is stated as `fin_x == fin_y`, the
+    /// `fin_y == 6` half is correctly refuted — so the hole is the MISSING
+    /// alias fact, not the encoding.
+    #[test]
+    fn hazard_aliasing_mut_ref_params_get_independent_finals() {
+        let vc = aliasing_pair_ctx();
+        assert_eq!(
+            vc.verify(),
+            VerifyResult::Verified,
+            "hazard pin drifted: aliasing &mut finals are now related"
+        );
+    }
+
+    /// LIAR TWIN of the pin above: the hole is the MISSING alias fact, not the
+    /// encoding. State `fin_x == fin_y` and resolve the single shared place
+    /// once (to 5), and the split claim's `fin_y == 6` half is correctly
+    /// REFUTED. Only one resolution is emitted here, so the assumption set
+    /// stays consistent and the verdict is a genuine counterexample rather
+    /// than the vacuity refusal.
+    #[test]
+    fn aliasing_mut_ref_finals_refuted_once_the_alias_fact_is_supplied() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64()), VariableDecl::new("y", u64())],
+            vec![
+                TypedProofObligation::requires(
+                    "req_alias",
+                    ir_builder::eq(cur(), current_value_term("y", &u64())),
+                ),
+                TypedProofObligation::ensures(
+                    "post_split",
+                    ir_builder::and(
+                        ir_builder::eq(fin(), lit(5)),
+                        ir_builder::eq(final_value_term("y", &u64()), lit(6)),
+                    ),
+                ),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        register_scalar_mut_ref_param(&mut vc, "y", &u64());
+        // The fact the builders cannot express: both params name one place.
+        vc.push_obligation(ProofObligation::new_typed(
+            "alias_fact",
+            ir_builder::eq(fin(), final_value_term("y", &u64())),
+            ObligationKind::Assume,
+        ));
+        // One place, one resolution.
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(5), "ret"));
+        let verdict = vc.verify();
+        assert!(
+            matches!(verdict, VerifyResult::Counterexample { .. }),
+            "with fin_x == fin_y stated and one resolution, the split final \
+             claim must be refuted -> {verdict:?}"
+        );
+    }
+
+    /// Shared scaffold for the aliasing pair: `x` and `y` denote one place
+    /// (equal entry values), each exit-resolved to a DIFFERENT final value.
+    fn aliasing_pair_ctx() -> VerificationContext {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64()), VariableDecl::new("y", u64())],
+            vec![
+                TypedProofObligation::requires(
+                    "req_alias",
+                    ir_builder::eq(cur(), current_value_term("y", &u64())),
+                ),
+                TypedProofObligation::ensures(
+                    "post_split",
+                    ir_builder::and(
+                        ir_builder::eq(fin(), lit(5)),
+                        ir_builder::eq(final_value_term("y", &u64()), lit(6)),
+                    ),
+                ),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        register_scalar_mut_ref_param(&mut vc, "y", &u64());
+        vc.push_obligation(exit_resolution_obligation("x", &u64(), lit(5), "ret"));
+        vc.push_obligation(exit_resolution_obligation("y", &u64(), lit(6), "ret"));
+        vc
+    }
+
+    /// A `&mut` that is never written emits no resolution at all, so `fin_x`
+    /// stays free and `has_resolved(x)` is correctly NOT provable. (The
+    /// fail-closed direction of the same incompleteness.)
+    #[test]
+    fn never_written_mut_ref_cannot_prove_has_resolved() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![VariableDecl::new("x", u64())],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                TypedProofObligation::ensures("post_hr", has_resolved_term("x", &u64())),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        assert!(
+            matches!(vc.verify(), VerifyResult::Counterexample { .. }),
+            "an unresolved prophecy must not prove has_resolved"
+        );
+    }
+
+    // ===== THE FIX SHAPE, MEASURED (2026-09-16) =====
+    //
+    // The three hazards above all come from ONE missing ingredient: the exit's
+    // PATH CONDITION. Attach it — `Assume(path_cond => fin_P == v)` instead of
+    // `Assume(fin_P == v)` — and all three measurements change, including the
+    // one that matters most: an INCOMPLETE exit set stops being unsound and
+    // becomes fail-closed on its own, with no separate totality check.
+    //
+    // These three tests are the evidence for that claim. They are deliberately
+    // NOT a new API: `exit_resolution_obligation` is unchanged, and the guard
+    // is applied here by hand. Adding the parameter is cheap; supplying a real
+    // path condition is not, because `body_extract.rs` has no exit set. Do that
+    // first.
+
+    /// The `c` of the modelled `if c { *x = .. } else { *x = .. }`.
+    fn branch_cond() -> TrustVcExpr {
+        ir_builder::var("c", TrustVcType::Bool)
+    }
+
+    /// `Assume(guard => fin_x == v)` — the shape `exit_resolution_obligation`
+    /// does NOT produce.
+    fn guarded_resolution(guard: TrustVcExpr, v: i128, tag: &str) -> ProofObligation {
+        ProofObligation::new_typed(
+            format!("__trust_vc_mut_ref_resolve_x_{tag}"),
+            ir_builder::implies(guard, ir_builder::eq(fin(), lit(v))),
+            ObligationKind::Assume,
+        )
+    }
+
+    /// A two-arm branch, both guards emitted, both arms writing 7. Claiming
+    /// `*final(x) == 7` VERIFIES.
+    ///
+    /// This is the case the live path currently over-rejects (a deref write in
+    /// both arms of an `if` havocs the root at the region exit), so the guarded
+    /// prophecy shape is a genuine capability gain — unlike the unguarded one,
+    /// which goes vacuous on exactly this input.
+    #[test]
+    fn guarded_agreeing_branch_exits_verify_the_join() {
+        let vc = guarded_branch_ctx(7, 7, 7);
+        assert_eq!(vc.verify(), VerifyResult::Verified);
+    }
+
+    /// The same branch with arms writing DIFFERENT values: claiming the
+    /// then-arm's value is a genuine `Counterexample` (witness `c = false`),
+    /// not the vacuity refusal the unguarded shape produces. The guard keeps
+    /// the assumption set consistent, so the engine can still reason.
+    #[test]
+    fn guarded_differing_branch_exits_refute_a_one_arm_claim() {
+        let vc = guarded_branch_ctx(7, 9, 7);
+        assert!(
+            matches!(vc.verify(), VerifyResult::Counterexample { .. }),
+            "a claim true on only one arm must be refuted, not vacuously proved"
+        );
+    }
+
+    /// THE LOAD-BEARING ONE: emit only ONE of the two guarded exits. Under the
+    /// unguarded shape this is the false `Verified` pinned by
+    /// `hazard_incomplete_exit_set_proves_a_false_final_value`. Guarded, the
+    /// unemitted path leaves `fin_x` free and the claim is REFUTED.
+    ///
+    /// So the path condition is not only the fix for the join — it makes
+    /// exit-resolution incompleteness fail closed by construction, which is
+    /// what a wiring actually needs (a caller cannot be trusted to enumerate
+    /// every exit).
+    #[test]
+    fn guarded_incomplete_exit_set_fails_closed_instead_of_proving() {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![
+                VariableDecl::new("x", u64()),
+                VariableDecl::new("c", TrustVcType::Bool),
+            ],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                TypedProofObligation::ensures("post_fin", ir_builder::eq(fin(), lit(7))),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        vc.push_obligation(guarded_resolution(branch_cond(), 7, "then"));
+        // The `else` exit is deliberately NOT emitted.
+        assert!(
+            matches!(vc.verify(), VerifyResult::Counterexample { .. }),
+            "a guarded resolution must leave the unemitted path unconstrained"
+        );
+    }
+
+    /// Scaffold: `if c { *x = v_then } else { *x = v_else }`, both exits
+    /// guarded, asserting `*final(x) == claim`.
+    fn guarded_branch_ctx(v_then: i128, v_else: i128, claim: i128) -> VerificationContext {
+        let mut vc = VerificationContext::from_typed_parts(
+            vec![
+                VariableDecl::new("x", u64()),
+                VariableDecl::new("c", TrustVcType::Bool),
+            ],
+            vec![
+                TypedProofObligation::requires("req_entry", ir_builder::eq(cur(), lit(0))),
+                TypedProofObligation::ensures("post_fin", ir_builder::eq(fin(), lit(claim))),
+            ],
+        );
+        register_scalar_mut_ref_param(&mut vc, "x", &u64());
+        vc.push_obligation(guarded_resolution(branch_cond(), v_then, "then"));
+        vc.push_obligation(guarded_resolution(
+            ir_builder::not(branch_cond()),
+            v_else,
+            "else",
+        ));
+        vc
     }
 }

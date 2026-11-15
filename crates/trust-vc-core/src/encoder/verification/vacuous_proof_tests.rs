@@ -48,7 +48,7 @@ fn check_vacuous_truth_returns_none_when_no_assumptions() {
         &[ProofObligation::assert("test", "x == x")],
     );
     let mut diag = EncodingDiagnostics::default();
-    let result = check_vacuous_truth(&prepared, &[], &[], &mut diag);
+    let result = check_vacuous_truth(&prepared, &[], &[], None, &mut diag);
     assert!(
         result.is_none(),
         "empty assumptions should return None (no vacuity possible)"
@@ -64,7 +64,13 @@ fn check_vacuous_truth_returns_none_when_both_slices_empty() {
     let empty_assumptions: Vec<&crate::prepared_context::PreparedObligation> = vec![];
     let empty_broadcasts: Vec<&crate::prepared_context::PreparedObligation> = vec![];
     let mut diag = EncodingDiagnostics::default();
-    let result = check_vacuous_truth(&prepared, &empty_assumptions, &empty_broadcasts, &mut diag);
+    let result = check_vacuous_truth(
+        &prepared,
+        &empty_assumptions,
+        &empty_broadcasts,
+        None,
+        &mut diag,
+    );
     assert!(
         result.is_none(),
         "both slices empty should hit the early return None path"
@@ -89,7 +95,7 @@ fn check_vacuous_truth_detects_contradictory_assumptions() {
         .filter(|o| o.kind == ObligationKind::Assume)
         .collect();
     let mut diag = EncodingDiagnostics::default();
-    let result = check_vacuous_truth(&prepared, &assumptions, &[], &mut diag);
+    let result = check_vacuous_truth(&prepared, &assumptions, &[], None, &mut diag);
     assert!(
         result.is_some(),
         "contradictory assumptions (x > 100 AND x < 0) should be detected as vacuous"
@@ -126,7 +132,7 @@ fn check_vacuous_truth_returns_none_when_assumptions_satisfiable() {
         .filter(|o| o.kind == ObligationKind::Assume)
         .collect();
     let mut diag = EncodingDiagnostics::default();
-    let result = check_vacuous_truth(&prepared, &assumptions, &[], &mut diag);
+    let result = check_vacuous_truth(&prepared, &assumptions, &[], None, &mut diag);
     assert!(
         result.is_none(),
         "satisfiable assumption (x > 0) should not trigger vacuous truth detection"
@@ -200,7 +206,7 @@ fn check_vacuous_truth_handles_int_mode_scheduling_with_measure_obligation() {
         .filter(|o| o.kind == ObligationKind::Assume)
         .collect();
     let mut diag = EncodingDiagnostics::default();
-    let result = check_vacuous_truth(&prepared, &assumptions, &[], &mut diag);
+    let result = check_vacuous_truth(&prepared, &assumptions, &[], None, &mut diag);
     assert!(
         result.is_none(),
         "satisfiable assumptions should pass through even with int-mode (MeasureDecreases) present"
@@ -236,7 +242,7 @@ fn check_vacuous_truth_does_not_panic_with_complex_assumptions() {
         .collect();
     let mut diag = EncodingDiagnostics::default();
     // Should not panic — catch_unwind protects against internal errors
-    let result = check_vacuous_truth(&prepared, &assumptions, &[], &mut diag);
+    let result = check_vacuous_truth(&prepared, &assumptions, &[], None, &mut diag);
     assert!(
         result.is_none(),
         "multiple satisfiable assumptions should pass through without panic"

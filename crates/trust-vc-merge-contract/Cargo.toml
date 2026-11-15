@@ -17,7 +17,6 @@ description = "Versioned merge boundary contract between trust-vc and trust_mc"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-rustdoc-json-stable = { workspace = true }
 rustdoc-types = { workspace = true }
 
 [lints]

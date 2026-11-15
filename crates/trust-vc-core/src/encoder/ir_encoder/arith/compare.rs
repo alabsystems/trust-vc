@@ -11,6 +11,7 @@ use crate::ir::{CompareOp, TrustVcExpr, TrustVcType};
 use crate::ir_expr::CollectionOp;
 
 use super::super::is_trust_vc_literal_zero;
+use crate::encoder::width_coercion::OwnSign;
 use crate::encoder::AstExpressionParser;
 
 fn seq_like_elem_type(ty: &TrustVcType) -> Option<&TrustVcType> {
@@ -21,32 +22,15 @@ fn seq_like_elem_type(ty: &TrustVcType) -> Option<&TrustVcType> {
 }
 
 impl<'a> AstExpressionParser<'a> {
-    fn coerce_compare_term_to_int(&mut self, term: Term, ty: &TrustVcType) -> TrustVcResult<Term> {
-        if !matches!(self.solver.term_sort(term), ay_dpll::api::Sort::BitVec(_)) {
-            return Ok(term);
-        }
-
-        let is_signed = self
-            .term_widths
-            .get(&term)
-            .map(|(_, is_signed)| *is_signed)
-            .unwrap_or(matches!(ty, TrustVcType::Int { .. }));
-
-        if is_signed {
-            self.solver
-                .try_bv2int_signed(term)
-                .map_err(|e| e.to_string().into())
-        } else {
-            self.solver
-                .try_bv2int(term)
-                .map_err(|e| e.to_string().into())
-        }
-    }
-
     /// Encode a comparison operation.
     ///
     /// Signedness is determined from the TrustVcExpr operand types, not from
-    /// `term_widths` (which loses type info for literals).
+    /// `term_widths`: ay hash-conses constants, so `u64::MAX` and `-1i64` are
+    /// ONE term and a term-keyed table answers for whichever occurrence was
+    /// encoded last. Every BV operand here is lifted, widened and ordered with
+    /// the signedness of its own IR type at this use site
+    /// ([`crate::encoder::width_coercion::OwnSign`] of
+    /// [`Self::infer_operand_value_type`]).
     ///
     /// Unsigned comparison is selected only when both operands are unsigned
     /// (AND semantics, #1769). Unsuffixed literal cases like `u32 >= 0` are
@@ -66,6 +50,11 @@ impl<'a> AstExpressionParser<'a> {
         let right_hint_ty = self.infer_effective_expr_type(left, None);
         let left_ty = self.infer_effective_expr_type(left, Some(&left_hint_ty));
         let right_ty = self.infer_effective_expr_type(right, Some(&right_hint_ty));
+        // The signedness each operand DENOTES, from its own type at this use
+        // site — never from `term_widths`, whose entry for a hash-consed
+        // constant may have been written by a different operand.
+        let left_signed = self.own_sign(left, Some(&left_hint_ty));
+        let right_signed = self.own_sign(right, Some(&right_hint_ty));
         if matches!(op, CompareOp::Eq | CompareOp::Ne)
             && seq_like_elem_type(&left_ty)
                 .zip(seq_like_elem_type(&right_ty))
@@ -184,9 +173,26 @@ impl<'a> AstExpressionParser<'a> {
         }
 
         // When both operands are explicit BV types and we disabled int_mode
-        // above, use the BV comparison path. The terms were encoded as BV.
-        // Part of #2557 Slice 2.
+        // above, use the BV comparison path. The terms were encoded as BV —
+        // EXCEPT a spec-collection length, which is an Int term whatever its IR
+        // type says (Route A #2779; see `try_encode_int_sorted_compare`), so an
+        // Int-sorted operand takes the integer comparison instead of reaching
+        // `bvslt` with an Int argument. Part of #2557 Slice 2.
         if use_bv_compare {
+            if let Some(int_compare) = self.try_encode_int_sorted_compare(
+                op,
+                (left_term, left_signed),
+                (right_term, right_signed),
+            )? {
+                return Ok(int_compare);
+            }
+            if let Some(bv_compare) = self.try_encode_bv_compare_signed(
+                op,
+                (left_term, left_signed),
+                (right_term, right_signed),
+            )? {
+                return Ok(bv_compare);
+            }
             let (left_term, right_term) = self.coerce_bv_widths(left_term, right_term)?;
             return match op {
                 CompareOp::Eq => self
@@ -252,45 +258,35 @@ impl<'a> AstExpressionParser<'a> {
             && (matches!(left_ty, TrustVcType::MathInt | TrustVcType::Nat)
                 || matches!(right_ty, TrustVcType::MathInt | TrustVcType::Nat))
         {
-            let left_term = self.coerce_compare_term_to_int(left_term, &left_ty)?;
-            let right_term = self.coerce_compare_term_to_int(right_term, &right_ty)?;
+            let left_term = self.lift_bv_operand_to_int(left_term, left_signed)?;
+            let right_term = self.lift_bv_operand_to_int(right_term, right_signed)?;
             return self.encode_int_compare(op, left_term, right_term);
         }
 
         // Route A (#2779): spec-collection `.len()` is Int while a peer integer
-        // literal/usize value encodes as BV. When the actual term sorts are a
-        // mixed Int/BV pair (e.g. `s.len() == k`, `s.len() < n`), lift the BV
-        // operand to Int (unsigned — lengths/usize are non-negative) and use
-        // Int comparison so the lengths reason over the unbounded integers.
-        // This is the comparison-boundary analogue of `coerce_to_len_width`.
-        {
-            use ay_dpll::api::Sort;
-            let left_sort = self.solver.term_sort(left_term);
-            let right_sort = self.solver.term_sort(right_term);
-            let mixed_int_bv = matches!(
-                (&left_sort, &right_sort),
-                (Sort::Int, Sort::BitVec(_)) | (Sort::BitVec(_), Sort::Int)
-            );
-            if mixed_int_bv {
-                let left_int = if matches!(left_sort, Sort::Int) {
-                    left_term
-                } else {
-                    self.solver
-                        .try_bv2int(left_term)
-                        .map_err(|e| e.to_string())?
-                };
-                let right_int = if matches!(right_sort, Sort::Int) {
-                    right_term
-                } else {
-                    self.solver
-                        .try_bv2int(right_term)
-                        .map_err(|e| e.to_string())?
-                };
-                return self.encode_int_compare(op, left_int, right_int);
-            }
+        // literal/usize value encodes as BV — and TWO lengths are both Int.
+        // Either way the comparison is over the integers; see
+        // `try_encode_int_sorted_compare`.
+        if let Some(int_compare) = self.try_encode_int_sorted_compare(
+            op,
+            (left_term, left_signed),
+            (right_term, right_signed),
+        )? {
+            return Ok(int_compare);
         }
 
-        // Coerce BV widths to match
+        // Two bit-vectors: compared as the integers they denote, each with its
+        // own operand's signedness (a mixed pair used to be compared as bits).
+        if let Some(bv_compare) = self.try_encode_bv_compare_signed(
+            op,
+            (left_term, left_signed),
+            (right_term, right_signed),
+        )? {
+            return Ok(bv_compare);
+        }
+
+        // Not a bit-vector pair (datatypes, arrays, booleans under `==`): the
+        // previous path, unchanged.
         let (left_term, right_term) = self.coerce_bv_widths(left_term, right_term)?;
 
         match op {
@@ -330,6 +326,61 @@ impl<'a> AstExpressionParser<'a> {
             }
             .map_err(|e| e.to_string().into()),
         }
+    }
+
+    /// Route A (#2779) at the comparison boundary: when at least one operand
+    /// TERM is `Int`-sorted, compare over the integers.
+    ///
+    /// A spec-collection length is modelled as an unbounded non-negative
+    /// `Int` (`encoder/mod.rs`, `collection_shared.rs`), whatever the IR type
+    /// of the `.len()` node says — the driver's string-length view types it
+    /// `Int { width: 64 }`, which made `both_explicit_bv` true and sent
+    /// `a.len() < b.len()` (Int, Int) to `bvslt`: "sort mismatch in bvslt:
+    /// expected BitVec(w), BitVec(w), got Int, Int", an `Unknown` for a true
+    /// fact. So the sort of the TERM, not the IR type, decides:
+    ///
+    /// * `(Int, Int)` — compared as integers, which is exactly what the two
+    ///   terms are;
+    /// * `(Int, BV)` / `(BV, Int)` — the BV operand is lifted to the integer
+    ///   it DENOTES, with the signedness of ITS OWN operand type (`*_signed`,
+    ///   an [`OwnSign`]; an operand whose type fixes none is refused — it
+    ///   used to take its peer's). The lift used to
+    ///   be unsigned unconditionally ("lengths/usize are non-negative"), which
+    ///   read a negative signed peer as a huge positive number (`a.len() == 2`
+    ///   entailed `a.len() < -1i64`); d4e06963 then took the sign from
+    ///   `term_widths`, whose entry for a hash-consed constant belongs to
+    ///   whichever operand encoded it last: `u64::MAX < a.len() + (-1i64)`
+    ///   read `u64::MAX` as `-1` and came back `Verified`
+    ///   (`tests/operand_signedness_soundness.rs`).
+    ///
+    /// `None` when neither term is `Int`, or when a term is neither `Int` nor
+    /// BV (floats and reals are routed before this is reached), so every
+    /// other comparison keeps its path.
+    fn try_encode_int_sorted_compare(
+        &mut self,
+        op: CompareOp,
+        (left_term, left_signed): (Term, OwnSign),
+        (right_term, right_signed): (Term, OwnSign),
+    ) -> TrustVcResult<Option<Term>> {
+        use ay_dpll::api::Sort;
+        let left_sort = self.solver.term_sort(left_term);
+        let right_sort = self.solver.term_sort(right_term);
+        let left_int = matches!(left_sort, Sort::Int);
+        let right_int = matches!(right_sort, Sort::Int);
+        let numeric = |int: bool, sort: &Sort| int || matches!(sort, Sort::BitVec(_));
+        if !(left_int || right_int)
+            || !numeric(left_int, &left_sort)
+            || !numeric(right_int, &right_sort)
+        {
+            return Ok(None);
+        }
+        // An Int term is returned unchanged; a BV term is lifted with the
+        // signedness of ITS OWN operand only — a peer's is never borrowed, and
+        // an operand whose own type fixes none is refused.
+        let left_int_term = self.lift_bv_operand_to_int(left_term, left_signed)?;
+        let right_int_term = self.lift_bv_operand_to_int(right_term, right_signed)?;
+        self.encode_int_compare(op, left_int_term, right_int_term)
+            .map(Some)
     }
 
     fn encode_finite_seq_literal_eq(

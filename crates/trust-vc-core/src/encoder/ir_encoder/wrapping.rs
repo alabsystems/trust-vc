@@ -27,6 +27,15 @@ impl<'a> AstExpressionParser<'a> {
     /// Fixes #2030: Checked/Saturating no longer fall through to BV ops on
     /// Int-sorted terms. The explicit Int-range checks mirror the BV overflow
     /// predicates used in the non-int_mode path.
+    ///
+    /// `x.wrapping_add(y)` is `fn wrapping_add(self, rhs: Self) -> Self`: both
+    /// operands have the node's type. A fixed-width node whose operands (after
+    /// the untyped-literal rule, `ir_lowering::binary_operand_types`) are of
+    /// another type is refused — it has no Rust meaning, and it used to be
+    /// computed at the wider operand's width and registered at the node's,
+    /// so `0u8.wrapping_add(-1i16)` read the 16-bit `-1` as the unsigned
+    /// 65535 (`> 1000` came back `Verified`). A fitting untyped literal is
+    /// encoded at the node's type.
     pub(super) fn encode_wrapping_arith(
         &mut self,
         mode: WrappingMode,
@@ -35,6 +44,27 @@ impl<'a> AstExpressionParser<'a> {
         right: &TrustVcExpr,
         ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
+        if crate::ir_lowering::is_fixed_width_int(ty) {
+            let (left_ty, right_ty) = crate::ir_lowering::binary_operand_types(left, right, ty);
+            if left_ty != *ty || right_ty != *ty {
+                return Err(format!(
+                    "a {mode:?} `{op:?}` of type `{}` over operands of types `{}` and `{}`: \
+                     both operands of a wrapping/checked/saturating method have its type",
+                    ty.to_type_string(),
+                    left_ty.to_type_string(),
+                    right_ty.to_type_string()
+                )
+                .into());
+            }
+        }
+        let typed_left = crate::ir_lowering::is_fixed_width_int(ty)
+            .then(|| crate::ir_lowering::untyped_literal_at_peer(left, ty))
+            .flatten();
+        let typed_right = crate::ir_lowering::is_fixed_width_int(ty)
+            .then(|| crate::ir_lowering::untyped_literal_at_peer(right, ty))
+            .flatten();
+        let left = typed_left.as_ref().unwrap_or(left);
+        let right = typed_right.as_ref().unwrap_or(right);
         // In int_mode, ALL wrapping modes use Int arithmetic.
         // Wrapping: modular wrap. Checked: overflow check. Saturating: clamp.
         // Fixes #2030: previously only Wrapping used Int path; Checked/Saturating
@@ -116,18 +146,26 @@ impl<'a> AstExpressionParser<'a> {
         let left_term = self.encode_subexpr(left)?;
         let right_term = self.encode_subexpr(right)?;
 
-        let (left_term, right_term) = self.coerce_bv_widths(left_term, right_term)?;
+        // A fixed-width node's operands both have its type (refused above
+        // otherwise), so nothing is widened. Any other node widens each
+        // operand by the signedness of its OWN IR type only — never its
+        // peer's or the node's — and never by a `term_widths` entry a
+        // hash-consed constant shares with other occurrences of the same bits.
+        let own_left = self.own_sign(left, None);
+        let own_right = self.own_sign(right, None);
+        let (left_term, right_term) =
+            self.coerce_bv_widths_signed((left_term, own_left), (right_term, own_right))?;
 
         // Derive width/signedness from the WrappingArith node's own `ty`
-        // (authoritative Rust type) as primary source. Fall back to operand
-        // term_widths only when ty lacks BV info. Fixes #2100: FnCall results
-        // without term_widths entries no longer cause incorrect defaults.
+        // (authoritative Rust type) as primary source. Fall back to the
+        // coerced operands' sort width and their IR-type signedness only when
+        // ty lacks BV info. Fixes #2100: FnCall results without term_widths
+        // entries no longer cause incorrect defaults.
         let ty_width_info: Option<(u32, bool)> = ty.bit_width().map(|w| (w, !ty.is_unsigned()));
         let coerced_width_info = ty_width_info.or_else(|| {
-            self.term_widths
-                .get(&left_term)
-                .or_else(|| self.term_widths.get(&right_term))
-                .copied()
+            self.bv_term_width(left_term)
+                .or_else(|| self.bv_term_width(right_term))
+                .zip(own_left.get().filter(|_| own_left == own_right))
         });
 
         let result = match op {
@@ -164,7 +202,11 @@ impl<'a> AstExpressionParser<'a> {
                 // requires BOTH operands unsigned. Literals lack term_widths entries
                 // and default to signed, causing false positives/negatives.
                 // Parity: methods.rs:731-740 (#1987, #2011).
-                let is_signed = coerced_width_info.map(|(_, s)| s).unwrap_or(true);
+                let is_signed = coerced_width_info.map(|(_, s)| s).ok_or_else(|| {
+                    "checked arithmetic requires a fixed-width type: neither the node nor \
+                     its operands fix a signedness for the overflow predicate"
+                        .to_string()
+                })?;
                 match op {
                     ArithOp::Add => {
                         let no_overflow = self

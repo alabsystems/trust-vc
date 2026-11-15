@@ -81,6 +81,18 @@ fn lower_lit(lit: &syn::ExprLit) -> Option<TokenStream> {
             let value: i128 = int_lit.base10_parse().ok()?;
             let suffix = int_lit.suffix();
             let ty_tokens = int_suffix_to_type(suffix);
+            // A literal the source TYPES `i32` is pinned by an identity cast,
+            // as in the syn lowering (`ir_lowering::atoms::typed_int_literal`):
+            // a bare `Int { width: 32 }` literal is the unsuffixed placeholder.
+            if suffix == "i32" {
+                return Some(quote! {
+                    #ir_builder_path::cast(
+                        #ir_builder_path::int_lit(#value, #ty_tokens),
+                        #ty_tokens,
+                        #ty_tokens,
+                    )
+                });
+            }
             Some(quote! {
                 #ir_builder_path::int_lit(#value, #ty_tokens)
             })
@@ -402,7 +414,11 @@ fn lower_call(call: &syn::ExprCall) -> Option<TokenStream> {
     let func_name = match &*call.func {
         syn::Expr::Path(path) if path.qself.is_none() => {
             let segments = &path.path.segments;
-            if segments.len() == 1 {
+            // H10: `f::<u8>(x)` names an instantiation this builder lane cannot
+            // carry (it would emit the bare `f(x)` term for every
+            // instantiation). Decline, so the call goes through the checked
+            // string lowering instead.
+            if segments.len() == 1 && matches!(segments[0].arguments, syn::PathArguments::None) {
                 segments[0].ident.to_string()
             } else {
                 return None;

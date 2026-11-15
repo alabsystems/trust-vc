@@ -1,0 +1,36 @@
+exit: 1
+outcome: "verification-failed"
+diagnostics:
+  error - assertion failed @[17:assertion failed]
+functions:
+  left_first verified -
+  right_first failed -
+vcir:
+exec fn test_crate::left_first() -> result: exec ()
+  let mut x: exec u64 = 24u64
+  let y: exec u64 = 30u64
+  let mut tmp%3: exec u64 = x
+  x := 60u64
+  let z: exec u64 = (tmp%3 +[#1] y)
+  ghost {
+    {
+      assert[#2] ((z as= int) == (54nat as= int))
+    }
+  }
+  ghost {
+    {
+      assert[#3] ((x as= int) == (60nat as= int))
+    }
+  }
+  return[#4]
+exec fn test_crate::right_first() -> result: exec ()
+  let mut x: exec u64 = 24u64
+  let y: exec u64 = 30u64
+  x := 60u64
+  let z: exec u64 = (y +[#1] x)
+  ghost {
+    {
+      assert[#2] ((z as= int) == (54nat as= int))
+    }
+  }
+  return[#3]

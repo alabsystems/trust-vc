@@ -21,7 +21,7 @@ impl AYEncoder {
     /// array properties from. This method creates a ground select at index 0 for
     /// each collection variable, giving E-matching a starting point.
     ///
-    /// ay's 8-round E-matching (`MAX_EMATCHING_ROUNDS = 8`) chains from the seed:
+    /// ay's multi-round E-matching chains from the seed:
     /// given `select(a, 0)`, a sortedness axiom `forall j: a[j] <= a[j+1]` fires
     /// with `j=0`, producing `select(a, 1)`, which triggers `j=1`, etc.
     ///
@@ -80,6 +80,28 @@ impl AYEncoder {
                 TrustVcType::Set(elem) => (sort_for_type(elem), Sort::Bool),
                 _ => continue,
             };
+
+            // A DATATYPE-VALUED MAP gets no seed. The seed only names
+            // `select(data, 0)` for an E-matching start, and index 0 is not a
+            // distinguished key of a map (a Seq keeps its seed: there it is the
+            // first element). For a `Map<_, <datatype>>` that named read is the
+            // one thing that drags the datatype-valued array into the model:
+            // measured 2026-09-13 at ay 0.26.0 on the `Map<u32, (u32, u32)>` liar
+            // `m.get(1).1 == 999` — the goal folds to `(not (= (T_1 (T 7 8))
+            // 999))`, which ay decides `sat` in 1 ms with the seed removed and
+            // answers `Unknown (incomplete)` with it
+            // (`collection_tuple_element_capability::map_tuple_false_counterexamples`,
+            // red since a15b6207). The seed is a fresh constant bound by one
+            // equality, so omitting it drops a conservative definition: it can
+            // lose an E-matching instance, never make a false claim `Verified`.
+            if let TrustVcType::Map(_, value_ty) = &ty {
+                if matches!(
+                    value_ty.as_ref(),
+                    TrustVcType::Datatype { .. } | TrustVcType::RecursiveRef(_)
+                ) {
+                    continue;
+                }
+            }
 
             let idx_zero = match &index_sort {
                 Sort::BitVec(bvs) => self.solver.try_bv_const(0, bvs.width).map_err(|e| {

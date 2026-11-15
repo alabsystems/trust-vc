@@ -2,6 +2,7 @@
   "schema_version": 2,
   "manifest_id": "upstream-verus-corpus",
   "description": "Evidence manifest for upstream Verus tests used by TrustVc parity gates.",
+  "correspondence_bound": "WHAT AN ACCEPTED CASE ESTABLISHES, and what it does NOT. Read it with every accepted-case count; the count alone reads as the strongest of several unequal kinds of evidence. THERE ARE TWO LAYERS, and the error this text has now been corrected for three times is describing ONE of them as though it were both. EVERY CHECK NAMED BELOW PRINTS THE POPULATION IT RUNS ON, because the fourth correction — round 9's — was a sentence that attributed three unequal sub-checks to one layer's denominator. HEADLINE: LAYER 1 checks a case's DECLARATION against upstream's source and COVERS 259 of 259 accepted expected cases (100.0%), and ITS SUB-CHECKS DO NOT SHARE THAT DENOMINATOR. Corpus-wide, on all 259 of 259: the declared upstream case RESOLVES to a real, non-`#[ignore]`d upstream case, and the DECLARED VERDICT IS ADMISSIBLE FOR upstream's — EQUAL to it, except that a port case mapped to a MULTI-FUNCTION upstream FAILURE case may declare `verified` for one of the functions upstream does not fail, which the exact failing-case count of (c) then pins. Narrower, each on the population printed with it: the mapped-case COUNT is compared per UPSTREAM case over the 223 the corpus maps — EXACTLY on the 50 that state a failure count, counting the mapped cases that DECLARE a failure, `>=` on the other 173; upstream's ASSERTED DIAGNOSTIC MESSAGES are required on 16 of the 25 error cases, 16 strings in all, and on nothing else; an upstream VERIFIER WARNING on the 1 upstream case that asserts one; an upstream FORBIDDEN diagnostic-context pattern on the 1 upstream case that states one, 1 pattern in all; and the cargo-fixture requirement on the 4 of the 259 whose upstream case is a RUST-error case. AN EARLIER REVISION OF THIS HEADLINE said that every one of the 259 has `its declared verdict, its mapped-case count and upstream's own asserted messages` read out of the checkout and compared. That gave all three the denominator 259, which is right for one of them and wrong for the other two; it is corrected above and retracted here rather than quietly rewritten. LAYER 2 checks the port's PROGRAM against upstream's program and COVERS 51 of 259 (19.7%), of which 51 (19.7%) survive to establish anything. So: every accepted case, 259 of 259, has its upstream case RESOLVED and its declared VERDICT compared, with the five narrower LAYER-1 checks applying only to the populations just named; 51 additionally have their PROGRAM checked, of which 51 survive; the other 208 (80.3%) have their DECLARATION checked and their PROGRAM not; and LAYER 2, the program-level one, is the LAUNDERABLE layer, which is why most of this bound's length is spent on it. An earlier revision of this text also said the other 208 cases establish NOTHING about upstream, and that a verified case is tied to upstream by nothing that reads upstream's source. BOTH WERE FALSE, in the pessimistic direction, and both are corrected here. EVERY BUCKET BELOW STATES BOTH NUMBERS — what the rule COVERS (its scope) and what it ESTABLISHES (scope minus whatever is refused, unreadable, synthesized or otherwise not really checked) — and where the two differ the reason is in the same sentence. A SCOPE count presented as an ESTABLISHED count is one failure mode of this text; ONE LAYER's scope presented as the whole of the gate's upstream reading is the second; and a SUB-CHECK's result presented on its LAYER's population — the headline error just retracted — is the third. Every quantified sentence below therefore prints the population it runs on, even where that population is the whole corpus. Every number in it is recomputed — from the pinned manifest by `the_bound_carries_the_measured_accepted_case_split`, and from the pinned Verus checkout by `the_bound_states_scope_and_established_for_every_bucket` — so none of them can be hand-written or drift. (L1) LAYER 1 — PER-CASE UPSTREAM CHECKS — COVERS 259 of 259 = 100.0%, ESTABLISHES on all 259 a RESOLVED upstream case and a DECLARED VERDICT equal to upstream's, plus checks (c) through (g) on the smaller populations each of them names, and NOTHING about any port's PROGRAM. The upstream harness-case block in `load_corpus_report_with_options` runs for EVERY accepted entry: it reads the entry's upstream file with the AST reader `upstream_verus_harness_cases` (a `syn` parse, NOT the line-based region reader of (1)), and per expected case it requires (a) the declared `upstream_case_id` to name a case that EXISTS upstream and is not `#[ignore]`d, on pain of `expected_cases entry ... does not match an upstream Verus harness case` — 0 of the 259 fail to resolve, and in the other direction each of the 223 non-ignored upstream cases in the 46 accepted files must be mapped by at least one port case or the entry fails with `expected_cases missing upstream Verus case`; (b) THE DECLARED VERDICT TO BE ADMISSIBLE FOR upstream's extracted verdict, on all 259 — EQUAL to it, with ONE exception, which is not a hole but the only way a multi-function failing case can be ported at all: upstream's verdict is a property of its whole PROGRAM and a port case's is a property of ONE FUNCTION, so where upstream's program refutes N obligations across M functions the other mapped port cases declare `verified`, and ONLY `verified` — `error` is still refused, and a `counterexample` under a VERIFIED upstream case is still a mismatch; (c) the number of mapped port cases THAT DECLARE A FAILURE to equal upstream's `expected_occurrences` — counted per UPSTREAM case, over the 223, and not per port case: EXACTLY on the 50 upstream cases where upstream states a failure count, `>=` on the other 173 where it states none. Upstream's `assert_fails(e, N)` is `assert_eq!(err.errors.len(), N)`: N FAILURES IN ONE PROGRAM. Comparing N against the number of mapped port CASES was the same number only while every mapped function failed, and it made a multi-function failing case UNPORTABLE BY CONSTRUCTION — `z3_restart.rs`'s `multiset_basics` is six proof fns with one trailing `assert(false) // FAILS`, and its five verifying functions could only be declared `counterexample` (a falsehood) or dropped (a deletion), while six mapped cases could never equal one failure. The remaining mapped cases must declare `verified` (that is (b)'s exception, and the two rules are one rule read from two ends), and the split is CEILINGED by upstream's own program: at most as many mapped cases as upstream declares FUNCTIONS in that case, counted at the top level of its `verus_code!` block by `program_function_count` out of the pinned checkout, so the room this opens cannot be spent on cases upstream does not have; (d) every diagnostic message upstream ASSERTS to be declared verbatim — 16 upstream-asserted strings across 16 of the 25 error cases, and nothing required of the other 9 or of any case outside that bucket; (e) every verifier WARNING upstream content-checks to be declared, on the 1 upstream case that asserts one and on no other, with the converse refused too (a port may not declare a warning upstream does not assert); (f) an upstream RUST-error case to map to a cargo fixture, so a rustc diagnostic is never modelled as a verifier counterexample — on the 4 of the 259 whose upstream case is a Rust-error one; and (g) every FORBIDDEN diagnostic-context pattern upstream states to be declared, on the 1 upstream case that states one, 1 pattern in all, with the converse refused too. (g) WAS MISSING FROM THIS LIST UNTIL ROUND 9. The gate has been running it all along, so the omission understated LAYER 1 rather than overstating it — but a list that reads as exhaustive and is not is the same defect as a denominator that does not fit its check, and it is recorded here rather than silently filled. On the 16 cases of (d) this composes into a real port-to-upstream tie in the RUN lane: `append_expected_error_pattern_failures` then requires every declared pattern to appear in ONE failure-attached diagnostic the PORT itself emitted, so upstream's exact asserted string has to come out of trust-vc's own run. WHAT LAYER 1 DOES NOT ESTABLISH, and it is the entire subject of (1): nothing about whether the port's PROGRAM reproduces upstream's program. A FAITHFUL DECLARATION OVER AN UNFAITHFUL BODY PASSES THIS LAYER — replace the port's function with one that trivially fails and keep `counterexample`, or one that trivially succeeds and keep `verified`, and (a) through (g) are all still satisfied. Layer 1 constrains the manifest ROW; Layer 2 constrains the SOURCE. LAYER 1 IS LIVE, NOT DORMANT, AND IT IS STILL RED: this worktree's own `--verus-path ../verus` run returns 1 `upstream_case_failures`, split 0 verdict, 0 occurrence-count, 1 missing-diagnostic-pattern. The one left is on an ERROR case: `real.rs::test_reject_mixed` declares a substring where upstream asserts the whole `The verifier does not yet support the following Rust feature: ...` message. The six that are GONE were all on `z3_restart.rs`'s `multiset_basics` — five verdict mismatches on port cases declaring `verified` under an upstream case that fails, and one occurrence-count mismatch (exactly 1 mapped case allowed, 6 mapped) — and they went by fixing the RULE, not the manifest: upstream's `multiset_basics` is a SIX-FUNCTION program with ONE failure, which the old readings of (b) and (c) made unportable, and not one declared verdict moved. `upstream_case_failures.is_empty()` is a conjunct of the corpus manifest gate's pass condition, so every one of the 1 remaining BLOCKS; none is waived, and the count and its split are recounted from the gate's own report rather than written down. (0) SCOPE OF LAYER 2 — WHICH CASES HAVE THEIR PROGRAM CHECKED AT ALL. The source-level correspondence rule governs COUNTEREXAMPLE cases ONLY: `append_counterexample_identity_failures` returns on its second line unless the expected verdict is `counterexample`, so every claim comparison, every premise channel and the vacuity guard sit behind that return. Measured on this manifest: 259 accepted expected cases = 51 counterexample (19.7%) + 183 verified (70.7%) + 25 error (9.7%). Four accepted cases in five have no program-level check at all: their upstream case is resolved and their verdict compared, plus whichever of (c) through (g) their own population falls inside, and nothing more. Of those 183 verified, 48 are SCHEMA-FIXED and carry no pin of any kind — see (2b). (1) COUNTEREXAMPLE / LAYER 2 — COVERS 51 of 259 = 19.7%, ESTABLISHES 51 of 259 = 19.7%. What an established case establishes, stated of each of those 51 and of no case outside them: the port refutes upstream's marked claim, in a function that runs upstream's statements and binds what upstream binds, every compared text machine-read from the pinned Verus checkout. The gap between COVERS and ESTABLISHES is EMPTY, and it was two kinds. 0 are REFUSED as un-checkable — the CLAUSE-MARKED class, whose marked line sits on the enclosing function's HEADER on both surfaces, was refused for as long as `enclosing_function_prefix_lines` returned an EMPTY window for a header line: both premise windows were then empty BY CONSTRUCTION and the whole function BODY — which is what makes a clause refutable at all — reached no channel, so `nonlinear.rs::test1_fails`, `nonlinear.rs::test2_fails` and the witness `z3_restart.rs::test2_fails` established nothing, and that witness's empty upstream body admitted ground `assume!`s that collapse the nonlinear claim with no failure of any kind. IT IS FIXED AT THE WINDOW, NOT AT THE REFUSAL: a contract obligation is discharged against everything the function body runs — an `ensures` holds at every return — so a header mark's premise window is that BODY, drawn by the same reader on both surfaces. The ground-`assume!` launder then lands in the port's statement set against upstream's empty one, and the statement channel compares as EQUALITY, so it FAILS a real comparison instead of being refused (`a_clause_marked_obligation_is_checked_against_the_function_body` pins both halves). What is still refused, fail-closed and with no member in this corpus, is the shape where UPSTREAM ITSELF has no body to read: a header mark on a bodyless signature, where the text that makes a clause refutable is missing on upstream's own side. And 0 more can only FAIL the cross-check, never pass it — a second kind that had exactly one member, `harness.rs::harness_false`, until ROUND 11 EMPTIED IT. `upstream_case_regions` — the LINE-BASED reader this layer and the provenance measurement in (3) use, and NOT Layer 1's AST reader — took a case name off the `#[test]` LINE ONLY, which is the form `test_verify_one_file!` expands to, and upstream's hand-written `harness.rs` puts a plain `#[test]` above `fn harness_false()`. It now reads that second form too, and narrows a plain-form region to the `verus_code! { .. }` block the Rust test function wraps the program in, so the premises compared are the Verus function's and not the test harness's `let err = verify_one_file(`. 0 of that file's 6 upstream cases are now invisible to it, and none anywhere in the accepted macro corpus: 0 of 162. They were never invisible to LAYER 1, which parses the file and reads all six — which is exactly why each layer needs its own blindness statement, and why an earlier revision calling these 4 invisible to every upstream reader in this gate was wrong. Inside the 51 it does NOT establish that the port reproduces upstream's proof OBLIGATION, and it does not discriminate: BLOCK STRUCTURE and statement ORDER, because the binding channel compares name/initializer PAIRS as a SET and the statement channel is a SET too — witness `scope.rs::test1_fails`, which IS upstream's block-scope case: delete the inner block, flatten every binding into one sequence, and both sets are unchanged, the case passes, and the refresh re-stamps the hash; the SIGNATURE and type environment (`fn f(x: u8)` for upstream's `fn f(x: int)`); anything outside the enclosing function and the definitions the claim calls; and a `let` whose block outruns the reader's 24-line window. Weaker still on 19 of the 51, and this is COVERED-BUT-THIN rather than covered-but-not-established: upstream binds nothing and runs nothing before its marked line, so its premise window is empty — and on 15 of those 19 the claim reaches no definition either, leaving the claim text and the hypothesis list as the whole comparison. Those 19 are not refused, because the statement channel compares as EQUALITY and so forces the port's own prefix to be empty too; the count is stated because `checked` and `checked against something` are not the same claim. (An earlier prose count of 8 in this branch's probe was the sub-count that also reaches no definition; both rules are now in code, in `measure_upstream_read_establishment`. Both figures then MOVED, 12 to 16 and 8 to 12, for TWO fixes that landed in the same integration and are additive on the single-branch measurements (12->15/8->11 and 12->13/8->9 respectively): `enclosing_function_prefix_lines` stopped starting its window at the item opener — a signature `requires` clause was being read as a body statement as well as a hypothesis, so three upstream windows that are genuinely empty had looked non-empty — and the LINE-BASED region reader learned upstream's plain `#[test]` form, which admits `harness.rs::harness_false` into this layer at all, with an upstream prefix that is empty. The gate admits MORE weakness on those four, not less.) (2) VERIFIED — LAYER 1 COVERS 183 of 259 = 70.7%, LAYER 2 COVERS 0 of 183 AND ESTABLISHES NOTHING ABOUT THE PORT'S PROGRAM: THE LARGEST HOLE and the MAJORITY of accepted cases, because a verified case is tied to its upstream case by NOTHING THAT READS UPSTREAM'S PROGRAM. Its DECLARATION is checked all the same, and with its own populations: the declared `verified` must equal upstream's own verdict on all 183, and the mapped-case count must satisfy upstream's — `>=` where the upstream case states no failure count, EXACTLY where it does, which is the rule that reaches the 5 of the 183 verified cases whose upstream case is a counterexample one. That is how the 5 `z3_restart.rs` verdict findings and the 1 count finding named above were raised, and — once the rule was corrected to count the mapped cases that DECLARE a failure — how they were retired without one declared verdict moving — so this is a PROGRAM-level hole, not the absence of any upstream check. One more of the narrow checks reaches into this bucket and the list would read as exhaustive without it: (e) applies to the 1 of the 183 whose upstream case asserts a verifier warning. What the two halves establish about the PORT differs, and the weaker half is invisible in the word `verified`. (2a) AUTHOR-PINNED, 135 of 183 — COVERS 135, ESTABLISHES 135 PORT-SIDE obligation pins and zero PROGRAM-level correspondence: the engine really runs, really encodes the PORT's obligations and really reports `verified`, and the case is pinned by an obligation COUNT (`min_obligations`, greater than 0 on every one of the 135) plus engine-derived fingerprints of the PORT'S OWN obligations (present on every one of the 135) — which encode nothing about upstream's program. So a verified port whose body is deleted, with `min_obligations` lowered to match and the fingerprints re-stamped and the port committed, is ACCEPTED — and LAYER 1 does not stop it, because deleting a body changes neither the declared verdict nor the mapped-case count. (2b) SCHEMA-FIXED, 48 of 183 — all 48 cases of the 6 `cargo_trust_vc_integration_test` entries (upstream's `source/cargo-verus/tests/*`) — COVERS 48, ESTABLISHES ZERO PROOF CONTENT BY CONSTRUCTION: here THE COUNT PINS NOTHING BECAUSE THE SCHEMA WROTE IT. `append_expected_case_obligation_pin_failures` REQUIRES `expected_verdict` `verified`, REQUIRES `min_obligations` 0 and REFUSES any `obligation_fingerprints` on these entries, so neither field records an author decision at all; and `run_trust_vc_corpus_cargo_trust_vc_integration_test` never invokes the engine — it SYNTHESIZES `verdict: verified, obligation_count: 0, fingerprints: []` whenever `cargo test --test <target> -- --exact <case_id>` reports exactly one pass. The word `verified` on these 48 rows is a schema placeholder, not an engine verdict, and no proof obligation exists anywhere in their evidence. What they DO establish is real and different in kind, and it is 48 CLI-BEHAVIOUR WITNESSES, not 48 proofs: a `#[test]` of exactly that name exists in the declared `crates/cargo-trust-vc/tests/*.rs` file, is not `#[ignore]`, and passes — evidence for the `cargo verus` argument-forwarding compat layer. LAYER 1 still applies to all 48, in the corpus-wide half it applies everywhere: the upstream case is enumerated by `upstream_cargo_verus_integration_test_cases`, and the declared verdict and the case count are compared against it. The deleted-body sentence in (2a) applies to these with LESS resistance, not more: emptying such a test's body makes it pass, and NO OBLIGATION PIN MOVES, because there is none — the only manifest field that changes is the `trust_vc_source_hashes` sha256 of the port file, which all 46 accepted entries carry alike and which the refresh re-stamps to whatever the file now says, so it separates these 48 from nothing. The ratchet of (4) compares `min_obligations` and `obligation_fingerprints` and nothing else, so it is structurally silent on all 48 ALWAYS, not merely after a commit; for the 135 of (2a) it does at least refuse the decrease while it is uncommitted. Read `accepted_expected_cases_verified` next to `accepted_expected_case_count`, and `accepted_expected_cases_verified_schema_fixed` next to that. (3) ERROR — LAYER 1 COVERS 25 of 259 = 9.7%, LAYER 2 COVERS 0, and the bucket ESTABLISHES 25 PORT-SIDE diagnostic pins plus, on 16 of the 25, an upstream-asserted message that must come out of the port's own run. The 25 is not a scope standing in for a result here: 25 of the 25 declare at least one `expected_error_patterns` entry, so the pin is non-vacuous on every one of them. What a diagnostic-pattern pin DOES establish, on each of those 25: the port's own run emits a failure-attached diagnostic containing every declared pattern, all of them in ONE diagnostic (`append_expected_error_pattern_failures`, which refuses a pattern satisfied by the port's source text or by two unrelated entries between them). What it does NOT: no rule compares the port's PROGRAM with upstream's for an error case, and a pattern the PORT invents is neither required nor forbidden by anything. HOW MUCH OF LAYER 1 IS UPSTREAM-SOURCED FOR THIS BUCKET, measured with the gate's own readers rather than assumed: 16 of the 25 error cases have an upstream case that ASSERTS a diagnostic message, and for those LAYER 1 already requires upstream's exact string — 16 strings in all — to be DECLARED, and the run lane requires it to APPEAR in the port's own failure diagnostic; the other 9 have no upstream-asserted message whatever, because upstream marks the line `// FAILS` and calls `assert_one_fails`, and the extractor re-keys such a case to `error` when upstream runs it with `--no-cheating` — so those 9 are upstream REFUTATION cases the port runs on trust-vc's own `--no-cheating` CLI surface, and for them Layer 1 checks the verdict and the count and nothing else. Seen from the PORT's side instead of upstream's, with a deliberately generous substring scan of the literals upstream asserts in the case's own region: of the 48 declared `expected_error_patterns` only 19 appear inside a string literal upstream itself asserts; by case, 15 of the 25 have every declared pattern so sourced; 10 of the 25 — every `no_cheating.rs` case — declare the PORT'S OWN strings (its fixture path `src/<case>.rs`, plus trust-vc's own wording: `admitted proof`, `trusted function body`, `source assumption`, `nested`), and for 9 of those 10 upstream asserts no message whatever; and 0 of the 25 (`harness.rs::harness_invalid_rust`) names an upstream case the LINE-BASED region reader cannot see — it was the one such case until round 11 taught that reader upstream's plain `#[test]` form, LAYER 1's AST reader read it throughout, and its one upstream-asserted pattern is now sourced on both readers. The 29 declared patterns that are NOT upstream text are a manifest-authoring question no rule asks. (4) THE PROOF-CONTENT RATCHET IS A TRIP-WIRE ON AN UNCOMMITTED DIFF, not a refusal by construction. It compares the WORKING manifest against `git show HEAD`, so it refuses a refresh or a hand-edit that would lower a pin exactly while the decrease is UNCOMMITTED; commit the lowered pin and the working manifest equals HEAD, there is nothing to compare against, and it is silent about that case forever after. What it buys is real and smaller: a lowered pin must be a line in a reviewed diff. (5) WHAT WOULD CLOSE THE CLASS — the class here is LAYER 2, the program-level one; Layer 1 is already corpus-wide. One route closes (1) and (2a) together, because an author-pinned verified case has no refuted claim but does have an obligation set — and it reaches (2b) only once those 48 upstream cases are ported as PROOF cases rather than as CLI-behaviour tests, which is a corpus re-key, not an engine change: correspondence on the ENCODED OBLIGATION, hypotheses plus goal, which the engine already builds for the port. It needs (a) a Verus-to-IR import so upstream's case has an encoding to compare against — `verus!` source through the trust-vc frontend into trust-ir is the self-contained shape, `.vir` interop the Phase-2 alternative; (b) a per-CASE entry point, which the corpus already provides: it extracts the upstream case region today; (c) obligation-SET comparison in the calculus rather than in strings — alpha-equivalence plus the normalizer the canonicalizer already implements for the deliberate native-surface differences, set equality on hypotheses, entailment-or-equality on the goal; and (d) a pinned Verus build or a vendored corpus at the manifest's upstream ref. ONE smaller thing is still in the way of the counts above and is cheap by comparison: the 29 declared error patterns that are the port's own wording have no upstream channel, because Layer 1 checks upstream's 16 asserted strings in the upstream-to-port direction only. The OTHER one — the LINE-BASED region reader learning upstream's plain `#[test]` + `fn name()` form — was done in round 11, and `harness.rs`'s four hand-written cases are readable to LAYER 2 and to the provenance measurement now, as they always were to LAYER 1. Not another source-level rule over the port: five rounds of those were each laundered by the next reviewer. (6) OUTSTANDING REVIEW FINDINGS — FOUND BY REVIEW, NOT YET FOLDED INTO THE PROSE ABOVE. This section exists so that a finding against this text never has to choose between blocking the branch and disappearing. A finding recorded here is DISCLOSED, not fixed: every sentence above still says exactly what it said, and the finding says what is wrong with it. A bound that carries its own outstanding review comment is more honest than one that hides it, and it is not a substitute for fixing the prose — a finding leaves this list only by being FIXED above, in the commit that removes it. HOW TO APPEND ONE: add it verbatim as a new `[R<round>] ` entry immediately after `FINDINGS:` in `ACCEPTED_CASE_CORRESPONDENCE_BOUND` in `crates/cargo-trust-vc/src/evidence.rs`, deleting the `NONE OUTSTANDING.` sentinel if it is still there; then re-stamp `evals/verus/verus-tests.json` with `--refresh-trust-vc-corpus-evidence`, or copy the constant across by hand. The schema's byte-identical `correspondence_bound` check carries this section into the manifest exactly as it carries every other sentence — it is one string, so there is no second channel to forget — and `the_bound_carries_its_outstanding_review_findings_section` pins the section's shape, its position at the very end of the bound, and the sentinel. FINDINGS: [R10] The corpus-wide LAYER-1 claims still credit 72 of the 259 with a comparison that carries no upstream content. For the 6 cargo_trust_vc_integration_test entries (48 cases) upstream_cargo_verus_integration_test_cases builds every upstream case with expected_verdict Verified and expected_occurrences 1 HARD-CODED (evidence.rs:14733-14752), and for the 16 /cargo-tests/ fixture entries (24 cases) upstream_cargo_fixture_cases mints ONE upstream case per entry NAMED AFTER THE FILE STEM, also Verified and 1, reading no upstream assertion whatever - it checks only that the source file and the fixture Cargo.toml exist (evidence.rs:14839-14870). So 64 of the 223 mapped upstream cases carry a verdict the extractor ASSIGNED rather than one upstream states, and on those 72 port cases the headline (\"on all 259 of 259: the declared upstream case RESOLVES to a real, non-#[ignore]d upstream case, and the DECLARED VERDICT EQUALS upstream's\") and (L1)(b) (\"on all 259\") hold only in the sense that a constant equals a constant: all 72 declare verified, the schema INDEPENDENTLY REQUIRES verified on the 48, so (b) cannot fail there at all; (c) compares >= 1 against a single minted case, which any non-empty mapping satisfies (vstd_macro_usage/src/lib.rs spends 5 port cases on the one minted case `lib`); and on 4 of those 16 entries (5 cases) the extractor reports Verified for fixtures upstream itself files under cargo-tests/unverified/. Three smaller items of the same family: (L1) describes the reader as \"a syn parse\" for every accepted entry, which is untrue of those 16, where nothing is parsed; the one genuinely upstream-reading check those 16 entries do get - append_cargo_fixture_inventory_failures, comparing package name, dependency set and bin/lib layout against upstream's Cargo.toml - is named nowhere in the bound, so LAYER 1 is understated there in the same breath as it is overstated; and (L1)(a)'s requirement that the declared upstream_case_id name a case \"not #[ignore]d ... on pain of `expected_cases entry ... does not match an upstream Verus harness case`\" IS NOT ENFORCED - that failure is raised from a set built over ALL upstream cases, ignored ones included, and a unit test pins that a port case covering an ignored upstream case must NOT fail - so half of (a) describes a guard the gate does not have, exercised by 0 of the 259 today.",
   "upstream": {
     "repo": "https://github.com/verus-lang/verus",
     "ref": "a40d57c73650cd3648b09386bfdb96ab5c270626",
@@ -538,7 +539,7 @@
       "upstream_path": "source/rust_verify_test/tests/adts_generics.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2785",
-      "reason": "Partial executable TrustVc coverage now exists for Rust-valid generic struct projection/refinement, generic spec identity over projected fields, generic enum construction, generic enum payload match extraction, one compute-supported generic struct counterexample, and generic tuple-struct destructure field binding. The broader upstream Verus generic ADT surface remains unsupported.",
+      "reason": "Partial executable TrustVc coverage now exists for Rust-valid generic struct projection/refinement, generic spec identity over projected fields, generic enum construction, generic enum payload match extraction, one compute-supported generic struct counterexample, the upstream test_generic_adt_eq / test_generic_adt_u8 refutations verbatim (RE-PINNED 2026-09-13: solver refutation with a model, formerly held as Unknown), and generic tuple-struct destructure field binding. The broader upstream Verus generic ADT surface remains unsupported.",
       "trust_vc_paths": [
         "evals/verus/ported/adts_generics.rs"
       ],
@@ -584,10 +585,22 @@
           "upstream_case_id": "test_erase1",
           "expected_verdict": "verified",
           "min_obligations": 3
+        },
+        {
+          "case_id": "test_generic_adt_eq_counterexample",
+          "upstream_case_id": "test_generic_adt_eq",
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "test_generic_adt_u8_counterexample",
+          "upstream_case_id": "test_generic_adt_u8",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         }
       ],
       "known_gaps": [
-        "Normal solver refutation for generic struct field projection is still Unknown in generic_struct_projection_wrong_inequality_currently_unknown.",
+        "Generic struct field projection refutations are genuine Counterexamples now (test_generic_adt_eq / test_generic_adt_u8 verbatim, RE-PINNED 2026-09-13 from the former currently_unknown twins); the other upstream cases' generic opaque spec fns, triggers, and field-mode attributes remain uncovered.",
         "Generic enum variant helper methods are pinned as fail-closed but not accepted as upstream parity.",
         "Nested out-of-order tuple projection, Verus field-erasure attributes, opaque/proof syntax, and trigger-heavy generic ADT cases remain unsupported."
       ],
@@ -658,7 +671,7 @@
       "upstream_path": "source/rust_verify_test/tests/arrays.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Partial executable TrustVc coverage now documents 50 array scout cases, including fixed-size array type parsing, native indexing, `.view().len()`, array literals/repeats, concrete direct indexed assignment and assignment-op subsets, copied parameter arrays, copied owned/borrowed struct-field arrays, direct owned struct-field arrays, direct `&mut [T; N]` updates, array cloning, array literal equality/inequality including the named-local upstream shape, array-to-Seq conversion, Seq binding contains/inequality witnesses, selected array-to-slice len/index/contains probes, and stable scalar and array-view false-tail counterexamples. The row remains unsupported-gap because const generics, tracked diagnostics, non-Copy repeat diagnostics, recursion checks, spec-fn array literals, generic indexing helpers, source-level `&mut` old-state postconditions, borrowed aliases, projection targets beyond direct owned struct fields, side-effecting index ops, boxed array-to-slice coercions, and solver-unknown negative array-view/index facts are not fully mirrored.",
+      "reason": "Partial executable TrustVc coverage now documents 50 array scout cases, including fixed-size array type parsing, native indexing, `.view().len()`, array literals/repeats, concrete direct indexed assignment and assignment-op subsets, copied parameter arrays, copied owned/borrowed struct-field arrays, direct owned struct-field arrays, direct `&mut [T; N]` updates, array cloning, array literal equality/inequality including the named-local upstream shape, array-to-Seq conversion, Seq binding contains/inequality witnesses, selected array-to-slice len/index/contains probes, and stable scalar and array-view false-tail counterexamples. The row remains unsupported-gap because const generics, tracked diagnostics, non-Copy repeat diagnostics, recursion checks, spec-fn array literals, generic indexing helpers, source-level `&mut` old-state postconditions, borrowed aliases, projection targets beyond direct owned struct fields, side-effecting index ops, boxed array-to-slice coercions, and solver-unknown negative array-view/index facts are not fully mirrored. RE-PINNED 2026-09-13: four false array-view claims, formerly unreferenced currently_unknown scouts, are refuted with a model.",
       "trust_vc_paths": [
         "evals/verus/ported/arrays.rs"
       ],
@@ -976,6 +989,30 @@
             "&mut not supported",
             "side-effect-free"
           ]
+        },
+        {
+          "case_id": "array_to_slice_literal_view_wrong_contains_counterexample",
+          "upstream_case_id": "test_array_to_slice",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "array_to_slice_wrong_len_counterexample",
+          "upstream_case_id": "test_array_to_slice",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "array_literal_view_seq_binding_wrong_contains_counterexample",
+          "upstream_case_id": "test_array_literals",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "array_named_view_wrong_contains_counterexample",
+          "upstream_case_id": "test_array_literals",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         }
       ],
       "known_gaps": [
@@ -997,7 +1034,7 @@
         {
           "path": "evals/verus/ported/assert_bitvector_by.rs",
           "kind": "file",
-          "sha256": "sha256:17e2f63dbe7a637b523a7b32050f73aa246a9fa7ac73becce31f6123aa06cd4b"
+          "sha256": "sha256:cd3af8240d0ce68effa8288eceaee4d5f58ec7ab56c1b0e2d85959795a594e6c"
         }
       ],
       "expected_cases": [
@@ -1043,8 +1080,8 @@
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
-            "sha256:559140c1613e714511452dc76061a520d55ba47ad87aec7f9d1d98bdfca0f363",
-            "sha256:80a36c052d685dace05bf9bd5e13280dd0fab78d09f35524857c3190e5e80dae"
+            "sha256:10d1a0a5e1391b5781477cb359d60d65e6d8e0a10d939d17e81d0177e31da4bd",
+            "sha256:c2e9c311da8b01fc1565539594934f0b0e3e53882f6e7d5df6515df7654f0234"
           ]
         },
         {
@@ -1053,7 +1090,7 @@
           "expected_verdict": "counterexample",
           "min_obligations": 1,
           "obligation_fingerprints": [
-            "sha256:25dedef6985f305a7232be5927eb5e24bfd55e2d1473c1547aa0c1c87393f067"
+            "sha256:9c45b5348c4fd317861e9201c9124ed076c41ab014e4ee8e1ba05a61e4f812be"
           ]
         },
         {
@@ -1395,7 +1432,7 @@
         {
           "path": "evals/verus/ported/assert_forall_by.rs",
           "kind": "file",
-          "sha256": "sha256:158bebbe918cea1d39bb29372b7199090c7a99cb6fafd72ee6bd6c76bcd720a5"
+          "sha256": "sha256:eeedc3a2e97d3ee150c81d7fd894b8a9d77881b27cd27eba2e9956fbfd5d941d"
         }
       ],
       "expected_cases": [
@@ -1506,7 +1543,7 @@
           "min_obligations": 3,
           "obligation_fingerprints": [
             "sha256:455f7511b0ebefdc62b17b4e5f43da19d859b9deff69cdb55e5559da740558ca",
-            "sha256:867eefa7826bc02710dbec92fea5aead305ce94c29dfaf747bba0f7100313679",
+            "sha256:6531b0607f9b8a9326c9187427bb6ce3bded7e5a930ba33df73cd9c9e322880e",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
           ]
         },
@@ -1516,7 +1553,7 @@
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:867eefa7826bc02710dbec92fea5aead305ce94c29dfaf747bba0f7100313679",
+            "sha256:6531b0607f9b8a9326c9187427bb6ce3bded7e5a930ba33df73cd9c9e322880e",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
             "sha256:fd3129e16790c05bc982ae42f24e0b238ce7898bbd362430b91d735a53fdcb7f"
           ]
@@ -1589,7 +1626,7 @@
           "expected_verdict": "verified",
           "min_obligations": 1,
           "obligation_fingerprints": [
-            "sha256:4ec3a64a75d3de8f04395a6e51f992160d3e2d2a026b3af243e690509811954b"
+            "sha256:00f39268576264fb74e65d431aa7e245fc18a89b629ef07ac8db3947e6ac4df5"
           ],
           "expected_warning_patterns": [
             "using ==> in `assert forall` does not currently assume the antecedent in the body"
@@ -2867,7 +2904,7 @@
         {
           "path": "evals/verus/ported/calc.rs",
           "kind": "file",
-          "sha256": "sha256:ecd4e78d401d6a11d3efab7bdd0f21aaf95bdc7b065de63fe9f1e97233ed2f31"
+          "sha256": "sha256:f7baf0395809684628ee97b1c5de6dcbd8246a10cdac3cd5cdf8af65b55cdb86"
         }
       ],
       "expected_cases": [
@@ -2877,12 +2914,12 @@
           "expected_verdict": "verified",
           "min_obligations": 6,
           "obligation_fingerprints": [
-            "sha256:338db41d270ebd890a46caa6985f05d90f7a95c083def8ecf3864a10106649c1",
-            "sha256:a2616ff9c1408f9edd47758134886ac3174062d236179075f06a8bf54bcce824",
-            "sha256:b379a41d2f588629653bb423e112691db0099f6bb09aa8c2035bac5b5735056e",
+            "sha256:0b9fe7a983cd9fbfee4416337394e972cb0f3c0cb8c94d27cc7499c5336fc758",
+            "sha256:22f74b45ef5b65866c87c8f5961a6914a2be22529b92b0f347c699eb01863c62",
+            "sha256:6f186c8dd5829e60f9d28f98f87d88f5f3746539b7d75f7a22c1be115591e5bb",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
-            "sha256:b84151bf99afa35c071026c1725383451f9a177d65928198b4da793585857b05",
-            "sha256:ed38ea9f1d9c1f3eb8256252e09b3155c49e3cc565179e447352c734fd8ddd11"
+            "sha256:cba0abb495495cf6c29f2fd4bc96eb990ca82e3cf56bfbb1ac45be7d0809c6c6",
+            "sha256:ef99ca333ed45d8959549196b9a8938df226a51a859eaaed72e7dede87ce8310"
           ]
         },
         {
@@ -2904,12 +2941,12 @@
           "expected_verdict": "counterexample",
           "min_obligations": 6,
           "obligation_fingerprints": [
-            "sha256:1e86529f4710377d4ecf038fc50472187a2b6e9196bc5c4a9483f0bb27e908d1",
-            "sha256:39c458563cf84bac4fbd7137c95a3b8145ef2c42208f76e04bf895183e1ffe4f",
-            "sha256:5c5c1e19bbfc16cb4c9fb73aeb66dda7326a0c44462df52a7ab80536d1b1fd0e",
-            "sha256:78083d9ff3a3a22f1d4929d134b3e3fab90c4723c3b3e85a627f99c1d12dafca",
+            "sha256:5c8375149596fdf7bb689e74bacf67006b782afdabe010e1e679a08567232670",
+            "sha256:a41ea4f84db3da1fe958c990ed99c1067c114986bb539c9ada96e61c16a83dbe",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
-            "sha256:b84151bf99afa35c071026c1725383451f9a177d65928198b4da793585857b05"
+            "sha256:c24ada34cfb09be05034489c7c476ddd5cf4f3dea921b12b1ec5d57ef6d31e7e",
+            "sha256:d2a6524e91682c80dc2fe6f1e4a215f2ac21082fe685b9ab4d7445aa32d20407",
+            "sha256:ef99ca333ed45d8959549196b9a8938df226a51a859eaaed72e7dede87ce8310"
           ]
         },
         {
@@ -2918,8 +2955,8 @@
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
-            "sha256:b379a41d2f588629653bb423e112691db0099f6bb09aa8c2035bac5b5735056e",
-            "sha256:b824256ebc324652b4693a419a117ae12def121d8e54c832e62def889cb2f953"
+            "sha256:b824256ebc324652b4693a419a117ae12def121d8e54c832e62def889cb2f953",
+            "sha256:cba0abb495495cf6c29f2fd4bc96eb990ca82e3cf56bfbb1ac45be7d0809c6c6"
           ]
         },
         {
@@ -3696,21 +3733,28 @@
       "upstream_path": "source/rust_verify_test/tests/choose.rs",
       "classification": "ported",
       "owner_issue": "#2777",
-      "reason": "Faithful 1:1 TrustVc port: all 17 upstream choose.rs harness cases reproduce with the matching verdict via run_trust_vc_corpus_direct. The two multi-subproof cases are split into their upstream subproofs (test1 -> test1_choose / test1_choose_inference / test1_choose_eq, all upstream_case_id=test1; test1_tuple -> test1_tuple_choose / test1_tuple_choose_eq, both upstream_case_id=test1_tuple), giving 20 executable functions: 10 verified (single- and multi-binder choose and choose_tuple refinement), 8 counterexample, and 2 compile errors. test1_choose_with_closure_illegal (parenthesized closure binder) and test1_choose_tuple_wrong_type (wrong-type choose_tuple ascription) reproduce the upstream Verus diagnostics verbatim through the general frontend body-extraction checks. source_hashes and obligation_fingerprints are auto-pinned by --refresh-trust-vc-corpus-evidence from the passing run.",
+      "reason": "Faithful 1:1 TrustVc port: all 17 upstream choose.rs harness cases reproduce with the matching verdict via run_trust_vc_corpus_direct. The port is TWO files because upstream's test_verify_one_file! blocks are separate compilation units and three helper names are declared twice upstream at different arities: `f` is 1-ary in the test1* blocks and 2-ary in the test1_tuple* blocks, and `cnatf`/`cintf` are 1-ary in the test_refine* blocks and 2-ary in the test_refine*_tuple blocks. Flattening them into one Rust file forced the 2-ary helpers to be renamed `f2`/`cnatf2`/`cintf2`, a spelling upstream never writes, and the gate's claim comparison then found test_refine_fail1_tuple's refuted statement corresponding to no upstream statement. Splitting at upstream's own unit boundary (evals/verus/ported/choose.rs for the single-binder half, evals/verus/ported/choose_tuple.rs for the multi-binder / choose_tuple half) restores upstream's own names at upstream's own arities; no case's claim, verdict or obligation floor changed. The two multi-subproof cases are split into their upstream subproofs (test1 -> test1_choose / test1_choose_inference / test1_choose_eq, all upstream_case_id=test1; test1_tuple -> test1_tuple_choose / test1_tuple_choose_eq, both upstream_case_id=test1_tuple), giving 20 executable functions: 10 verified (single- and multi-binder choose and choose_tuple refinement), 8 counterexample, and 2 compile errors. test1_choose_with_closure_illegal (parenthesized closure binder) and test1_choose_tuple_wrong_type (wrong-type choose_tuple ascription) reproduce the upstream Verus diagnostics verbatim through the general frontend body-extraction checks. source_hashes and obligation_fingerprints are auto-pinned by --refresh-trust-vc-corpus-evidence from the passing run.",
       "trust_vc_paths": [
-        "evals/verus/ported/choose.rs"
+        "evals/verus/ported/choose.rs",
+        "evals/verus/ported/choose_tuple.rs"
       ],
       "trust_vc_source_hashes": [
         {
           "path": "evals/verus/ported/choose.rs",
           "kind": "file",
-          "sha256": "sha256:47f1da7a18fe0c40f64326dbe7d71290cc66e77e4924f1d5c452af0b1550775a"
+          "sha256": "sha256:44a1a57983eeb038bece2b87ff8ce557232cbd3497060c66c4a2b4b3ca903541"
+        },
+        {
+          "path": "evals/verus/ported/choose_tuple.rs",
+          "kind": "file",
+          "sha256": "sha256:c12641cb8cad4376bb8e18bfe4d430cb0fbdbc581139515b33e6e5837f8ad26e"
         }
       ],
       "expected_cases": [
         {
           "case_id": "test1_choose",
           "upstream_case_id": "test1",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3722,6 +3766,7 @@
         {
           "case_id": "test1_choose_inference",
           "upstream_case_id": "test1",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3733,6 +3778,7 @@
         {
           "case_id": "test1_choose_eq",
           "upstream_case_id": "test1",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "verified",
           "min_obligations": 2,
           "obligation_fingerprints": [
@@ -3743,6 +3789,7 @@
         {
           "case_id": "test1_fails1",
           "upstream_case_id": "test1_fails1",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
@@ -3753,6 +3800,7 @@
         {
           "case_id": "test1_fails2",
           "upstream_case_id": "test1_fails2",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3764,6 +3812,7 @@
         {
           "case_id": "test1_fails3",
           "upstream_case_id": "test1_fails3",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
@@ -3774,6 +3823,7 @@
         {
           "case_id": "test_refine",
           "upstream_case_id": "test_refine",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3785,6 +3835,7 @@
         {
           "case_id": "test_refine_fail1",
           "upstream_case_id": "test_refine_fail1",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3796,6 +3847,7 @@
         {
           "case_id": "test_refine2",
           "upstream_case_id": "test_refine2",
+          "trust_vc_path": "evals/verus/ported/choose.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -3807,6 +3859,7 @@
         {
           "case_id": "test1_choose_with_closure_illegal",
           "upstream_case_id": "test1_choose_with_closure_illegal",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
@@ -3816,92 +3869,101 @@
         {
           "case_id": "test1_tuple_choose",
           "upstream_case_id": "test1_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:4491d283d774e5f5ff46194439ad3b49da84b605740fb5cb29aa083504218d3d",
+            "sha256:27f9949131928e96c4d0b223795a5ae03ce3dc8b5e966953639cbef17f67e3c3",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
-            "sha256:e55dbc98bc7f942343d4600e940e0fd20f51fe80fa07fb4798f8f15b5020abf6"
+            "sha256:f7582757dcd9aea8e23eaf249571970a1ceb8a8136a302fcaf7c5ccab7da351a"
           ]
         },
         {
           "case_id": "test1_tuple_choose_eq",
           "upstream_case_id": "test1_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:4ab3d625885535b4e74715339a2c07c27ba26a2e88ad75db9e4e804ac57edfaf",
-            "sha256:5759f7408799c4fc11f3dab8fac4790a20fa14bfeb0c8273b6be3b01f6da0c16",
-            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+            "sha256:b66f49fd1b46440a1670d4d73b455b0693df4f0329467b4c51530a2807fd14c5",
+            "sha256:f2154b275f7472f34f61a2c05f53fb37256b90735d74bb1da291e2d9f60022e0"
           ]
         },
         {
           "case_id": "test1_fails1_tuple",
           "upstream_case_id": "test1_fails1_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
-            "sha256:e55dbc98bc7f942343d4600e940e0fd20f51fe80fa07fb4798f8f15b5020abf6"
+            "sha256:f7582757dcd9aea8e23eaf249571970a1ceb8a8136a302fcaf7c5ccab7da351a"
           ]
         },
         {
           "case_id": "test1_fails2_tuple",
           "upstream_case_id": "test1_fails2_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:0c7160ac41f86dffd99f646cc8cc9198ab3ed429c562d0107249e06091cc37a6",
-            "sha256:4491d283d774e5f5ff46194439ad3b49da84b605740fb5cb29aa083504218d3d",
+            "sha256:19ca7f236f12d5119c08c2ff426871aae5ef0793219ac3691cd190555e107c77",
+            "sha256:27f9949131928e96c4d0b223795a5ae03ce3dc8b5e966953639cbef17f67e3c3",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
           ]
         },
         {
           "case_id": "test1_fails3_tuple",
           "upstream_case_id": "test1_fails3_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
-            "sha256:9e7197e27ee50eb0f4ddcc2d8ad6455ebd925c405de232acde7c7df71fa8db43",
+            "sha256:54cf3267b62d465982c870ca5f984c1dac53f17febab1f126103013b0ed4134a",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
           ]
         },
         {
           "case_id": "test_refine_tuple",
           "upstream_case_id": "test_refine_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:09e246a1fa41d2b17680f64a45eec7728dcc7dab0fe49908a5bea9ba5049e809",
-            "sha256:29d40e60cede0b5e3b9b3c4f2f761966d46d22a899410062582fae79e62b120a",
-            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+            "sha256:41353a3f5a4316bae6153fd0c116e0b694b97416ddaa19f1078eda62bedb538c",
+            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+            "sha256:b6e4b15364d1b27ab71720aa7c166f2c1fb7f36de035739e1b57908d1aab2653"
           ]
         },
         {
           "case_id": "test_refine_fail1_tuple",
           "upstream_case_id": "test_refine_fail1_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:58c62b8d0a77f54df46880704e54411cf6fd19df53d436b0e49979fad535f4a2",
-            "sha256:b3c2fb288d7691c5711c846dcab1b2d6a46cd32fc65632df868142c9db697399",
-            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+            "sha256:108450cae99aa2e62bfe30a8da0f023f479e800562871d4e080dca4a32255e9d",
+            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+            "sha256:b5faa474890278aeab6aab4bfb38a3c2e1b015d54a0470450c0415f42fb17bd5"
           ]
         },
         {
           "case_id": "test_refine2_tuple",
           "upstream_case_id": "test_refine2_tuple",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:03e0fcd3f50c0312b94590dd19f02564190a849197f08cac0ac7aee96f830ed8",
+            "sha256:4941d25d2b9dc857c5d316385a3a4236e0d648c508750a9c59e77edf392b7a0b",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
-            "sha256:d540ec8abff97987acc105622848dafbc9812661e6deb55c324ed15118dae00e"
+            "sha256:da4625032c1a065f8912ebdd343b3283a29248cfa28259544ed96d9089e68fdf"
           ]
         },
         {
           "case_id": "test1_choose_tuple_wrong_type",
           "upstream_case_id": "test1_choose_tuple_wrong_type",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
@@ -3911,6 +3973,7 @@
         {
           "case_id": "test1_choose_tuple_no_ascription_regression_1183",
           "upstream_case_id": "test1_choose_tuple_no_ascription_regression_1183",
+          "trust_vc_path": "evals/verus/ported/choose_tuple.rs",
           "expected_verdict": "verified",
           "min_obligations": 3,
           "obligation_fingerprints": [
@@ -4195,7 +4258,7 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported"
+            "dereference expressions are not supported in verification syntax"
           ]
         }
       ],
@@ -4478,7 +4541,7 @@
       "upstream_path": "source/rust_verify_test/tests/default_trait.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Expanded partial executable TrustVc default_trait.rs scout coverage now records explicit primitive/Option/tuple/custom-record/std collection default surrogates, direct f32/f64 integral zero literal lowering, direct u32/bool/Option/Vec/HashMap/HashSet/typed-tuple associated Default constructors, stable wrong-default counterexamples, and fail-closed Rust Default::default, UFCS, inference, string/unsupported-collection/smart-pointer/PhantomData/generic boundaries. The row remains unsupported-gap because TrustVc does not yet lower the full Rust/Verus Default surface.",
+      "reason": "Executable TrustVc default_trait.rs port. The `Default::default()` constructor family is TYPE-DIRECTED (2026-09-13): `<Ty>::default()`, `let b: Ty = Default::default()` / a `Default::default()` tail read against the return type, and `<Ty as core::default::Default>::default()` all model for the primitives, `&str`, `String`, `Option<T>`, `PhantomData<T>`, tuples, `Vec`/`VecDeque`/`HashMap`/`HashSet`, `Box`/`Rc`/`Arc` (their payload), `#[derive(Default)]` structs (the field-wise constructor), a hand-written `impl Default` whose body is a single constructor expression (its body axiom), and a generic `T::default()` (one uninterpreted per-type-parameter constant; a claim that needs two calls to agree is refused, since a `Default` impl can read a counter). The upstream `test_default_ok!`/`test_default_fail!` macro family and both custom-type cases are ported verbatim, and every modelled constructor is pinned in both directions (a `_verified` claim and a refuted `_counterexample` twin). The row remains unsupported-gap: the upstream `T::default.ensures((), r)` closure-reflection contract and `String::is_ascii()` fail closed, and the port's many-fragments-per-upstream-case shape is not the one-case-per-id shape the evidence gate keys.",
       "trust_vc_paths": [
         "evals/verus/ported/default_trait.rs"
       ],
@@ -4487,6 +4550,30 @@
           "case_id": "trust_vc_default_u32_zero_value_verified",
           "upstream_case_id": "test_default_u32_ok",
           "expected_verdict": "verified",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "trust_vc_default_u32_arithmetic_zero_verified",
+          "upstream_case_id": "test_default_arithmetic",
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "trust_vc_default_f32_zero_literal_verified",
+          "upstream_case_id": "test_default_f32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "trust_vc_default_f64_zero_literal_verified",
+          "upstream_case_id": "test_default_f64_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "trust_vc_default_u32_wrong_value_counterexample",
+          "upstream_case_id": "test_default_u32_wrong",
+          "expected_verdict": "counterexample",
           "min_obligations": 2
         },
         {
@@ -4502,28 +4589,22 @@
           "min_obligations": 2
         },
         {
-          "case_id": "trust_vc_default_u32_arithmetic_zero_verified",
-          "upstream_case_id": "test_default_arithmetic",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
           "case_id": "trust_vc_default_tuple2_surrogate_verified",
           "upstream_case_id": "test_default_tuple2_ok",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 3
         },
         {
           "case_id": "trust_vc_default_tuple3_surrogate_verified",
           "upstream_case_id": "test_default_tuple3_ok",
           "expected_verdict": "verified",
-          "min_obligations": 3
+          "min_obligations": 4
         },
         {
           "case_id": "trust_vc_default_record_verified",
           "upstream_case_id": "test_default_custom_type_spec",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 4
         },
         {
           "case_id": "trust_vc_default_vec_new_empty_view_verified",
@@ -4535,18 +4616,12 @@
           "case_id": "trust_vc_default_hash_map_direct_view_reflexive_verified",
           "upstream_case_id": "test_default_hash_map_u32_ok",
           "expected_verdict": "verified",
-          "min_obligations": 1
+          "min_obligations": 2
         },
         {
           "case_id": "trust_vc_default_hash_set_direct_view_reflexive_verified",
           "upstream_case_id": "test_default_hash_set_u32_ok",
           "expected_verdict": "verified",
-          "min_obligations": 1
-        },
-        {
-          "case_id": "trust_vc_default_u32_wrong_value_counterexample",
-          "upstream_case_id": "test_default_u32_wrong",
-          "expected_verdict": "counterexample",
           "min_obligations": 2
         },
         {
@@ -4556,194 +4631,352 @@
           "min_obligations": 2
         },
         {
-          "case_id": "trust_vc_default_f32_zero_literal_verified",
-          "upstream_case_id": "test_default_f32_ok",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
-          "case_id": "trust_vc_default_f64_zero_literal_verified",
-          "upstream_case_id": "test_default_f64_ok",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
-          "case_id": "rust_default_trait_inference_currently_blocked",
+          "case_id": "rust_default_trait_inference_verified",
           "upstream_case_id": "test_default_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Default::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
           "case_id": "rust_default_u32_associated_constructor_verified",
           "upstream_case_id": "test_default_u32_ok",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 5
         },
         {
           "case_id": "rust_default_bool_associated_constructor_verified",
           "upstream_case_id": "test_default_bool_ok",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 5
         },
         {
           "case_id": "rust_default_option_u32_associated_constructor_verified",
           "upstream_case_id": "test_default_option_u32_ok",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_vec_u32_constructor_verified",
-          "upstream_case_id": "test_default_vec_u32_ok",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
-          "case_id": "rust_default_hash_map_constructor_verified",
-          "upstream_case_id": "test_default_hash_map_u32_ok",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
-          "case_id": "rust_default_hash_set_constructor_verified",
-          "upstream_case_id": "test_default_hash_set_u32_ok",
-          "expected_verdict": "verified",
-          "min_obligations": 2
-        },
-        {
-          "case_id": "rust_default_str_associated_constructor_currently_blocked",
+          "case_id": "rust_default_str_associated_constructor_verified",
           "upstream_case_id": "test_default_str_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'str::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "rust_default_tuple2_associated_constructor_verified",
           "upstream_case_id": "test_default_tuple2_ok",
           "expected_verdict": "verified",
-          "min_obligations": 2
+          "min_obligations": 3
         },
         {
           "case_id": "rust_default_tuple3_associated_constructor_verified",
           "upstream_case_id": "test_default_tuple3_ok",
           "expected_verdict": "verified",
-          "min_obligations": 3
+          "min_obligations": 4
         },
         {
           "case_id": "rust_default_u32_ufcs_constructor_verified",
           "upstream_case_id": "test_default_u32_ok",
           "expected_verdict": "verified",
-          "min_obligations": 1
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_string_constructor_currently_blocked",
+          "case_id": "rust_default_vec_u32_constructor_verified",
+          "upstream_case_id": "test_default_vec_u32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_string_constructor_verified",
           "upstream_case_id": "test_default_string_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'String::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_vec_deque_constructor_currently_blocked",
+          "case_id": "rust_default_hash_map_constructor_verified",
+          "upstream_case_id": "test_default_hash_map_u32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_hash_set_constructor_verified",
+          "upstream_case_id": "test_default_hash_set_u32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_vec_deque_constructor_verified",
           "upstream_case_id": "test_default_vec_deque_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'VecDeque::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_box_u32_constructor_currently_blocked",
+          "case_id": "rust_default_box_u32_constructor_verified",
           "upstream_case_id": "test_default_box_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Box::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_box_vec_u32_constructor_currently_blocked",
+          "case_id": "rust_default_box_vec_u32_constructor_verified",
           "upstream_case_id": "test_default_box_vec_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Box::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_rc_u32_constructor_currently_blocked",
+          "case_id": "rust_default_rc_u32_constructor_verified",
           "upstream_case_id": "test_default_rc_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Rc::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_arc_u32_constructor_currently_blocked",
+          "case_id": "rust_default_arc_u32_constructor_verified",
           "upstream_case_id": "test_default_arc_u32_ok",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Arc::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 5
         },
         {
-          "case_id": "rust_default_box_custom_type_constructor_currently_blocked",
+          "case_id": "rust_default_box_custom_type_constructor_verified",
           "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Box::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 6
         },
         {
-          "case_id": "rust_default_rc_custom_type_constructor_currently_blocked",
+          "case_id": "rust_default_rc_custom_type_constructor_verified",
           "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Rc::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 6
         },
         {
-          "case_id": "rust_default_arc_custom_type_constructor_currently_blocked",
+          "case_id": "rust_default_arc_custom_type_constructor_verified",
           "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'Arc::default'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 6
         },
         {
-          "case_id": "rust_default_phantom_constructor_currently_blocked",
+          "case_id": "rust_default_phantom_constructor_verified",
           "upstream_case_id": "test_default_phantom_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_generic_instantiation_verified",
+          "upstream_case_id": "test_default_generic_instantiation",
           "expected_verdict": "error",
-          "min_obligations": 0,
+          "min_obligations": 5,
           "expected_error_patterns": [
-            "unknown return type for function 'PhantomData::default'"
+            "bodiless call repeated"
           ]
         },
         {
-          "case_id": "rust_default_generic_instantiation_currently_blocked",
+          "case_id": "rust_default_trait_inference_wrong_counterexample",
+          "upstream_case_id": "test_default_u32_wrong",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_str_associated_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_str_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "rust_default_string_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_string_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_vec_deque_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_vec_deque_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_box_u32_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_box_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_box_vec_u32_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_box_vec_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_rc_u32_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_rc_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_arc_u32_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_arc_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_box_custom_type_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_phantom_constructor_wrong_counterexample",
+          "upstream_case_id": "test_default_phantom_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_generic_instantiation_wrong_counterexample",
+          "upstream_case_id": "test_default_generic_instantiation",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "upstream_test_default_u32_ok_verified",
+          "upstream_case_id": "test_default_u32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_u32_wrong_counterexample",
+          "upstream_case_id": "test_default_u32_wrong",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "upstream_test_default_bool_ok_verified",
+          "upstream_case_id": "test_default_bool_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_bool_wrong_counterexample",
+          "upstream_case_id": "test_default_bool_wrong",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "upstream_test_default_f32_ok_verified",
+          "upstream_case_id": "test_default_f32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_f64_ok_verified",
+          "upstream_case_id": "test_default_f64_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_f64_wrong_counterexample",
+          "upstream_case_id": "test_default_f64_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "upstream_test_default_str_ok_verified",
+          "upstream_case_id": "test_default_str_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_option_u32_ok_verified",
+          "upstream_case_id": "test_default_option_u32_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_option_u32_wrong_counterexample",
+          "upstream_case_id": "test_default_option_u32_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "upstream_test_default_phantom_ok_verified",
+          "upstream_case_id": "test_default_phantom_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_tuple2_ok_verified",
+          "upstream_case_id": "test_default_tuple2_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_tuple2_wrong_counterexample",
+          "upstream_case_id": "test_default_tuple2_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "upstream_test_default_tuple3_ok_verified",
+          "upstream_case_id": "test_default_tuple3_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "upstream_test_default_tuple3_wrong_counterexample",
+          "upstream_case_id": "test_default_tuple3_ok",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "rust_default_custom_type_spec_mk_verified",
+          "upstream_case_id": "test_default_custom_type_spec",
+          "expected_verdict": "verified",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "rust_default_custom_type_spec_test_verified",
+          "upstream_case_id": "test_default_custom_type_spec",
+          "expected_verdict": "verified",
+          "min_obligations": 9
+        },
+        {
+          "case_id": "rust_default_custom_type_spec_wrong_counterexample",
+          "upstream_case_id": "test_default_custom_type_spec",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_custom_type_ensures_in_smart_ptrs_verified",
+          "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
+          "expected_verdict": "verified",
+          "min_obligations": 10
+        },
+        {
+          "case_id": "rust_default_custom_type_ensures_in_smart_ptrs_wrong_counterexample",
+          "upstream_case_id": "test_default_custom_type_ensures_in_smart_ptrs",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "rust_default_generic_mk_reflection_currently_blocked",
           "upstream_case_id": "test_default_generic_instantiation",
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "unknown return type for function 'T::default'"
+            "Failed to lower obligation 'postcondition'",
+            "unsupported expression `T::default` in specification context"
+          ]
+        },
+        {
+          "case_id": "rust_default_string_is_ascii_currently_blocked",
+          "upstream_case_id": "test_default_string_ok",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "Failed to lower obligation 'assertion_1'",
+            "unsupported method `is_ascii()"
           ]
         }
       ],
       "known_gaps": [
-        "Direct Rust associated Default lowering is accepted only for u32, bool, explicit Option<T>, typed tuple locals, and typed empty Vec/HashMap/HashSet locals; inference, UFCS, string, VecDeque, smart-pointer, PhantomData, and generic cases remain unsupported.",
-        "f32/f64 default literal behavior and exact upstream diagnostics remain fail-closed boundaries.",
-        "The Rust Default trait surface is represented by surrogates only; full std/generic Default parity remains unsupported."
+        "Upstream test_default_generic_instantiation writes `ensures T::default.ensures((), r)` on `fn mk<T: Default>() -> T` — closure reflection on a trait function of a type parameter — which fails closed (`unsupported expression `T::default` in specification context`); the port pins the EUF-congruence `T::default() == T::default()` (verified) and its `!=` liar (refuted) instead.",
+        "Upstream test_default_string_ok also asserts `a.is_ascii()`, which fails closed (`unsupported method `is_ascii()` on type `String``).",
+        "The `x == 1.0f64` liar on a float default returns NotProved (incomplete) from the Real lane — fail-closed, never Verified — so the refuted float liar pinned here is `x != 0.0f64`.",
+        "BTreeMap/BTreeSet and `&[T]` defaults are not modelled; they keep the fail-closed `unknown return type for function '<Ty>::default'` refusal."
       ],
       "notes": "The expected_cases listed here document targeted partial default_trait.rs scout coverage only. Because this entry remains unsupported-gap, these cases are not accepted replacement evidence and are not scheduled by --run-trust-vc-corpus."
     },
@@ -4751,7 +4984,7 @@
       "upstream_path": "source/rust_verify_test/tests/eq_cmp.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Partial executable TrustVc scout coverage now exists for Rust-valid operator-backed primitive ordering and derived structural equality, primitive and Option<finite-integer> PartialOrd::{lt, gt} method lowering, and operator/method order counterexamples. The upstream vstd Eq/Ord law/spec surface, custom PartialEq implementations, trait-law reveals, and full structural equality parity remain unsupported.",
+      "reason": "Partial executable TrustVc scout coverage now exists for Rust-valid operator-backed primitive ordering and derived structural equality, primitive and Option<finite-integer> PartialOrd::{lt, gt} method lowering, and operator/method order counterexamples. The upstream vstd Eq/Ord law/spec surface, custom PartialEq implementations, trait-law reveals, and full structural equality parity remain unsupported. RE-PINNED 2026-09-11: the two `.eq()` METHOD cases (derived PartialEq on a tuple struct — upstream check_eq; hand-written PartialEq — test_p_eq) verify, each with a refuted liar twin; their fail-closed pins were stale. The `!=` OPERATOR on the hand-written-PartialEq datatype (test_p_ee) is re-pinned FAIL-CLOSED the same day: the structural gate of 2026-07-24 refuses it and its verified pin predated that fix; lowering the operator through the `.eq()` method lane is the recorded follow-up. VERIFIED AGAIN 2026-09-11: the `!=` / `==` OPERATOR on the hand-written-PartialEq datatype (test_p_ee) lowers to the impl's own `eq`/`ne` (the inherent-method body axiom), so the 2026-07-24 structural gate applies only to a manual impl reached through a field; the liar `left == different` is refuted.",
       "trust_vc_paths": [
         "evals/verus/ported/eq_cmp.rs"
       ],
@@ -4823,15 +5056,16 @@
           "min_obligations": 2
         },
         {
-          "case_id": "eq_cmp_structural_tuple_eq_method_currently_blocked",
+          "case_id": "eq_cmp_structural_tuple_eq_method_verified",
           "upstream_case_id": "eq_cmp1::check_eq",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpTuple`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "eq_cmp_structural_tuple_eq_method_liar_counterexample",
+          "upstream_case_id": "eq_cmp1::check_eq",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         },
         {
           "case_id": "eq_cmp_option_partial_ord_method_verified",
@@ -4846,20 +5080,27 @@
           "min_obligations": 1
         },
         {
-          "case_id": "eq_cmp_custom_partial_eq_method_currently_blocked",
+          "case_id": "eq_cmp_custom_partial_eq_method_verified",
           "upstream_case_id": "eq_cmp1::test_p_eq",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpCustomPartialEq`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "eq_cmp_custom_partial_eq_method_liar_counterexample",
+          "upstream_case_id": "eq_cmp1::test_p_eq",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         },
         {
           "case_id": "eq_cmp_custom_partial_eq_operator_verified",
           "upstream_case_id": "eq_cmp1::test_p_ee",
           "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "eq_cmp_custom_partial_eq_operator_liar_counterexample",
+          "upstream_case_id": "eq_cmp1::test_p_ee",
+          "expected_verdict": "counterexample",
           "min_obligations": 1
         }
       ],
@@ -5086,8 +5327,11 @@
         },
         {
           "case_id": "exec_closure_fn_trait_bound_application_is_deterministic_verified",
-          "expected_verdict": "verified",
-          "min_obligations": 1
+          "expected_verdict": "error",
+          "min_obligations": 1,
+          "expected_error_patterns": [
+            "bodiless call repeated"
+          ]
         },
         {
           "case_id": "exec_closure_fn_trait_bound_callee_ensures_verified",
@@ -5302,7 +5546,7 @@
       "upstream_path": "source/rust_verify_test/tests/exec_termination.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2785",
-      "reason": "Partial executable TrustVc scout coverage now exists for bounded recursive-decreases compute witnesses including a multi-call recursion shape, wrong-value counterexamples, and a fail-closed loop-decreases boundary. The upstream Verus exec_termination.rs language and diagnostic surface remains unsupported as replacement evidence.",
+      "reason": "Partial executable TrustVc scout coverage now exists for bounded recursive-decreases compute witnesses including a multi-call recursion shape, wrong-value counterexamples, and a fail-closed loop-decreases boundary. The upstream Verus exec_termination.rs language and diagnostic surface remains unsupported as replacement evidence. 2026-09-10: loop_with_break_with_decreases_clause now verifies faithfully (break-site checks + exact lane through the break-only `if`; audit rows 430/431).",
       "trust_vc_paths": [
         "evals/verus/ported/exec_termination.rs"
       ],
@@ -5330,9 +5574,9 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loop_with_break_with_decreases_clause_counterexample",
+          "case_id": "loop_with_break_with_decreases_clause_verified",
           "upstream_case_id": "loop_with_break_with_decreases_clause",
-          "expected_verdict": "counterexample",
+          "expected_verdict": "verified",
           "min_obligations": 8
         }
       ],
@@ -5864,7 +6108,7 @@
       "upstream_path": "source/rust_verify_test/tests/fndef_types.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2785",
-      "reason": "Expanded partial executable TrustVc fndef_types.rs scout coverage now records direct helper-contract calls, generic helper calls, SpecFn value-argument and call witnesses, stable bad-requires/bad-ensures counterexamples, and fail-closed trait-associated, first-class function item, Fn/FnOnce/FnMut-bound, reflection, datatype-constructor, reference, and mutable-parameter function-value boundaries. The row remains unsupported-gap because full Verus fndef/function-value semantics are not mirrored.",
+      "reason": "Expanded partial executable TrustVc fndef_types.rs scout coverage now records direct helper-contract calls, generic helper calls, SpecFn value-argument and call witnesses, stable bad-requires/bad-ensures counterexamples, and fail-closed trait-associated, first-class function item, Fn/FnOnce/FnMut-bound, reflection, datatype-constructor, reference, and mutable-parameter function-value boundaries. The row remains unsupported-gap because full Verus fndef/function-value semantics are not mirrored. RE-PINNED 2026-09-11: calling an `F: Fn(u8) -> bool` parameter verifies (an opaque spec-function value; the liar `assert!(b)` is refuted) — the fail-closed pin was stale. The FnOnce / FnMut twins still fail closed. (Its liar twin `assert!(b)` refutes in isolation with model `@SpecFn1Tobool!0` but returns solver Unknown (quantifier-unhandled) in this port's file context, so it is not pinned.)",
       "trust_vc_paths": [
         "evals/verus/ported/fndef_types.rs"
       ],
@@ -6059,16 +6303,10 @@
           ]
         },
         {
-          "case_id": "fn_trait_bound_value_call_currently_errors",
+          "case_id": "fn_trait_bound_value_call_verified",
           "upstream_case_id": "basic_test",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "Undefined function: f",
-            "unknown return type for function 'f'",
-            "Fn(u8) -> bool",
-            "function value"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 4
         },
         {
           "case_id": "fn_once_trait_bound_value_call_currently_errors",
@@ -6450,7 +6688,7 @@
         {
           "path": "evals/verus/ported/harness.rs",
           "kind": "file",
-          "sha256": "sha256:e784276274a01ff3b36c95926ab713a5dc6c649d9015be3229636aad7f7b9851"
+          "sha256": "sha256:3f0e768ee69e85f4cfd76991c0863a1bd03731b32c12e7b987f58075d9d7ccca"
         },
         {
           "path": "evals/verus/ported/harness_invalid_rust",
@@ -7206,7 +7444,7 @@
       "upstream_path": "source/rust_verify_test/tests/integers.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2778",
-      "reason": "Partial executable TrustVc coverage now exists for Rust-valid int/nat arithmetic, finite-integer casts into mathematical int, focused finite unsigned-to-nat and guarded signed-to-nat casts, small literal boundaries plus u128/i128 associated-constant boundaries, bool-to-int casts, and two upstream-shaped arithmetic counterexamples. The full upstream file remains unsupported because Verus-only int/nat syntax, Integer trait sealing and generic casts, Step specs, enum casts, large boundary literal diagnostics, symbolic div/rem completeness, and diagnostic parity are not fully mirrored.",
+      "reason": "Partial executable TrustVc coverage now exists for Rust-valid int/nat arithmetic, finite-integer casts into mathematical int, focused finite unsigned-to-nat and guarded signed-to-nat casts, small literal boundaries plus u128/i128 associated-constant boundaries, bool-to-int casts, and two upstream-shaped arithmetic counterexamples. The full upstream file remains unsupported because Verus-only int/nat syntax, Integer trait sealing and generic casts, Step specs, enum casts, large boundary literal diagnostics, symbolic div/rem completeness, and diagnostic parity are not fully mirrored. RE-PINNED 2026-09-11: enum-to-int casts verify — explicit and implicit-successor discriminants as constants (`A == 0`, `B == 255`, `C == 256`) and the symbolic cast of a parameter (`result == v as usize`, three-valued) — each with a refuted liar twin; both had been held in the suite's fail-closed list.",
       "trust_vc_paths": [
         "evals/verus/ported/integers.rs"
       ],
@@ -7312,6 +7550,30 @@
           "upstream_case_id": "test_bool_to_int",
           "expected_verdict": "verified",
           "min_obligations": 5
+        },
+        {
+          "case_id": "test_enum_to_int_discriminant_constants",
+          "upstream_case_id": "test_enum_to_int",
+          "expected_verdict": "verified",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "test_enum_to_int_discriminant_liar_counterexample",
+          "upstream_case_id": "test_enum_to_int",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
+        },
+        {
+          "case_id": "test_enum_to_int_symbolic_return",
+          "upstream_case_id": "test_enum_to_int",
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "test_enum_to_int_symbolic_return_liar_counterexample",
+          "upstream_case_id": "test_enum_to_int",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         },
         {
           "case_id": "test_finite_unsigned_to_nat_casts",
@@ -7750,7 +8012,7 @@
       "upstream_path": "source/rust_verify_test/tests/loops.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Partial executable TrustVc scout coverage now documents 21 Rust-valid loop cases, including while invariant and normal-exit witnesses, unmodified-local and shadowing facts, break/continue witnesses, stable break-flow counterexamples, and fail-closed loop_decreases/old-state boundaries. The row remains unsupported-gap because full upstream loops.rs parity still needs Verus loop-header invariant/decreases syntax, loop havoc diagnostics, richer break/continue flow, ghost/proof loop guards, iterator loops, subrange via clauses, old/final mutable-reference loop reasoning, loop isolation behavior, termination inside loops, and exact diagnostic counts.",
+      "reason": "Partial executable TrustVc scout coverage now documents 58 Rust-valid loop cases, including complex_while (a guard block with flat scalar side effects, rotated into a pure-guard while over a snapshot of the guard-assigned var — 2026-09-11, row 430), including for_loop1::test_loop_peek / for_loop2::test_loop (a range for with only an accumulator invariant — both bounds auto-injected, 2026-09-10, row 433), including loop_decreases1 (descent refuted at the continue site and on the fall-through path — 2026-09-10), including the loop_decreases2 family (a nested modifying loop summarized in the outer exact lane — 2026-09-10, rows 430/431), including basic_while_fail2 / test_variables_havoc_nested / test_variables_no_effect_nested / while_b_ok / while_b_fail / while_to_loop_ensures (promoted 2026-09-10; while_to_loop_ensures is pinned verified because Verus rejects it only through its while-to-loop conversion), including basic_loop (an `int`-typed let-local counter — 2026-09-10, row 430), including infinite_loop / loop_infinite2 / loop_infinite2y (code after a bare loop with no exit is unreachable — 2026-09-10, row 430) and basic_loop_fail, including the loop2_ok family (an effect-free inner loop in the outer exact lane, its invariant checked at the outer loop's arbitrary head — 2026-09-10, row 430), including loop_continue_no_break (trailing unconditional continue/break statements in the exact lane — 2026-09-10, row 430), including the faithful example_loop_continue pair (invariants and the measure's descent checked at the continue site — 2026-09-10, rows 430/431), including the faithful upstream example_loop_break family (invariants and loop ensures checked at break sites, head-to-head step through the break-only `if`, loop_decreases on a bare loop — 2026-09-10, audit rows 430/431), including while invariant and normal-exit witnesses, bare-loop regular invariants over unmodified state (checked against the loop's own modified set and available after the loop — 2026-09-10, audit row 429), the Verus-faithful exec-counter-overflow and stale-entry-read refutations for bare loops, unmodified-local and shadowing facts, break/continue witnesses, stable break-flow counterexamples, and fail-closed loop_decreases/old-state boundaries. The row remains unsupported-gap because full upstream loops.rs parity still needs Verus loop-header invariant/decreases syntax, loop havoc diagnostics, richer break/continue flow, ghost/proof loop guards, iterator loops, subrange via clauses, old/final mutable-reference loop reasoning, loop isolation behavior, termination inside loops, and exact diagnostic counts.",
       "trust_vc_paths": [
         "evals/verus/ported/loops.rs"
       ],
@@ -7793,7 +8055,7 @@
         },
         {
           "case_id": "loop_break_invariant_except_break",
-          "upstream_case_id": "example_loop_break",
+          "upstream_case_id": "example_loop_break (while slice)",
           "expected_verdict": "verified",
           "min_obligations": 4
         },
@@ -7852,22 +8114,244 @@
           "min_obligations": 1
         },
         {
+          "case_id": "infinite_loop_verified",
+          "upstream_case_id": "infinite_loop",
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "loop_infinite2_verified",
+          "upstream_case_id": "loop_infinite2",
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "loop_infinite2y_verified",
+          "upstream_case_id": "loop_infinite2y",
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "basic_loop_int_counter_verified",
+          "upstream_case_id": "basic_loop",
+          "expected_verdict": "verified",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "basic_loop_fail_counterexample",
+          "upstream_case_id": "basic_loop_fail",
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "basic_while_fail2_counterexample",
+          "upstream_case_id": "basic_while_fail2",
+          "expected_verdict": "counterexample",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "test_variables_havoc_nested_counterexample",
+          "upstream_case_id": "test_variables_havoc_nested",
+          "expected_verdict": "counterexample",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "test_variables_no_effect_nested_verified",
+          "upstream_case_id": "test_variables_no_effect_nested",
+          "expected_verdict": "verified",
+          "min_obligations": 7
+        },
+        {
+          "case_id": "while_b_ok_verified",
+          "upstream_case_id": "while_b_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "while_b_fail_counterexample",
+          "upstream_case_id": "while_b_fail",
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "while_to_loop_ensures_verified",
+          "upstream_case_id": "while_to_loop_ensures (Verus rejects only through its while-to-loop conversion)",
+          "expected_verdict": "verified",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "loop_decreases2_nested_counters_verified",
+          "upstream_case_id": "loop_decreases2 test1",
+          "expected_verdict": "verified",
+          "min_obligations": 11
+        },
+        {
+          "case_id": "loop_decreases2_inner_measure_constant_counterexample",
+          "upstream_case_id": "loop_decreases2 test2",
+          "expected_verdict": "counterexample",
+          "min_obligations": 9
+        },
+        {
+          "case_id": "loop_decreases2_outer_measure_constant_counterexample",
+          "upstream_case_id": "loop_decreases2 test3",
+          "expected_verdict": "counterexample",
+          "min_obligations": 9
+        },
+        {
+          "case_id": "loop_decreases1_continue_skips_decrease_counterexample",
+          "upstream_case_id": "loop_decreases1 test1",
+          "expected_verdict": "counterexample",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "loop_decreases1_fall_through_never_decreases_counterexample",
+          "upstream_case_id": "loop_decreases1 test2",
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "for_loop1_test_loop_peek_verified",
+          "upstream_case_id": "for_loop1 test_loop_peek",
+          "expected_verdict": "verified",
+          "min_obligations": 9
+        },
+        {
+          "case_id": "for_loop2_test_loop_verified",
+          "upstream_case_id": "for_loop2 test_loop",
+          "expected_verdict": "verified",
+          "min_obligations": 10
+        },
+        {
+          "case_id": "complex_while_exit_values_verified",
+          "upstream_case_id": "complex_while",
+          "expected_verdict": "verified",
+          "min_obligations": 11
+        },
+        {
+          "case_id": "complex_while_wrong_exit_value_counterexample",
+          "upstream_case_id": "complex_while (exit-value liar)",
+          "expected_verdict": "counterexample",
+          "min_obligations": 10
+        },
+        {
           "case_id": "loop_nested_break_to_outer_false_counterexample",
           "upstream_case_id": "loop_infinite2x",
           "expected_verdict": "counterexample",
           "min_obligations": 1
         },
         {
-          "case_id": "loop_break_regular_unmodified_invariant_current_gap_counterexample",
-          "upstream_case_id": "basic_loop non-tautological invariant current TrustVc gap",
+          "case_id": "loop_break_regular_unmodified_invariant_verified",
+          "upstream_case_id": "basic_loop non-tautological invariant (unmodified-state subset)",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "loop_labeled_inner_break_regular_invariant_verified",
+          "upstream_case_id": "loop2_ok_y non-tautological invariant (unmodified-state subset)",
+          "expected_verdict": "verified",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "loop_break_unbounded_counter_increment_overflow_counterexample",
+          "upstream_case_id": "basic_loop exec-counter overflow at an arbitrary loop head",
+          "expected_verdict": "counterexample",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "loop_break_modified_param_forgets_entry_value_counterexample",
+          "upstream_case_id": "test_variables_havoc_basic bare-loop form",
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
+        },
+        {
+          "case_id": "example_loop_break_verified",
+          "upstream_case_id": "example_loop_break",
+          "expected_verdict": "verified",
+          "min_obligations": 13
+        },
+        {
+          "case_id": "example_loop_break_fail1_counterexample",
+          "upstream_case_id": "example_loop_break_fail1",
+          "expected_verdict": "counterexample",
+          "min_obligations": 13
+        },
+        {
+          "case_id": "example_loop_break_fail2_counterexample",
+          "upstream_case_id": "example_loop_break_fail2",
+          "expected_verdict": "counterexample",
+          "min_obligations": 13
+        },
+        {
+          "case_id": "example_loop_break_fail3_counterexample",
+          "upstream_case_id": "example_loop_break_fail3",
+          "expected_verdict": "counterexample",
+          "min_obligations": 10
+        },
+        {
+          "case_id": "example_loop_break_fail4_counterexample",
+          "upstream_case_id": "example_loop_break_fail4",
+          "expected_verdict": "counterexample",
+          "min_obligations": 12
+        },
+        {
+          "case_id": "example_loop_continue_verified",
+          "upstream_case_id": "example_loop_continue",
+          "expected_verdict": "verified",
+          "min_obligations": 16
+        },
+        {
+          "case_id": "example_loop_continue_fail_counterexample",
+          "upstream_case_id": "example_loop_continue_fail",
+          "expected_verdict": "counterexample",
+          "min_obligations": 16
+        },
+        {
+          "case_id": "loop_continue_no_break_test_loop_verified",
+          "upstream_case_id": "loop_continue_no_break test_loop",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "loop_continue_no_break_fail_beginning_counterexample",
+          "upstream_case_id": "loop_continue_no_break test_fail_beginning",
           "expected_verdict": "counterexample",
           "min_obligations": 3
         },
         {
-          "case_id": "loop_labeled_inner_break_regular_invariant_current_gap_counterexample",
-          "upstream_case_id": "loop2_ok_y non-tautological invariant current TrustVc gap",
+          "case_id": "loop_continue_no_break_fail_at_continue_counterexample",
+          "upstream_case_id": "loop_continue_no_break test_fail_at_continue",
           "expected_verdict": "counterexample",
-          "min_obligations": 3
+          "min_obligations": 5
+        },
+        {
+          "case_id": "loop_continue_no_break_fail_at_end_after_continue_counterexample",
+          "upstream_case_id": "loop_continue_no_break test_fail_at_end_after_continue",
+          "expected_verdict": "counterexample",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "loop2_ok_verified",
+          "upstream_case_id": "loop2_ok",
+          "expected_verdict": "verified",
+          "min_obligations": 8
+        },
+        {
+          "case_id": "loop2_ok_y_verified",
+          "upstream_case_id": "loop2_ok_y",
+          "expected_verdict": "verified",
+          "min_obligations": 8
+        },
+        {
+          "case_id": "loop2_fail1_counterexample",
+          "upstream_case_id": "loop2_fail1",
+          "expected_verdict": "counterexample",
+          "min_obligations": 6
+        },
+        {
+          "case_id": "loop2_fail2_counterexample",
+          "upstream_case_id": "loop2_fail2",
+          "expected_verdict": "counterexample",
+          "min_obligations": 8
         },
         {
           "case_id": "while_loop_decreases_verified",
@@ -7889,7 +8373,7 @@
       ],
       "known_gaps": [
         "This partial port uses TrustVc invariant macros inside ordinary Rust while loops; pure boolean normal-exit coverage is limited to one while-b witness and does not cover Verus loop-header invariant/decreases syntax.",
-        "Break and continue coverage is limited to narrow witnesses; the bare-loop invariant frame only proves unmodified-state preservation across one break shape, while iterators, havocing behavior, and subrange via clauses remain unported.",
+        "Break and continue coverage: break-only `if cond { break; }` sites are checked (regular invariants + loop ensures at the exit, head-to-head step under ¬cond), so the example_loop_break family is ported; still unported are invariants over the counter across NESTED loops (loop2_ok), `continue` paths (example_loop_continue, loop_continue_no_break), unconditional/labeled-outer breaks, in-body assertions that need `invariant_except_break` facts, iterators, and subrange via clauses.",
         "The while-let guard shape is intentionally not given boolean loop guard metadata or a normal-exit assumption.",
         "Upstream loops.rs diagnostics and failure-count parity are not covered by this partial port."
       ],
@@ -7899,7 +8383,7 @@
       "upstream_path": "source/rust_verify_test/tests/loops_no_spinoff.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Partial executable TrustVc scout coverage now documents 30 Rust-valid loop_no_spinoff cases, including normal-exit witnesses, while/labeled-break counterexamples, unmodified-local facts, shadowing and nested-loop subsets, loop/break/continue witnesses, stable current-gap counterexamples, and fail-closed loop_decreases/old-state boundaries. The row remains unsupported-gap because full upstream loops_no_spinoff.rs parity still requires Verus loop_isolation(false) lowering, loop-header invariant/decreases syntax, havocing, broader break/continue flow facts, iterator loops, old/final mutable-reference reasoning, and diagnostic parity.",
+      "reason": "Partial executable TrustVc scout coverage now documents 36 Rust-valid loop_no_spinoff cases, including complex_while (the side-effect guard block verifies since 2026-09-11), including normal-exit witnesses, while/labeled-break counterexamples, unmodified-local facts, shadowing and nested-loop subsets, loop/break/continue witnesses, stable current-gap counterexamples, and fail-closed loop_decreases/old-state boundaries. The row remains unsupported-gap because full upstream loops_no_spinoff.rs parity still requires Verus loop_isolation(false) lowering, loop-header invariant/decreases syntax, havocing, broader break/continue flow facts, iterator loops, old/final mutable-reference reasoning, and diagnostic parity.",
       "trust_vc_paths": [
         "evals/verus/ported/loops_no_spinoff.rs"
       ],
@@ -8013,10 +8497,10 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loops_no_spinoff_complex_while_side_effect_guard_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_complex_while_side_effect_guard_verified",
           "upstream_case_id": "complex_while",
-          "expected_verdict": "counterexample",
-          "min_obligations": 1
+          "expected_verdict": "verified",
+          "min_obligations": 12
         },
         {
           "case_id": "loops_no_spinoff_loop_break_false_labeled_counterexample",
@@ -8025,16 +8509,16 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loops_no_spinoff_infinite_loop_unreachable_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_infinite_loop_unreachable_verified",
           "upstream_case_id": "infinite_loop",
-          "expected_verdict": "counterexample",
-          "min_obligations": 1
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
-          "case_id": "loops_no_spinoff_loop_infinite_nested_inner_break_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_loop_infinite_nested_inner_break_verified",
           "upstream_case_id": "loop_infinite2",
-          "expected_verdict": "counterexample",
-          "min_obligations": 1
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "loops_no_spinoff_loop_labeled_break_to_outer_false_counterexample",
@@ -8055,10 +8539,16 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loops_no_spinoff_for_loop_range_fact_boundary_counterexample",
+          "case_id": "loops_no_spinoff_for_loop_range_fact_verified",
           "upstream_case_id": "for_loop1",
+          "expected_verdict": "verified",
+          "min_obligations": 5
+        },
+        {
+          "case_id": "loops_no_spinoff_for_loop_range_fact_liar_counterexample",
+          "upstream_case_id": "for_loop1 test_loop_fail",
           "expected_verdict": "counterexample",
-          "min_obligations": 1
+          "min_obligations": 5
         },
         {
           "case_id": "loops_no_spinoff_for_loop_accumulator_post_boundary_counterexample",
@@ -8085,16 +8575,16 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loops_no_spinoff_loop2_restore_before_break_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_loop2_restore_before_break_verified",
           "upstream_case_id": "loop2_ok",
-          "expected_verdict": "counterexample",
-          "min_obligations": 3
+          "expected_verdict": "verified",
+          "min_obligations": 10
         },
         {
-          "case_id": "loops_no_spinoff_loop2_restore_before_labeled_inner_break_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_loop2_restore_before_labeled_inner_break_verified",
           "upstream_case_id": "loop2_ok_y",
-          "expected_verdict": "counterexample",
-          "min_obligations": 3
+          "expected_verdict": "verified",
+          "min_obligations": 10
         },
         {
           "case_id": "loops_no_spinoff_example_loop_break_without_progress_counterexample",
@@ -8109,10 +8599,10 @@
           "min_obligations": 1
         },
         {
-          "case_id": "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_current_gap_counterexample",
+          "case_id": "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_verified",
           "upstream_case_id": "loop_infinite2y",
-          "expected_verdict": "counterexample",
-          "min_obligations": 1
+          "expected_verdict": "verified",
+          "min_obligations": 3
         }
       ],
       "known_gaps": [
@@ -8137,7 +8627,7 @@
         {
           "path": "evals/verus/ported/maps.rs",
           "kind": "file",
-          "sha256": "sha256:bd3190e58e94926836f2bb3b0685e6a8f7eeefefd3736affac4522e82ab5e89c"
+          "sha256": "sha256:0647aa74aef4175397130f34891c922ebe2182590d5e7ab6d07d29bb55aeb38f"
         },
         {
           "path": "evals/verus/ported/maps_fails_subtype",
@@ -8170,8 +8660,8 @@
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:02f22524532ce186032f4fb4d9509e088eacbeb867b2239c122032b9aa9dc426",
-            "sha256:13672f46fb5a8749c30f44678bfc395f61ee1eea8a0de86dfc8ce3565d1e892c",
+            "sha256:097722fd606ab9bd4455d9163c69997cea21318459643249ae07d6424fa795be",
+            "sha256:14a621f01bc548164b7a3bc61bb7dff7aff2e4f7dbb68081570816dc81d7ab88",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
           ]
         },
@@ -8182,9 +8672,9 @@
           "expected_verdict": "counterexample",
           "min_obligations": 3,
           "obligation_fingerprints": [
-            "sha256:02f22524532ce186032f4fb4d9509e088eacbeb867b2239c122032b9aa9dc426",
-            "sha256:12ff99fc93b557ff56105375c0aef4a9a17607f55e87481cbeb3c20c397ddffd",
-            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+            "sha256:097722fd606ab9bd4455d9163c69997cea21318459643249ae07d6424fa795be",
+            "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+            "sha256:d73c9b113b985bad311a4c40cd5ca038bbe38bafae92cf2848da0fb8208d8e75"
           ]
         },
         {
@@ -8204,7 +8694,7 @@
           "expected_verdict": "counterexample",
           "min_obligations": 2,
           "obligation_fingerprints": [
-            "sha256:36006c7494ec45ebb3f916f6b245e9a807a774c187dfd72a5b898c70ed95d7f4",
+            "sha256:3621e5527f7fa2b88f652f2256c13a5d3e0fe89989fec5f992b0f8e034e0ef55",
             "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
           ]
         },
@@ -9329,7 +9819,7 @@
       "upstream_path": "source/rust_verify_test/tests/mut_refs.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2784",
-      "reason": "Partial executable TrustVc scout coverage now documents 31 Rust-valid mutable-reference cases, including direct local writes, one-level field writes, field-borrow updates, copy-through-helper/shared-borrow subsets, nested alias reassignment, parameter writes via a local alias, branch-sensitive local writes, stable stale-value counterexamples, and fail-closed reborrow, compound-assignment, direct parameter-write, aggregate-stored mutable-reference, evaluation-order, old/final/current/future, and resolvedness boundaries. The row remains unsupported-gap because full upstream mut_refs.rs parity still needs Verus new-mut-ref semantics, future/final/after_borrow state, resolvedness axioms, direct parameter writes, reborrows, tuple/index/nested projections, aggregate-held mutable refs, evaluation-order semantics, closure and loop integration, and diagnostic parity.",
+      "reason": "Partial executable TrustVc scout coverage now documents 31 Rust-valid mutable-reference cases, including direct local writes, one-level field writes, field-borrow updates, copy-through-helper/shared-borrow subsets, nested alias reassignment, scalar reborrow updates, direct scalar parameter writes and parameter writes via a local alias, scalar compound assignment through a local alias, branch-sensitive local writes, writes through mutable references held in tuple/struct-literal locals (straight-line, branch, and after a move), stable stale-value counterexamples, and fail-closed compound-field-projection-assignment, alias-reassignment evaluation-order, primitive compound-op evaluation-order, old/final/current/future/after_borrow, and resolvedness boundaries. The row remains unsupported-gap because full upstream mut_refs.rs parity still needs Verus new-mut-ref semantics, future/final/after_borrow state, resolvedness axioms, non-scalar and escaping parameter writes, reborrows beyond the scalar local subset, tuple-field borrows and index/nested projections, tuple-of-`&mut` parameters, loop-body/compound writes through aggregate-held mutable refs and holder escapes, evaluation-order semantics, closure and loop integration, and diagnostic parity.",
       "trust_vc_paths": [
         "evals/verus/ported/mut_refs.rs"
       ],
@@ -9376,12 +9866,8 @@
         },
         {
           "case_id": "mut_refs_basic_mut_ref_in_pair_write_currently_blocked",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported",
-            "* u_ref . x"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_assign_op_add_assign_verified",
@@ -9444,21 +9930,13 @@
         },
         {
           "case_id": "mut_refs_control_flow_tuple_pair_write_currently_blocked",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported",
-            "* x_ref . 0"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_moves_via_let_tuple_write_currently_blocked",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported",
-            "* refs2 . 0"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_short_circuit_alias_reassignment_currently_blocked",
@@ -9485,9 +9963,7 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "Failed to lower obligation 'assertion_0'",
-            "unresolved variable `a`",
-            "ensure the variable is declared as a function parameter, let-binding, or quantifier-bound variable"
+            "assignment through a dereferenced reference is unsupported in vc_extraction"
           ]
         },
         {
@@ -9496,7 +9972,7 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "has_resolved",
-            "unknown return type for function"
+            "is refused"
           ]
         },
         {
@@ -9505,17 +9981,23 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "after_borrow",
-            "unknown return type for function"
+            "is refused"
           ]
         },
         {
-          "case_id": "mut_refs_mut_ref_current_currently_blocked",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "mut_ref_current",
-            "unknown return type for function"
-          ]
+          "case_id": "mut_refs_mut_ref_current_unconstrained_counterexample",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_mut_ref_current_after_write_verified",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_mut_ref_current_after_write_stale_counterexample",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_mut_ref_future_currently_blocked",
@@ -9523,7 +10005,7 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "mut_ref_future",
-            "unknown return type for function"
+            "END of its borrow"
           ]
         },
         {
@@ -9531,8 +10013,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "Failed to parse assert!() expression",
-            "expected an expression"
+            "final",
+            "END of its borrow"
           ]
         },
         {
@@ -9544,11 +10026,29 @@
             "old-state",
             "old"
           ]
+        },
+        {
+          "case_id": "mut_refs_two_phase_call_takes_mut_ref_verified",
+          "upstream_case_id": "two_phase_borrow_basic::call_takes_mut_ref mut_ref_future ensures",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_two_phase_direct_call_verified",
+          "upstream_case_id": "two_phase_borrow_basic::test1 caller instantiates the mut_ref_future ensures",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_two_phase_direct_call_wrong_value_counterexample",
+          "upstream_case_id": "two_phase_borrow_basic::test1 caller, wrong post value",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         }
       ],
       "known_gaps": [
-        "Direct local mutable-reference writes, one-level field writes, field-borrow writes, helper/shared-borrow reads, nested alias reassignment, and branch-sensitive writes are covered only as Rust-valid TrustVc scout subsets.",
-        "Reborrows, compound assignments, direct writes through mutable-reference parameters, aggregate-held mutable refs, tuple projections, assignment-in-RHS aliasing, and primitive compound-op evaluation order remain fail-closed.",
+        "Direct local mutable-reference writes, one-level field writes, field-borrow writes, helper/shared-borrow reads, nested alias reassignment, branch-sensitive writes, and writes through mutable references held in tuple/struct-literal locals are covered only as Rust-valid TrustVc scout subsets.",
+        "In this row's cases, compound assignment through a mutable-reference field projection (`x_ref.x += ..`), alias reassignment inside a short-circuit operand or an assignment right-hand side, and primitive compound-op evaluation order remain fail-closed. Outside them (pinned by crates/trust-vc-core/tests/mut_ref_aggregate_holder_capability.rs and the sibling mut_refs_* rows): tuple-of-`&mut` parameters, loop-body and compound writes through aggregate-held mutable refs, holder escapes (call arguments, reborrows, closures, destructuring, function-local macros, `ref mut` / raw place borrows, use after move), holders with non-constant plain components, tuple-field borrows of plain tuples (`&mut x.0`), and nested aggregate projections remain fail-closed.",
         "Verus old/final/current/future/after_borrow and has_resolved semantics remain unsupported.",
         "No solver Unknown outcomes are used as manifest evidence."
       ],
@@ -9684,19 +10184,21 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "has_resolved",
-            "unknown return type for function",
+            "is refused",
             "standalone closure"
           ]
         },
         {
-          "case_id": "mut_refs_closure_mut_ref_current_capture_currently_errors",
+          "case_id": "mut_refs_closure_mut_ref_current_capture_verified",
           "upstream_case_id": "spec_capture_of_mut_ref",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported",
-            "unknown return type for function"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_closure_mut_ref_current_capture_wrong_value_counterexample",
+          "upstream_case_id": "spec_capture_of_mut_ref",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         }
       ],
       "known_gaps": [
@@ -9710,7 +10212,7 @@
       "upstream_path": "source/rust_verify_test/tests/mut_refs_libs.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2784",
-      "reason": "Partial executable TrustVc scout coverage now documents 57 Rust-valid mutable-reference library cases, including Option Some/None and Option::as_mut(None) verified prefixes, Vec::new/push and direct vec! scalar indexed-update subsets, stable Option/Vec false-tail counterexamples including tuple-field assignment, runtime witnesses, and fail-closed Option mutable-reference/slice/insert/get_or_insert, direct vec! nested assignment, Vec index mutable-reference, out-of-bounds, Vec-held mutable-reference, Vec::new/push nested/index/mut-ref boundary, and has_resolved surfaces. Direct vec! tuple-field indexed assignments now reach VC generation but remain counterexample mismatches. The row remains unsupported-gap because full upstream mut_refs_libs.rs parity still needs Option-returned mutable-reference mutation, Option source preservation after library calls, Option slice APIs, broader direct vec! modeling beyond scalar indexed assignment, broader tuple-field and nested Vec index assignment, Vec index mutable references, vectors of mutable references, Verus has_resolved, and index-out-of-bounds diagnostics.",
+      "reason": "Partial executable TrustVc scout coverage now documents 57 Rust-valid mutable-reference library cases, including Option Some/None and Option::as_mut(None) verified prefixes, Option::as_slice views of known None/Some(scalar) receivers (verified, with their false-tail counterexamples; 2026-09-16), Option::insert/get_or_insert `&mut` payload aliases on known None/Some(scalar) locals in the straight-line shape (the four test bodies and their pre-mutation result observations verified, the four false tails counterexamples; 2026-09-17), Vec::new/push and direct vec! scalar indexed-update subsets, stable Option/Vec false-tail counterexamples including tuple-field assignment, runtime witnesses, and fail-closed Option::as_mut mutable-reference/mutable-slice, direct vec! nested assignment, Vec index mutable-reference, out-of-bounds, Vec-held mutable-reference, Vec::new/push nested/index/mut-ref boundary, and has_resolved surfaces. Direct vec! tuple-field indexed assignments now reach VC generation but remain counterexample mismatches. The row remains unsupported-gap because full upstream mut_refs_libs.rs parity still needs Option::as_mut-returned mutable-reference mutation, Option::insert/get_or_insert aliases beyond the admitted straight-line shape (parameter or unknown-state receivers, non-literal payloads, writes in branches or loops, escaping aliases), Option source preservation after library calls, Option::as_mut_slice and as_slice on unknown-state or non-scalar-payload receivers, broader direct vec! modeling beyond scalar indexed assignment, broader tuple-field and nested Vec index assignment, Vec index mutable references, vectors of mutable references, Verus has_resolved, and index-out-of-bounds diagnostics.",
       "trust_vc_paths": [
         "evals/verus/ported/mut_refs_libs.rs"
       ],
@@ -9795,22 +10297,14 @@
         {
           "case_id": "mut_refs_libs_option_as_slice_none_observation_currently_blocked",
           "upstream_case_id": "test_options_as_mut_slice::test_as_slice_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "as_slice() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_libs_option_as_slice_some_observation_currently_blocked",
           "upstream_case_id": "test_options_as_mut_slice::test_as_slice_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "as_slice() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_as_mut_slice_none_observation_currently_blocked",
@@ -9835,22 +10329,14 @@
         {
           "case_id": "mut_refs_libs_option_as_slice_none_false_tail_currently_blocked",
           "upstream_case_id": "test_options_as_mut_slice::fail_as_slice_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "as_slice() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_as_slice_some_false_tail_currently_blocked",
           "upstream_case_id": "test_options_as_mut_slice::fail_as_slice_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "as_slice() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
         },
         {
           "case_id": "mut_refs_libs_option_as_mut_slice_none_false_tail_currently_blocked",
@@ -9875,122 +10361,74 @@
         {
           "case_id": "mut_refs_libs_option_insert_mut_ref_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_insert_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_insert_some_mut_ref_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_insert_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_none_mut_ref_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_get_or_insert_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_some_mut_ref_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_get_or_insert_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "mut_refs_libs_option_insert_none_result_observation_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_insert_none pre-mutation result observation",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "collection operation 'insert'",
-            "requires a collection receiver, got 'Option<u64>'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_libs_option_insert_some_result_observation_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_insert_some pre-mutation result observation",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "collection operation 'insert'",
-            "requires a collection receiver, got 'Option<u64>'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_none_result_observation_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_get_or_insert_none pre-mutation result observation",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "get_or_insert() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_some_result_observation_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::test_get_or_insert_some pre-mutation result observation",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "get_or_insert() on type `Option<u64>`",
-            "method is not available in specification context"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_libs_option_insert_none_false_tail_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::fail_insert_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
         },
         {
           "case_id": "mut_refs_libs_option_insert_some_false_tail_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::fail_insert_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_none_false_tail_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::fail_get_or_insert_none",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
         },
         {
           "case_id": "mut_refs_libs_option_get_or_insert_some_false_tail_currently_blocked",
           "upstream_case_id": "test_option_insert_and_get_or_insert::fail_get_or_insert_some",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 4
         },
         {
           "case_id": "mut_refs_libs_vec_index_assign_currently_blocked",
@@ -10007,7 +10445,7 @@
         {
           "case_id": "mut_refs_libs_vec_index_assign_fields_currently_blocked",
           "upstream_case_id": "test_vec_index_assign::test_fields",
-          "expected_verdict": "counterexample",
+          "expected_verdict": "verified",
           "min_obligations": 1
         },
         {
@@ -10019,32 +10457,20 @@
         {
           "case_id": "mut_refs_libs_vec_index_assign_nested_currently_blocked",
           "upstream_case_id": "test_vec_index_assign::test_nested",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "indexed assignment target is unsupported in vc_extraction",
-            "v [1] [1]"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_index_assign_nested_false_tail_currently_blocked",
           "upstream_case_id": "test_vec_index_assign::fails_nested",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "indexed assignment target is unsupported in vc_extraction",
-            "v [1] [1]"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_push_nested_index_assign_currently_blocked",
           "upstream_case_id": "test_vec_index_assign::test_nested Vec::new/push nested assignment boundary",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "indexed assignment target is unsupported in vc_extraction",
-            "v [1usize] [1usize]"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_push_tuple_field_index_assign_false_tail_counterexample",
@@ -10055,24 +10481,14 @@
         {
           "case_id": "mut_refs_libs_vec_index_mut_ref_currently_blocked",
           "upstream_case_id": "test_vec_index_mut_ref::test_mut_ref",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r",
-            "tuple/index/nested"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_index_mut_ref_false_tail_currently_blocked",
           "upstream_case_id": "test_vec_index_mut_ref::fails_mut_ref",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r",
-            "tuple/index/nested"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_index_mut_ref_fields_currently_blocked",
@@ -10121,13 +10537,8 @@
         {
           "case_id": "mut_refs_libs_vec_push_index_mut_ref_currently_blocked",
           "upstream_case_id": "test_vec_index_mut_ref::test_mut_ref Vec::new/push mutable index reference boundary",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r",
-            "tuple/index/nested"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_libs_vec_index_out_of_bounds_assign_currently_blocked",
@@ -10179,7 +10590,7 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "indexed assignment target is unsupported in vc_extraction",
+            "Vec literal indexed assignment is out of bounds in vc_extraction",
             "v [2] [1]"
           ]
         },
@@ -10251,12 +10662,12 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "has_resolved",
-            "unknown return type for function 'has_resolved'"
+            "`has_resolved()` is refused"
           ]
         }
       ],
       "known_gaps": [
-        "Only the observational Option::as_mut(None), Option prefix, and Vec::new/push plus direct vec! scalar indexed-update subsets verify; Option::as_mut(Some), Option::as_mut_slice, Option::insert, and Option::get_or_insert mutable-reference behavior is runtime-witnessed but not verified as Verus-equivalent library specs.",
+        "Only the observational Option::as_mut(None), Option prefix, Option::as_slice on a known None/Some(bool|integer) receiver, Option::insert/get_or_insert `&mut` payload aliases in the straight-line shape (a top-level `let r = x.insert(<typed literal>)` on a known None/Some(<typed literal>) local, flat `*r` reads, statement-level typed-literal writes, no use of `x` until `r`'s last use), and Vec::new/push plus direct vec! scalar indexed-update subsets verify; Option::as_mut(Some) and Option::as_mut_slice mutable-reference behavior is runtime-witnessed but not verified as Verus-equivalent library specs, Option::insert/get_or_insert outside the admitted shape fails closed, and Option::as_slice on an unknown-state receiver, a non-scalar payload, or an `Option<i32>` receiver (a declared `Option<uN>` with an unsuffixed payload is recorded as `Option<i32>`, so i32 payloads fail closed wholesale) fails closed.",
         "Broader direct vec! tuple-field Vec index assignment remains a counterexample mismatch; nested Vec index assignment, Vec index mutable references, and vectors of mutable references remain fail-closed.",
         "has_resolved and index-out-of-bounds Verus diagnostics remain unsupported.",
         "No solver Unknown outcomes are used as manifest evidence."
@@ -10495,14 +10906,8 @@
         {
           "case_id": "mut_refs_loop_tuple_field_writeback_boundary_currently_errors",
           "upstream_case_id": "future_preserved_in_loop",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "assignment through a mutable-reference projection is unsupported",
-            "tuple-field",
-            "pair_ref . 0",
-            "field '0'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 2
         },
         {
           "case_id": "mut_refs_loop_nested_tuple_mut_ref_write_boundary_currently_errors",
@@ -11292,14 +11697,16 @@
           ]
         },
         {
-          "case_id": "mut_refs_patterns_mut_ref_current_currently_blocked",
+          "case_id": "mut_refs_patterns_mut_ref_current_local_borrow_verified",
           "upstream_case_id": "mut_ref_current resolution helper boundary",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "mut_ref_current",
-            "unknown return type"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_patterns_mut_ref_current_local_borrow_wrong_value_counterexample",
+          "upstream_case_id": "mut_ref_current resolution helper boundary",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "mut_refs_patterns_mut_ref_future_currently_blocked",
@@ -11354,6 +11761,36 @@
             "unsupported method",
             "get"
           ]
+        },
+        {
+          "case_id": "mut_refs_patterns_side_effects_add1_two_state_verified",
+          "upstream_case_id": "side_effects_in_match_arg::add1 two-state mut_ref_current/mut_ref_future contract",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_patterns_side_effects_statement_call_verified",
+          "upstream_case_id": "side_effects_in_match_arg statement-position call applies the two-state ensures",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_patterns_side_effects_let_tuple_call_verified",
+          "upstream_case_id": "side_effects_in_match_arg::test3 tuple-destructured call result",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_patterns_side_effects_let_tuple_false_counterexample",
+          "upstream_case_id": "side_effects_in_match_arg::test3_fails tuple-destructured call result",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "mut_refs_patterns_side_effects_let_tuple_wrong_value_counterexample",
+          "upstream_case_id": "side_effects_in_match_arg::test3 tuple-destructured call result, wrong post value",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         }
       ],
       "known_gaps": [
@@ -12055,9 +12492,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "unsafe block",
-            "unknown type",
-            "unsupported"
+            "does not model Rust unions",
+            "`mut_refs_unions_native_field_access_currently_blocked` names the union `MutRefsUnionsNative`"
           ]
         },
         {
@@ -12066,8 +12502,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "string literals are not yet supported",
-            "is_variant"
+            "does not model Rust unions",
+            "`mut_refs_unions_is_variant_currently_blocked` names the union `MutRefsUnionsNative`"
           ]
         },
         {
@@ -12086,8 +12522,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "string literals are not yet supported",
-            "get_union_field"
+            "does not model Rust unions",
+            "`mut_refs_unions_get_union_field_currently_blocked` names the union `MutRefsUnionsNative`"
           ]
         },
         {
@@ -12096,9 +12532,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "unsafe block",
-            "unknown type",
-            "unsupported"
+            "does not model Rust unions",
+            "`mut_refs_unions_native_struct_update_tail_wrong_variant_currently_blocked` names the union `MutRefsUnionsNative`"
           ]
         }
       ],
@@ -12228,7 +12663,8 @@
           "expected_error_patterns": [
             "unknown return type",
             "standalone closure",
-            "closure"
+            "closure",
+            "assignment target other than a local variable"
           ]
         },
         {
@@ -12239,7 +12675,8 @@
           "expected_error_patterns": [
             "unknown return type",
             "standalone closure",
-            "closure"
+            "closure",
+            "assignment target other than a local variable"
           ]
         },
         {
@@ -12250,7 +12687,8 @@
           "expected_error_patterns": [
             "unknown return type",
             "standalone closure",
-            "closure"
+            "closure",
+            "assignment target other than a local variable"
           ]
         },
         {
@@ -13179,7 +13617,7 @@
       "upstream_path": "source/rust_verify_test/tests/operators.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Partial executable TrustVc coverage now exists for signed division/remainder arithmetic from upstream test_arith, concrete comparison/logical operator facts, adjacent false fact counterexamples, primitive in-range shift guards, derived structural equality, and primitive integer Add::add lowering. Operator overloading, external trait specifications, vstd operator specs, structural equality priority over assumed specifications, overloaded PartialEq/Sub, non-primitive trait method lowering, shift-overflow diagnostics, and broad diagnostic parity remain unsupported.",
+      "reason": "Partial executable TrustVc coverage now exists for signed division/remainder arithmetic from upstream test_arith, concrete comparison/logical operator facts, adjacent false fact counterexamples, primitive in-range shift guards, derived structural equality, and primitive integer Add::add lowering. Operator overloading, external trait specifications, vstd operator specs, structural equality priority over assumed specifications, overloaded PartialEq/Sub, non-primitive trait method lowering, shift-overflow diagnostics, and broad diagnostic parity remain unsupported. RE-PINNED 2026-09-11: the hand-written `PartialEq::eq` METHOD call (upstream test_eq_overload, an INVERTED eq body) verifies as its body — the negated and the structural readings are both refuted; the fail-closed pin was stale.",
       "trust_vc_paths": [
         "evals/verus/ported/operators.rs"
       ],
@@ -13233,18 +13671,22 @@
           "min_obligations": 2
         },
         {
-          "case_id": "custom_partial_eq_method_currently_blocked",
+          "case_id": "custom_partial_eq_method_verified",
           "upstream_case_id": "test_eq_overload",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "eq",
-            "PartialEq",
-            "unsupported",
-            "unknown",
-            "opaque",
-            "unresolved"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "custom_partial_eq_method_negated_counterexample",
+          "upstream_case_id": "test_eq_overload",
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "custom_partial_eq_method_structural_liar_counterexample",
+          "upstream_case_id": "test_eq_overload",
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
         }
       ],
       "known_gaps": [
@@ -13676,7 +14118,7 @@
       "upstream_path": "source/rust_verify_test/tests/proof_closures.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Partial executable TrustVc scout coverage now documents Rust-valid proof-closure-adjacent function-call contracts for one-arg, two-arg, zero-arg, helper-call, identity-call, and straight-line assignment-call subsets, stable false-call counterexamples, and fail-closed proof-local closure call/capture/subexpression boundaries. The row remains unsupported-gap because direct Verus proof_fn closure syntax, f.requires/f.ensures reflection, proof-local closure calls and captures, branch-join assignment proof calls, ProofFn/ProofFnOnce/ProofFnMut parameter passing, ReqEns, tracked args/returns, lifetime/copy/send/sync behavior, proof-call-in-spec mode parity, and exact diagnostics remain unsupported.",
+      "reason": "Partial executable TrustVc scout coverage now documents Rust-valid proof-closure-adjacent function-call contracts for one-arg, two-arg, zero-arg, helper-call, identity-call, and straight-line assignment-call subsets, stable false-call counterexamples, and fail-closed proof-local closure call/capture/subexpression boundaries. The row remains unsupported-gap because direct Verus proof_fn closure syntax, f.requires/f.ensures reflection, proof-local closure calls and captures, branch-join assignment proof calls, ProofFn/ProofFnOnce/ProofFnMut parameter passing, ReqEns, tracked args/returns, lifetime/copy/send/sync behavior, proof-call-in-spec mode parity, and exact diagnostics remain unsupported. RE-PINNED 2026-09-11: direct proof-local closure application — one-argument, zero-argument, and as a comparison operand — verifies with refuted liar twins; the move-capture and mut-capture applications still fail closed. The move-capture application now fails closed on the captured variable (`unresolved variable \\`y\\``) rather than the closure type; its pattern list carries both.",
       "trust_vc_paths": [
         "evals/verus/ported/proof_closures.rs"
       ],
@@ -13748,29 +14190,33 @@
           "min_obligations": 1
         },
         {
-          "case_id": "proof_closure_local_application_currently_errors",
+          "case_id": "proof_closure_local_application_verified",
           "upstream_case_id": "basic_test",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'f'",
-            "standalone closure"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
         },
         {
-          "case_id": "proof_closure_zero_arg_local_application_currently_errors",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'f'",
-            "standalone closure"
-          ]
+          "case_id": "proof_closure_local_application_liar_counterexample",
+          "upstream_case_id": "basic_test",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "proof_closure_zero_arg_local_application_verified",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "proof_closure_zero_arg_local_application_liar_counterexample",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "proof_closure_move_capture_application_currently_errors",
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
+            "unresolved variable `y`",
             "unknown return type for function 'f'",
             "standalone closure",
             "closure"
@@ -13788,15 +14234,14 @@
           ]
         },
         {
-          "case_id": "proof_closure_call_as_subexpression_currently_errors",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'f'",
-            "standalone closure",
-            "call function",
-            "closure"
-          ]
+          "case_id": "proof_closure_call_as_subexpression_verified",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "proof_closure_call_as_subexpression_liar_counterexample",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         }
       ],
       "known_gaps": [
@@ -14544,9 +14989,9 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'g'",
-            "register it in TypeEnv via prepare_context"
+            "application of a function value whose precondition is not modelled",
+            "`g` is a local bound to `prophetic_rank`",
+            "rejected rather than trusted"
           ]
         },
         {
@@ -16201,11 +16646,14 @@
         {
           "case_id": "return_from_let_else_contract",
           "upstream_case_id": "test1",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "fail closed without solver Unknown evidence"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "return_from_let_else_contract_payload_counterexample",
+          "upstream_case_id": "test1",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
         },
         {
           "case_id": "return_from_call_argument_contract",
@@ -16699,7 +17147,7 @@
       "upstream_path": "source/rust_verify_test/tests/safe_api.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Expanded partial executable TrustVc safe_api.rs scout coverage now records public API postcondition, satisfied precondition, trait contract, fn-pointer-adjacent, and stable counterexample witnesses, plus fail-closed trait-impl-side requires, closure smuggling, and fn-pointer return boundaries. The row remains unsupported-gap because TrustVc does not expose Verus check-api-safety whole-API analysis or exact diagnostics.",
+      "reason": "Expanded partial executable TrustVc safe_api.rs scout coverage now records public API postcondition, satisfied precondition, trait contract, fn-pointer-adjacent, and stable counterexample witnesses, plus fail-closed trait-impl-side requires, closure smuggling, and fn-pointer return boundaries. The row remains unsupported-gap because TrustVc does not expose Verus check-api-safety whole-API analysis or exact diagnostics. RE-PINNED 2026-09-11: a local closure applied in the body (the opaque_closure_type_returned scout) verifies with a refuted liar twin; the fail-closed pin was stale.",
       "trust_vc_paths": [
         "evals/verus/ported/safe_api.rs"
       ],
@@ -16767,13 +17215,16 @@
           ]
         },
         {
-          "case_id": "safe_api_closure_smuggling_boundary_fails_closed",
+          "case_id": "safe_api_closure_application_verified",
           "upstream_case_id": "opaque_closure_type_returned",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'f'"
-          ]
+          "expected_verdict": "verified",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "safe_api_closure_application_liar_counterexample",
+          "upstream_case_id": "opaque_closure_type_returned",
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
         },
         {
           "case_id": "safe_api_fn_pointer_return_boundary_fails_closed",
@@ -16805,7 +17256,7 @@
         {
           "path": "evals/verus/ported/scope.rs",
           "kind": "file",
-          "sha256": "sha256:2e8b51c5e4f2189e04e2d56371c201db09e7a1f746bfbc337bde318704b99a8c"
+          "sha256": "sha256:4422d2e66989320b750166648f5cb2a7057e2fd4826301027422473bec698837"
         }
       ],
       "expected_cases": [
@@ -16931,7 +17382,7 @@
       "upstream_path": "source/rust_verify_test/tests/seqs.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Expanded partial executable TrustVc seqs.rs scout coverage now records 45 stable Seq len, index, Seq::new, update, push, add, subrange, to_set, filter, repeat, and extensionality-adjacent witnesses, matching wrong-claim counterexamples, and fail-closed flat_map, fold_left, and empty seq! macro boundaries. The row remains unsupported-gap because broader vstd::Seq reasoning and macro behavior are not full replacements.",
+      "reason": "Expanded partial executable TrustVc seqs.rs scout coverage now records 46 stable Seq len, index, Seq::new, update, push, add, subrange, to_set, filter, repeat, and extensionality-adjacent witnesses, matching wrong-claim counterexamples, and fail-closed flat_map, fold_left, and empty seq! macro boundaries. The row remains unsupported-gap because broader vstd::Seq reasoning and macro behavior are not full replacements.",
       "trust_vc_paths": [
         "evals/verus/ported/seqs.rs"
       ],
@@ -17097,6 +17548,12 @@
           "upstream_case_id": "filter_lemmas",
           "expected_verdict": "verified",
           "min_obligations": 1
+        },
+        {
+          "case_id": "filter_lemmas_retained_membership_exact_subset",
+          "upstream_case_id": "filter_lemmas",
+          "expected_verdict": "verified",
+          "min_obligations": 3
         },
         {
           "case_id": "auto_extensionality_syntax1",
@@ -17736,7 +18193,7 @@
       "upstream_path": "source/rust_verify_test/tests/state_machines.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2784",
-      "reason": "Partial executable TrustVc scout coverage now exists for Rust-valid scalar relation-codegen and boolean token-flow surrogates, stable adjacent counterexamples, and fail-closed direct state_machine!/tokenized_state_machine! macro boundaries. The entry remains unsupported-gap because TrustVc does not yet replace Verus state_machine!/tokenized_state_machine! macro expansion, generated token APIs, sharding semantics, inductive lemma checking, deterministic guard analysis, pattern-binding diagnostics, persistent-token behavior, or exact macro diagnostics.",
+      "reason": "TrustVc now expands the non-tokenized `state_machine!` surface natively (D1a): an item-position `trust_vc::state_machine!` over int/bool/file-local-datatype fields becomes definitional relations plus `#[trust_vc::proof]` inductiveness lemmas, checked by the ordinary proof pipeline on ay. The port records the upstream relation_codegen init relation (both directions plus its inductiveness lemma), the assert-free tr2 relation (adapted), the lemma_doesnt_verify families as counterexamples, and 54 upstream diagnostic cases that fail closed with the upstream message. The entry remains unsupported-gap because the tokenized half, assert/match/property!, labels, generics, collection and machine-integer fields, Step/show::/take_step and the generated token APIs are still unsupported.",
       "trust_vc_paths": [
         "evals/verus/ported/state_machines.rs"
       ],
@@ -17790,14 +18247,611 @@
             "unsupported macro",
             "tokenized_state_machine"
           ]
+        },
+        {
+          "case_id": "rc_init_inductive",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_correct_init",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_rev_init",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_tr2_inductive",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_correct_tr2_noassert",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_rev_tr2_noassert",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "rc_rev_init_wrong",
+          "upstream_case_id": "relation_codegen",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "ldv_tr_inductive",
+          "upstream_case_id": "lemma_doesnt_verify",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "ldv_init_inductive",
+          "upstream_case_id": "lemma_doesnt_verify_init",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "sm_dupe_name_fail_error",
+          "upstream_case_id": "dupe_name_fail",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "duplicate item name"
+          ]
+        },
+        {
+          "case_id": "sm_birds_eye_nontokenized_error",
+          "upstream_case_id": "test_birds_eye_nontokenized_error",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "`birds_eye` only makes sense for tokenized state machines"
+          ]
+        },
+        {
+          "case_id": "sm_normal_sm_sharding_error",
+          "upstream_case_id": "normal_sm_sharding",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "sharding strategy only makes sense for tokenized state machines"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_init_missing_error",
+          "upstream_case_id": "init_wf_init_missing",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "procedure does not initialize"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_init_dupe_error",
+          "upstream_case_id": "init_wf_init_dupe",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "might be initialized multiple times"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_init_dupe_conditional_error",
+          "upstream_case_id": "init_wf_init_dupe_conditional",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "might be initialized multiple times"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_init_if_error",
+          "upstream_case_id": "init_wf_init_if",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "the else-branch does not initialize"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_init_else_error",
+          "upstream_case_id": "init_wf_init_else",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "the if-branch does not initialize"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_update_error",
+          "upstream_case_id": "init_wf_update",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "'update' statement not allowed in initialization"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_update2_error",
+          "upstream_case_id": "init_wf_update2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "'update' statement not allowed in initialization"
+          ]
+        },
+        {
+          "case_id": "sm_init_wf_assert_error",
+          "upstream_case_id": "init_wf_assert",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "'assert' statement not allowed in initialization"
+          ]
+        },
+        {
+          "case_id": "sm_normal_wf_update_dupe_error",
+          "upstream_case_id": "normal_wf_update_dupe",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "might be updated multiple times"
+          ]
+        },
+        {
+          "case_id": "sm_normal_wf_update_dupe_conditional_error",
+          "upstream_case_id": "normal_wf_update_dupe_conditional",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "might be updated multiple times"
+          ]
+        },
+        {
+          "case_id": "sm_normal_wf_update_dupe_conditional2_error",
+          "upstream_case_id": "normal_wf_update_dupe_conditional2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "might be updated multiple times"
+          ]
+        },
+        {
+          "case_id": "sm_normal_wf_update_init_error",
+          "upstream_case_id": "normal_wf_update_init",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "'init' statement not allowed"
+          ]
+        },
+        {
+          "case_id": "sm_readonly_wf_update_error",
+          "upstream_case_id": "readonly_wf_update",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "statement not allowed in readonly transition"
+          ]
+        },
+        {
+          "case_id": "sm_property_wf_update_error",
+          "upstream_case_id": "property_wf_update",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "statement not allowed in property definition"
+          ]
+        },
+        {
+          "case_id": "sm_readonly_wf_init_error",
+          "upstream_case_id": "readonly_wf_init",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "statement not allowed outside 'init' routine"
+          ]
+        },
+        {
+          "case_id": "sm_property_wf_init_error",
+          "upstream_case_id": "property_wf_init",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "statement not allowed outside 'init' routine"
+          ]
+        },
+        {
+          "case_id": "sm_field_not_found_error",
+          "upstream_case_id": "field_not_found",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "field 'whats_this' not found"
+          ]
+        },
+        {
+          "case_id": "sm_no_let_repeated_idents_error",
+          "upstream_case_id": "no_let_repeated_idents",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "bound variables with the same name"
+          ]
+        },
+        {
+          "case_id": "sm_no_let_repeated_idents2_error",
+          "upstream_case_id": "no_let_repeated_idents2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "bound variables with the same name"
+          ]
+        },
+        {
+          "case_id": "sm_no_let_repeated_idents3_error",
+          "upstream_case_id": "no_let_repeated_idents3",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "bound variables with the same name"
+          ]
+        },
+        {
+          "case_id": "sm_pre_in_init_error",
+          "upstream_case_id": "pre_in_init",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "no previous state to refer to"
+          ]
+        },
+        {
+          "case_id": "sm_self_in_transition_error",
+          "upstream_case_id": "self_in_transition",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "`self` is meaningless"
+          ]
+        },
+        {
+          "case_id": "sm_post_in_transition_error",
+          "upstream_case_id": "post_in_transition",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "cannot refer directly to `post`"
+          ]
+        },
+        {
+          "case_id": "sm_super_error",
+          "upstream_case_id": "super_error",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "`super::` path not allowed here"
+          ]
+        },
+        {
+          "case_id": "sm_duplicate_inductive_lemma_error",
+          "upstream_case_id": "duplicate_inductive_lemma",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "duplicate 'inductive' lemma"
+          ]
+        },
+        {
+          "case_id": "sm_missing_inductive_lemma_error",
+          "upstream_case_id": "missing_inductive_lemma",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "missing inductiveness proofs for"
+          ]
+        },
+        {
+          "case_id": "sm_missing_inductive_lemma_init_error",
+          "upstream_case_id": "missing_inductive_lemma_init",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "missing inductiveness proofs for"
+          ]
+        },
+        {
+          "case_id": "sm_inductive_lemma_readonly_error",
+          "upstream_case_id": "inductive_lemma_readonly",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "does not make sense for a 'readonly' transition"
+          ]
+        },
+        {
+          "case_id": "sm_inductive_lemma_property_error",
+          "upstream_case_id": "inductive_lemma_property",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "does not make sense for a 'property' definition"
+          ]
+        },
+        {
+          "case_id": "sm_lemma_wrong_args_error",
+          "upstream_case_id": "lemma_wrong_args",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "params for 'inductive' lemma should be"
+          ]
+        },
+        {
+          "case_id": "sm_lemma_bad_transition_name_error",
+          "upstream_case_id": "lemma_bad_transition_name",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "could not find transition"
+          ]
+        },
+        {
+          "case_id": "sm_lemma_bad_generic_params_error",
+          "upstream_case_id": "lemma_bad_generic_params",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "should have no generic parameters"
+          ]
+        },
+        {
+          "case_id": "sm_lemma_bad_return_type_error",
+          "upstream_case_id": "lemma_bad_return_type",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "should have no return type"
+          ]
+        },
+        {
+          "case_id": "sm_lemma_bad_header_error",
+          "upstream_case_id": "lemma_bad_header",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "the precondition and postcondition are implicit"
+          ]
+        },
+        {
+          "case_id": "sm_conflicting_attrs_error",
+          "upstream_case_id": "conflicting_attrs",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "conflicting attributes"
+          ]
+        },
+        {
+          "case_id": "sm_explicit_mode_inv_error",
+          "upstream_case_id": "explicit_mode_inv",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "should not be explicitly labelled"
+          ]
+        },
+        {
+          "case_id": "sm_explicit_mode_field_error",
+          "upstream_case_id": "explicit_mode_field",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "should not be explicitly labelled"
+          ]
+        },
+        {
+          "case_id": "sm_explicit_mode_proof_error",
+          "upstream_case_id": "explicit_mode_proof",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "should not be explicitly labelled"
+          ]
+        },
+        {
+          "case_id": "sm_inv_wrong_params_error",
+          "upstream_case_id": "inv_wrong_params",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "an invariant function must take 1 argument (self)"
+          ]
+        },
+        {
+          "case_id": "sm_inv_wrong_ret_error",
+          "upstream_case_id": "inv_wrong_ret",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "an invariant function must return a bool"
+          ]
+        },
+        {
+          "case_id": "sm_inv_wrong_generics_error",
+          "upstream_case_id": "inv_wrong_generics",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "an invariant function must take 0 type arguments"
+          ]
+        },
+        {
+          "case_id": "sm_multiple_fields_error",
+          "upstream_case_id": "multiple_fields",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "Expected only one declaration of `fields` block"
+          ]
+        },
+        {
+          "case_id": "sm_no_fields_error",
+          "upstream_case_id": "no_fields",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "'fields' declaration was not found"
+          ]
+        },
+        {
+          "case_id": "sm_field_name_reserved_ident1_error",
+          "upstream_case_id": "field_name_reserved_ident1",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_field_name_reserved_ident2_error",
+          "upstream_case_id": "field_name_reserved_ident2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_let_name_reserved_ident1_error",
+          "upstream_case_id": "let_name_reserved_ident1",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_let_name_reserved_ident2_error",
+          "upstream_case_id": "let_name_reserved_ident2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_arg_reserved_ident1_error",
+          "upstream_case_id": "arg_reserved_ident1",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_arg_reserved_ident2_error",
+          "upstream_case_id": "arg_reserved_ident2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_sm_name_reserved_ident1_error",
+          "upstream_case_id": "sm_name_reserved_ident1",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
+        },
+        {
+          "case_id": "sm_sm_name_reserved_ident2_error",
+          "upstream_case_id": "sm_name_reserved_ident2",
+          "expected_verdict": "error",
+          "min_obligations": 0,
+          "expected_error_patterns": [
+            "state_machine!",
+            "reserved identifier"
+          ]
         }
       ],
       "known_gaps": [
-        "Verus state_machine! and tokenized_state_machine! macro expansion, generated token APIs, sharding semantics, inductive lemma checking, deterministic guard analysis, pattern-binding diagnostics, persistent-token behavior, and exact macro diagnostics remain unsupported.",
-        "The verified cases are Rust-valid scalar and boolean-token surrogates only, not generated Verus state-machine replacement evidence.",
+        "tokenized_state_machine! — sharding strategies, generated token APIs, deterministic guard analysis, pattern-binding diagnostics and persistent-token behaviour — is refused with a pinned message, not expanded.",
+        "`assert` in a transition (and with it the weak/strong relation split and the generated safety lemma), `match`, `property!`, `require let`/`assert let`, labels, generics, helper fns and sub-updates are refused by name (D1b).",
+        "Collection-valued (Seq/Set/Map/Multiset), machine-integer and nat state fields are refused: the frame needs extensional equality, machine-integer DSL arithmetic is not modeled as mathematical, and nat struct fields carry no range fact (slice 1b).",
+        "The upstream relation_codegen tr1/tr2/tr3 cases as written, relation_codegen_match, the assert_safety_condition families, Step/show::/take_step, arrow_functions_regression_1002_*, labels_* and the whole tokenized half remain unported.",
+        "Invariant inference (CHC) is out of scope: a CHC result may never discharge a user lemma contract.",
         "No solver Unknown outcomes are used as evidence."
       ],
-      "notes": "Focused regression coverage lives in crates/trust-vc/tests/state_machines_rs_trust_vc_regressions.rs. Because this entry remains unsupported-gap, these cases are scout evidence only and are not accepted full replacement evidence."
+      "notes": "Focused regression coverage lives in crates/trust-vc/tests/state_machines_rs_trust_vc_regressions.rs, and the soundness harness (controls, one-token-away liars, per-path and implicit-else liars, satisfiability witnesses, gated refusals) in crates/trust-vc/tests/state_machine_dsl_soundness.rs. A case that references a machine counts only if every generated INIT/IND lemma of that machine verifies: lemma ensures are assumed modularly at call sites, so a client of a non-inductive machine verifies on its own. Because this entry remains unsupported-gap, these cases are scout evidence only and are not accepted full replacement evidence."
     },
     {
       "upstream_path": "source/rust_verify_test/tests/std.rs",
@@ -17879,7 +18933,7 @@
       "upstream_path": "source/rust_verify_test/tests/strings.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2779",
-      "reason": "Partial executable coverage exists for upstream char literal pass/fail behavior, a narrow String::view() length/equality surface, runtime std string equality guards, and a fail-closed direct String::len() guard; full string literal, reveal_strlit, ascii, substring, unicode, byte-view, append/concat, iterator, and deref parity remains unsupported.",
+      "reason": "Partial executable coverage exists for upstream char literal pass/fail behavior, a narrow String::view() length/equality surface, runtime std string equality guards, and a fail-closed direct String::len() guard; full string literal, reveal_strlit, ascii, substring, unicode, byte-view, append/concat, iterator, and deref parity remains unsupported. RE-PINNED 2026-09-13: three false String::view() claims are refuted with a model (formerly tolerated as any non-Verified verdict).",
       "trust_vc_paths": [
         "evals/verus/ported/strings.rs"
       ],
@@ -17923,6 +18977,24 @@
             "len on 'String'",
             "view()"
           ]
+        },
+        {
+          "case_id": "string_view_len_irreflexive_counterexample",
+          "upstream_case_id": "test_passes_len",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "string_view_equality_irreflexive_counterexample",
+          "upstream_case_id": "test_string_1_pass",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "string_view_len_inconsistent_counterexample",
+          "upstream_case_id": "test_passes_len",
+          "expected_verdict": "counterexample",
+          "min_obligations": 2
         }
       ],
       "known_gaps": [
@@ -17936,7 +19008,7 @@
       "upstream_path": "source/rust_verify_test/tests/structural.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2785",
-      "reason": "Partial executable TrustVc scout coverage now exists for Rust-valid field-level and direct derived PartialEq equality over the upstream Car shape, direct derived PartialEq inequality/equality over the upstream Vehicle enum shape, and fieldless explicit-value enum equality, plus fail-closed guards for unsupported custom PartialEq boundaries. The upstream Verus Structural derive and diagnostic surface remain unsupported.",
+      "reason": "Partial executable TrustVc scout coverage now exists for Rust-valid field-level and direct derived PartialEq equality over the upstream Car shape, direct derived PartialEq inequality/equality over the upstream Vehicle enum shape, and fieldless explicit-value enum equality, plus fail-closed guards for unsupported custom PartialEq boundaries. The upstream Verus Structural derive and diagnostic surface remain unsupported. RE-PINNED 2026-09-13: the manual-PartialEq `.eq()` method call is a genuine Counterexample (its body is `false`; the negation verifies), no longer a fail-closed error.",
       "trust_vc_paths": [
         "evals/verus/ported/structural.rs"
       ],
@@ -17984,14 +19056,16 @@
           "min_obligations": 1
         },
         {
-          "case_id": "structural_manual_partial_eq_method_currently_blocked",
+          "case_id": "structural_manual_partial_eq_method_counterexample",
           "upstream_case_id": "test_not_structural_generic",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unsupported method",
-            "eq()"
-          ]
+          "expected_verdict": "counterexample",
+          "min_obligations": 3
+        },
+        {
+          "case_id": "structural_manual_partial_eq_method_negation_verified",
+          "upstream_case_id": "test_not_structural_generic",
+          "expected_verdict": "verified",
+          "min_obligations": 3
         }
       ],
       "known_gaps": [
@@ -18468,7 +19542,7 @@
       "upstream_path": "source/rust_verify_test/tests/triggers.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Partial executable TrustVc scout coverage now exists for a narrow trigger-adjacent quantifier slice: one verified explicit arithmetic-trigger universal, one verified Verus-style assert-forall inner trigger-group arithmetic identity, one rejected adjacent false universal, one local fail-closed explicit-trigger false-universal guard, one fail-closed assert_forall_by trigger-boundary case, and one fail-closed closure-form quantifier-level trigger-syntax boundary. Full trigger parity remains unsupported.",
+      "reason": "Partial executable TrustVc scout coverage now exists for a narrow trigger-adjacent quantifier slice: one verified explicit arithmetic-trigger universal, one verified Verus-style assert-forall inner trigger-group arithmetic identity, one rejected adjacent false universal, one local fail-closed explicit-trigger false-universal guard, one fail-closed assert_forall_by trigger-boundary case, and one fail-closed closure-form quantifier-level trigger-syntax boundary. Full trigger parity remains unsupported. RE-PINNED 2026-09-11: the quantifier-level `#![trigger …]` assert_forall_by syntax parses and verifies, with a refuted false-universal twin; the fail-closed pin was stale.",
       "trust_vc_paths": [
         "evals/verus/ported/triggers.rs"
       ],
@@ -18486,8 +19560,20 @@
           "min_obligations": 1
         },
         {
+          "case_id": "quantifier_level_trigger_syntax_verified",
+          "upstream_case_id": "test_multiple_triggers",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
           "case_id": "trigger_adjacent_quantifier_counterexample",
           "upstream_case_id": "test_arith_function_trigger_fail",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
+          "case_id": "quantifier_level_trigger_false_universal_counterexample",
+          "upstream_case_id": "test_multiple_triggers",
           "expected_verdict": "counterexample",
           "min_obligations": 1
         },
@@ -18498,15 +19584,6 @@
           "min_obligations": 0,
           "expected_error_patterns": [
             "does not reference any bound variable"
-          ]
-        },
-        {
-          "case_id": "quantifier_level_trigger_syntax_fails_closed",
-          "upstream_case_id": "test_multiple_triggers",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "Failed to parse assert_forall_by!() expression"
           ]
         }
       ],
@@ -18529,7 +19606,7 @@
         {
           "path": "evals/verus/ported/ui.rs",
           "kind": "file",
-          "sha256": "sha256:728be072fe1007f81a5d3d3cf029390f14cb1eda6e20d2f603c75eb6416dd989"
+          "sha256": "sha256:066d8f39e09ee29f9850d662a1b9c7dcd49467311ee2171f8470f9e0896b324c"
         }
       ],
       "expected_cases": [
@@ -18586,9 +19663,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "unsafe block",
-            "unknown type",
-            "unsupported"
+            "does not model Rust unions",
+            "`unions_native_field_read_currently_blocked` names the union `UnionsNative`"
           ]
         },
         {
@@ -18597,10 +19673,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "unsafe block",
-            "using a union",
-            "unsupported",
-            "unresolved variable `x`"
+            "does not model Rust unions",
+            "`unions_native_pattern_currently_blocked` names the union `UnionsNative`"
           ]
         },
         {
@@ -18609,8 +19683,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "string literals are not yet supported",
-            "get_union_field"
+            "does not model Rust unions",
+            "`unions_get_union_field_currently_blocked` names the union `UnionsNative`"
           ]
         },
         {
@@ -18619,8 +19693,8 @@
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
-            "string literals are not yet supported",
-            "is_variant"
+            "does not model Rust unions",
+            "`unions_is_variant_currently_blocked` names the union `UnionsNative`"
           ]
         }
       ],
@@ -18672,7 +19746,7 @@
       "upstream_path": "source/rust_verify_test/tests/unwind.rs",
       "classification": "unsupported-gap",
       "owner_issue": "#2777",
-      "reason": "Partial executable TrustVc scout coverage exists for small conditional no-unwind contract-boundary approximations, accepted no-panic/no-unwind-style callers, rejected bad boundary calls, and fail-closed panic/closure-call unwind boundaries. The upstream Verus unwind.rs language and diagnostic surface remains unsupported as replacement evidence.",
+      "reason": "Partial executable TrustVc scout coverage exists for small conditional no-unwind contract-boundary approximations, accepted no-panic/no-unwind-style callers, rejected bad boundary calls, and fail-closed panic/closure-call unwind boundaries. The upstream Verus unwind.rs language and diagnostic surface remains unsupported as replacement evidence. RE-PINNED 2026-09-11: the applied local closure (upstream test_closure2 shape) verifies with a refuted liar twin; the fail-closed pin was stale.",
       "trust_vc_paths": [
         "evals/verus/ported/unwind.rs"
       ],
@@ -18696,6 +19770,12 @@
           "min_obligations": 1
         },
         {
+          "case_id": "test_closure2_application_verified",
+          "upstream_case_id": "basic",
+          "expected_verdict": "verified",
+          "min_obligations": 1
+        },
+        {
           "case_id": "test_caller_no_unwind2_contract_boundary_counterexample",
           "upstream_case_id": "basic",
           "expected_verdict": "counterexample",
@@ -18708,22 +19788,18 @@
           "min_obligations": 1
         },
         {
+          "case_id": "test_closure2_application_liar_counterexample",
+          "upstream_case_id": "basic",
+          "expected_verdict": "counterexample",
+          "min_obligations": 1
+        },
+        {
           "case_id": "test_caller_no_unwind1_panic_boundary_currently_errors",
           "upstream_case_id": "basic",
           "expected_verdict": "error",
           "min_obligations": 0,
           "expected_error_patterns": [
             "panic"
-          ]
-        },
-        {
-          "case_id": "test_closure2_unwind_boundary_currently_errors",
-          "upstream_case_id": "basic",
-          "expected_verdict": "error",
-          "min_obligations": 0,
-          "expected_error_patterns": [
-            "unknown return type for function 'f'",
-            "closure"
           ]
         }
       ],

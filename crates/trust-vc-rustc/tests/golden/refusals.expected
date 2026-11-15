@@ -1,0 +1,15 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - trust-vc refused: trait: the associated type `Unit` @[13]
+  error - trust-vc refused: closure: closures are not read yet @[6]
+  error - trust-vc refused: generics: functions with const parameters are not read yet @[9]
+  error - trust-vc refused: trait: a method of a trait the reader does not read @[15]
+functions:
+  uses_closure refused closure
+  generic refused generics
+  plain skipped crate-refused
+  Shape::area refused trait
+vcir:
+exec fn test_crate::plain(x: exec u64) -> result: exec u64
+  return[#1] x

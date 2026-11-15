@@ -188,9 +188,13 @@ fn test_multiset_ext_eq_different_multiplicity_fails() {
     );
 }
 
+/// `{7}` and `{7, 7}` differ in the count of 7, so `ext_ne!` is true. Both
+/// operands are `empty()`-rooted insert chains, whose counts are zero off their
+/// inserted keys, so `ext_eq!` between them is decided on that finite support
+/// and its negation needs no witness search.
 #[test]
-fn test_multiset_ext_ne_different_multiplicity_fails_closed() {
-    let result = common::verify_should_fail(|| {
+fn test_multiset_ext_ne_different_multiplicity_verified() {
+    let result = common::verify_should_pass(|| {
         trust_vc::assert!(trust_vc::ext_ne!(
             trust_vc_types::Multiset::<i32>::empty().insert(7),
             trust_vc_types::Multiset::<i32>::empty().insert(7).insert(7)
@@ -198,10 +202,47 @@ fn test_multiset_ext_ne_different_multiplicity_fails_closed() {
     });
 
     assert!(
-        matches!(
-            result,
-            VerifyResult::Counterexample { .. } | VerifyResult::Unknown { .. }
-        ),
-        "Multiset ext_ne! over constructed values should fail closed until witness support lands, got {result:?}"
+        matches!(result, VerifyResult::Verified),
+        "Multisets with different multiplicities should verify under ext_ne!, got {result:?}"
+    );
+}
+
+/// Refuted twin of the test above: one operand differs, and the two multisets
+/// are now equal.
+#[test]
+fn test_multiset_ext_ne_same_multiplicity_fails() {
+    let result = common::verify_should_fail(|| {
+        trust_vc::assert!(trust_vc::ext_ne!(
+            trust_vc_types::Multiset::<i32>::empty().insert(7).insert(7),
+            trust_vc_types::Multiset::<i32>::empty().insert(7).insert(7)
+        ));
+    });
+
+    assert!(
+        matches!(result, VerifyResult::Counterexample { .. }),
+        "equal Multisets should refute ext_ne!, got {result:?}"
+    );
+}
+
+/// The finite support is deduplicated by expression, so the order of inserts
+/// must not make equal multisets look different.
+#[test]
+fn test_multiset_ext_ne_permuted_inserts_fails() {
+    let result = common::verify_should_fail(|| {
+        trust_vc::assert!(trust_vc::ext_ne!(
+            trust_vc_types::Multiset::<i32>::empty()
+                .insert(7)
+                .insert(8)
+                .insert(7),
+            trust_vc_types::Multiset::<i32>::empty()
+                .insert(8)
+                .insert(7)
+                .insert(7)
+        ));
+    });
+
+    assert!(
+        matches!(result, VerifyResult::Counterexample { .. }),
+        "Multisets equal up to insert order should refute ext_ne!, got {result:?}"
     );
 }

@@ -1,0 +1,9 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - trust-vc refused: closure: closures are not read yet @[11]
+  error - mismatched types; types must be compatible to use == or != @[7:this is `AnonymousClosure(Fn)(i32) -> i32`, 7:this is `nat`, 7]
+functions:
+  test rejected -
+  same_closure refused closure
+vcir:

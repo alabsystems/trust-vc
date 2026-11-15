@@ -22,7 +22,8 @@ use std::time::Instant;
 mod protocol_types;
 
 pub(crate) use protocol_types::{
-    ProtocolActionDef, ProtocolInvariantDef, ProtocolLivenessDef, ProtocolStateVarDef,
+    ProtocolActionDef, ProtocolInitial, ProtocolInvariantDef, ProtocolLivenessDef,
+    ProtocolStateVarDef,
 };
 
 #[path = "verification_bridge_parallel.rs"]
@@ -55,10 +56,15 @@ pub(crate) use registry::register_collection_error;
 #[cfg(feature = "ty")]
 #[doc(hidden)]
 pub use registry::register_protocol;
+#[cfg(all(test, feature = "ty"))]
+pub(crate) use registry::MODELLED_FIELD_TYPES;
 #[doc(hidden)]
 pub use registry::{
-    clear_registrations, register_proof, register_protocol_action, register_protocol_invariant,
-    register_protocol_liveness, register_protocol_state_var,
+    clear_registrations, register_declared_protocol_components, register_proof,
+    register_protocol_action, register_protocol_field, register_protocol_invariant,
+    register_protocol_liveness, register_protocol_state_var, ProtocolComponentDef,
+    ProtocolComponentKind, ProtocolDefaultState, ProtocolFieldType, ProtocolInitialState,
+    ProtocolModelledField, ProtocolNoDefaultState, ProtocolUnmodelledField, ProtocolValue,
 };
 
 /// Proc-macro verification entry point: collects obligations and dispatches to ay.

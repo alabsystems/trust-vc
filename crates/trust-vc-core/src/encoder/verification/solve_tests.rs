@@ -136,7 +136,8 @@ fn test_solver_unknown_outcome_preserves_exact_quantifier_detail() {
     ];
 
     for (reason, expected_category) in cases {
-        let outcome = solver_unknown_outcome("quantified", Some("src/lib.rs:12:34"), Some(reason));
+        let outcome =
+            solver_unknown_outcome("quantified", Some("src/lib.rs:12:34"), Some(reason), None);
         match outcome {
             AssertionOutcome::Unknown {
                 reason: rendered_reason,
@@ -233,6 +234,7 @@ fn test_demote_verified_outcome_counterexample_not_demoted() {
     let result = demote_verified_outcome(
         AssertionOutcome::Counterexample {
             obligation_name: "test".to_string(),
+            location: None,
             model: None,
             bindings: Vec::new(),
         },
@@ -244,4 +246,66 @@ fn test_demote_verified_outcome_counterexample_not_demoted() {
         "Counterexample should not be demoted even with demoting diagnostics: {:?}",
         result
     );
+}
+
+/// An encoder whose solver holds `b` and `not b`, so any solve on it that
+/// runs answers UNSAT.
+fn contradictory_encoder() -> AYEncoder {
+    let mut encoder = AYEncoder::new();
+    let b = encoder.solver.declare_const("b", ay_dpll::api::Sort::Bool);
+    let not_b = encoder.solver.try_not(b).expect("b is Boolean");
+    encoder.solver.try_assert_term(b).expect("assert b");
+    encoder.solver.try_assert_term(not_b).expect("assert not b");
+    encoder
+}
+
+/// After a solve panics, the next solve on the same solver is refused without
+/// solving, even though the query it would decide is UNSAT.
+#[test]
+fn a_solver_whose_solve_panicked_is_not_asked_again() {
+    let mut encoder = contradictory_encoder();
+    super::super::test_hooks::FORCE_SOLVE_PANIC_ONCE.with(|flag| flag.set(true));
+    let first = try_check_sat_with_details(&mut encoder.solver, &mut encoder.state.solver_panic);
+    assert!(
+        matches!(first, Err(SolverError::SolverPanic(_))),
+        "the forced panic must surface as a solver panic: {first:?}"
+    );
+
+    let second = try_check_sat_with_details(&mut encoder.solver, &mut encoder.state.solver_panic);
+    match second {
+        Err(SolverError::SolverPanic(reason)) => {
+            assert!(
+                reason.contains("not reused") && reason.contains("simulated ay solve panic"),
+                "the refusal must say why and quote the first panic: {reason}"
+            );
+            assert_eq!(
+                UnknownCategory::classify(&format_solver_observation_error(
+                    "ctx",
+                    SolverError::SolverPanic(reason)
+                )),
+                UnknownCategory::SolverPanic
+            );
+        }
+        other => panic!("a poisoned solver must not decide anything: {other:?}"),
+    }
+}
+
+/// Twin of the test above without the forced panic: both solves run and
+/// answer UNSAT.
+#[test]
+fn a_solver_that_never_panicked_keeps_deciding() {
+    let mut encoder = contradictory_encoder();
+    super::super::test_hooks::FORCE_SOLVE_PANIC_ONCE.with(|flag| flag.set(false));
+    let first = try_check_sat_with_details(&mut encoder.solver, &mut encoder.state.solver_panic);
+    assert!(
+        matches!(&first, Ok(details) if details.result.result().is_unsat()),
+        "b and not b is UNSAT: {first:?}"
+    );
+
+    let second = try_check_sat_with_details(&mut encoder.solver, &mut encoder.state.solver_panic);
+    assert!(
+        matches!(&second, Ok(details) if details.result.result().is_unsat()),
+        "a healthy solver keeps answering: {second:?}"
+    );
+    assert!(encoder.state.solver_panic.is_none());
 }

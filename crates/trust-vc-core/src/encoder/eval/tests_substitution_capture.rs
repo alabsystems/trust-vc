@@ -6,6 +6,36 @@ use super::super::substitution::substitute_vars_in_expr;
 use super::support::{i32_lit, i32_var};
 use crate::ir::{TrustVcExpr, TrustVcType};
 
+/// A literal substituted for an `i32` variable arrives pinned at `i32` by an
+/// identity cast (`ir_lowering::pin_substituted_value`: an `Int { width: 32 }`
+/// literal is otherwise the untyped placeholder, re-typed by its new peers).
+/// These tests are about binder capture; they look through the pin.
+fn unpinned(expr: &TrustVcExpr) -> &TrustVcExpr {
+    match expr {
+        TrustVcExpr::Cast {
+            expr,
+            from_ty: TrustVcType::Int { width: 32 },
+            to_ty: TrustVcType::Int { width: 32 },
+        } => expr,
+        other => other,
+    }
+}
+
+#[test]
+fn test_substitute_vars_pins_an_i32_literal_at_the_variable_type() {
+    let five = i32_lit(5);
+    let subst = std::collections::HashMap::from([("x", &five)]);
+    let result = substitute_vars_in_expr(&i32_var("x"), &subst);
+    assert_eq!(
+        result,
+        TrustVcExpr::Cast {
+            expr: Box::new(i32_lit(5)),
+            from_ty: TrustVcType::Int { width: 32 },
+            to_ty: TrustVcType::Int { width: 32 },
+        }
+    );
+}
+
 #[test]
 fn test_substitute_vars_let_capture_avoidance() {
     use crate::ir::ArithOp;
@@ -36,7 +66,7 @@ fn test_substitute_vars_let_capture_avoidance() {
     match &result {
         TrustVcExpr::Let { value, body, .. } => {
             match value.as_ref() {
-                TrustVcExpr::Arith { left, .. } => match left.as_ref() {
+                TrustVcExpr::Arith { left, .. } => match unpinned(left.as_ref()) {
                     TrustVcExpr::IntLit { value: 5, .. } => {}
                     other => panic!("value.left should be IntLit(5), got {:?}", other),
                 },
@@ -162,7 +192,7 @@ fn test_substitute_vars_let_non_shadow_still_substituted() {
 
     match &result {
         TrustVcExpr::Let { value, body, .. } => {
-            match value.as_ref() {
+            match unpinned(value.as_ref()) {
                 TrustVcExpr::IntLit { value: 5, .. } => {}
                 other => panic!("value should be IntLit(5), got {:?}", other),
             }
@@ -172,7 +202,7 @@ fn test_substitute_vars_let_non_shadow_still_substituted() {
                         TrustVcExpr::Var { name, .. } => assert_eq!(name, "y"),
                         other => panic!("body.left should be Var(y), got {:?}", other),
                     }
-                    match right.as_ref() {
+                    match unpinned(right.as_ref()) {
                         TrustVcExpr::IntLit { value: 5, .. } => {}
                         other => panic!("body.right should be IntLit(5), got {:?}", other),
                     }
@@ -230,7 +260,7 @@ fn test_substitute_vars_match_pattern_capture_avoidance() {
                         }
                         other => panic!("unexpected left: {:?}", other),
                     }
-                    match right.as_ref() {
+                    match unpinned(right.as_ref()) {
                         TrustVcExpr::IntLit { value: 10, .. } => {}
                         other => panic!("y should be substituted to 10, got {:?}", other),
                     }
@@ -281,7 +311,7 @@ fn test_substitute_vars_in_expr_recurses_into_spec_closure_body() {
                             panic!("closure param 'item' should remain as Var, got {:?}", other)
                         }
                     }
-                    match right.as_ref() {
+                    match unpinned(right.as_ref()) {
                         TrustVcExpr::IntLit { value: 5, .. } => {}
                         other => panic!("captured 'x' should be substituted to 5, got {:?}", other),
                     }

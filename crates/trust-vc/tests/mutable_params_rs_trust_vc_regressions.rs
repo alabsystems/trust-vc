@@ -36,6 +36,18 @@ fn verify_case(path: &str, case: &str, upstream_case: &str) -> VerifyResult {
         .unwrap_or_else(|err| panic!("{case} ({upstream_case}) should extract: {err}"))
 }
 
+/// Strips the dual-width arch tag (`_32bit`, `_64bit`, `_32bit_64bit`) that
+/// `verify_function_from_file` appends to a failing obligation's name when the
+/// unit is verified at both pointer widths.
+fn strip_arch_tag(name: &str) -> &str {
+    for tag in ["_32bit_64bit", "_32bit", "_64bit"] {
+        if let Some(base) = name.strip_suffix(tag) {
+            return base;
+        }
+    }
+    name
+}
+
 fn fail_closed_message(path: &str, case: &str, upstream_case: &str) -> String {
     match verify_function_from_file(path, case) {
         Err(err) => err.to_string(),
@@ -420,17 +432,32 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "mutable_param_closure_application_currently_errors",
         "mut_param_on_closure_with_loops::test",
-        &["unknown return type", "standalone closure", "closure"],
+        &[
+            "unknown return type",
+            "standalone closure",
+            "closure",
+            "assignment target other than a local variable",
+        ],
     ),
     (
         "mutable_param_closure_mutated_application_currently_errors",
         "mut_param_on_closure_with_loops::test_fails",
-        &["unknown return type", "standalone closure", "closure"],
+        &[
+            "unknown return type",
+            "standalone closure",
+            "closure",
+            "assignment target other than a local variable",
+        ],
     ),
     (
         "mutable_param_iso_false_closure_application_currently_errors",
         "mut_param_on_closure_with_loops_iso_false::test",
-        &["unknown return type", "standalone closure", "closure"],
+        &[
+            "unknown return type",
+            "standalone closure",
+            "closure",
+            "assignment target other than a local variable",
+        ],
     ),
     (
         "mutable_param_open_atomic_invariant_boundary_currently_errors",
@@ -659,8 +686,12 @@ fn mutable_params_rs_unknown_surfaces_are_rejected_as_replacement_evidence() {
             Ok(VerifyResult::Counterexample {
                 obligation_name, ..
             }) => {
+                // The ported file is width-polymorphic as a whole (its own
+                // metadata table is typed with `usize`), so the failing
+                // obligation carries the dual-arch tag; compare the base name.
                 assert_eq!(
-                    &obligation_name, expected_obligation,
+                    strip_arch_tag(&obligation_name),
+                    *expected_obligation,
                     "{case} ({upstream_case}) should refute {expected_obligation}, got: {obligation_name}"
                 );
             }

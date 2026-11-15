@@ -1,3 +1,4 @@
+const fn trust_vc_trust_engine::BodyReading::is_havoc_instantiated(self: Self) -> bool
 const fn trust_vc_trust_engine::TrustAliasFact::kind(self: &Self) -> TrustAliasKind
 const fn trust_vc_trust_engine::TrustBootstrapProvenance::source(self: &Self) -> &TrustBootstrapProvenanceSource
 const fn trust_vc_trust_engine::TrustBorrow::kind(self: &Self) -> TrustBorrowKind
@@ -14,6 +15,7 @@ const fn trust_vc_trust_engine::TrustField::sort(self: &Self) -> &TrustSort
 const fn trust_vc_trust_engine::TrustFunctionSignature::return_sort(self: &Self) -> &TrustSort
 const fn trust_vc_trust_engine::TrustInvariant::predicate(self: &Self) -> &TrustPredicateRef
 const fn trust_vc_trust_engine::TrustInvariant::target(self: &Self) -> &TrustInvariantTarget
+const fn trust_vc_trust_engine::TrustIrBodyVerdict::is_discharged_advisory(self: &Self) -> bool
 const fn trust_vc_trust_engine::TrustMirMemoryObligation::predicate(self: &Self) -> &TrustExpr
 const fn trust_vc_trust_engine::TrustMirMemoryObligation::solver_mode(self: &Self) -> Option<TrustSolverMode>
 const fn trust_vc_trust_engine::TrustMirMemoryProofUnit::metadata_payload_key() -> &'static str
@@ -95,11 +97,13 @@ const fn trust_vc_trust_engine::TrustVcNativeCompilerFactsBinding::obligation_id
 const fn trust_vc_trust_engine::TrustVcNativeCompilerFactsBinding::source_span(self: &Self) -> Option<TrustVcNativeSourceSpan>
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::admission(self: &Self) -> &TrustVcNativeArtifactAdmission
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::compiler_facts_binding(self: &Self) -> &TrustVcNativeCompilerFactsBinding
+const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::obligation_status(self: &Self) -> TrustVcNativeArtifactObligationStatus
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::schema_version(self: &Self) -> u32
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::solver_identity(self: &Self) -> &TrustVcNativeSolverIdentity
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::suite_identity(self: &Self) -> &TrustVcNativeVerifierSuiteIdentity
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::tmir_obligation_id(self: &Self) -> u32
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::trust_ir_obligation_id(self: &Self) -> u32
+const fn trust_vc_trust_engine::TrustVcNativeProofArtifact::trusted(self: &Self) -> bool
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifactInput::with_obligation_status(self: Self, obligation_status: TrustVcNativeArtifactObligationStatus) -> Self
 const fn trust_vc_trust_engine::TrustVcNativeProofArtifactInput::with_trusted(self: Self, trusted: bool) -> Self
 const fn trust_vc_trust_engine::TrustVcNativeSourceSpan::column(self: &Self) -> u32
@@ -108,6 +112,8 @@ const fn trust_vc_trust_engine::TrustVcNativeSourceSpan::line(self: &Self) -> u3
 const fn trust_vc_trust_engine::TrustVcNativeSourceSpan::new(file_id: u32, line: u32, column: u32) -> Self
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::input_kind(self: &Self) -> TrustVcNativeTrustIrInputKind
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::verdict(self: &Self) -> TrustVcNativeTrustIrVerdict
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::coverage_basis(self: &Self) -> Option<&TrustVcNativeCoverageBasis>
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::coverage_established(self: &Self) -> bool
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::is_admissible(self: &Self) -> bool
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::status(self: &Self) -> TrustVcNativeTrustIrCertificateAdmissionStatus
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::compiler_facts_binding(self: &Self) -> &TrustVcNativeCompilerFactsBinding
@@ -121,12 +127,21 @@ const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::suite_i
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::trusted(self: &Self) -> bool
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::typed_obligation_kind(self: &Self) -> TrustVcNativeTrustIrObligationKind
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::typed_obligation_status(self: &Self) -> TrustVcNativeArtifactObligationStatus
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::authority(self: &Self) -> TrustVcNativeTrustIrDischargeAuthority
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::function(self: &Self) -> u32
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::ignored_inputs(self: &Self) -> &TrustVcNativeTrustIrDischargeIgnoredInputs
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::lowering_witness(self: &Self) -> TrustVcNativeTrustIrLoweringWitness
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation::obligation_id(self: &Self) -> u32
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation::outcome(self: &Self) -> TrustVcNativeTrustIrDischargeOutcome
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation::reading(self: &Self) -> TrustVcNativeTrustIrBodyReading
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind::label(self: Self) -> &'static str
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata::lineage_node_id(self: &Self) -> Option<u32>
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata::source(self: &Self) -> TrustVcNativeTrustIrReplayMetadataSource
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport::discharge(self: &Self) -> Option<&TrustVcNativeTrustIrDischargeAnswer>
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport::mode(self: &Self) -> TrustVcNativeTrustIrRequestMode
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport::request_id(self: &Self) -> u32
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport::verdict(self: &Self) -> TrustVcNativeTrustIrVerdict
+const fn trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::exit_class(self: Self) -> TrustVcNativeTrustIrExitClass
 const fn trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::is_ok(self: Self) -> bool
 const fn trust_vc_trust_engine::TrustVcNativeVerifierSuiteIdentity::suite(self: &Self) -> TrustVcNativeVerifierSuite
 const fn trust_vc_trust_engine::TrustVcTrustEngine::new() -> Self
@@ -159,11 +174,13 @@ const fn trust_vc_trust_engine::native_artifact::TrustVcNativeCompilerFactsBindi
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeCompilerFactsBinding::source_span(self: &Self) -> Option<TrustVcNativeSourceSpan>
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::admission(self: &Self) -> &TrustVcNativeArtifactAdmission
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::compiler_facts_binding(self: &Self) -> &TrustVcNativeCompilerFactsBinding
+const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::obligation_status(self: &Self) -> TrustVcNativeArtifactObligationStatus
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::schema_version(self: &Self) -> u32
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::solver_identity(self: &Self) -> &TrustVcNativeSolverIdentity
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::suite_identity(self: &Self) -> &TrustVcNativeVerifierSuiteIdentity
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::tmir_obligation_id(self: &Self) -> u32
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::trust_ir_obligation_id(self: &Self) -> u32
+const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifact::trusted(self: &Self) -> bool
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifactInput::with_obligation_status(self: Self, obligation_status: TrustVcNativeArtifactObligationStatus) -> Self
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeProofArtifactInput::with_trusted(self: Self, trusted: bool) -> Self
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeSourceSpan::column(self: &Self) -> u32
@@ -173,6 +190,8 @@ const fn trust_vc_trust_engine::native_artifact::TrustVcNativeSourceSpan::new(fi
 const fn trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuiteIdentity::suite(self: &Self) -> TrustVcNativeVerifierSuite
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport::input_kind(self: &Self) -> TrustVcNativeTrustIrInputKind
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport::verdict(self: &Self) -> TrustVcNativeTrustIrVerdict
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::coverage_basis(self: &Self) -> Option<&TrustVcNativeCoverageBasis>
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::coverage_established(self: &Self) -> bool
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::is_admissible(self: &Self) -> bool
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::status(self: &Self) -> TrustVcNativeTrustIrCertificateAdmissionStatus
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::compiler_facts_binding(self: &Self) -> &TrustVcNativeCompilerFactsBinding
@@ -186,12 +205,21 @@ const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCert
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::trusted(self: &Self) -> bool
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::typed_obligation_kind(self: &Self) -> TrustVcNativeTrustIrObligationKind
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::typed_obligation_status(self: &Self) -> TrustVcNativeArtifactObligationStatus
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::authority(self: &Self) -> TrustVcNativeTrustIrDischargeAuthority
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::function(self: &Self) -> u32
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::ignored_inputs(self: &Self) -> &TrustVcNativeTrustIrDischargeIgnoredInputs
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::lowering_witness(self: &Self) -> TrustVcNativeTrustIrLoweringWitness
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation::obligation_id(self: &Self) -> u32
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation::outcome(self: &Self) -> TrustVcNativeTrustIrDischargeOutcome
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation::reading(self: &Self) -> TrustVcNativeTrustIrBodyReading
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind::label(self: Self) -> &'static str
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata::lineage_node_id(self: &Self) -> Option<u32>
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata::source(self: &Self) -> TrustVcNativeTrustIrReplayMetadataSource
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport::discharge(self: &Self) -> Option<&TrustVcNativeTrustIrDischargeAnswer>
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport::mode(self: &Self) -> TrustVcNativeTrustIrRequestMode
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport::request_id(self: &Self) -> u32
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport::verdict(self: &Self) -> TrustVcNativeTrustIrVerdict
+const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::exit_class(self: Self) -> TrustVcNativeTrustIrExitClass
 const fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::is_ok(self: Self) -> bool
 const fn trust_vc_trust_engine::trust_ir_adapter::TrustSourceSpan::column_end(self: &Self) -> u32
 const fn trust_vc_trust_engine::trust_ir_adapter::TrustSourceSpan::column_start(self: &Self) -> u32
@@ -206,11 +234,17 @@ const fn trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligation::solver
 const fn trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligation::span(self: &Self) -> Option<&TrustSourceSpan>
 const fn trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligation::trust_ir_assertion_id(self: &Self) -> Option<u32>
 const fn trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrProofUnit::native_context(self: &Self) -> &TrustNativeContext
+const fn trust_vc_trust_engine::trust_ir_body::BodyReading::is_havoc_instantiated(self: Self) -> bool
+const fn trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::is_discharged_advisory(self: &Self) -> bool
+const trust_vc_trust_engine::HAVOC_INSTANTIATION_NOTE: &str
 const trust_vc_trust_engine::TRUST_CACHE_METADATA_AY_VERSION: &str
 const trust_vc_trust_engine::TRUST_CACHE_METADATA_KERNEL_VERSION: &str
 const trust_vc_trust_engine::TRUST_CACHE_METADATA_LAYOUT_HASH: &str
 const trust_vc_trust_engine::TRUST_CACHE_METADATA_TRUST_IR_BODY_HASH: &str
 const trust_vc_trust_engine::TRUST_EVIDENCE_CACHE_KEY_SCHEMA_VERSION: u32
+const trust_vc_trust_engine::TRUST_IR_BODY_BINDING_SCHEMA: &str
+const trust_vc_trust_engine::TRUST_IR_BODY_LANE_SCHEMA: &str
+const trust_vc_trust_engine::TRUST_IR_BODY_TRUST_IR_PIN: &str
 const trust_vc_trust_engine::TRUST_PROOF_ARTIFACT_BINDING_SCHEMA_VERSION: u32
 const trust_vc_trust_engine::TRUST_TRUST_IR_ADAPTER_SCHEMA_VERSION: u32
 const trust_vc_trust_engine::TRUST_VC_CONDITION_ORIGIN_METADATA_KEY: &str
@@ -222,6 +256,7 @@ const trust_vc_trust_engine::TRUST_VC_OWNERSHIP_CONTEXT_METADATA_KEY: &str
 const trust_vc_trust_engine::TRUST_VC_OWNERSHIP_CONTEXT_TYPED_VALUE: &str
 const trust_vc_trust_engine::TRUST_VC_PROOF_OBLIGATION_METADATA_KEY: &str
 const trust_vc_trust_engine::TRUST_VC_PROOF_OBLIGATION_TYPED_PROOF_OBLIGATION_VALUE: &str
+const trust_vc_trust_engine::UNOBLIGATED_ASSERT_LABEL: &str
 const trust_vc_trust_engine::mir_memory::TRUST_VC_CONDITION_ORIGIN_METADATA_KEY: &str
 const trust_vc_trust_engine::mir_memory::TRUST_VC_CONDITION_ORIGIN_TYPED_TRUST_VC_EXPR_VALUE: &str
 const trust_vc_trust_engine::mir_memory::TRUST_VC_MIR_MEMORY_PROOF_UNIT_METADATA_KEY: &str
@@ -231,6 +266,13 @@ const trust_vc_trust_engine::mir_memory::TRUST_VC_OWNERSHIP_CONTEXT_TYPED_VALUE:
 const trust_vc_trust_engine::mir_memory::TRUST_VC_PROOF_OBLIGATION_METADATA_KEY: &str
 const trust_vc_trust_engine::mir_memory::TRUST_VC_PROOF_OBLIGATION_TYPED_PROOF_OBLIGATION_VALUE: &str
 const trust_vc_trust_engine::native_artifact::TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION: u32
+const trust_vc_trust_engine::trust_ir_body::HAVOC_INSTANTIATION_NOTE: &str
+const trust_vc_trust_engine::trust_ir_body::TRUST_IR_BODY_BINDING_SCHEMA: &str
+const trust_vc_trust_engine::trust_ir_body::TRUST_IR_BODY_LANE_SCHEMA: &str
+const trust_vc_trust_engine::trust_ir_body::TRUST_IR_BODY_TRUST_IR_PIN: &str
+const trust_vc_trust_engine::trust_ir_body::UNOBLIGATED_ASSERT_LABEL: &str
+enum trust_vc_trust_engine::BodyReading
+enum trust_vc_trust_engine::LoweringWitness
 enum trust_vc_trust_engine::TrustAliasKind
 enum trust_vc_trust_engine::TrustArithOp
 enum trust_vc_trust_engine::TrustAssuranceLevel
@@ -242,6 +284,12 @@ enum trust_vc_trust_engine::TrustEngineError
 enum trust_vc_trust_engine::TrustEvidenceCacheStatus
 enum trust_vc_trust_engine::TrustExpr
 enum trust_vc_trust_engine::TrustInvariantTarget
+enum trust_vc_trust_engine::TrustIrBodyAuthority
+enum trust_vc_trust_engine::TrustIrBodyCertificate
+enum trust_vc_trust_engine::TrustIrBodyError
+enum trust_vc_trust_engine::TrustIrBodyRefusal
+enum trust_vc_trust_engine::TrustIrBodyVerdict
+enum trust_vc_trust_engine::TrustIrScalar
 enum trust_vc_trust_engine::TrustLogicOp
 enum trust_vc_trust_engine::TrustObligationKind
 enum trust_vc_trust_engine::TrustObligationRole
@@ -266,11 +314,18 @@ enum trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus
 enum trust_vc_trust_engine::TrustVcNativeArtifactRejection
 enum trust_vc_trust_engine::TrustVcNativeArtifactReplayStatus
 enum trust_vc_trust_engine::TrustVcNativeCompilerFactKind
+enum trust_vc_trust_engine::TrustVcNativeCoverageBasis
+enum trust_vc_trust_engine::TrustVcNativeKernelClaimFamily
 enum trust_vc_trust_engine::TrustVcNativeObligationCause
+enum trust_vc_trust_engine::TrustVcNativeTrustIrBodyReading
 enum trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmissionStatus
 enum trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection
+enum trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAuthority
+enum trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome
 enum trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind
+enum trust_vc_trust_engine::TrustVcNativeTrustIrExitClass
 enum trust_vc_trust_engine::TrustVcNativeTrustIrInputKind
+enum trust_vc_trust_engine::TrustVcNativeTrustIrLoweringWitness
 enum trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind
 enum trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadataSource
 enum trust_vc_trust_engine::TrustVcNativeTrustIrRequestMode
@@ -284,16 +339,41 @@ enum trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactReplayStatus
 enum trust_vc_trust_engine::native_artifact::TrustVcNativeCompilerFactKind
 enum trust_vc_trust_engine::native_artifact::TrustVcNativeObligationCause
 enum trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuite
+enum trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis
+enum trust_vc_trust_engine::native_coverage::TrustVcNativeKernelClaimFamily
+enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBodyReading
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmissionStatus
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection
+enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAuthority
+enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind
+enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind
+enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrLoweringWitness
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadataSource
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestMode
 enum trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict
 enum trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind
 enum trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrPredicate
+enum trust_vc_trust_engine::trust_ir_body::BodyReading
+enum trust_vc_trust_engine::trust_ir_body::LoweringWitness
+enum trust_vc_trust_engine::trust_ir_body::TrustIrBodyAuthority
+enum trust_vc_trust_engine::trust_ir_body::TrustIrBodyCertificate
+enum trust_vc_trust_engine::trust_ir_body::TrustIrBodyError
+enum trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal
+enum trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict
+enum trust_vc_trust_engine::trust_ir_body::TrustIrScalar
+field trust_vc_trust_engine::AssertPosition::block: trust_ir::BlockId
+field trust_vc_trust_engine::AssertPosition::inst_index: u32
+field trust_vc_trust_engine::HavocSeedPosition::block: trust_ir::BlockId
+field trust_vc_trust_engine::HavocSeedPosition::inst_index: u32
+field trust_vc_trust_engine::HavocSeedPosition::ty: String
+field trust_vc_trust_engine::IgnoredInputs::annotations: bool
+field trust_vc_trust_engine::IgnoredInputs::certificates: bool
+field trust_vc_trust_engine::IgnoredInputs::formulas: bool
+field trust_vc_trust_engine::IgnoredInputs::statuses: bool
+field trust_vc_trust_engine::IgnoredInputs::summary_requires: bool
 field trust_vc_trust_engine::TrustBootstrapProvenanceSource::ExternalAxiom::0: String
 field trust_vc_trust_engine::TrustBootstrapProvenanceSource::Other::0: String
 field trust_vc_trust_engine::TrustCounterexampleBinding::display_name: String
@@ -363,9 +443,40 @@ field trust_vc_trust_engine::TrustEngineError::MissingNativeContext::obligation_
 field trust_vc_trust_engine::TrustEngineError::MissingNativeContext::unit_id: String
 field trust_vc_trust_engine::TrustEngineError::MissingVerifiedUnitReport::unit_id: String
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrBundleHasNoTrustVcRequests::module: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrBundleVerdictNotClean::module: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrBundleVerdictNotClean::verdict: String
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrCertificateMissing::obligation_id: u32
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrCertificateMissing::prover: String
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrCertificateMissing::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeLaneRefusedRequest::detail: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeLaneRefusedRequest::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeReportNotBound::detail: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeReportNotBound::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestCarriesCertificate::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestCarriesCertificate::prover: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestCarriesCertificate::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestDuplicateObligation::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestDuplicateObligation::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestMissingFunction::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationFunctionDisagrees::declared_function_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationFunctionDisagrees::function_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationFunctionDisagrees::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationFunctionDisagrees::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationOutsideFunction::function_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationOutsideFunction::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationOutsideFunction::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestWithoutObligations::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestWrongMode::mode: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestWrongMode::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationAttributesTemporalProperty::machine: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationAttributesTemporalProperty::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationAttributesTemporalProperty::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationAttributesTemporalProperty::temporal: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationKindUnrepresentable::kind: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationKindUnrepresentable::obligation_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationKindUnrepresentable::request_id: u32
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrModuleHasNoWireIdentity::construct: String
+field trust_vc_trust_engine::TrustEngineError::NativeTrustIrModuleHasNoWireIdentity::location: String
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestMissingCertificate::obligation_id: u32
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestMissingCertificate::request_id: u32
 field trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestUnexpectedCertificate::obligation_id: u32
@@ -438,6 +549,75 @@ field trust_vc_trust_engine::TrustInvariantTarget::BorrowRegion::region: String
 field trust_vc_trust_engine::TrustInvariantTarget::Datatype::datatype: String
 field trust_vc_trust_engine::TrustInvariantTarget::Function::function: String
 field trust_vc_trust_engine::TrustInvariantTarget::Loop::loop_id: String
+field trust_vc_trust_engine::TrustIrBodyBinding::function: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyBinding::kind: String
+field trust_vc_trust_engine::TrustIrBodyBinding::proof_id: trust_ir::ProofId
+field trust_vc_trust_engine::TrustIrBodyBinding::reading: super::BodyReading
+field trust_vc_trust_engine::TrustIrBodyBinding::schema: &'static str
+field trust_vc_trust_engine::TrustIrBodyBinding::semantic_digest: String
+field trust_vc_trust_engine::TrustIrBodyBinding::site: trust_ir::ObligationSite
+field trust_vc_trust_engine::TrustIrBodyBinding::trust_ir: &'static str
+field trust_vc_trust_engine::TrustIrBodyError::DuplicateProofId::0: trust_ir::ProofId
+field trust_vc_trust_engine::TrustIrBodyError::FunctionDuplicated::0: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyError::FunctionMissing::0: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyError::NoWireIdentity::construct: String
+field trust_vc_trust_engine::TrustIrBodyError::NoWireIdentity::function: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyError::NoWireIdentity::location: String
+field trust_vc_trust_engine::TrustIrBodyError::UnsupportedPolicy::0: crate::TrustProofPolicy
+field trust_vc_trust_engine::TrustIrBodyObligationReport::kind: trust_ir::ObligationKind
+field trust_vc_trust_engine::TrustIrBodyObligationReport::prior_asserts_not_assumed: usize
+field trust_vc_trust_engine::TrustIrBodyObligationReport::proof_id: trust_ir::ProofId
+field trust_vc_trust_engine::TrustIrBodyObligationReport::reading: BodyReading
+field trust_vc_trust_engine::TrustIrBodyObligationReport::site: Option<trust_ir::ObligationSite>
+field trust_vc_trust_engine::TrustIrBodyObligationReport::verdict: TrustIrBodyVerdict
+field trust_vc_trust_engine::TrustIrBodyOptions::proof_policy: crate::TrustProofPolicy
+field trust_vc_trust_engine::TrustIrBodyRefusal::ControlFlow::block: trust_ir::BlockId
+field trust_vc_trust_engine::TrustIrBodyRefusal::ControlFlow::detail: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::ControlFlow::inst_index: Option<u32>
+field trust_vc_trust_engine::TrustIrBodyRefusal::IllTyped::block: trust_ir::BlockId
+field trust_vc_trust_engine::TrustIrBodyRefusal::IllTyped::detail: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::IllTyped::inst_index: u32
+field trust_vc_trust_engine::TrustIrBodyRefusal::Malformed::detail: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::SiteBlockMissing::block: trust_ir::BlockId
+field trust_vc_trust_engine::TrustIrBodyRefusal::SiteFunctionMismatch::site_function: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyRefusal::SiteIndexOutOfRange::block: trust_ir::BlockId
+field trust_vc_trust_engine::TrustIrBodyRefusal::SiteIndexOutOfRange::inst_index: u32
+field trust_vc_trust_engine::TrustIrBodyRefusal::SiteNotAssert::found: &'static str
+field trust_vc_trust_engine::TrustIrBodyRefusal::TemporalPropertyAttributed::machine: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::TemporalPropertyAttributed::temporal: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedInstruction::block: trust_ir::BlockId
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedInstruction::detail: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedInstruction::inst: &'static str
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedInstruction::inst_index: u32
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedModuleTable::detail: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedModuleTable::table: &'static str
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedObligationKind::0: String
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedType::block: Option<trust_ir::BlockId>
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedType::inst_index: Option<u32>
+field trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedType::ty: String
+field trust_vc_trust_engine::TrustIrBodyReport::authority: TrustIrBodyAuthority
+field trust_vc_trust_engine::TrustIrBodyReport::function: trust_ir::FuncId
+field trust_vc_trust_engine::TrustIrBodyReport::function_refusal: Option<TrustIrBodyRefusal>
+field trust_vc_trust_engine::TrustIrBodyReport::havoc_seeds: Vec<HavocSeedPosition>
+field trust_vc_trust_engine::TrustIrBodyReport::ignored_inputs: IgnoredInputs
+field trust_vc_trust_engine::TrustIrBodyReport::lowering_witness: LoweringWitness
+field trust_vc_trust_engine::TrustIrBodyReport::obligations: Vec<TrustIrBodyObligationReport>
+field trust_vc_trust_engine::TrustIrBodyReport::schema: &'static str
+field trust_vc_trust_engine::TrustIrBodyReport::semantic_digest: String
+field trust_vc_trust_engine::TrustIrBodyReport::unobligated_asserts: Vec<AssertPosition>
+field trust_vc_trust_engine::TrustIrBodyVerdict::DischargedAdvisory::certificate: Option<TrustIrBodyCertificate>
+field trust_vc_trust_engine::TrustIrBodyVerdict::DischargedAdvisory::certificate_note: Option<String>
+field trust_vc_trust_engine::TrustIrBodyVerdict::DischargedAdvisory::premise_witness: TrustIrBodyWitness
+field trust_vc_trust_engine::TrustIrBodyVerdict::NotAnswerable::0: TrustIrBodyRefusal
+field trust_vc_trust_engine::TrustIrBodyVerdict::Refuted::witness: TrustIrBodyWitness
+field trust_vc_trust_engine::TrustIrBodyVerdict::RefutedIgnoringPriorAsserts::witness: TrustIrBodyWitness
+field trust_vc_trust_engine::TrustIrBodyVerdict::Unknown::category: String
+field trust_vc_trust_engine::TrustIrBodyVerdict::Unknown::reason: String
+field trust_vc_trust_engine::TrustIrBodyWitness::params: Vec<(trust_ir::ValueId, TrustIrScalar)>
+field trust_vc_trust_engine::TrustIrBodyWitness::reading: BodyReading
+field trust_vc_trust_engine::TrustIrScalar::Bool::0: bool
+field trust_vc_trust_engine::TrustIrScalar::Int::ty: trust_ir::Ty
+field trust_vc_trust_engine::TrustIrScalar::Int::value: i128
 field trust_vc_trust_engine::TrustObligationKind::Other::0: String
 field trust_vc_trust_engine::TrustOutcome::Error::message: String
 field trust_vc_trust_engine::TrustOutcome::Refuted::bindings: Vec<TrustCounterexampleBinding>
@@ -468,8 +648,111 @@ field trust_vc_trust_engine::TrustSort::SpecFn::ret: Box<TrustSort>
 field trust_vc_trust_engine::TrustSort::TypeParam::name: String
 field trust_vc_trust_engine::TrustTrustIrPredicate::Expr::expr: crate::TrustExpr
 field trust_vc_trust_engine::TrustTrustIrPredicate::Unsupported::construct: TrustUnsupportedTrustIrConstruct
+field trust_vc_trust_engine::TrustVcNativeCoverageBasis::KernelReplayedClaim::evidence_digest: String
+field trust_vc_trust_engine::TrustVcNativeCoverageBasis::KernelReplayedClaim::family: TrustVcNativeKernelClaimFamily
+field trust_vc_trust_engine::TrustVcNativeCoverageBasis::KernelReplayedClaim::obligation_id: u32
+field trust_vc_trust_engine::TrustVcNativeCoverageBasis::KernelReplayedClaim::prover: String
+field trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs::annotations: bool
+field trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs::certificates: bool
+field trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs::formulas: bool
+field trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs::statuses: bool
+field trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs::summary_requires: bool
+field trust_vc_trust_engine::TrustVcNativeTrustIrUnexaminedAssert::block: u32
+field trust_vc_trust_engine::TrustVcNativeTrustIrUnexaminedAssert::inst_index: u32
+field trust_vc_trust_engine::TrustVcNativeTrustIrUnexaminedAssert::label: String
+field trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis::KernelReplayedClaim::evidence_digest: String
+field trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis::KernelReplayedClaim::family: TrustVcNativeKernelClaimFamily
+field trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis::KernelReplayedClaim::obligation_id: u32
+field trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis::KernelReplayedClaim::prover: String
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs::annotations: bool
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs::certificates: bool
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs::formulas: bool
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs::statuses: bool
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs::summary_requires: bool
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrUnexaminedAssert::block: u32
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrUnexaminedAssert::inst_index: u32
+field trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrUnexaminedAssert::label: String
 field trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrPredicate::Expr::expr: crate::TrustExpr
 field trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrPredicate::Unsupported::construct: TrustUnsupportedTrustIrConstruct
+field trust_vc_trust_engine::trust_ir_body::AssertPosition::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::AssertPosition::inst_index: u32
+field trust_vc_trust_engine::trust_ir_body::HavocSeedPosition::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::HavocSeedPosition::inst_index: u32
+field trust_vc_trust_engine::trust_ir_body::HavocSeedPosition::ty: String
+field trust_vc_trust_engine::trust_ir_body::IgnoredInputs::annotations: bool
+field trust_vc_trust_engine::trust_ir_body::IgnoredInputs::certificates: bool
+field trust_vc_trust_engine::trust_ir_body::IgnoredInputs::formulas: bool
+field trust_vc_trust_engine::trust_ir_body::IgnoredInputs::statuses: bool
+field trust_vc_trust_engine::trust_ir_body::IgnoredInputs::summary_requires: bool
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::function: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::kind: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::proof_id: trust_ir::ProofId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::reading: super::BodyReading
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::schema: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::semantic_digest: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::site: trust_ir::ObligationSite
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::trust_ir: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::DuplicateProofId::0: trust_ir::ProofId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::FunctionDuplicated::0: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::FunctionMissing::0: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::NoWireIdentity::construct: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::NoWireIdentity::function: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::NoWireIdentity::location: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::UnsupportedPolicy::0: crate::TrustProofPolicy
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::kind: trust_ir::ObligationKind
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::prior_asserts_not_assumed: usize
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::proof_id: trust_ir::ProofId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::reading: BodyReading
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::site: Option<trust_ir::ObligationSite>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport::verdict: TrustIrBodyVerdict
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyOptions::proof_policy: crate::TrustProofPolicy
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::ControlFlow::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::ControlFlow::detail: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::ControlFlow::inst_index: Option<u32>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::IllTyped::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::IllTyped::detail: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::IllTyped::inst_index: u32
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::Malformed::detail: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteBlockMissing::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteFunctionMismatch::site_function: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteIndexOutOfRange::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteIndexOutOfRange::inst_index: u32
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteNotAssert::found: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::TemporalPropertyAttributed::machine: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::TemporalPropertyAttributed::temporal: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedInstruction::block: trust_ir::BlockId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedInstruction::detail: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedInstruction::inst: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedInstruction::inst_index: u32
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedModuleTable::detail: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedModuleTable::table: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedObligationKind::0: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedType::block: Option<trust_ir::BlockId>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedType::inst_index: Option<u32>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedType::ty: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::authority: TrustIrBodyAuthority
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::function: trust_ir::FuncId
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::function_refusal: Option<TrustIrBodyRefusal>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::havoc_seeds: Vec<HavocSeedPosition>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::ignored_inputs: IgnoredInputs
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::lowering_witness: LoweringWitness
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::obligations: Vec<TrustIrBodyObligationReport>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::schema: &'static str
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::semantic_digest: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::unobligated_asserts: Vec<AssertPosition>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::DischargedAdvisory::certificate: Option<TrustIrBodyCertificate>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::DischargedAdvisory::certificate_note: Option<String>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::DischargedAdvisory::premise_witness: TrustIrBodyWitness
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::NotAnswerable::0: TrustIrBodyRefusal
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::Refuted::witness: TrustIrBodyWitness
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::RefutedIgnoringPriorAsserts::witness: TrustIrBodyWitness
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::Unknown::category: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::Unknown::reason: String
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyWitness::params: Vec<(trust_ir::ValueId, TrustIrScalar)>
+field trust_vc_trust_engine::trust_ir_body::TrustIrBodyWitness::reading: BodyReading
+field trust_vc_trust_engine::trust_ir_body::TrustIrScalar::Bool::0: bool
+field trust_vc_trust_engine::trust_ir_body::TrustIrScalar::Int::ty: trust_ir::Ty
+field trust_vc_trust_engine::trust_ir_body::TrustIrScalar::Int::value: i128
 fn trust_vc_trust_engine::TrustAliasFact::left(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustAliasFact::new<impl Into<String>, impl Into<String>>(left: impl Into<String>, right: impl Into<String>, kind: TrustAliasKind) -> Self
 fn trust_vc_trust_engine::TrustAliasFact::right(self: &Self) -> &str
@@ -565,6 +848,8 @@ fn trust_vc_trust_engine::TrustFunctionSignature::type_params(self: &Self) -> &[
 fn trust_vc_trust_engine::TrustFunctionSignature::with_type_params(self: Self, type_params: Vec<String>) -> Self
 fn trust_vc_trust_engine::TrustInvariant::id(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustInvariant::new<impl Into<String>>(id: impl Into<String>, target: TrustInvariantTarget, predicate: TrustPredicateRef) -> Self
+fn trust_vc_trust_engine::TrustIrBodyBinding::canonical_string(self: &Self) -> String
+fn trust_vc_trust_engine::TrustIrBodyReport::obligation(self: &Self, proof_id: ProofId) -> Option<&TrustIrBodyObligationReport>
 fn trust_vc_trust_engine::TrustLifetimeRegion::new<impl Into<String>>(region: impl Into<String>) -> Self
 fn trust_vc_trust_engine::TrustLifetimeRegion::outlives(self: &Self) -> &[String]
 fn trust_vc_trust_engine::TrustLifetimeRegion::region(self: &Self) -> &str
@@ -815,6 +1100,7 @@ fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::module_name(self: &S
 fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::producer(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::requests(self: &Self) -> &[TrustVcNativeTrustIrRequestReport]
 fn trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::coverage_detail(self: &Self) -> Option<&str>
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission::rejection_reasons(self: &Self) -> &[TrustVcNativeTrustIrCertificateRejection]
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::admit_native_proof_artifact(self: &Self) -> TrustVcNativeProofArtifact
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::admit_proof_artifact<impl Into<String>>(self: &Self, assertion_id: impl Into<String>) -> TrustVcNativeProofArtifact
@@ -828,6 +1114,15 @@ fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::obligation_st
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::prover(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::request_digest(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::function_refusal(self: &Self) -> Option<&str>
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::havoc_instantiation_note(self: &Self) -> Option<&str>
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::lane_schema(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::obligations(self: &Self) -> &[TrustVcNativeTrustIrDischargeObligation]
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::request_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::semantic_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer::unexamined_asserts(self: &Self) -> &[TrustVcNativeTrustIrUnexaminedAssert]
+fn trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation::detail(self: &Self) -> Option<&str>
 fn trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata::engine(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata::invocation(self: &Self) -> &str
 fn trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata::transcript_digest(self: &Self) -> Option<&str>
@@ -845,12 +1140,15 @@ fn trust_vc_trust_engine::TrustVcNativeVerifierSuiteIdentity::version(self: &Sel
 fn trust_vc_trust_engine::TrustVcNativeVerifierSuiteIdentity::with_tool_digest<impl Into<String>>(self: Self, tool_digest: impl Into<String>) -> Self
 fn trust_vc_trust_engine::TrustVcTrustEngine::consume_native_tmir_bundle(self: &Self, bundle: &NativeVerificationBundle) -> Result<TrustVcNativeTrustIrBundleReport, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::consume_native_trust_ir_bundle(self: &Self, bundle: &NativeVerificationBundle) -> Result<TrustVcNativeTrustIrBundleReport, TrustEngineError>
+fn trust_vc_trust_engine::TrustVcTrustEngine::discharge_native_trust_ir_request(self: &Self, module: &Module, request: &TrustVcNativeRequest) -> Result<TrustVcNativeTrustIrRequestReport, TrustEngineError>
+fn trust_vc_trust_engine::TrustVcTrustEngine::discharge_trust_ir_function(self: &Self, module: &Module, function: FuncId, options: &TrustIrBodyOptions) -> Result<TrustIrBodyReport, TrustIrBodyError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_contract_bundle(self: &Self, bundle: &TrustContractBundle) -> Result<TrustVerificationRequest, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_full_unit(self: &Self, unit: &TrustVerificationUnit) -> Result<VerificationContext, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_native_datatypes(self: &Self, unit: &TrustVerificationUnit) -> Result<Vec<TrustVcType>, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_trust_ir_adapter_request(self: &Self, request: &TrustTrustIrAdapterRequest) -> Result<TrustVerificationRequest, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_typed_proof_unit(self: &Self, unit: &TrustTypedProofUnit) -> Result<TrustVerificationRequest, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::lower_unit(self: &Self, unit: &TrustVerificationUnit) -> Result<VerificationContext, TrustEngineError>
+fn trust_vc_trust_engine::TrustVcTrustEngine::rejudge_native_trust_ir_discharge_report(self: &Self, module: &Module, request: &TrustVcNativeRequest, report: &TrustVcNativeTrustIrRequestReport) -> Result<TrustVcNativeTrustIrRequestReport, TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::validate_native_trust_ir_bundle(self: &Self, bundle: &NativeVerificationBundle) -> Result<(), TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::validate_request(self: &Self, request: &TrustVerificationRequest) -> Result<(), TrustEngineError>
 fn trust_vc_trust_engine::TrustVcTrustEngine::validate_trust_ir_adapter_request(self: &Self, request: &TrustTrustIrAdapterRequest) -> Result<(), TrustEngineError>
@@ -979,6 +1277,7 @@ fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleRepo
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport::producer(self: &Self) -> &str
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport::requests(self: &Self) -> &[TrustVcNativeTrustIrRequestReport]
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::coverage_detail(self: &Self) -> Option<&str>
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission::rejection_reasons(self: &Self) -> &[TrustVcNativeTrustIrCertificateRejection]
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::admit_native_proof_artifact(self: &Self) -> TrustVcNativeProofArtifact
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::admit_proof_artifact<impl Into<String>>(self: &Self, assertion_id: impl Into<String>) -> TrustVcNativeProofArtifact
@@ -992,6 +1291,15 @@ fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificat
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::prover(self: &Self) -> &str
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::request_digest(self: &Self) -> &str
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::function_refusal(self: &Self) -> Option<&str>
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::havoc_instantiation_note(self: &Self) -> Option<&str>
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::lane_schema(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::obligations(self: &Self) -> &[TrustVcNativeTrustIrDischargeObligation]
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::request_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::semantic_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::trust_ir_module_digest(self: &Self) -> &str
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer::unexamined_asserts(self: &Self) -> &[TrustVcNativeTrustIrUnexaminedAssert]
+fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation::detail(self: &Self) -> Option<&str>
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata::engine(self: &Self) -> &str
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata::invocation(self: &Self) -> &str
 fn trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata::transcript_digest(self: &Self) -> Option<&str>
@@ -1033,11 +1341,26 @@ fn trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrProofUnit::with_variable
 fn trust_vc_trust_engine::trust_ir_adapter::TrustUnsupportedTrustIrConstruct::diagnostic(self: &Self) -> &str
 fn trust_vc_trust_engine::trust_ir_adapter::TrustUnsupportedTrustIrConstruct::feature(self: &Self) -> &str
 fn trust_vc_trust_engine::trust_ir_adapter::TrustUnsupportedTrustIrConstruct::new<impl Into<String>, impl Into<String>>(feature: impl Into<String>, diagnostic: impl Into<String>) -> Self
+fn trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding::canonical_string(self: &Self) -> String
+fn trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport::obligation(self: &Self, proof_id: ProofId) -> Option<&TrustIrBodyObligationReport>
+fn trust_vc_trust_engine::trust_ir_body::trust_ir_body_semantic_digest(module: &trust_ir::Module, function: trust_ir::FuncId) -> Result<String, super::TrustIrBodyError>
+fn trust_vc_trust_engine::trust_ir_body_semantic_digest(module: &trust_ir::Module, function: trust_ir::FuncId) -> Result<String, super::TrustIrBodyError>
 fn trust_vc_trust_engine::typed_mir_memory_metadata() -> std::collections::BTreeMap<String, String>
 module trust_vc_trust_engine::mir_memory
 module trust_vc_trust_engine::native_artifact
+module trust_vc_trust_engine::native_coverage
 module trust_vc_trust_engine::native_trust_ir_bundle
 module trust_vc_trust_engine::trust_ir_adapter
+module trust_vc_trust_engine::trust_ir_body
+pub use trust_vc_trust_engine::AssertPosition = trust_ir_body::AssertPosition
+pub use trust_vc_trust_engine::BodyReading = trust_ir_body::BodyReading
+pub use trust_vc_trust_engine::HAVOC_INSTANTIATION_NOTE = trust_ir_body::HAVOC_INSTANTIATION_NOTE
+pub use trust_vc_trust_engine::HavocSeedPosition = trust_ir_body::HavocSeedPosition
+pub use trust_vc_trust_engine::IgnoredInputs = trust_ir_body::IgnoredInputs
+pub use trust_vc_trust_engine::LoweringWitness = trust_ir_body::LoweringWitness
+pub use trust_vc_trust_engine::TRUST_IR_BODY_BINDING_SCHEMA = trust_ir_body::TRUST_IR_BODY_BINDING_SCHEMA
+pub use trust_vc_trust_engine::TRUST_IR_BODY_LANE_SCHEMA = trust_ir_body::TRUST_IR_BODY_LANE_SCHEMA
+pub use trust_vc_trust_engine::TRUST_IR_BODY_TRUST_IR_PIN = trust_ir_body::TRUST_IR_BODY_TRUST_IR_PIN
 pub use trust_vc_trust_engine::TRUST_VC_CONDITION_ORIGIN_METADATA_KEY = mir_memory::TRUST_VC_CONDITION_ORIGIN_METADATA_KEY
 pub use trust_vc_trust_engine::TRUST_VC_CONDITION_ORIGIN_TYPED_TRUST_VC_EXPR_VALUE = mir_memory::TRUST_VC_CONDITION_ORIGIN_TYPED_TRUST_VC_EXPR_VALUE
 pub use trust_vc_trust_engine::TRUST_VC_MIR_MEMORY_PROOF_UNIT_METADATA_KEY = mir_memory::TRUST_VC_MIR_MEMORY_PROOF_UNIT_METADATA_KEY
@@ -1047,6 +1370,17 @@ pub use trust_vc_trust_engine::TRUST_VC_OWNERSHIP_CONTEXT_METADATA_KEY = mir_mem
 pub use trust_vc_trust_engine::TRUST_VC_OWNERSHIP_CONTEXT_TYPED_VALUE = mir_memory::TRUST_VC_OWNERSHIP_CONTEXT_TYPED_VALUE
 pub use trust_vc_trust_engine::TRUST_VC_PROOF_OBLIGATION_METADATA_KEY = mir_memory::TRUST_VC_PROOF_OBLIGATION_METADATA_KEY
 pub use trust_vc_trust_engine::TRUST_VC_PROOF_OBLIGATION_TYPED_PROOF_OBLIGATION_VALUE = mir_memory::TRUST_VC_PROOF_OBLIGATION_TYPED_PROOF_OBLIGATION_VALUE
+pub use trust_vc_trust_engine::TrustIrBodyAuthority = trust_ir_body::TrustIrBodyAuthority
+pub use trust_vc_trust_engine::TrustIrBodyBinding = trust_ir_body::TrustIrBodyBinding
+pub use trust_vc_trust_engine::TrustIrBodyCertificate = trust_ir_body::TrustIrBodyCertificate
+pub use trust_vc_trust_engine::TrustIrBodyError = trust_ir_body::TrustIrBodyError
+pub use trust_vc_trust_engine::TrustIrBodyObligationReport = trust_ir_body::TrustIrBodyObligationReport
+pub use trust_vc_trust_engine::TrustIrBodyOptions = trust_ir_body::TrustIrBodyOptions
+pub use trust_vc_trust_engine::TrustIrBodyRefusal = trust_ir_body::TrustIrBodyRefusal
+pub use trust_vc_trust_engine::TrustIrBodyReport = trust_ir_body::TrustIrBodyReport
+pub use trust_vc_trust_engine::TrustIrBodyVerdict = trust_ir_body::TrustIrBodyVerdict
+pub use trust_vc_trust_engine::TrustIrBodyWitness = trust_ir_body::TrustIrBodyWitness
+pub use trust_vc_trust_engine::TrustIrScalar = trust_ir_body::TrustIrScalar
 pub use trust_vc_trust_engine::TrustMirMemoryObligation = mir_memory::TrustMirMemoryObligation
 pub use trust_vc_trust_engine::TrustMirMemoryProofUnit = mir_memory::TrustMirMemoryProofUnit
 pub use trust_vc_trust_engine::TrustSourceSpan = trust_ir_adapter::TrustSourceSpan
@@ -1065,29 +1399,50 @@ pub use trust_vc_trust_engine::TrustVcNativeArtifactReplayStatus = native_artifa
 pub use trust_vc_trust_engine::TrustVcNativeCompilerFactKind = native_artifact::TrustVcNativeCompilerFactKind
 pub use trust_vc_trust_engine::TrustVcNativeCompilerFactRef = native_artifact::TrustVcNativeCompilerFactRef
 pub use trust_vc_trust_engine::TrustVcNativeCompilerFactsBinding = native_artifact::TrustVcNativeCompilerFactsBinding
+pub use trust_vc_trust_engine::TrustVcNativeCoverageBasis = native_coverage::TrustVcNativeCoverageBasis
+pub use trust_vc_trust_engine::TrustVcNativeKernelClaimFamily = native_coverage::TrustVcNativeKernelClaimFamily
 pub use trust_vc_trust_engine::TrustVcNativeObligationCause = native_artifact::TrustVcNativeObligationCause
 pub use trust_vc_trust_engine::TrustVcNativeProofArtifact = native_artifact::TrustVcNativeProofArtifact
 pub use trust_vc_trust_engine::TrustVcNativeProofArtifactInput = native_artifact::TrustVcNativeProofArtifactInput
 pub use trust_vc_trust_engine::TrustVcNativeSolverIdentity = native_artifact::TrustVcNativeSolverIdentity
 pub use trust_vc_trust_engine::TrustVcNativeSourceSpan = native_artifact::TrustVcNativeSourceSpan
 pub use trust_vc_trust_engine::TrustVcNativeToolIdentity = native_artifact::TrustVcNativeToolIdentity
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrBodyReading = native_trust_ir_bundle::TrustVcNativeTrustIrBodyReading
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport = native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission = native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmissionStatus = native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmissionStatus
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence = native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection = native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer = native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAuthority = native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAuthority
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs = native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation = native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome = native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind = native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrExitClass = native_trust_ir_bundle::TrustVcNativeTrustIrExitClass
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrInputKind = native_trust_ir_bundle::TrustVcNativeTrustIrInputKind
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrLoweringWitness = native_trust_ir_bundle::TrustVcNativeTrustIrLoweringWitness
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind = native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata = native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadataSource = native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadataSource
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrRequestMode = native_trust_ir_bundle::TrustVcNativeTrustIrRequestMode
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport = native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport
+pub use trust_vc_trust_engine::TrustVcNativeTrustIrUnexaminedAssert = native_trust_ir_bundle::TrustVcNativeTrustIrUnexaminedAssert
 pub use trust_vc_trust_engine::TrustVcNativeTrustIrVerdict = native_trust_ir_bundle::TrustVcNativeTrustIrVerdict
 pub use trust_vc_trust_engine::TrustVcNativeVerifierSuite = native_artifact::TrustVcNativeVerifierSuite
 pub use trust_vc_trust_engine::TrustVcNativeVerifierSuiteIdentity = native_artifact::TrustVcNativeVerifierSuiteIdentity
 pub use trust_vc_trust_engine::TypedProofObligation = trust_vc_core::vc::TypedProofObligation
+pub use trust_vc_trust_engine::UNOBLIGATED_ASSERT_LABEL = trust_ir_body::UNOBLIGATED_ASSERT_LABEL
+pub use trust_vc_trust_engine::trust_ir_body::TRUST_IR_BODY_BINDING_SCHEMA = binding::TRUST_IR_BODY_BINDING_SCHEMA
+pub use trust_vc_trust_engine::trust_ir_body::TRUST_IR_BODY_TRUST_IR_PIN = binding::TRUST_IR_BODY_TRUST_IR_PIN
+pub use trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding = binding::TrustIrBodyBinding
+pub use trust_vc_trust_engine::trust_ir_body::TrustIrBodyCertificate = binding::TrustIrBodyCertificate
+pub use trust_vc_trust_engine::trust_ir_body::trust_ir_body_semantic_digest = binding::trust_ir_body_semantic_digest
+pub use trust_vc_trust_engine::trust_ir_body_semantic_digest = trust_ir_body::trust_ir_body_semantic_digest
 pub use trust_vc_trust_engine::typed_mir_memory_metadata = mir_memory::typed_mir_memory_metadata
+struct trust_vc_trust_engine::AssertPosition
+struct trust_vc_trust_engine::HavocSeedPosition
+struct trust_vc_trust_engine::IgnoredInputs
 struct trust_vc_trust_engine::TrustAliasFact
 struct trust_vc_trust_engine::TrustBootstrapProvenance
 struct trust_vc_trust_engine::TrustBorrow
@@ -1103,6 +1458,11 @@ struct trust_vc_trust_engine::TrustEvidenceCacheKey
 struct trust_vc_trust_engine::TrustField
 struct trust_vc_trust_engine::TrustFunctionSignature
 struct trust_vc_trust_engine::TrustInvariant
+struct trust_vc_trust_engine::TrustIrBodyBinding
+struct trust_vc_trust_engine::TrustIrBodyObligationReport
+struct trust_vc_trust_engine::TrustIrBodyOptions
+struct trust_vc_trust_engine::TrustIrBodyReport
+struct trust_vc_trust_engine::TrustIrBodyWitness
 struct trust_vc_trust_engine::TrustLifetimeRegion
 struct trust_vc_trust_engine::TrustMirMemoryObligation
 struct trust_vc_trust_engine::TrustMirMemoryProofUnit
@@ -1141,8 +1501,12 @@ struct trust_vc_trust_engine::TrustVcNativeToolIdentity
 struct trust_vc_trust_engine::TrustVcNativeTrustIrBundleReport
 struct trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmission
 struct trust_vc_trust_engine::TrustVcNativeTrustIrCertificateEvidence
+struct trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAnswer
+struct trust_vc_trust_engine::TrustVcNativeTrustIrDischargeIgnoredInputs
+struct trust_vc_trust_engine::TrustVcNativeTrustIrDischargeObligation
 struct trust_vc_trust_engine::TrustVcNativeTrustIrReplayMetadata
 struct trust_vc_trust_engine::TrustVcNativeTrustIrRequestReport
+struct trust_vc_trust_engine::TrustVcNativeTrustIrUnexaminedAssert
 struct trust_vc_trust_engine::TrustVcNativeVerifierSuiteIdentity
 struct trust_vc_trust_engine::TrustVcTrustEngine
 struct trust_vc_trust_engine::TrustVerificationReport
@@ -1163,13 +1527,25 @@ struct trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuiteIdentit
 struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBundleReport
 struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmission
 struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateEvidence
+struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAnswer
+struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeIgnoredInputs
+struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeObligation
 struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReplayMetadata
 struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrRequestReport
+struct trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrUnexaminedAssert
 struct trust_vc_trust_engine::trust_ir_adapter::TrustSourceSpan
 struct trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrAdapterRequest
 struct trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligation
 struct trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrProofUnit
 struct trust_vc_trust_engine::trust_ir_adapter::TrustUnsupportedTrustIrConstruct
+struct trust_vc_trust_engine::trust_ir_body::AssertPosition
+struct trust_vc_trust_engine::trust_ir_body::HavocSeedPosition
+struct trust_vc_trust_engine::trust_ir_body::IgnoredInputs
+struct trust_vc_trust_engine::trust_ir_body::TrustIrBodyBinding
+struct trust_vc_trust_engine::trust_ir_body::TrustIrBodyObligationReport
+struct trust_vc_trust_engine::trust_ir_body::TrustIrBodyOptions
+struct trust_vc_trust_engine::trust_ir_body::TrustIrBodyReport
+struct trust_vc_trust_engine::trust_ir_body::TrustIrBodyWitness
 trait trust_vc_trust_engine::TrustVerifier
 type trust_vc_trust_engine::TrusTrustIrMemoryObligation = TrustMirMemoryObligation
 type trust_vc_trust_engine::TrusTrustIrMemoryProofUnit = TrustMirMemoryProofUnit
@@ -1180,6 +1556,9 @@ type trust_vc_trust_engine::TrustTmirPredicate = TrustTrustIrPredicate
 type trust_vc_trust_engine::TrustTmirProofUnit = TrustTrustIrProofUnit
 type trust_vc_trust_engine::TrustUnsupportedTmirConstruct = TrustUnsupportedTrustIrConstruct
 type trust_vc_trust_engine::TrustVcNativeTmirBundleReport = TrustVcNativeTrustIrBundleReport
+variant trust_vc_trust_engine::BodyReading::HavocInstantiatedUndef
+variant trust_vc_trust_engine::BodyReading::PinnedInterpreter
+variant trust_vc_trust_engine::LoweringWitness::None
 variant trust_vc_trust_engine::TrustAliasKind::MayAlias
 variant trust_vc_trust_engine::TrustAliasKind::MustAlias
 variant trust_vc_trust_engine::TrustAliasKind::NoAlias
@@ -1241,7 +1620,20 @@ variant trust_vc_trust_engine::TrustEngineError::MissingBootstrapProvenance
 variant trust_vc_trust_engine::TrustEngineError::MissingNativeContext
 variant trust_vc_trust_engine::TrustEngineError::MissingVerifiedUnitReport
 variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrBundleHasNoTrustVcRequests
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrBundleVerdictNotClean
 variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrCertificateMissing
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeLaneRefusedRequest
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeReportNotBound
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestCarriesCertificate
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestDuplicateObligation
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestMissingFunction
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationFunctionDisagrees
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestObligationOutsideFunction
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestWithoutObligations
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrDischargeRequestWrongMode
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationAttributesTemporalProperty
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrImportObligationKindUnrepresentable
+variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrModuleHasNoWireIdentity
 variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestMissingCertificate
 variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestUnexpectedCertificate
 variant trust_vc_trust_engine::TrustEngineError::NativeTrustIrTrustVcRequestUnknownObligation
@@ -1278,6 +1670,34 @@ variant trust_vc_trust_engine::TrustInvariantTarget::BorrowRegion
 variant trust_vc_trust_engine::TrustInvariantTarget::Datatype
 variant trust_vc_trust_engine::TrustInvariantTarget::Function
 variant trust_vc_trust_engine::TrustInvariantTarget::Loop
+variant trust_vc_trust_engine::TrustIrBodyAuthority::Advisory
+variant trust_vc_trust_engine::TrustIrBodyError::DuplicateProofId
+variant trust_vc_trust_engine::TrustIrBodyError::FunctionDuplicated
+variant trust_vc_trust_engine::TrustIrBodyError::FunctionMissing
+variant trust_vc_trust_engine::TrustIrBodyError::NoWireIdentity
+variant trust_vc_trust_engine::TrustIrBodyError::UnsupportedPolicy
+variant trust_vc_trust_engine::TrustIrBodyRefusal::ControlFlow
+variant trust_vc_trust_engine::TrustIrBodyRefusal::FunctionScopeMissing
+variant trust_vc_trust_engine::TrustIrBodyRefusal::IllTyped
+variant trust_vc_trust_engine::TrustIrBodyRefusal::Malformed
+variant trust_vc_trust_engine::TrustIrBodyRefusal::SiteBlockMissing
+variant trust_vc_trust_engine::TrustIrBodyRefusal::SiteFunctionMismatch
+variant trust_vc_trust_engine::TrustIrBodyRefusal::SiteIndexOutOfRange
+variant trust_vc_trust_engine::TrustIrBodyRefusal::SiteMissing
+variant trust_vc_trust_engine::TrustIrBodyRefusal::SiteNotAssert
+variant trust_vc_trust_engine::TrustIrBodyRefusal::TemporalPropertyAttributed
+variant trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedInstruction
+variant trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedModuleTable
+variant trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedObligationKind
+variant trust_vc_trust_engine::TrustIrBodyRefusal::UnsupportedType
+variant trust_vc_trust_engine::TrustIrBodyRefusal::VacuousPremises
+variant trust_vc_trust_engine::TrustIrBodyVerdict::DischargedAdvisory
+variant trust_vc_trust_engine::TrustIrBodyVerdict::NotAnswerable
+variant trust_vc_trust_engine::TrustIrBodyVerdict::Refuted
+variant trust_vc_trust_engine::TrustIrBodyVerdict::RefutedIgnoringPriorAsserts
+variant trust_vc_trust_engine::TrustIrBodyVerdict::Unknown
+variant trust_vc_trust_engine::TrustIrScalar::Bool
+variant trust_vc_trust_engine::TrustIrScalar::Int
 variant trust_vc_trust_engine::TrustLogicOp::And
 variant trust_vc_trust_engine::TrustLogicOp::Or
 variant trust_vc_trust_engine::TrustObligationKind::AdtDiscriminant
@@ -1388,6 +1808,7 @@ variant trust_vc_trust_engine::TrustTrustIrPredicate::Unsupported
 variant trust_vc_trust_engine::TrustVcNativeArtifactAdmissionStatus::Accepted
 variant trust_vc_trust_engine::TrustVcNativeArtifactAdmissionStatus::Rejected
 variant trust_vc_trust_engine::TrustVcNativeArtifactAdmissionStatus::Unspecified
+variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Certified
 variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Discharged
 variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Failed
 variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Pending
@@ -1395,6 +1816,11 @@ variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Trusted
 variant trust_vc_trust_engine::TrustVcNativeArtifactObligationStatus::Unspecified
 variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::ArtifactFingerprintMismatch
 variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::AssertionIdMismatch
+variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateCoverageBasisNotThisCertificate
+variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateCoverageBounded
+variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateCoverageNotJudged
+variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateCoverageRefused
+variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateCoverageUndetermined
 variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateDigestMismatch
 variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CertificateUsesTrustedEvidence
 variant trust_vc_trust_engine::TrustVcNativeArtifactRejection::CompilerFactAssertionIdMismatch
@@ -1428,6 +1854,8 @@ variant trust_vc_trust_engine::TrustVcNativeCompilerFactKind::FatPointer
 variant trust_vc_trust_engine::TrustVcNativeCompilerFactKind::Monomorphization
 variant trust_vc_trust_engine::TrustVcNativeCompilerFactKind::PointerOffset
 variant trust_vc_trust_engine::TrustVcNativeCompilerFactKind::TraitObjectMetadata
+variant trust_vc_trust_engine::TrustVcNativeCoverageBasis::KernelReplayedClaim
+variant trust_vc_trust_engine::TrustVcNativeKernelClaimFamily::ContractGroundDecision
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::Assert
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::BorrowCheck
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::BoundsCheck
@@ -1440,9 +1868,16 @@ variant trust_vc_trust_engine::TrustVcNativeObligationCause::PointerOffset
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::Postcondition
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::Precondition
 variant trust_vc_trust_engine::TrustVcNativeObligationCause::Translation
+variant trust_vc_trust_engine::TrustVcNativeTrustIrBodyReading::HavocInstantiatedUndef
+variant trust_vc_trust_engine::TrustVcNativeTrustIrBodyReading::PinnedInterpreter
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmissionStatus::Admissible
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmissionStatus::Rejected
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateAdmissionStatus::Unspecified
+variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageBasisNotThisCertificate
+variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageBounded
+variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageNotJudged
+variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageRefused
+variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageUndetermined
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::CertificateUsesTrustedEvidence
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::MissingAssertionId
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::MissingCompilerFactReferences
@@ -1453,6 +1888,13 @@ variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::Missing
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::ObligationFailed
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::ObligationPending
 variant trust_vc_trust_engine::TrustVcNativeTrustIrCertificateRejection::ObligationTrusted
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeAuthority::Advisory
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::DischargedAdvisory
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::NotAnswerable
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::NotJudged
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::Refuted
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::RefutedIgnoringPriorAsserts
+variant trust_vc_trust_engine::TrustVcNativeTrustIrDischargeOutcome::Unknown
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::CleanCic
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::GammaCrownBound
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::KaniHarness
@@ -1460,8 +1902,13 @@ variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::LeanProof
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::SmtProof
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::TranslationValidation
 variant trust_vc_trust_engine::TrustVcNativeTrustIrEvidenceKind::Trusted
+variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Ok
+variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Refuted
+variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Rejected
+variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Unknown
 variant trust_vc_trust_engine::TrustVcNativeTrustIrInputKind::RustMir
 variant trust_vc_trust_engine::TrustVcNativeTrustIrInputKind::TrustIrModule
+variant trust_vc_trust_engine::TrustVcNativeTrustIrLoweringWitness::None
 variant trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind::LoopInvariant
 variant trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind::MemorySafety
 variant trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind::PanicFreedom
@@ -1478,6 +1925,9 @@ variant trust_vc_trust_engine::TrustVcNativeTrustIrRequestMode::MergeProofCertif
 variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::CertificatesAdmitted
 variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::CertificatesRejected
 variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::DischargeNotAnswerable
+variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::DischargeRefuted
+variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::DischargedAdvisory
+variant trust_vc_trust_engine::TrustVcNativeTrustIrVerdict::NotJudged
 variant trust_vc_trust_engine::TrustVcNativeVerifierSuite::AY
 variant trust_vc_trust_engine::TrustVcNativeVerifierSuite::Other
 variant trust_vc_trust_engine::TrustVcNativeVerifierSuite::TRust
@@ -1491,6 +1941,7 @@ variant trust_vc_trust_engine::TrustVerificationMode::Full
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactAdmissionStatus::Accepted
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactAdmissionStatus::Rejected
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactAdmissionStatus::Unspecified
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationStatus::Certified
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationStatus::Discharged
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationStatus::Failed
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationStatus::Pending
@@ -1498,6 +1949,11 @@ variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationS
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactObligationStatus::Unspecified
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::ArtifactFingerprintMismatch
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::AssertionIdMismatch
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateCoverageBasisNotThisCertificate
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateCoverageBounded
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateCoverageNotJudged
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateCoverageRefused
+variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateCoverageUndetermined
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateDigestMismatch
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CertificateUsesTrustedEvidence
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeArtifactRejection::CompilerFactAssertionIdMismatch
@@ -1551,9 +2007,18 @@ variant trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuite::Trus
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuite::TrustVc
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuite::TrustWp
 variant trust_vc_trust_engine::native_artifact::TrustVcNativeVerifierSuite::Unknown
+variant trust_vc_trust_engine::native_coverage::TrustVcNativeCoverageBasis::KernelReplayedClaim
+variant trust_vc_trust_engine::native_coverage::TrustVcNativeKernelClaimFamily::ContractGroundDecision
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBodyReading::HavocInstantiatedUndef
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrBodyReading::PinnedInterpreter
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmissionStatus::Admissible
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmissionStatus::Rejected
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateAdmissionStatus::Unspecified
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageBasisNotThisCertificate
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageBounded
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageNotJudged
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageRefused
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateCoverageUndetermined
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::CertificateUsesTrustedEvidence
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::MissingAssertionId
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::MissingCompilerFactReferences
@@ -1564,6 +2029,13 @@ variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCerti
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::ObligationFailed
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::ObligationPending
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrCertificateRejection::ObligationTrusted
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeAuthority::Advisory
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::DischargedAdvisory
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::NotAnswerable
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::NotJudged
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::Refuted
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::RefutedIgnoringPriorAsserts
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrDischargeOutcome::Unknown
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::CleanCic
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::GammaCrownBound
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::KaniHarness
@@ -1571,8 +2043,13 @@ variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvide
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::SmtProof
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::TranslationValidation
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrEvidenceKind::Trusted
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Ok
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Refuted
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Rejected
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Unknown
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind::RustMir
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind::TrustIrModule
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrLoweringWitness::None
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind::LoopInvariant
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind::MemorySafety
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind::PanicFreedom
@@ -1589,6 +2066,9 @@ variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrReque
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::CertificatesAdmitted
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::CertificatesRejected
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::DischargeNotAnswerable
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::DischargeRefuted
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::DischargedAdvisory
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrVerdict::NotJudged
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind::BorrowProvenance
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind::Ensures
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind::LoopInvariant
@@ -1600,3 +2080,34 @@ variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind::Tra
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrObligationKind::TypeInvariant
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrPredicate::Expr
 variant trust_vc_trust_engine::trust_ir_adapter::TrustTrustIrPredicate::Unsupported
+variant trust_vc_trust_engine::trust_ir_body::BodyReading::HavocInstantiatedUndef
+variant trust_vc_trust_engine::trust_ir_body::BodyReading::PinnedInterpreter
+variant trust_vc_trust_engine::trust_ir_body::LoweringWitness::None
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyAuthority::Advisory
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::DuplicateProofId
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::FunctionDuplicated
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::FunctionMissing
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::NoWireIdentity
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyError::UnsupportedPolicy
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::ControlFlow
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::FunctionScopeMissing
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::IllTyped
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::Malformed
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteBlockMissing
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteFunctionMismatch
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteIndexOutOfRange
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteMissing
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::SiteNotAssert
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::TemporalPropertyAttributed
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedInstruction
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedModuleTable
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedObligationKind
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::UnsupportedType
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyRefusal::VacuousPremises
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::DischargedAdvisory
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::NotAnswerable
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::Refuted
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::RefutedIgnoringPriorAsserts
+variant trust_vc_trust_engine::trust_ir_body::TrustIrBodyVerdict::Unknown
+variant trust_vc_trust_engine::trust_ir_body::TrustIrScalar::Bool
+variant trust_vc_trust_engine::trust_ir_body::TrustIrScalar::Int

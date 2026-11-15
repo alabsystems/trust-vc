@@ -5,15 +5,17 @@
 // (`closure_direct_application_soundness.rs`). Verified via
 // verify_function_from_file, cache-OFF.
 //
-// DIRECT APPLICATION `f(arg)` of a KNOWN LOCAL `trust_vc::closure!` literal
-// (unary, over modelable value sorts) lowers to the OPAQUE, DISJOINT
+// DIRECT APPLICATION `f(args..)` of a KNOWN LOCAL `trust_vc::closure!` literal
+// (any arity, over modelable value sorts) lowers to the OPAQUE, DISJOINT
 // `spec_fn_apply` UF the `.call` method path already uses. At the call site the
-// extraction seam PROVES `f.requires(arg)` (an obligation) and ASSUMES
-// `f.ensures(arg, f(arg))` binding the REAL returned term. The assumed ensures is
-// ONLY ever the def-side-CHECKED written clause: a lying closure's independent
-// def-side obligation COUNTEREXAMPLES and poisons the whole function, so the
-// call-site assume can never rescue an unchecked ensures. Non-unary closures and
-// bare Rust closures stay fail-closed (deferred).
+// extraction seam PROVES `f.requires(args..)` (an obligation) and ASSUMES
+// `f.ensures(args.., f(args..))` binding the REAL returned term. The assumed
+// ensures is ONLY ever the def-side-CHECKED written clause: a lying closure's
+// independent def-side obligation COUNTEREXAMPLES and poisons the whole function,
+// so the call-site assume can never rescue an unchecked ensures. The zero-arg and
+// two-arg applications (D9) were deferred while the seam was unary-only; H6
+// widened it to every arity, because a deferred LOWERING error never
+// fires on an unused result and the n-ary requires went unproven.
 
 // ---------------------------------------------------------------------------
 // D1 ACCEPTANCE / flip: unary closure!, requires satisfied, ensures genuinely
@@ -189,11 +191,13 @@ fn d8_loop_body_drop_fails_closed() {
 }
 
 // ---------------------------------------------------------------------------
-// D9a non-unary (zero-arg) stays deferred. The unary restriction in both the
-// lowering guard and the seam keeps `f()` fail-closed. MUST NOT verify.
+// D9a zero-arg application (H6: the seam is no longer unary-only). A TRUE claim
+// over the def-side-checked ensures. MUST VERIFY. Before H6 it was deferred
+// (not verified) — and a zero-arg application whose result went unused proved
+// no requires at all.
 // ---------------------------------------------------------------------------
 #[trust_vc::ensures(true)]
-fn d9a_zero_arg_application_deferred() {
+fn d9a_zero_arg_application_verified() {
     let f = trust_vc::closure!(
         || -> u64
         requires(true)
@@ -204,11 +208,36 @@ fn d9a_zero_arg_application_deferred() {
     trust_vc::assert!(t == 7u64);
 }
 
+// D9a liar twin: the assumed ensures pins `t == 7`, so `t == 8` counterexamples.
+#[trust_vc::ensures(true)]
+fn d9a_zero_arg_liar_cx() {
+    let f = trust_vc::closure!(
+        || -> u64
+        requires(true)
+        ensures(|z: u64| z == 7u64)
+        7u64
+    );
+    let t = f();
+    trust_vc::assert!(t == 8u64);
+}
+
+// D9a requires twin: the zero-arg call-site requires is PROVEN (and fails).
+#[trust_vc::ensures(true)]
+fn d9a_zero_arg_requires_false_cx() {
+    let f = trust_vc::closure!(
+        || -> u64
+        requires(false)
+        ensures(|z: u64| z == 7u64)
+        7u64
+    );
+    let _t = f();
+}
+
 // ---------------------------------------------------------------------------
-// D9b non-unary (two-arg) stays deferred. MUST NOT verify.
+// D9b two-arg application (H6). A TRUE claim. MUST VERIFY.
 // ---------------------------------------------------------------------------
 #[trust_vc::ensures(true)]
-fn d9b_two_arg_application_deferred() {
+fn d9b_two_arg_application_verified() {
     let f = trust_vc::closure!(
         |a: u64, b: u64| -> u64
         requires(true)
@@ -217,6 +246,32 @@ fn d9b_two_arg_application_deferred() {
     );
     let t = f(1u64, 2u64);
     trust_vc::assert!(t == 7u64);
+}
+
+// D9b liar twin: `t == 8` counterexamples.
+#[trust_vc::ensures(true)]
+fn d9b_two_arg_liar_cx() {
+    let f = trust_vc::closure!(
+        |a: u64, b: u64| -> u64
+        requires(true)
+        ensures(|z: u64| z == 7u64)
+        7u64
+    );
+    let t = f(1u64, 2u64);
+    trust_vc::assert!(t == 8u64);
+}
+
+// D9b requires twin: `requires(a == b)` at `(1, 2)` counterexamples on the
+// call-site prove-requires obligation.
+#[trust_vc::ensures(true)]
+fn d9b_two_arg_bad_requires_cx() {
+    let f = trust_vc::closure!(
+        |a: u64, b: u64| -> u64
+        requires(a == b)
+        ensures(|z: u64| z == 7u64)
+        7u64
+    );
+    let _t = f(1u64, 2u64);
 }
 
 // ---------------------------------------------------------------------------

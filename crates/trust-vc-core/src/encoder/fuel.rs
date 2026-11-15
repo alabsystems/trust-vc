@@ -9,10 +9,15 @@
 //!
 //!   `forall x. {f(x)} f(x) == body(x)`
 //!
-//! ay-dpll's hard E-matching round limit (`MAX_EMATCHING_ROUNDS = 8`)
-//! prevents infinite instantiation, providing implicit fuel=8 with a
-//! single function name. This enables both concrete evaluation and
-//! symbolic reasoning (e.g., `gcd(a,b) == gcd(b,a%b)`).
+//! ay-dpll's E-matching round limit (16 rounds by default) bounds the
+//! unfolding depth, which acts as implicit fuel with a single function
+//! name. This enables both concrete evaluation and symbolic reasoning
+//! (e.g., `gcd(a,b) == gcd(b,a%b)`).
+//!
+//! The round limit bounds depth, not size: a body with two recursive calls
+//! can double its instances every round once a symbolic call seeds it.
+//! ay's per-check-sat E-matching budget and congruence clause budget bound
+//! that growth and answer `unknown` when they are spent.
 //!
 //! Previously used Verus-style stratified fuel encoding (f__fuel_k),
 //! but renamed functions break symbolic equality proofs. Part of #2155, #2187.
@@ -22,7 +27,7 @@ use ay_dpll::api::Term;
 use super::ground_pool::GroundAxiom;
 use super::AYEncoder;
 use crate::error::{TrustVcError, TrustVcResult};
-use crate::ir::{CompareOp, TrustVcExpr};
+use crate::ir::TrustVcExpr;
 use crate::prepared_context::PreparedObligation;
 use crate::vc::FunctionContext;
 
@@ -35,12 +40,8 @@ fn decompose_body_axiom<'a>(
     expr: &'a TrustVcExpr,
     func_name: &str,
 ) -> TrustVcResult<(&'a [TrustVcExpr], &'a TrustVcExpr)> {
-    match expr {
-        TrustVcExpr::Compare {
-            op: CompareOp::Eq,
-            left,
-            right,
-        } => match left.as_ref() {
+    match crate::float_identity::identity_equation_sides(expr) {
+        Some((left, right)) => match left {
             TrustVcExpr::FnCall { name, args, .. } if name == func_name => Ok((args, right)),
             _ => Err(TrustVcError::Encoding {
                 context: "fuel encoding",
@@ -50,7 +51,7 @@ fn decompose_body_axiom<'a>(
                 ),
             }),
         },
-        _ => Err(TrustVcError::Encoding {
+        None => Err(TrustVcError::Encoding {
             context: "fuel encoding",
             detail: format!(
                 "Body axiom is not an equality (Compare::Eq): {:?}",
@@ -101,7 +102,7 @@ fn resolve_bound_var_terms(
 /// Instead of the circular `forall x. f(x) == body(f(x))`, emits:
 /// 1. A direct defining axiom: `forall x. {f(x)} f(x) == body(x)` using the
 ///    ORIGINAL function name on both sides. ay-dpll's E-matching round limit
-///    (`MAX_EMATCHING_ROUNDS = 8`) provides implicit fuel bounding.
+///    bounds the unfolding depth (see the module docs).
 /// 2. Ground-pool registration of the body axiom for one-step instantiation
 ///    on already-present calls `f(t1, ..., tn)`.
 ///
@@ -160,24 +161,20 @@ pub(super) fn encode_fuel_axioms(
     //
     // E-matching fires on any ground `f(t1, t2)` term, producing new terms
     // in the body. Recursive calls in the body create new trigger matches,
-    // chaining up to MAX_EMATCHING_ROUNDS (8). This handles:
+    // chaining up to ay's E-matching round limit. This handles:
     //   - Concrete: gcd(6,4) → gcd(4,2) → gcd(2,0) → 2  (3 rounds)
     //   - Symbolic: gcd(a,b) → gcd(b,a%b)                 (1 round)
     //
-    // Safety: ay-dpll's hard E-matching round limit (8) prevents infinite
-    // instantiation. Equivalent to implicit fuel=8 with a single function
-    // name, avoiding the stratified fuel name mismatch that blocks symbolic
-    // equality proofs. Part of #2187.
+    // ay-dpll's E-matching round limit bounds the chain depth, and its
+    // per-check-sat instance budget bounds the chain size. This is implicit
+    // fuel with a single function name, avoiding the stratified fuel name
+    // mismatch that blocks symbolic equality proofs. Part of #2187.
     let direct_lhs = TrustVcExpr::FnCall {
         name: func_name.clone(),
         args: lhs_args.to_vec(),
         return_ty: func_ctx.return_type.clone(),
     };
-    let direct_axiom = TrustVcExpr::Compare {
-        op: CompareOp::Eq,
-        left: Box::new(direct_lhs),
-        right: Box::new(body_rhs.clone()),
-    };
+    let direct_axiom = crate::float_identity::identity_equation(direct_lhs, body_rhs.clone());
 
     // BINDER CAPTURE (CARDINAL), same shape as `add_typed_broadcast`: the body is
     // encoded here with every bound variable resolved as an ordinary top-level
@@ -260,7 +257,7 @@ pub(super) fn encode_fuel_axioms(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::TrustVcType;
+    use crate::ir::{CompareOp, TrustVcType};
 
     #[test]
     fn test_decompose_body_axiom_valid() {

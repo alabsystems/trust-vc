@@ -52,7 +52,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn run(args: &[&str]) -> (String, String, i32) {
@@ -125,8 +127,9 @@ fn gate_help_lists_stages_and_flags() {
     let (stdout, _stderr, code) = run(&["trust-vc", "gate", "--help"]);
     assert_eq!(code, 0);
     for needle in [
-        "fmt",
-        "clippy",
+        "targo fmt --all --check",
+        "targo tippy --locked --workspace --all-targets -- -D warnings",
+        "targo --unverified test --locked --workspace",
         "test",
         "examples",
         "evidence",
@@ -158,7 +161,7 @@ fn gate_rejects_verus_path_with_checkout_evidence_guidance() {
 
 #[cfg(unix)]
 #[test]
-fn gate_json_stdout_is_one_clean_report() {
+fn gate_json_captures_every_child_stream_in_one_report() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = temp_dir("json_clean");
@@ -175,12 +178,8 @@ fn gate_json_stdout_is_one_clean_report() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&fake_cargo, permissions).expect("fake cargo should be executable");
 
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root should resolve");
     let output = Command::new(cargo_trust_vc_bin())
-        .current_dir(workspace)
+        .current_dir(&temp)
         .env("CARGO", &fake_cargo)
         .args(["trust-vc", "gate", "--quick", "--no-fuzz", "--json"])
         .output()
@@ -189,14 +188,59 @@ fn gate_json_stdout_is_one_clean_report() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "fake local gate should pass: stdout={stdout} stderr={stderr}"
+        Some(1),
+        "the deliberately incomplete synthetic checkout should fail in-band: stdout={stdout} stderr={stderr}"
     );
     let report: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout must contain exactly one JSON value");
-    assert_eq!(report["overall"], "pass", "{stdout}");
-    assert!(!stdout.contains("fake cargo"), "{stdout}");
-    assert!(!stderr.contains("fake cargo"), "{stderr}");
+    assert_eq!(report["overall"], "fail", "{stdout}");
+    let stages = report["stages"]
+        .as_array()
+        .expect("gate report should contain a stage array");
+    for stage_name in ["fmt", "clippy", "examples"] {
+        let stage = stages
+            .iter()
+            .find(|stage| stage["name"] == stage_name)
+            .unwrap_or_else(|| panic!("missing `{stage_name}` stage: {stdout}"));
+        assert_eq!(stage["status"], "pass", "{stage:?}");
+    }
+    let evidence = stages
+        .iter()
+        .find(|stage| stage["name"] == "evidence")
+        .expect("synthetic checkout should report its evidence failure");
+    assert_eq!(evidence["status"], "fail", "{evidence:?}");
+    // fmt and tippy run through `$CARGO` (targo), never a repository script.
+    let fake_cargo_display = fake_cargo.to_string_lossy().into_owned();
+    for (stage_name, expected) in [
+        ("fmt", format!("{fake_cargo_display} fmt --all --check")),
+        (
+            "clippy",
+            format!("{fake_cargo_display} tippy --locked --workspace --all-targets -- -D warnings"),
+        ),
+        (
+            "examples",
+            format!("{fake_cargo_display} --unverified build --locked --examples --workspace"),
+        ),
+    ] {
+        assert_eq!(
+            stages
+                .iter()
+                .find(|stage| stage["name"] == stage_name)
+                .and_then(|stage| stage["command"].as_str()),
+            Some(expected.as_str()),
+            "{stdout}"
+        );
+    }
+    for leaked in ["fake cargo stdout", "fake cargo stderr"] {
+        assert!(
+            !stdout.contains(leaked),
+            "stdout leaked `{leaked}`: {stdout}"
+        );
+        assert!(
+            !stderr.contains(leaked),
+            "stderr leaked `{leaked}`: {stderr}"
+        );
+    }
 
     std::fs::remove_dir_all(&temp).ok();
 }
@@ -241,9 +285,89 @@ fn fuzz_without_cargo_fuzz_prints_install_instructions() {
         "missing cargo-fuzz must exit 2 (not pretend to run): {stderr}"
     );
     assert!(
-        stderr.contains("cargo install cargo-fuzz"),
-        "should print the exact install instruction: {stderr}"
+        stderr.contains("targo trust-vc fuzz ensures_false --time 30"),
+        "should name the Trust lane first: {stderr}"
     );
+    assert!(
+        stderr.contains("RUSTUP_AUTO_INSTALL=0 rustup run <nightly> cargo install cargo-fuzz"),
+        "should print the exact install instruction, with rustup's auto-install off: {stderr}"
+    );
+}
+
+/// A stand-in for the Trust toolchain's targo: it passes the discriminator
+/// (`targo --unverified --version` exits 0), which upstream cargo fails.
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, body).expect("synthetic executable should be written");
+    let mut permissions = std::fs::metadata(path)
+        .expect("synthetic executable metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("synthetic executable should be executable");
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_under_targo_never_sends_the_user_to_cargo_fuzz() {
+    // Under targo the runner is fuzz/run.sh (cargo-fuzz spawns a bare `cargo`
+    // from PATH and leaves the Targo lanes). Outside a checkout it is missing:
+    // exit 2 with the Trust repair, never a cargo-fuzz install line.
+    let dir = temp_dir("fuzz_targo_missing");
+    std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
+    let fake_targo = dir.join("targo");
+    write_executable(&fake_targo, "#!/bin/sh\nexit 0\n");
+    let output = Command::new(cargo_trust_vc_bin())
+        .current_dir(&dir)
+        .env("CARGO", &fake_targo)
+        .args(["trust-vc", "fuzz", "mode_crossing", "--time", "4"])
+        .output()
+        .expect("cargo-trust-vc should execute");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code().unwrap_or(-1), 2, "{stderr}");
+    assert!(stderr.contains("fuzz/run.sh not found"), "{stderr}");
+    assert!(
+        stderr.contains("fuzz/run.sh mode_crossing -max_total_time=4"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cargo install"), "{stderr}");
+    assert!(!stderr.contains("cargo fuzz"), "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_under_targo_runs_fuzz_run_sh_with_the_same_targo() {
+    let dir = temp_dir("fuzz_targo_runs");
+    std::fs::create_dir_all(dir.join("fuzz")).expect("temp checkout should be creatable");
+    let fake_targo = dir.join("targo");
+    write_executable(&fake_targo, "#!/bin/sh\nexit 0\n");
+    // The runner is invoked as `bash fuzz/run.sh <target> <budget>` with
+    // TARGO naming the frontend that passed the discriminator.
+    std::fs::write(
+        dir.join("fuzz/run.sh"),
+        "printf '%s|%s\\n' \"$TARGO\" \"$*\" >> \"$(dirname \"$0\")/invocations.txt\"\n",
+    )
+    .expect("synthetic fuzz/run.sh should be written");
+    let output = Command::new(cargo_trust_vc_bin())
+        .current_dir(&dir)
+        .env("CARGO", &fake_targo)
+        .args(["trust-vc", "fuzz", "strict_inequality", "--time", "5"])
+        .output()
+        .expect("cargo-trust-vc should execute");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code().unwrap_or(-1), 0, "{stderr}");
+    let recorded = std::fs::read_to_string(dir.join("fuzz/invocations.txt"))
+        .expect("fuzz/run.sh should have run");
+    assert_eq!(
+        recorded,
+        format!(
+            "{}|strict_inequality -max_total_time=5\n",
+            fake_targo.display()
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -276,12 +400,11 @@ fn new_lib_scaffolds_verifiable_crate() {
         "check on scaffold should pass: stdout={stdout} stderr={stderr}"
     );
     assert!(
-        stdout.contains("1 function found"),
-        "check should find the scaffolded function: {stdout}"
-    );
-    assert!(
-        stdout.contains("Verified") || stdout.contains("verified"),
-        "scaffolded function should verify: {stdout}"
+        stdout.lines().any(|line| {
+            line.contains("checked_add_one")
+                && (line.contains("Verified") || line.contains("verified"))
+        }),
+        "the named scaffolded function should verify: {stdout}"
     );
 
     std::fs::remove_dir_all(&parent).ok();
@@ -308,7 +431,12 @@ fn new_bin_scaffolds_verifiable_crate() {
         code, 0,
         "check on scaffold should pass: stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("1 function found"), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| {
+            line.contains("increment") && (line.contains("Verified") || line.contains("verified"))
+        }),
+        "the named scaffolded function should verify: {stdout}"
+    );
 
     std::fs::remove_dir_all(&parent).ok();
 }

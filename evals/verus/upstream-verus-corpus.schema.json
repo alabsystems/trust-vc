@@ -269,6 +269,34 @@
                   "type": "string",
                   "minLength": 1
                 }
+              },
+              "expected_warning_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Verifier warnings this case must emit, in upstream's order. An EMPTY/omitted list is a positive claim of no warnings, not an absence of checking."
+              },
+              "obligation_decrease_waiver": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from_min_obligations",
+                  "reason"
+                ],
+                "properties": {
+                  "from_min_obligations": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The committed min_obligations this case descends FROM. Must name the committed count exactly, so one waiver authorizes one decrease."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "description": "Declared, reviewed exception to the proof-content ratchet. Without it, neither min_obligations nor the size of the pinned obligation set may fall below the committed manifest's."
               }
             },
             "allOf": [

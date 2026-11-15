@@ -236,6 +236,7 @@ fn test_default_body_axiom_assertion_count() {
 
     let impl_decl = TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -259,11 +260,9 @@ fn test_default_body_axiom_assertion_count() {
     );
 }
 
-/// The default body axiom for `is_labeled` defines it as `self.label()` at
-/// the Poly level. The postcondition axiom for `label` ensures `result == true`.
-/// Together: `is_labeled(p) == label(p) == true`.
-#[test]
-fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
+/// Registers `Describable` and an impl for `bool` that overrides `label` and
+/// inherits the default `is_labeled`.
+fn encoder_with_inherited_default() -> AYEncoder {
     let mut encoder = AYEncoder::new();
     let decl = trait_with_default();
     encoder
@@ -288,9 +287,9 @@ fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
         .param_types
         .insert("MyType__label".to_string(), vec![TrustVcType::Bool]);
 
-    // Register impl with only `label` binding — `is_labeled` is inherited default
     let impl_decl = TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -301,11 +300,11 @@ fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
     encoder
         .register_trait_impl(&impl_decl)
         .expect("impl registration should succeed");
+    encoder
+}
 
-    // Create ground term at the Poly level (matching ay-dpll E-matching scope)
-    let poly = Sort::Uninterpreted("Poly".to_string());
-    let poly_val = encoder.solver.declare_const("poly_self", poly);
-
+/// Asserts `Describable__is_labeled(receiver) == false`.
+fn assert_is_labeled_false(encoder: &mut AYEncoder, receiver: Term) {
     let is_labeled_fn = encoder
         .fn_ctx
         .functions
@@ -314,12 +313,8 @@ fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
         .clone();
     let is_labeled_result = encoder
         .solver
-        .try_apply(&is_labeled_fn, &[poly_val])
+        .try_apply(&is_labeled_fn, &[receiver])
         .expect("trait apply should succeed");
-
-    // Assert is_labeled(poly_self) == false — should be UNSAT because:
-    // default body axiom: ∀p:Poly. {is_labeled(p)} is_labeled(p) == label(p)
-    // postcondition axiom: ∀p:Poly. {label(p)} label(p) == true
     let falsity = encoder.solver.bool_const(false);
     let claim = encoder
         .solver
@@ -329,10 +324,44 @@ fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
         .solver
         .try_assert_term(claim)
         .expect("assert should succeed");
+}
+
+/// The default body axiom defines `is_labeled` as `self.label()` for the
+/// impl's own receivers, `Box_bool(b)`. The postcondition axiom for `label`
+/// ensures `result == true`. Together: `is_labeled(Box_bool(b)) == true`.
+#[test]
+fn test_inherited_default_body_defines_trait_method_via_body_axiom() {
+    let mut encoder = encoder_with_inherited_default();
+    let box_fn = encoder
+        .box_fn_for_type(&TrustVcType::Bool)
+        .expect("the impl declares Box_bool")
+        .clone();
+    let b = encoder.solver.declare_const("b", Sort::Bool);
+    let receiver = encoder
+        .solver
+        .try_apply(&box_fn, &[b])
+        .expect("box apply should succeed");
+    assert_is_labeled_false(&mut encoder, receiver);
 
     assert!(
         encoder.solver.try_check_sat().unwrap().is_unsat(),
-        "default body axiom + postcondition chain: is_labeled(p) == label(p) == true"
+        "default body axiom + postcondition chain: is_labeled(Box_bool(b)) == label(Box_bool(b)) == true"
+    );
+}
+
+/// The default body is the inheriting impl's behaviour only. A `Poly`
+/// receiver that is not a boxed `bool` may belong to an impl that overrides
+/// `is_labeled`, so the default body says nothing about it.
+#[test]
+fn test_inherited_default_body_says_nothing_about_other_receivers() {
+    let mut encoder = encoder_with_inherited_default();
+    let poly = Sort::Uninterpreted("Poly".to_string());
+    let receiver = encoder.solver.declare_const("poly_self", poly);
+    assert_is_labeled_false(&mut encoder, receiver);
+
+    assert!(
+        !encoder.solver.try_check_sat().unwrap().is_unsat(),
+        "is_labeled(p) == false must not be refuted for an arbitrary Poly receiver"
     );
 }
 
@@ -367,6 +396,7 @@ fn test_explicit_override_skips_default_body_axiom() {
 
     let impl_decl = TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![
@@ -411,6 +441,7 @@ fn test_explicit_override_skips_default_body_axiom() {
 
     let impl_decl_no_override = TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Describable".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("label".to_string(), "MyType__label".to_string())],
@@ -467,12 +498,14 @@ fn trait_with_raw_default_body(
             has_default: true,
             default_body: Some(body.to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     };
     let impl_decl = TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: trait_name.to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],

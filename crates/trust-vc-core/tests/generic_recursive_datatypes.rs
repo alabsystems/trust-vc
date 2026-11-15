@@ -142,35 +142,58 @@ fn ill_founded_generic_recursion_proves_no_false() {
 /// symbol, so it stays fail-closed — `0 == 1` must NOT verify through it.
 ///
 /// The conflict is detected EARLY (the function builds a self-recursive generic
-/// datatype at two distinct instantiations) and surfaced as a CLEAN
-/// `VerifyResult::Error` before any obligation is encoded. Previously the
-/// per-instantiation carrier mismatch leaked all the way into the backend as an
-/// `apply` sort mismatch that was swallowed and mis-reported as
-/// `Unknown { category: SolverPanic }`; assert it is now a clean fail-close with
-/// no swallowed panic.
+/// datatype at two distinct instantiations) and surfaced as a CLEAN fail-close
+/// before any obligation is encoded. Previously the per-instantiation carrier
+/// mismatch leaked all the way into the backend as an `apply` sort mismatch that
+/// was swallowed and mis-reported as `Unknown { category: SolverPanic }`; assert
+/// it is a clean fail-close with no swallowed panic.
+///
+/// H10 moved the fail-close one step EARLIER and made it typed. The
+/// conflict already removed `GList` from the per-query monomorphization map, so
+/// `glen`'s `T` is carried by nothing — exactly the instantiation collapse H10
+/// closes. The source catalog now REFUSES that declaration at registration
+/// (`generic instantiation not carried`) instead of declaring an uninterpreted
+/// `glen`, and the refusal reaches the caller as a typed
+/// `Err(TrustVcError::Encoding)` rather than `Ok(VerifyResult::Error)` — the same
+/// fail-closed outcome, raised before a context exists to carry a message. Both
+/// spellings are accepted here, the `Err` one only when it actually names the
+/// H10 refusal and the offending function (never an unrelated extraction error);
+/// `Verified` and a swallowed `SolverPanic` stay forbidden either way. The
+/// sibling `unsupported_generic_recursion_stays_fail_closed` already reads
+/// `Err(_) | Ok(Error)` as one fail-close.
 #[test]
 fn distinct_instantiations_do_not_collapse() {
     use trust_vc_core::UnknownCategory;
-    let result = ok("t_conflict_no_false");
+    let result = verdict("t_conflict_no_false");
     assert!(
-        !matches!(result, VerifyResult::Verified),
+        !matches!(result, Ok(VerifyResult::Verified)),
         "UNSOUND: a generic spec fn used at two instantiations in one function must \
          stay fail-closed; 0 == 1 must NOT verify, got {result:?}"
-    );
-    // Clean fail-close: a `VerifyResult::Error`, never a swallowed `SolverPanic`.
-    assert!(
-        matches!(result, VerifyResult::Error { .. }),
-        "two-instantiation conflict must fail closed as a clean Error, got {result:?}"
     );
     assert!(
         !matches!(
             result,
-            VerifyResult::Unknown {
+            Ok(VerifyResult::Unknown {
                 category: UnknownCategory::SolverPanic,
                 ..
-            }
+            })
         ),
         "two-instantiation conflict must NOT surface a swallowed SolverPanic, got {result:?}"
+    );
+    // Clean fail-close: a `VerifyResult::Error`, or the typed H10 carriage
+    // refusal — never a swallowed panic and never a silent Unknown.
+    let clean_fail_close = match &result {
+        Ok(VerifyResult::Error { .. }) => true,
+        Err(err) => {
+            let message = err.to_string();
+            message.contains("generic instantiation not carried") && message.contains("`glen`")
+        }
+        _ => false,
+    };
+    assert!(
+        clean_fail_close,
+        "two-instantiation conflict must fail closed as a clean Error or as the H10 \
+         carriage refusal naming `glen`, got {result:?}"
     );
 }
 
@@ -185,11 +208,7 @@ fn distinct_instantiations_do_not_collapse() {
 fn unsupported_generic_recursion_stays_fail_closed() {
     for func in ["use_gstream", "use_geven", "use_gnegpos"] {
         let result = verdict(func);
-        let is_fail_closed = match &result {
-            Err(_) => true,
-            Ok(VerifyResult::Error { .. }) => true,
-            _ => false,
-        };
+        let is_fail_closed = matches!(&result, Err(_) | Ok(VerifyResult::Error { .. }));
         assert!(
             is_fail_closed,
             "{func} must fail closed (generic no-base-case / mutual / negative-position \

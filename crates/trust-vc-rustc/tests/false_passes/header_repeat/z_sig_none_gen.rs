@@ -1,0 +1,4 @@
+::verus_builtin_macros::verus!{
+fn f<A>(a: A) opens_invariants none { opens_invariants_none(); }
+fn user() { f(1u8);  }
+}

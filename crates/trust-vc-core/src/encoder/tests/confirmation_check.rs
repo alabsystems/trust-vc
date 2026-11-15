@@ -98,8 +98,8 @@ fn test_proof_certificate_strict_flag_readable_through_capture() {
 /// PLUMBING: `kernel_verified()` returns a meaningful result when the full
 /// kernel bridge pipeline runs on a simple integer proof.
 ///
-/// Exercises: solve -> export_last_unsat_artifact -> last_proof ->
-/// kernel_bridge::verify_proof_with_kernel -> ProofCertificate.kernel_verified().
+/// Exercises: solve -> export_last_unsat_artifact ->
+/// kernel_bridge::certify_last_refutation -> ProofCertificate.kernel_verified().
 #[cfg(feature = "proof-certificates")]
 #[test]
 fn test_kernel_verified_flag_readable_through_capture() {

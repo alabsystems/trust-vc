@@ -46,13 +46,22 @@ fn unique_nested_spec_does_not_gain_a_global_bare_alias() {
     assert_not_verified(NESTED_SPEC, "bare_nested_spec_without_import");
 }
 
+/// `hidden_scope::always_true()` runs in the exec body, and a spec function
+/// panics when called at run time, so the ghost-call rule refuses the answer.
+/// It refuses only a `Verified` answer, so the refusal still shows that the
+/// qualified name resolves to the nested spec's body.
 #[test]
 fn qualified_nested_spec_remains_available() {
     let result = verify(NESTED_SPEC, "qualified_nested_spec")
         .unwrap_or_else(|error| panic!("qualified nested spec must extract: {error}"));
     assert!(
-        matches!(result, VerifyResult::Verified),
-        "qualified nested spec should retain its body semantics, got {result:?}"
+        matches!(
+            &result,
+            VerifyResult::Error { message }
+                if message.contains("ghost function called from exec code")
+        ),
+        "qualified nested spec should retain its body semantics (a `Verified` answer, \
+         refused by the ghost-call rule), got {result:?}"
     );
 }
 
@@ -687,6 +696,9 @@ fn unresolved_glob_in_unobservable_unit_sibling_stays_opaque() {
         "omitting an unobservable unit helper body should preserve the caller's tautological postcondition, got {result:?}"
     );
 }
+
+#[path = "source_name_resolution_soundness/sibling_contracts.rs"]
+mod sibling_contracts;
 
 const OBSERVABLE_SIBLING_WITH_BLOCK_GLOB: &str = r#"
 mod nested {

@@ -310,7 +310,11 @@ impl AYEncoder {
     }
 
     /// [`record_capture`], into the encoder's own diagnostics.
-    pub(in crate::encoder) fn record_binder_capture(&mut self, site: &str, capture: &BinderCapture) {
+    pub(in crate::encoder) fn record_binder_capture(
+        &mut self,
+        site: &str,
+        capture: &BinderCapture,
+    ) {
         record_capture(&mut self.state.diagnostics, site, capture)
     }
 }

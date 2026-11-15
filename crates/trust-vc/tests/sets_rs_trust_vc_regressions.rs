@@ -88,6 +88,56 @@ struct CaseMetadata {
     expected_error_patterns: Vec<String>,
 }
 
+/// Refuted liar twins of pinned verified `test_set_fold` rows: `(liar, verified twin)`.
+///
+/// Each liar is the SAME shape as its verified twin with a false sum, in the same
+/// port file, and must come back `Counterexample` — the evidence that the twin's
+/// `Verified` reads the finite fold rather than holding vacuously. They are NOT rows
+/// of `EXPECTED_CASES` / the port table / the manifest: upstream `test_set_fold` is
+/// `=> Ok(())`, and the gate's per-case rule turns a mapped `counterexample` row into
+/// a verdict mismatch.
+const FOLD_LIAR_TWINS: &[(&str, &str)] = &[
+    (
+        "test_set_fold_singleton_wrong_sum_counterexample",
+        "test_set_fold_singleton",
+    ),
+    (
+        "test_set_fold_two_insert_wrong_sum_counterexample",
+        "test_set_fold_two_insert_sum",
+    ),
+    (
+        "test_set_fold_empty_wrong_sum_counterexample",
+        "test_set_fold_empty",
+    ),
+];
+
+/// Refuted liar twins of pinned verified `test1` rows: `(liar, verified twin)`.
+///
+/// Each liar keeps its twin's shape with a false claim, in the same port file, and must
+/// come back `Counterexample` — the evidence that the twin's `Verified` reads the
+/// `Set::new` / extensionality encoding rather than holding on every set. Like `FOLD_LIAR_TWINS` they stay out of `EXPECTED_CASES`, the port
+/// table and the manifest, because upstream `test1` is `=> Ok(())`.
+///
+/// NOT every `test1` row has a twin: the three SYMBOLIC-set rows
+/// (`test1_filter_preserves_positive_member`, `test1_filter_excludes_nonpositive_member`,
+/// `test1_map_forward_image_contains_successor`) have none. Re-measured 2026-09-14 at ay
+/// 0.26.0 with `TRUST_VC_DISABLE_VC_CACHE=1`, five false claims on those shapes — the
+/// negated filter membership, a different element under `filter`, the excluded-member
+/// flip, a wrong `map` image and the negated `map` image — ALL came back
+/// `NotProved (Solver returned unknown ((incomplete quantifier-unhandled)))`, none of them
+/// `Counterexample`. An unrefuted liar is not refutation evidence, so those three pins
+/// stay without a twin and are recorded as a pre-existing hole rather than papered over.
+const TEST1_LIAR_TWINS: &[(&str, &str)] = &[
+    (
+        "test1_set_new_empty_contains_counterexample",
+        "test1_set_new_empty_alias_boundary",
+    ),
+    (
+        "test1_finite_insert_wrong_extensionality_counterexample",
+        "test1_finite_insert_order_extensionality",
+    ),
+];
+
 fn referenced_array_const(file: &syn::File, const_name: &str) -> syn::ExprArray {
     let const_item = file
         .items
@@ -313,6 +363,58 @@ fn sets_rs_negative_subset_is_rejected_from_file() {
         assert!(
             matches!(result, VerifyResult::Counterexample { .. }),
             "{case} should be rejected, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn sets_rs_fold_liar_twins_are_refuted_from_file() {
+    let path = sets_port_path();
+    let path = path.to_str().expect("sets port path should be UTF-8");
+
+    for (liar, twin) in FOLD_LIAR_TWINS {
+        assert!(
+            EXPECTED_CASES
+                .iter()
+                .any(|(case, upstream_case, verdict, _)| {
+                    case == twin && *upstream_case == "test_set_fold" && *verdict == "verified"
+                }),
+            "{liar}'s twin {twin} should be a pinned verified test_set_fold case"
+        );
+        assert!(
+            EXPECTED_CASES.iter().all(|(case, _, _, _)| case != liar),
+            "{liar} must stay out of the upstream-mapped expected cases (see FOLD_LIAR_TWINS)"
+        );
+        let result = verify_case(path, liar);
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{liar} (liar twin of {twin}) should be refuted, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn sets_rs_test1_liar_twins_are_refuted_from_file() {
+    let path = sets_port_path();
+    let path = path.to_str().expect("sets port path should be UTF-8");
+
+    for (liar, twin) in TEST1_LIAR_TWINS {
+        assert!(
+            EXPECTED_CASES
+                .iter()
+                .any(|(case, upstream_case, verdict, _)| {
+                    case == twin && *upstream_case == "test1" && *verdict == "verified"
+                }),
+            "{liar}'s twin {twin} should be a pinned verified test1 case"
+        );
+        assert!(
+            EXPECTED_CASES.iter().all(|(case, _, _, _)| case != liar),
+            "{liar} must stay out of the upstream-mapped expected cases (see TEST1_LIAR_TWINS)"
+        );
+        let result = verify_case(path, liar);
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{liar} (liar twin of {twin}) should be refuted, got {result:?}"
         );
     }
 }

@@ -73,6 +73,12 @@ pub fn parse_file_allow_tracked(source: &str) -> Result<syn::File, syn::Error> {
         .parse()
         .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
     let mut file: syn::File = syn::parse2(normalize_verus_file_tokens(tokens))?;
+    // D1a `state_machine!` expansion runs BEFORE every other rewrite, so the
+    // generated attributes are already canonical and the user's macro tokens
+    // never pass through alias or cfg_attr rewriting. It never fails (a
+    // refusal becomes a poison marker) and is an exact no-op for a file with
+    // no item-position invocation. See `crate::state_machine_dsl`.
+    crate::state_machine_dsl::expand_file(&mut file);
     // Runs FIRST, and here rather than in any one consumer: a contract reached
     // through `use trust_vc::ensures as promises` must look canonical to the
     // scanner AND to the extractor, or the two disagree — the scanner drops the
@@ -120,6 +126,14 @@ const TRUST_VC_CFG_ATTR_NAMES: &[&str] = &[
 /// real function without pulling a `trust_vc` dependency into the normal build.
 /// Only `cfg_attr`s carrying a trust_vc attribute are touched; all other
 /// `cfg_attr`s (e.g. `cfg_attr(feature = "x", derive(..))`) are left untouched.
+///
+/// The predicate is not evaluated, so an unwrapped attribute may be absent from
+/// the build. A postcondition read as present is still sound: the body is
+/// checked against it, and a caller only relies on what that check shows. A
+/// precondition or a mode is not ([`presence_cannot_be_assumed`]), so a
+/// `cfg_attr` that carries one is also kept in place, and the `cfg` refusal
+/// (`vc_extraction::refuse_unevaluated_cfg`) refuses a `Verified` answer for
+/// the function and for every function that reaches it.
 fn unwrap_trust_vc_cfg_attrs_in_file(file: &mut syn::File) {
     use syn::visit_mut::VisitMut;
     CfgAttrUnwrapper.visit_file_mut(file);
@@ -133,13 +147,92 @@ impl CfgAttrUnwrapper {
         let mut rewritten = Vec::with_capacity(original.len());
         for attr in original {
             if let Some(inner_attrs) = unwrap_trust_vc_cfg_attr(&attr) {
+                let keep = inner_attrs.iter().any(presence_cannot_be_assumed);
                 rewritten.extend(inner_attrs);
+                if keep {
+                    rewritten.push(attr);
+                }
             } else {
                 rewritten.push(attr);
             }
         }
         *attrs = rewritten;
     }
+}
+
+/// Whether reading `attr` as present when the build leaves it out can make a
+/// `Verified` answer false.
+///
+/// * `requires`, and a `contract` with a `requires` clause: the body is checked
+///   under a precondition the function the build runs does not have.
+/// * `spec` and `proof`: the lane reads the body as ghost code, with no
+///   overflow obligation, and reads a call of it from exec code without one
+///   either, while a build that leaves the mode out runs the body as an
+///   ordinary exec function (`#[cfg_attr(any(), trust_vc::spec)] fn inc(x:
+///   u64) -> u64 { x + 1u64 }` overflows when an exec caller passes
+///   `u64::MAX`).
+fn presence_cannot_be_assumed(attr: &syn::Attribute) -> bool {
+    let Some(name) = attr
+        .path()
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return false;
+    };
+    match name.as_str() {
+        "requires" | "spec" | "proof" => true,
+        "contract" => match &attr.meta {
+            syn::Meta::List(list) => tokens_name(list.tokens.clone(), "requires"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The name of the first function in `file` that carries a `cfg_attr` kept by
+/// the unwrapping: one that gates a precondition or a mode
+/// ([`presence_cannot_be_assumed`]). The file-level trait conformance context
+/// has no per-function `cfg` reach, so it is refused on this.
+pub(crate) fn first_cfg_gated_precondition_or_mode(file: &syn::File) -> Option<String> {
+    struct Finder(Option<String>);
+    impl Finder {
+        fn check(&mut self, attrs: &[syn::Attribute], ident: &syn::Ident) {
+            let gated = attrs.iter().any(|attr| {
+                unwrap_trust_vc_cfg_attr(attr)
+                    .is_some_and(|inner| inner.iter().any(presence_cannot_be_assumed))
+            });
+            if gated && self.0.is_none() {
+                self.0 = Some(ident.to_string());
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            self.check(&node.attrs, &node.sig.ident);
+            syn::visit::visit_item_fn(self, node);
+        }
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            self.check(&node.attrs, &node.sig.ident);
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+        fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+            self.check(&node.attrs, &node.sig.ident);
+            syn::visit::visit_trait_item_fn(self, node);
+        }
+    }
+    let mut finder = Finder(None);
+    syn::visit::Visit::visit_file(&mut finder, file);
+    finder.0
+}
+
+/// Whether `tokens` hold the identifier `name` at any group depth.
+fn tokens_name(tokens: TokenStream, name: &str) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => ident == name,
+        TokenTree::Group(group) => tokens_name(group.stream(), name),
+        _ => false,
+    })
 }
 
 /// If `attr` is `#[cfg_attr(<pred>, <attr>...)]` and at least one inner attribute
@@ -221,10 +314,117 @@ fn normalize_verus_source_tokens(tokens: TokenStream) -> TokenStream {
 }
 
 fn normalize_verus_file_tokens(tokens: TokenStream) -> TokenStream {
-    normalize_bare_assert_forall_by_tokens(normalize_tracked_param_tokens(
-        tokens,
-        TrackedParam::MarkProof,
+    normalize_ghost_tracked_local_tokens(normalize_bare_assert_forall_by_tokens(
+        normalize_tracked_param_tokens(tokens, TrackedParam::MarkProof),
     ))
+}
+
+/// Rewrites a Verus-style ghost/tracked LOCAL declaration into the equivalent
+/// mode ATTRIBUTE on the same `let`:
+///
+/// ```text
+/// let ghost   [mut] x ...   ->   #[trust_vc::spec]  let [mut] x ...
+/// let tracked [mut] x ...   ->   #[trust_vc::proof] let [mut] x ...
+/// ```
+///
+/// **FILE path only**, and the exact twin of the `tracked x: T` PARAMETER
+/// rewrite above: in Verus, `let ghost x` / `let tracked x` are surface sugar
+/// for a spec-/proof-mode binding (`vir/src/modes.rs` assigns every `let` a
+/// `Mode`), and `#[verifier::spec] let x` / `#[verifier::proof] let x` is the
+/// attribute spelling of the same thing — upstream `modes.rs` itself uses BOTH
+/// (`#[verifier::spec] let b: bool = ...` in `eq_mode`, `let ghost b = false;`
+/// in `initialize_spec_var_in_exec`).
+///
+/// Why an attribute and not a drop: `let ghost x` does not parse as Rust at
+/// all, so before this rewrite EVERY upstream case that declares a ghost or
+/// tracked local was a hard `cannot parse source` FileError — it could not be
+/// ported, whatever the engine could prove. Dropping the marker instead would
+/// be worse than not parsing: the binding would become indistinguishable from
+/// an exec local, and [`crate::mode_body`] could not tell a legal ghost
+/// mutation inside `proof_block!` from the ILLEGAL mutation of an exec local
+/// there (which is erased at runtime — see that module).
+///
+/// Deliberately narrow, so it can never touch a program that parses today:
+/// the rewrite fires ONLY on `let` immediately followed by the bare ident
+/// `ghost`/`tracked` and then a binding-name shape (`x` or `mut x`). A
+/// local actually *named* `ghost` (`let ghost = 5;`, `let ghost: u32 = 5;`) is
+/// left alone, because `=`/`:` is not a binding-name shape.
+fn normalize_ghost_tracked_local_tokens(tokens: TokenStream) -> TokenStream {
+    let input: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut output = TokenStream::new();
+    let mut index = 0;
+
+    while index < input.len() {
+        if let Some(marker) = ghost_tracked_local_marker(&input, index) {
+            // `let` stays; the mode marker token is replaced by the attribute,
+            // which syn attaches to the `syn::Local` it precedes.
+            match marker {
+                LocalMode::Ghost => output.extend(quote! { #[trust_vc::spec] }),
+                LocalMode::Tracked => output.extend(quote! { #[trust_vc::proof] }),
+            }
+            if let Some(let_token) = input.get(index) {
+                output.extend(std::iter::once(let_token.clone()));
+            }
+            // Skip `let` and the consumed `ghost`/`tracked` marker.
+            index += 2;
+            continue;
+        }
+
+        match input.get(index) {
+            Some(TokenTree::Group(group)) => {
+                let mut rebuilt = Group::new(
+                    group.delimiter(),
+                    normalize_ghost_tracked_local_tokens(group.stream()),
+                );
+                rebuilt.set_span(group.span());
+                output.extend(std::iter::once(TokenTree::Group(rebuilt)));
+            }
+            Some(other) => output.extend(std::iter::once(other.clone())),
+            None => break,
+        }
+        index += 1;
+    }
+
+    output
+}
+
+/// The mode a `let ghost` / `let tracked` local declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalMode {
+    Ghost,
+    Tracked,
+}
+
+/// Recognizes `let ghost <name-shape>` / `let tracked <name-shape>` starting at
+/// `index` (which must point at the `let`). Returns the declared mode, or
+/// `None` if this is not a ghost/tracked local declaration.
+fn ghost_tracked_local_marker(tokens: &[TokenTree], index: usize) -> Option<LocalMode> {
+    if !matches!(tokens.get(index), Some(TokenTree::Ident(ident)) if ident == "let") {
+        return None;
+    }
+    let mode = match tokens.get(index + 1) {
+        Some(TokenTree::Ident(ident)) if ident == "ghost" => LocalMode::Ghost,
+        Some(TokenTree::Ident(ident)) if ident == "tracked" => LocalMode::Tracked,
+        _ => return None,
+    };
+    if !is_local_binding_name_shape(tokens, index + 2) {
+        return None;
+    }
+    Some(mode)
+}
+
+/// Whether `tokens[start..]` begins a plain binding name: `x` or `mut x`.
+///
+/// Anything else (`=`, `:`, a tuple pattern, end of stream) means the preceding
+/// `ghost`/`tracked` ident was the binding name itself, not a mode marker.
+fn is_local_binding_name_shape(tokens: &[TokenTree], start: usize) -> bool {
+    match tokens.get(start) {
+        Some(TokenTree::Ident(ident)) if ident == "mut" => {
+            matches!(tokens.get(start + 1), Some(TokenTree::Ident(_)))
+        }
+        Some(TokenTree::Ident(_)) => true,
+        _ => false,
+    }
 }
 
 /// A BODYLESS function declaration: `#[trust_vc::spec] fn f(x: int) -> bool;`.
@@ -272,7 +472,7 @@ impl Parse for BodylessFn {
 ///
 /// FILE path only: the proc-macro path re-emits its input as Rust, where a
 /// bodyless fn does not compile in the first place.
-fn mark_bodyless_spec_fns_uninterp(items: &mut Vec<syn::Item>) {
+fn mark_bodyless_spec_fns_uninterp(items: &mut [syn::Item]) {
     for item in items.iter_mut() {
         if let syn::Item::Mod(module) = item {
             if let Some((_, inner)) = &mut module.content {
@@ -774,5 +974,167 @@ mod tests {
         assert_eq!(result.tracked_params, vec!["token"]);
         assert_eq!(result.item_fn.sig.ident.to_string(), "lemma");
         assert_eq!(result.item_fn.sig.inputs.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod ghost_tracked_local_tests {
+    use super::parse_file_allow_tracked;
+
+    fn body_of(src: &str) -> String {
+        let file = parse_file_allow_tracked(src).expect("source should parse");
+        let syn::Item::Fn(func) = &file.items[0] else {
+            panic!("expected a fn item")
+        };
+        quote::ToTokens::to_token_stream(&func.block).to_string()
+    }
+
+    #[test]
+    fn ghost_local_becomes_a_spec_attribute() {
+        let body = body_of("fn f(a: u64) { let ghost g: u64 = a; }");
+        assert!(
+            body.contains("trust_vc :: spec"),
+            "`let ghost` must carry the spec mode onto the local: {body}"
+        );
+    }
+
+    #[test]
+    fn tracked_local_becomes_a_proof_attribute() {
+        let body = body_of("fn f(a: u64) { let tracked t: u64 = a; }");
+        assert!(
+            body.contains("trust_vc :: proof"),
+            "`let tracked` must carry the proof mode onto the local: {body}"
+        );
+    }
+
+    #[test]
+    fn ghost_mut_and_uninitialized_forms_parse() {
+        for src in [
+            "fn f(a: u64) { let ghost mut g: u64 = a; }",
+            "fn f() { let ghost g: bool; }",
+            "fn f() { let tracked mut t: bool; }",
+        ] {
+            assert!(
+                parse_file_allow_tracked(src).is_ok(),
+                "should parse after normalization: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_actually_named_ghost_or_tracked_is_left_alone() {
+        // OVER-REJECTION guard. `ghost` and `tracked` are not Rust keywords, so
+        // they are legal binding names; the rewrite must fire only on the
+        // `let <marker> <name>` shape and never on `let ghost = ..` /
+        // `let ghost: T = ..`.
+        for src in [
+            "fn f() -> u64 { let ghost = 5u64; ghost }",
+            "fn f() -> u64 { let tracked: u64 = 7u64; tracked }",
+            "fn f() -> u64 { let mut ghost = 5u64; ghost = 6u64; ghost }",
+        ] {
+            let body = body_of(src);
+            assert!(
+                !body.contains("trust_vc :: spec") && !body.contains("trust_vc :: proof"),
+                "a local NAMED ghost/tracked must not acquire a mode attribute: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghost_locals_nested_in_blocks_are_normalized() {
+        let body = body_of("fn f(a: u64) { if a > 0 { let ghost g: u64 = a; } }");
+        assert!(body.contains("trust_vc :: spec"), "{body}");
+    }
+
+    /// The attributes of `fn f` (or of `S::f`) after parsing, one per entry.
+    fn attrs_of(src: &str) -> Vec<String> {
+        use quote::ToTokens;
+        let file = parse_file_allow_tracked(src).expect("fixture parses");
+        let attrs = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(func) if func.sig.ident == "f" => Some(func.attrs.clone()),
+                syn::Item::Impl(imp) => imp.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(func) if func.sig.ident == "f" => Some(func.attrs.clone()),
+                    _ => None,
+                }),
+                syn::Item::Trait(tr) => tr.items.iter().find_map(|item| match item {
+                    syn::TraitItem::Fn(func) if func.sig.ident == "f" => Some(func.attrs.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("fixture has `f`");
+        attrs
+            .iter()
+            .map(|attr| attr.to_token_stream().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_gated_precondition_or_mode_keeps_its_cfg_attr() {
+        for (src, unwrapped) in [
+            (
+                "#[cfg_attr(any(), trust_vc::requires(x > 0u64))] fn f(x: u64) {}",
+                "# [trust_vc :: requires (x > 0u64)]",
+            ),
+            (
+                "#[cfg_attr(test, requires(x > 0u64))] fn f(x: u64) {}",
+                "# [requires (x > 0u64)]",
+            ),
+            (
+                "#[cfg_attr(trust_vc, trust_vc::contract(requires(x > 0u64), ensures(ret == x), returns(ret)))] fn f(x: u64) -> u64 { x }",
+                "# [trust_vc :: contract (requires (x > 0u64) , ensures (ret == x) , returns (ret))]",
+            ),
+            (
+                "#[cfg_attr(trust_vc, trust_vc::ensures(result == x), trust_vc::requires(x > 0u64))] fn f(x: u64) -> u64 { x }",
+                "# [trust_vc :: requires (x > 0u64)]",
+            ),
+            (
+                "#[cfg_attr(any(), trust_vc::spec)] fn f(x: u64) -> u64 { x + 1u64 }",
+                "# [trust_vc :: spec]",
+            ),
+            (
+                "#[cfg_attr(not(test), trust_vc::proof)] fn f() {}",
+                "# [trust_vc :: proof]",
+            ),
+            (
+                "struct S; impl S { #[cfg_attr(any(), trust_vc::requires(x > 0u64))] fn f(&self, x: u64) {} }",
+                "# [trust_vc :: requires (x > 0u64)]",
+            ),
+            (
+                "trait T { #[cfg_attr(any(), trust_vc::requires(x > 0u64))] fn f(&self, x: u64); }",
+                "# [trust_vc :: requires (x > 0u64)]",
+            ),
+        ] {
+            let attrs = attrs_of(src);
+            assert!(attrs.iter().any(|a| a == unwrapped), "{src}: {attrs:?}");
+            assert!(
+                attrs.iter().any(|a| a.starts_with("# [cfg_attr (")),
+                "{src}: the cfg_attr must stay for the cfg refusal: {attrs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gated_postcondition_is_only_unwrapped() {
+        for (src, unwrapped) in [
+            (
+                "#[cfg_attr(any(), trust_vc::ensures(result == x))] fn f(x: u64) -> u64 { x }",
+                "# [trust_vc :: ensures (result == x)]",
+            ),
+            (
+                "#[cfg_attr(trust_vc, trust_vc::contract(ensures(ret >= 0), returns(ret)))] fn f() -> i64 { 0 }",
+                "# [trust_vc :: contract (ensures (ret >= 0) , returns (ret))]",
+            ),
+            (
+                "#[cfg_attr(any(), trust_vc::decreases(n))] fn f(n: u64) -> u64 { if n == 0 { 0 } else { f(n - 1) } }",
+                "# [trust_vc :: decreases (n)]",
+            ),
+        ] {
+            let attrs = attrs_of(src);
+            assert_eq!(attrs, vec![unwrapped.to_string()], "{src}");
+        }
     }
 }

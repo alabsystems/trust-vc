@@ -1,0 +1,18 @@
+error: protocol component `bump`: `#[trust_vc::contract]` could change the body after the protocol model read it; a component's attributes are limited to doc comments, lint levels, `cfg`, `inline`, `cold`, `must_use`, `track_caller`, `deprecated` and `rustfmt::`/`clippy::` tool attributes
+  --> tests/compile-fail/protocol_component_under_a_body_changing_attribute.rs:24:5
+   |
+24 |     #[trust_vc::contract(requires(self.x < 5))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `trust_mc`
+  --> tests/compile-fail/protocol_component_under_a_body_changing_attribute.rs:11:1
+   |
+11 | #[trust_vc::protocol]
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 34 more
+   = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `trust_vc::protocol` crate for guidance on how handle this unexpected cfg
+   = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+   = note: this warning originates in the attribute macro `trust_vc::protocol` (in Nightly builds, run with -Z macro-backtrace for more info)

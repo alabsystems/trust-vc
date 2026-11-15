@@ -6,11 +6,17 @@
 //!
 //! These tests intentionally do not claim full Verus default_trait.rs parity.
 //! They parse the scout metadata from the port itself, reject solver `Unknown`
-//! as replacement evidence, pin Rust-valid primitive/Option/tuple/default-method
-//! f32/f64 zero literal witnesses, and std collection witnesses, accept a narrow direct u32/bool/Option/tuple
-//! `Default` constructor slice, require stable counterexamples, and require the
-//! remaining fail-closed Rust `Default` constructor boundaries to carry precise
-//! error fragments while the corpus entry remains `unsupported-gap`.
+//! as replacement evidence, pin the type-directed `Default::default()`
+//! constructor family (2026-09-13: the `<Ty>::default()`, `let b: Ty =
+//! Default::default()` and `<Ty as core::default::Default>::default()`
+//! spellings over primitives, `&str`, `String`, `Option`, `PhantomData`,
+//! tuples, `Vec`/`VecDeque`/`HashMap`/`HashSet`, `Box`/`Rc`/`Arc`,
+//! `#[derive(Default)]` and hand-written `impl Default` types, and a generic
+//! `T::default()`), require a refuted liar twin for every modelled
+//! constructor, and require the two remaining fail-closed boundaries (the
+//! upstream `T::default.ensures((), r)` reflection contract and
+//! `String::is_ascii()`) to carry precise error fragments while the corpus
+//! entry remains `unsupported-gap`.
 
 mod common;
 
@@ -139,6 +145,14 @@ fn collect_port_function_names(items: &[syn::Item], names: &mut Vec<String>) {
                 }
             }
             syn::Item::Impl(impl_block) => {
+                // A `impl Default for S { fn default() .. }` method is the
+                // Rust-required half of a ported custom-type shape (upstream
+                // `test_default_custom_type_spec` / `..._in_smart_ptrs`), not a
+                // witness of its own: the witnesses are the functions that CALL
+                // it. Inherent-impl methods stay inventoried.
+                if impl_block.trait_.is_some() {
+                    continue;
+                }
                 for impl_item in &impl_block.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         names.push(method.sig.ident.to_string());
@@ -414,80 +428,10 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         &[],
     ),
     (
-        "trust_vc_default_bool_false_value_verified",
-        "test_default_bool_ok",
-        "verified",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_option_u32_none_verified",
-        "test_default_option_u32_ok",
-        "verified",
-        2,
-        &[],
-    ),
-    (
         "trust_vc_default_u32_arithmetic_zero_verified",
         "test_default_arithmetic",
         "verified",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_tuple2_surrogate_verified",
-        "test_default_tuple2_ok",
-        "verified",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_tuple3_surrogate_verified",
-        "test_default_tuple3_ok",
-        "verified",
         3,
-        &[],
-    ),
-    (
-        "trust_vc_default_record_verified",
-        "test_default_custom_type_spec",
-        "verified",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_vec_new_empty_view_verified",
-        "test_default_vec_u32_ok",
-        "verified",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_hash_map_direct_view_reflexive_verified",
-        "test_default_hash_map_u32_ok",
-        "verified",
-        1,
-        &[],
-    ),
-    (
-        "trust_vc_default_hash_set_direct_view_reflexive_verified",
-        "test_default_hash_set_u32_ok",
-        "verified",
-        1,
-        &[],
-    ),
-    (
-        "trust_vc_default_u32_wrong_value_counterexample",
-        "test_default_u32_wrong",
-        "counterexample",
-        2,
-        &[],
-    ),
-    (
-        "trust_vc_default_bool_wrong_value_counterexample",
-        "test_default_bool_wrong",
-        "counterexample",
-        2,
         &[],
     ),
     (
@@ -505,177 +449,465 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         &[],
     ),
     (
-        "rust_default_trait_inference_currently_blocked",
-        "test_default_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'Default::default'"],
-    ),
-    (
-        "rust_default_u32_associated_constructor_verified",
-        "test_default_u32_ok",
-        "verified",
+        "trust_vc_default_u32_wrong_value_counterexample",
+        "test_default_u32_wrong",
+        "counterexample",
         2,
         &[],
     ),
     (
-        "rust_default_bool_associated_constructor_verified",
+        "trust_vc_default_bool_false_value_verified",
         "test_default_bool_ok",
         "verified",
         2,
         &[],
     ),
     (
-        "rust_default_option_u32_associated_constructor_verified",
+        "trust_vc_default_option_u32_none_verified",
         "test_default_option_u32_ok",
         "verified",
         2,
         &[],
     ),
     (
-        "rust_default_vec_u32_constructor_verified",
+        "trust_vc_default_tuple2_surrogate_verified",
+        "test_default_tuple2_ok",
+        "verified",
+        3,
+        &[],
+    ),
+    (
+        "trust_vc_default_tuple3_surrogate_verified",
+        "test_default_tuple3_ok",
+        "verified",
+        4,
+        &[],
+    ),
+    (
+        "trust_vc_default_record_verified",
+        "test_default_custom_type_spec",
+        "verified",
+        4,
+        &[],
+    ),
+    (
+        "trust_vc_default_vec_new_empty_view_verified",
         "test_default_vec_u32_ok",
         "verified",
         2,
         &[],
     ),
     (
-        "rust_default_hash_map_constructor_verified",
+        "trust_vc_default_hash_map_direct_view_reflexive_verified",
         "test_default_hash_map_u32_ok",
         "verified",
         2,
         &[],
     ),
     (
-        "rust_default_hash_set_constructor_verified",
+        "trust_vc_default_hash_set_direct_view_reflexive_verified",
         "test_default_hash_set_u32_ok",
         "verified",
         2,
         &[],
     ),
-    // `<&'static str>::default()` is a QSELF associated call. Since `49d16b38`
-    // ("Phase A no-self UFCS") a no-arg qself call is rendered with the CONCRETE
-    // self type taken from `qself.ty`, not the bare method name — that IS the
-    // point of the change, because a bare name cannot say which impl is meant.
-    // So the unresolved symbol is `str::default`, not `default`; this row simply
-    // predates the rendering, and every sibling row here is already qualified.
-    // The requirement is unchanged and the new fragment is STRICTER: it pins
-    // which type's `default` went unmodeled rather than merely that some
-    // `default` did.
     (
-        "rust_default_str_associated_constructor_currently_blocked",
+        "trust_vc_default_bool_wrong_value_counterexample",
+        "test_default_bool_wrong",
+        "counterexample",
+        2,
+        &[],
+    ),
+    (
+        "rust_default_trait_inference_verified",
+        "test_default_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_u32_associated_constructor_verified",
+        "test_default_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_bool_associated_constructor_verified",
+        "test_default_bool_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_option_u32_associated_constructor_verified",
+        "test_default_option_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_str_associated_constructor_verified",
         "test_default_str_ok",
-        "error",
-        0,
-        &[
-            "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'str::default'",
-        ],
+        "verified",
+        2,
+        &[],
     ),
     (
         "rust_default_tuple2_associated_constructor_verified",
         "test_default_tuple2_ok",
         "verified",
-        2,
+        3,
         &[],
     ),
     (
         "rust_default_tuple3_associated_constructor_verified",
         "test_default_tuple3_ok",
         "verified",
-        3,
+        4,
         &[],
     ),
-    // Promoted from `..._currently_blocked` (error). The trait-qualified UFCS
-    // spelling now models as the same zero `u32::default()` does. Measured in
-    // BOTH directions before promoting — `result == 0u32` verifies, `result ==
-    // 1u32` counterexamples, on both spellings — and stock `rustc --edition
-    // 2021` prints `0`, so the claim that verifies is the true one. It read
-    // `error` only because the fail-closed loop panicked on an earlier row and
-    // never reached this one.
     (
         "rust_default_u32_ufcs_constructor_verified",
         "test_default_u32_ok",
         "verified",
-        1,
+        5,
         &[],
     ),
     (
-        "rust_default_string_constructor_currently_blocked",
+        "rust_default_vec_u32_constructor_verified",
+        "test_default_vec_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_string_constructor_verified",
         "test_default_string_ok",
-        "error",
-        0,
-        &["unknown return type for function 'String::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_vec_deque_constructor_currently_blocked",
+        "rust_default_hash_map_constructor_verified",
+        "test_default_hash_map_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_hash_set_constructor_verified",
+        "test_default_hash_set_u32_ok",
+        "verified",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_vec_deque_constructor_verified",
         "test_default_vec_deque_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'VecDeque::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_box_u32_constructor_currently_blocked",
+        "rust_default_box_u32_constructor_verified",
         "test_default_box_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'Box::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_box_vec_u32_constructor_currently_blocked",
+        "rust_default_box_vec_u32_constructor_verified",
         "test_default_box_vec_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'Box::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_rc_u32_constructor_currently_blocked",
+        "rust_default_rc_u32_constructor_verified",
         "test_default_rc_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'Rc::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_arc_u32_constructor_currently_blocked",
+        "rust_default_arc_u32_constructor_verified",
         "test_default_arc_u32_ok",
-        "error",
-        0,
-        &["unknown return type for function 'Arc::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_box_custom_type_constructor_currently_blocked",
+        "rust_default_box_custom_type_constructor_verified",
         "test_default_custom_type_ensures_in_smart_ptrs",
-        "error",
-        0,
-        &["unknown return type for function 'Box::default'"],
+        "verified",
+        6,
+        &[],
     ),
     (
-        "rust_default_rc_custom_type_constructor_currently_blocked",
+        "rust_default_rc_custom_type_constructor_verified",
         "test_default_custom_type_ensures_in_smart_ptrs",
-        "error",
-        0,
-        &["unknown return type for function 'Rc::default'"],
+        "verified",
+        6,
+        &[],
     ),
     (
-        "rust_default_arc_custom_type_constructor_currently_blocked",
+        "rust_default_arc_custom_type_constructor_verified",
         "test_default_custom_type_ensures_in_smart_ptrs",
-        "error",
-        0,
-        &["unknown return type for function 'Arc::default'"],
+        "verified",
+        6,
+        &[],
     ),
     (
-        "rust_default_phantom_constructor_currently_blocked",
+        "rust_default_phantom_constructor_verified",
         "test_default_phantom_ok",
-        "error",
-        0,
-        &["unknown return type for function 'PhantomData::default'"],
+        "verified",
+        5,
+        &[],
     ),
     (
-        "rust_default_generic_instantiation_currently_blocked",
+        "rust_default_generic_instantiation_verified",
+        "test_default_generic_instantiation",
+        "error",
+        5,
+        &["bodiless call repeated"],
+    ),
+    (
+        "rust_default_trait_inference_wrong_counterexample",
+        "test_default_u32_wrong",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_str_associated_constructor_wrong_counterexample",
+        "test_default_str_ok",
+        "counterexample",
+        2,
+        &[],
+    ),
+    (
+        "rust_default_string_constructor_wrong_counterexample",
+        "test_default_string_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_vec_deque_constructor_wrong_counterexample",
+        "test_default_vec_deque_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_box_u32_constructor_wrong_counterexample",
+        "test_default_box_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_box_vec_u32_constructor_wrong_counterexample",
+        "test_default_box_vec_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_rc_u32_constructor_wrong_counterexample",
+        "test_default_rc_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_arc_u32_constructor_wrong_counterexample",
+        "test_default_arc_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_box_custom_type_constructor_wrong_counterexample",
+        "test_default_custom_type_ensures_in_smart_ptrs",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_phantom_constructor_wrong_counterexample",
+        "test_default_phantom_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_generic_instantiation_wrong_counterexample",
+        "test_default_generic_instantiation",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "upstream_test_default_u32_ok_verified",
+        "test_default_u32_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_u32_wrong_counterexample",
+        "test_default_u32_wrong",
+        "counterexample",
+        2,
+        &[],
+    ),
+    (
+        "upstream_test_default_bool_ok_verified",
+        "test_default_bool_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_bool_wrong_counterexample",
+        "test_default_bool_wrong",
+        "counterexample",
+        2,
+        &[],
+    ),
+    (
+        "upstream_test_default_f32_ok_verified",
+        "test_default_f32_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_f64_ok_verified",
+        "test_default_f64_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_f64_wrong_counterexample",
+        "test_default_f64_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "upstream_test_default_str_ok_verified",
+        "test_default_str_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_option_u32_ok_verified",
+        "test_default_option_u32_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_option_u32_wrong_counterexample",
+        "test_default_option_u32_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "upstream_test_default_phantom_ok_verified",
+        "test_default_phantom_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_tuple2_ok_verified",
+        "test_default_tuple2_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_tuple2_wrong_counterexample",
+        "test_default_tuple2_ok",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "upstream_test_default_tuple3_ok_verified",
+        "test_default_tuple3_ok",
+        "verified",
+        7,
+        &[],
+    ),
+    (
+        "upstream_test_default_tuple3_wrong_counterexample",
+        "test_default_tuple3_ok",
+        "counterexample",
+        2,
+        &[],
+    ),
+    (
+        "rust_default_custom_type_spec_mk_verified",
+        "test_default_custom_type_spec",
+        "verified",
+        6,
+        &[],
+    ),
+    (
+        "rust_default_custom_type_spec_test_verified",
+        "test_default_custom_type_spec",
+        "verified",
+        9,
+        &[],
+    ),
+    (
+        "rust_default_custom_type_spec_wrong_counterexample",
+        "test_default_custom_type_spec",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_custom_type_ensures_in_smart_ptrs_verified",
+        "test_default_custom_type_ensures_in_smart_ptrs",
+        "verified",
+        10,
+        &[],
+    ),
+    (
+        "rust_default_custom_type_ensures_in_smart_ptrs_wrong_counterexample",
+        "test_default_custom_type_ensures_in_smart_ptrs",
+        "counterexample",
+        5,
+        &[],
+    ),
+    (
+        "rust_default_generic_mk_reflection_currently_blocked",
         "test_default_generic_instantiation",
         "error",
         0,
-        &["unknown return type for function 'T::default'"],
+        &[
+            "Failed to lower obligation 'postcondition'",
+            "unsupported expression `T::default` in specification context",
+        ],
+    ),
+    (
+        "rust_default_string_is_ascii_currently_blocked",
+        "test_default_string_ok",
+        "error",
+        0,
+        &[
+            "Failed to lower obligation 'assertion_1'",
+            "unsupported method `is_ascii()",
+        ],
     ),
 ];
 

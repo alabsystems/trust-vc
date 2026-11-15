@@ -152,7 +152,10 @@ fn g(i: int, a: int) {
 }
 
 /// Guarded `nat` subtraction (`a - b` with `a >= b`) verifies under nat
-/// semantics with no spurious underflow obligation.
+/// semantics with no spurious underflow obligation. `a - b` is an `int` (§5b
+/// rule 6: a `nat` result binds only a value a `nat` holds), so the function
+/// returns it `as nat`, as Verus requires; returned bare, it is refused
+/// (`integer_typing_nat_bindings.rs`).
 #[test]
 fn spec_nat_subtraction_guarded_no_underflow() {
     let src = r#"
@@ -160,7 +163,7 @@ use trust_vc_types::nat;
 #[trust_vc::requires(a >= b)]
 #[trust_vc::ensures(result + b == a)]
 fn f(a: nat, b: nat) -> nat {
-    a - b
+    (a - b) as nat
 }
 "#;
     assert_verified("spec_nat_subtraction_guarded", src, "f");

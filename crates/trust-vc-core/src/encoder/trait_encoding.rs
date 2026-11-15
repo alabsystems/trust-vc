@@ -127,7 +127,7 @@ impl AYEncoder {
             })?
             .clone();
 
-        let (box_fn, unbox_fn) = self
+        let (box_fn, _unbox_fn) = self
             .registries
             .poly_context
             .ensure_box_unbox(&mut self.solver, &impl_decl.concrete_type)?;
@@ -225,7 +225,6 @@ impl AYEncoder {
                 concrete_fn_name,
                 inst_sig.as_ref(),
                 &box_fn,
-                &unbox_fn,
             );
             if let Err(err) = result {
                 if declared_generic {
@@ -276,6 +275,22 @@ impl AYEncoder {
                 continue;
             }
 
+            // CONTRACT WINS (2026-09-11): a default method that carries an
+            // explicit contract publishes ONLY that contract to callers (the
+            // postcondition axiom asserted by `assert_trait_postconditions`);
+            // its body is checked AGAINST the contract by the conformance lane
+            // and is never published as a second, definitional axiom. The two
+            // disagree exactly when the conformance obligation is refuted, and
+            // publishing both made every function in the file vacuous
+            // (measured: "Assumptions are contradictory" for an unrelated
+            // `fn a() -> u8 { 20u8 }` beside a `ensures(result == true)`
+            // default returning `false` — the whole returns_postcondition port
+            // was unverifiable). A contract-free default keeps its body axiom:
+            // there the body IS the only spec, as before.
+            if !method.ensures.is_empty() || !method.default_ensures.is_empty() {
+                continue;
+            }
+
             // A default body whose SHAPE the axiom fragment cannot express —
             // proof-macro statements (`trust_vc::assert!` is "macro in block"
             // to the spec lowering) or constructs the minimal trait-contract
@@ -312,16 +327,17 @@ impl AYEncoder {
     }
 
     /// Builds and asserts ONE per-impl linking axiom
-    /// `∀vars. {Trait__m(self_poly, …)} Trait__m(self_poly, …) == concrete_fn(…)`.
+    /// `∀(self:T, vars). {Trait__m(Box_T(self), …)} Trait__m(Box_T(self), …) == concrete_fn(self, …)`.
     ///
     /// `inst_sig` is `Some` exactly for a parameterized-trait method whose
     /// signature the impl's trait type args instantiate (trait-side
     /// A2-generic): each bare-TypeParam position binds a CONCRETE-sorted
     /// variable that crosses a `Box_{inst}` bridge on the UF side and passes
     /// raw to the concrete fn; a bridged return wraps the concrete result in
-    /// `Box_{inst}`. The bridge terms sit INSIDE the trigger, so E-matching
-    /// fires only for this instantiation's ground terms — the axiom-scoping
-    /// that keeps distinct instantiations and impls apart.
+    /// `Box_{inst}`. The boxed receiver and the bridge terms are part of the
+    /// axiom itself, not only of its trigger, so the axiom states nothing
+    /// about a receiver or an argument of another type: that is what keeps
+    /// distinct instantiations and impls apart.
     fn emit_impl_linking_axiom(
         &mut self,
         impl_decl: &TraitImplDecl,
@@ -329,7 +345,6 @@ impl AYEncoder {
         concrete_fn_name: &str,
         inst_sig: Option<&crate::trait_instantiation::InstantiatedTraitMethodSig>,
         box_fn: &FuncDecl,
-        unbox_fn: &FuncDecl,
     ) -> TrustVcResult<()> {
         let trait_method_fn = self
             .registries
@@ -382,22 +397,29 @@ impl AYEncoder {
             })?
             .clone();
 
-        let poly_sort = sort_for_type(&TrustVcType::Poly);
-
-        // Use Poly-sorted bound variable for self — ay-dpll E-matching
-        // only fires triggers containing uninterpreted-sort variables,
-        // not Bool-sorted ones. We use Unbox_T to recover the concrete
-        // value for the concrete function call.
-        let self_poly = self.solver.fresh_var(
+        // `self` ranges over the impl's OWN type and reaches the trait UF as
+        // `Box_T(self)`, so the axiom speaks only of receivers that are boxed
+        // `T` values. A `Poly` receiver unboxed with `Unbox_T` on the concrete
+        // side would instead claim that EVERY receiver, a second impl's and a
+        // generic caller's included, dispatches to this impl. That claim is
+        // false as soon as another impl behaves differently, and a solver that
+        // adopts the axiom as a definition of the trait UF uses it: two unit
+        // struct impls with different postconditions then prove `false`, and a
+        // caller comparing the two impls' results verifies a false equality.
+        let self_var = self.solver.fresh_var(
             &format!(
                 "__impl_{}_{}_self",
                 sanitize_symbol(&impl_decl.trait_name),
                 sanitize_symbol(trait_method_name)
             ),
-            poly_sort,
+            sort_for_type(&impl_decl.concrete_type),
         );
+        let boxed_self = self
+            .solver
+            .try_apply(box_fn, &[self_var])
+            .map_err(|e| trait_encoding_error(format!("Box application failed: {e}")))?;
 
-        let mut bound_vars = vec![self_poly];
+        let mut bound_vars = vec![self_var];
         // UF-side (possibly Box-bridged) and concrete-fn-side (always raw)
         // argument terms, aligned per non-self position.
         let mut trait_side_args = Vec::new();
@@ -450,8 +472,8 @@ impl AYEncoder {
             }
         }
 
-        // LHS: Trait__method(self_poly, trait_side_args...)
-        let mut trait_args = vec![self_poly];
+        // LHS: Trait__method(Box_T(self), trait_side_args...)
+        let mut trait_args = vec![boxed_self];
         trait_args.extend(trait_side_args.iter().copied());
 
         let lhs = self
@@ -459,13 +481,8 @@ impl AYEncoder {
             .try_apply(&trait_method_fn, &trait_args)
             .map_err(|e| trait_encoding_error(format!("Trait method application failed: {e}")))?;
 
-        // RHS: concrete_fn(Unbox_T(self_poly), concrete_side_args...)
-        let unboxed_self = self
-            .solver
-            .try_apply(unbox_fn, &[self_poly])
-            .map_err(|e| trait_encoding_error(format!("Unbox application failed: {e}")))?;
-
-        let mut concrete_args = vec![unboxed_self];
+        // RHS: concrete_fn(self, concrete_side_args...)
+        let mut concrete_args = vec![self_var];
         concrete_args.extend(concrete_side_args.iter().copied());
 
         let concrete_result = self
@@ -494,7 +511,7 @@ impl AYEncoder {
             concrete_result
         };
 
-        // Assert: ∀(p:Poly, params). {Trait__method(p, ...)} lhs == rhs
+        // Assert: ∀(self:T, params). {Trait__method(Box_T(self), ...)} lhs == rhs
         let eq = self
             .solver
             .try_eq(lhs, rhs)

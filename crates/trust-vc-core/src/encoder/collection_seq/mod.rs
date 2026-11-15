@@ -42,29 +42,18 @@ impl<'a> AstExpressionParser<'a> {
         }
         let expected_signed = !elem_ty.is_unsigned();
 
-        if let Some((value_width, value_signed)) = self.term_widths.get(&value).copied() {
+        // A bit-vector value must arrive at the element type's width (it used
+        // to be widened by a `term_widths` sign, or truncated).
+        if let Some(value_width) = self.bv_term_width(value) {
             if value_width == expected_width {
                 return Ok(value);
             }
-            if value_width < expected_width {
-                let extended =
-                    self.extend_term(value, expected_width - value_width, value_signed)?;
-                self.term_widths
-                    .insert(extended, (expected_width, value_signed));
-                return Ok(extended);
-            }
-            let truncated = self
-                .solver
-                .try_bvextract(value, expected_width - 1, 0)
-                .map_err(|e| {
-                    format!(
-                        "Failed to narrow BV{} to BV{} for sequence result coercion: {}",
-                        value_width, expected_width, e
-                    )
-                })?;
-            self.term_widths
-                .insert(truncated, (expected_width, value_signed));
-            return Ok(truncated);
+            return Err(format!(
+                "a {value_width}-bit value cannot be taken as a `{}` sequence element: its own \
+                 type is not known here, so it is neither widened nor narrowed",
+                elem_ty.to_type_string()
+            )
+            .into());
         }
 
         if self.int_mode() {

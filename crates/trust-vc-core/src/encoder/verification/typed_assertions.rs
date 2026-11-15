@@ -54,6 +54,11 @@ fn shared_bv_reuse_batch_limit() -> usize {
     }
 }
 
+/// The name `vc_extraction` gives the single `result == <return expression>`
+/// binding it appends to a function's obligations. It is an EXIT-point fact:
+/// see [`forward_visible_assumptions`].
+pub(super) const RETURN_BINDING_ASSUMPTION: &str = "return_value";
+
 /// Program point of a straight-line body obligation, derived from its name.
 ///
 /// Body asserts/assumes are named `assertion_{N}` / `assumption_{N}` by
@@ -92,11 +97,12 @@ fn shared_bv_reuse_batch_limit() -> usize {
 /// never excuse an earlier arithmetic panic).
 ///
 /// Every other obligation (the function `postcondition`, `precondition` /
-/// requires, the call-site `__call_requires_*`, `return_value`, loop
-/// invariants/ensures, …) has a different name shape and returns `None` — those
-/// are not subject to forward-only ordering and stay unconditionally visible.
-/// Part of the body `assume!` scope fix and its call-`ensures` / post-loop /
-/// loop-body-arithmetic siblings.
+/// requires, `return_value`, loop invariants/ensures, …) has a different name
+/// shape and returns `None` — those are not forward-ordered BY A PROGRAM POINT.
+/// `return_value` is nonetheless forward-ordered, by NAME, in
+/// [`forward_visible_assumptions`]: it is an exit-point fact with no point to
+/// carry. Part of the body `assume!` scope fix and its call-`ensures` /
+/// post-loop / loop-body-arithmetic siblings.
 fn body_program_point(name: &str) -> Option<usize> {
     if let Some(rest) = name
         .strip_prefix("__call_ensures_pp")
@@ -144,12 +150,29 @@ fn body_program_point(name: &str) -> Option<usize> {
 /// later one — otherwise a textually-later `assume!(P)` would retroactively
 /// satisfy an earlier `assert!(P)` (`assert!(b); assume!(b)` → false Verified).
 ///
+/// The function's RETURN BINDING is an EXIT-point fact, so it is forward-ordered
+/// too, after every body program point. `return_value` is the un-stamped
+/// `result == <return expression>` assume that `vc_extraction` appends once per
+/// function; it describes the state at function exit and can never be
+/// established at a body point. Keeping it visible there was not a false-verify
+/// hole (a body obligation cannot name `result`, and the binding alone is
+/// satisfiable by construction) but it dragged the return expression's terms
+/// into every body solve — and when the returned expression is a CALL returning
+/// an integer, that is a BV-sorted uninterpreted application sitting next to a
+/// spec clause's `Int` arithmetic. ay answers `unknown (incomplete)` on that
+/// QF_UFBVLIA mixture, so `#[requires(z + 1u32 < z)] fn h(z: u32) -> u32` called
+/// as `fn f(w: u32) -> u32 { h(w) }` lost its COUNTEREXAMPLE and reported an
+/// incompleteness instead. Measured at the merge base with an explicitly
+/// `int`-typed clause (`z as int + 1int < z as int`), which answers the same
+/// `incomplete` there: the mixture is pre-existing and the spec-arithmetic
+/// reading only routed the ordinary `z + 1u32` shape into it.
+///
 /// Returns `Some(filtered)` when at least one assumption is dropped, and `None`
 /// when nothing is removed — the overwhelmingly common case (no out-of-order
 /// assume), in which the caller leaves the slice byte-identical and the shared-BV
 /// fast path is fully preserved. Assumptions with no body program point
-/// (requires/precondition, return_value, helper-call ensures, loop/post-loop
-/// facts, …) are always retained, so non-`assume!` behavior is unchanged.
+/// (requires/precondition, helper-call ensures, loop/post-loop facts, …) are
+/// always retained, so non-`assume!` behavior is unchanged.
 fn forward_visible_assumptions<'a>(
     assumptions: &[&'a PreparedObligation],
     assertion_name: &str,
@@ -163,19 +186,23 @@ fn forward_visible_assumptions<'a>(
     let filtered: Vec<&'a PreparedObligation> = assumptions
         .iter()
         .copied()
-        .filter(|assumption| match body_program_point(&assumption.name) {
-            // A body assume at the same-or-later program point is not yet
-            // established when this assert is checked. (Distinct obligations
-            // never share a point, so this only ever drops strictly-later ones.)
-            Some(assume_point) => {
-                if assume_point >= assert_point {
+        .filter(|assumption| {
+            // The return binding is established at function EXIT, strictly after
+            // every body program point — see the note above.
+            if assumption.name == RETURN_BINDING_ASSUMPTION {
+                removed = true;
+                return false;
+            }
+            match body_program_point(&assumption.name) {
+                // A body assume at the same-or-later program point is not yet
+                // established when this assert is checked. (Distinct obligations
+                // never share a point, so this only ever drops strictly-later ones.)
+                Some(assume_point) if assume_point >= assert_point => {
                     removed = true;
                     false
-                } else {
-                    true
                 }
+                Some(_) | None => true,
             }
-            None => true,
         })
         .collect();
     removed.then_some(filtered)
@@ -271,6 +298,7 @@ pub(super) fn verify_regular_assertions(
                         Some(false) => {
                             let result = VerifyResult::Counterexample {
                                 obligation_name: assertion.name.clone(),
+                                location: assertion.location.clone(),
                                 model: Some(
                                     "by(compute): expression evaluates to false".to_string(),
                                 ),
@@ -381,6 +409,7 @@ pub(super) fn verify_regular_assertions(
         if closed_ground_datatype_goal_computes_false(slices, assertion) {
             let result = VerifyResult::Counterexample {
                 obligation_name: assertion.name.clone(),
+                location: assertion.location.clone(),
                 model: Some(
                     "concrete datatype refutation: closed ground goal evaluates to false"
                         .to_string(),
@@ -445,8 +474,15 @@ pub(super) fn verify_regular_assertions(
                         // candidates drops to the per-assertion fallback
                         // (which owns the demand-inline retry). See
                         // `unknown_should_fall_back_to_demand_inline`.
+                        // Trait-prune fall-through (2026-09-11): a shared-lane
+                        // Unknown in a trait-bearing context drops to the
+                        // focused fallback, which prunes the traits the goal
+                        // cannot reach. See
+                        // `shared_unknown_should_fall_back_to_focused`.
                         if !super::assertion::unknown_should_fall_back_to_demand_inline(
                             slices, assertion, &outcome,
+                        ) && !super::assertion_bv_reuse::shared_unknown_should_fall_back_to_focused(
+                            slices, &outcome,
                         ) {
                             if let Some(result) = finish_reported_regular_assertion(
                                 step,
@@ -471,6 +507,8 @@ pub(super) fn verify_regular_assertions(
                         shared_bv_reuse_count = 0;
                         if !super::assertion::unknown_should_fall_back_to_demand_inline(
                             slices, assertion, &outcome,
+                        ) && !super::assertion_bv_reuse::shared_unknown_should_fall_back_to_focused(
+                            slices, &outcome,
                         ) {
                             if let Some(result) = finish_reported_regular_assertion(
                                 step,
@@ -702,6 +740,7 @@ pub(super) fn reflexive_disequality_refutation(
 ) -> Option<AssertionOutcome> {
     is_syntactic_self_disequality(&assertion.expr).then(|| AssertionOutcome::Counterexample {
         obligation_name: assertion.name.clone(),
+        location: assertion.location.clone(),
         model: Some("reflexive disequality `a != a` is false (hypothesis-robust)".to_string()),
         bindings: Vec::new(),
     })
@@ -823,6 +862,7 @@ fn finish_regular_assertion_step(
         Ok(AssertionOutcome::Verified) if is_syntactic_self_disequality(&assertion.expr) => {
             Ok(AssertionOutcome::Counterexample {
                 obligation_name: assertion.name.clone(),
+                location: assertion.location.clone(),
                 model: Some(
                     "reflexive disequality `a != a` is false (hypothesis-robust)".to_string(),
                 ),
@@ -844,6 +884,7 @@ fn finish_regular_assertion_step(
         {
             Ok(AssertionOutcome::Counterexample {
                 obligation_name: assertion.name.clone(),
+                location: assertion.location.clone(),
                 model: Some(
                     "concrete datatype refutation: closed ground (dis)equality goal \
                      evaluates to false"
@@ -930,6 +971,7 @@ fn finish_regular_assertion_step(
             Some(false) if goal_is_closed_ground(slices) => {
                 return Some(VerifyResult::Counterexample {
                     obligation_name: assertion.name.clone(),
+                    location: assertion.location.clone(),
                     model: Some(
                         "concrete datatype refutation: closed ground goal evaluates to false"
                             .to_string(),
@@ -996,6 +1038,12 @@ mod forward_ordering_tests {
         // see the loop's strictly-later normal-exit fact (which would vacuously
         // discharge a genuine in-body overflow).
         assert_eq!(body_program_point("overflow_check_3"), Some(3));
+        // The unreachable-after-infinite-loop marker keeps the post-loop point
+        // and carries a suffix (`take_while` ignores it).
+        assert_eq!(
+            body_program_point("post_loop_assumption_pp9_unreachable"),
+            Some(9)
+        );
         assert_eq!(body_program_point("index_bounds_check_5"), Some(5));
         // A call's ensures carries a reserved straight-line program point so it
         // orders like a body `assume!` placed at the call site.
@@ -1049,8 +1097,9 @@ mod forward_ordering_tests {
 
     #[test]
     fn untagged_assumptions_are_never_dropped() {
-        // requires/precondition + return_value remain visible regardless of the
-        // assert's program point; only the strictly-later body assume is dropped.
+        // requires/precondition remains visible regardless of the assert's
+        // program point; the strictly-later body assume is dropped, and so is
+        // the EXIT-point return binding (see the next two tests).
         let precondition = assumption("precondition");
         let return_value = assumption("return_value");
         let later = assumption("assumption_5");
@@ -1058,6 +1107,44 @@ mod forward_ordering_tests {
         let filtered = forward_visible_assumptions(&assumptions, "assertion_2")
             .expect("the later body assume must be filtered");
         let names: Vec<&str> = filtered.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(names, vec!["precondition", "return_value"]);
+        assert_eq!(names, vec!["precondition"]);
+    }
+
+    /// The return binding is established at function EXIT, so no body-point
+    /// obligation may see it — including a call-site `requires` discharge,
+    /// which is where its absence is measurable: the returned call's BV-sorted
+    /// uninterpreted result sitting next to a spec clause's `Int` arithmetic
+    /// made ay answer `unknown (incomplete)` and cost the user a
+    /// counterexample.
+    #[test]
+    fn the_return_binding_is_dropped_for_a_body_point_obligation() {
+        let return_value = assumption("return_value");
+        let assumptions: Vec<&PreparedObligation> = vec![&return_value];
+        for tagged in [
+            "assertion_0",
+            "__call_requires_pp0_h_0_0",
+            "overflow_check_3",
+        ] {
+            let filtered = forward_visible_assumptions(&assumptions, tagged)
+                .unwrap_or_else(|| panic!("{tagged} must not see the exit-point return binding"));
+            assert!(
+                filtered.is_empty(),
+                "{tagged} must not see the exit-point return binding"
+            );
+        }
+    }
+
+    /// LIAR TWIN: an obligation checked AT exit — a postcondition, which is the
+    /// only obligation that may name `result` — still sees the binding. Without
+    /// this the previous test would be satisfiable by deleting the binding
+    /// outright, which would make every `ensures(result == …)` unprovable.
+    #[test]
+    fn the_return_binding_is_still_visible_to_the_postcondition() {
+        let return_value = assumption("return_value");
+        let assumptions: Vec<&PreparedObligation> = vec![&return_value];
+        assert!(
+            forward_visible_assumptions(&assumptions, "postcondition").is_none(),
+            "a postcondition is checked at function exit and must keep the return binding"
+        );
     }
 }

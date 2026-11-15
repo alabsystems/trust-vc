@@ -78,7 +78,7 @@ pub const CONTRIB_RS_FAIL_CLOSED_ERROR_PATTERNS: &[ContribRsFailClosedErrorPatte
     ),
     (
         "contrib_auto_spec_mut_ref_body_fails_closed",
-        &["assignment through a dereferenced reference is unsupported"],
+        &["dereference expressions are not supported in verification syntax"],
     ),
 ];
 

@@ -27,7 +27,7 @@ fn test1_fails() {
     x = 60;
     let x = 7;
     let _ = x;
-    trust_vc::assert!(false);
+    trust_vc::assert!(false); // FAILS
 }
 
 #[trust_vc::ensures(true)]
@@ -54,7 +54,7 @@ fn test2_fails() {
         let _ = x;
     }
     trust_vc::assert!(x == 7);
-    trust_vc::assert!(false);
+    trust_vc::assert!(false); // FAILS
 }
 
 #[trust_vc::ensures(true)]
@@ -83,7 +83,7 @@ fn test3_fails() {
     };
     trust_vc::assert!(x == 7);
     trust_vc::assert!(y == 50);
-    trust_vc::assert!(false);
+    trust_vc::assert!(false); // FAILS
 }
 
 #[trust_vc::ensures(true)]
@@ -118,7 +118,7 @@ fn test4_fails() {
     };
     trust_vc::assert!(x == 7);
     trust_vc::assert!(y == 105);
-    trust_vc::assert!(false);
+    trust_vc::assert!(false); // FAILS
 }
 
 #[trust_vc::ensures(true)]
@@ -151,5 +151,5 @@ fn test5_fails() {
         x
     };
     trust_vc::assert!(x == 105);
-    trust_vc::assert!(false);
+    trust_vc::assert!(false); // FAILS
 }

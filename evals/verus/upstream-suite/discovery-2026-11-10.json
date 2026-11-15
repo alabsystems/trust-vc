@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "upstream_revision": "a40d57c73650cd3648b09386bfdb96ab5c270626",
+  "discovered_utc": "2026-11-10",
+  "target": "aarch64-apple-darwin",
+  "trust_revision": "29ebb403de7a102850d6cb10a62d5cc3baf723ed",
+  "maintained_runner_revision": "d3e026dfb83a682fed9f8571c334d88252bef54e",
+  "discovery_method": "Each genuine test executable directly listed with -Z unstable-options --format json --list; maintained parse_discovery accepted only complete successful output. Six closed second-root lists joined with 129 fresh first-root lists.",
+  "inventory": "discovery-2026-11-10-cases.json",
+  "inventory_sha256": "74e11c73290601c70faffa4b8b919b44cd6b1031e84902f870ed4d05dcd825c6",
+  "registered_cases": 4261,
+  "test_harnesses": 135,
+  "ignored_cases_retained": 80,
+  "manifest_roots": {
+    "source/rust_verify_test/Cargo.toml": {
+      "harnesses": 129,
+      "registered_cases": 4213
+    },
+    "source/cargo-verus/Cargo.toml": {
+      "harnesses": 6,
+      "registered_cases": 48
+    }
+  },
+  "first_root_cargo_cases_retained": 19,
+  "all_direct_children_waited": true,
+  "owner_exit": 0,
+  "runner_exit": 0,
+  "all_initial_final_guards_passed": true,
+  "owner_descendants_remaining": 0,
+  "second_root_discovery_receipt_sha256": "30e92b618af1307bd5e3123035cb0a68b418d2ad2e0892b379b9b8e5c2a95214",
+  "combined_discovery_receipt_sha256": "8e268aee55a927654f4505e1b4d58a2d19368e8339e8d29b69c59760caf549fc",
+  "body_results": null,
+  "full_suite_pass_claim": false,
+  "other_target_and_feature_configurations": "Remain in scope and require their own discovery and execution.",
+  "native_sdk_qualification": false,
+  "link_context": "Harnesses compiled using the previously recorded staged Darwin linker; discovery does not qualify a genuine SDK build.",
+  "historical_comparison_selection": 4114,
+  "historical_selection_defines_completion": false
+}

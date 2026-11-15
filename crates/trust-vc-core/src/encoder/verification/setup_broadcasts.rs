@@ -84,6 +84,7 @@ pub(super) fn register_setup_broadcasts(
     prune_plan: &PrunePlan,
     var_terms: &[Term],
     assertion_focus: Option<&PreparedObligation>,
+    use_int_for_measures: bool,
 ) -> TrustVcResult<()> {
     // FORWARD-ONLY snapshot of the file-path broadcast groups active at the
     // current goal's body position. Session-path activation stays in
@@ -117,6 +118,17 @@ pub(super) fn register_setup_broadcasts(
 
     for broadcast in broadcast_assumptions {
         if !prune_plan.is_broadcast_reachable(broadcast) {
+            continue;
+        }
+        // THE READING GATE (see `arith_reading`): a broadcast axiom proved in
+        // one arithmetic universe is not an axiom of the other.
+        // A broadcast axiom is a QUANTIFIED fact whose guarded form would have
+        // to carry the guard inside the binder; this lane drops rather than
+        // guards.
+        if !crate::encoder::verification::arith_reading::fact_crosses_into(
+            broadcast,
+            crate::encoder::verification::arith_reading::encoder_reading(use_int_for_measures),
+        ) {
             continue;
         }
         if let Some(ref group) = broadcast.broadcast_group {

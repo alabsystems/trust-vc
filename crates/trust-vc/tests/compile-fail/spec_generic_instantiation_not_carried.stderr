@@ -1,0 +1,35 @@
+error: generic instantiation not carried: spec function `rsz` declares generic parameter(s) `T` that no value parameter carries into its solver term, and its body axiom is not published for every use (it is recursive with no `decreases` measure, so the axiom is suppressed), so calls at different instantiations would collapse into one uninterpreted application; TrustVc fails closed
+  --> tests/compile-fail/spec_generic_instantiation_not_carried.rs:18:1
+   |
+18 | fn rsz<T>(n: u64) -> u64 {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: generic instantiation not carried: spec function `csz` declares generic parameter(s) `T` that no value parameter carries into its solver term, and its body axiom is not published for every use (it is opaque), so calls at different instantiations would collapse into one uninterpreted application; TrustVc fails closed
+  --> tests/compile-fail/spec_generic_instantiation_not_carried.rs:29:1
+   |
+29 | fn csz<T>() -> u64 {
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `trust_mc`
+  --> tests/compile-fail/spec_generic_instantiation_not_carried.rs:35:1
+   |
+35 | #[trust_vc::spec]
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 34 more
+   = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `trust_vc::spec` crate for guidance on how handle this unexpected cfg
+   = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+   = note: this warning originates in the attribute macro `trust_vc::spec` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition name: `trust_mc`
+  --> tests/compile-fail/spec_generic_instantiation_not_carried.rs:43:1
+   |
+43 | #[trust_vc::spec]
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = note: using a cfg inside a attribute macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `trust_vc::spec` crate for guidance on how handle this unexpected cfg
+   = note: see the Trust trustc check-cfg Cargo documentation for more information about checking conditional configuration
+   = note: this warning originates in the attribute macro `trust_vc::spec` (in Nightly builds, run with -Z macro-backtrace for more info)

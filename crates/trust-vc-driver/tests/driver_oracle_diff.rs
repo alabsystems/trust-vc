@@ -28,13 +28,12 @@
 //   (c) an out-of-fragment construct (a loop) returns UnsupportedContract —
 //       fail-closed, never a fabricated verdict.
 //
-// Feature-gated: this whole file is empty in the default (no-feature) build, so
-// `cargo test` on stable is unaffected. Run via
-// `scripts/build-trust-vc-driver.sh test`.
+// Feature-gated: this whole file is empty in the default (no-feature) build.
+// Run via `targo --unverified test -p trust-vc-driver --features rustc-driver`.
 #![cfg(feature = "rustc-driver")]
 // Linking the feature-on `trust-vc-driver` lib pulls in `rustc_driver`, which the
-// linking crate (this test binary) must opt into; the build script supplies
-// `-Cprefer-dynamic` + `RUSTC_BOOTSTRAP=1` so the dynamic compiler libs resolve.
+// linking crate (this test binary) must opt into; build.rs bakes the rpath to
+// the compiler's lib dir so the dynamic compiler libs resolve.
 #![cfg_attr(feature = "rustc-driver", feature(rustc_private))]
 
 use trust_vc_driver::driver::{self, DriverError, DriverResult};
@@ -366,16 +365,9 @@ fn run_driver() -> Vec<DriverResult> {
     let path = dir.join("oracle_src.rs");
     std::fs::write(&path, SOURCE).expect("write source");
 
-    let sysroot = {
-        let out = std::process::Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .expect("run rustc --print sysroot");
-        String::from_utf8(out.stdout)
-            .expect("utf8 sysroot")
-            .trim()
-            .to_string()
-    };
+    // The sysroot of the compiler this driver links (baked in by build.rs),
+    // not whatever `rustc` PATH carries.
+    let sysroot = env!("VC_DRIVER_COMPILER_SYSROOT").to_string();
 
     let args = vec![
         "trust-vc-driver".to_string(),

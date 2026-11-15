@@ -235,7 +235,7 @@ fn assertby_test() {
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn assertby_test_fail1() {
-    trust_vc::assert_by!(f1(3int) > 4int, {
+    trust_vc::assert_by!(f1(3int) > 4int, { // FAILS
         trust_vc::reveal!(f1);
     });
 }
@@ -255,7 +255,7 @@ fn assertby_test_fail2() {
     trust_vc::assert_by!(f1(3int) > 3int, {
         trust_vc::reveal!(f1);
     });
-    trust_vc::assert!(f1(3int) == 4int);
+    trust_vc::assert!(f1(3int) == 4int); // FAILS
 }
 
 // ===========================================================================
@@ -331,7 +331,7 @@ fn forallstmt_proof_var_allowed_as_spec(#[trust_vc::proof] x: bool) {
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn forallstmt_test_fail1() {
-    trust_vc::assert_forall_by!(|x: int| f1(x) < x, {
+    trust_vc::assert_forall_by!(|x: int| f1(x) < x, { // FAILS
         trust_vc::reveal!(f1);
     });
 }
@@ -357,7 +357,7 @@ fn forallstmt_test_fail2() {
     trust_vc::assert_forall_by!(|x: int| f1(x) > x, {
         trust_vc::reveal!(f1);
     });
-    trust_vc::assert!(f1(3int) == 4int);
+    trust_vc::assert!(f1(3int) == 4int); // FAILS
 }
 
 // ===========================================================================
@@ -405,7 +405,7 @@ fn forallstmt2_test_fails1() {
     trust_vc::assert_forall_by!(assert forall|x: int| 0int <= x implies 1int <= f1(x) by {
         trust_vc::reveal!(f1);
     });
-    trust_vc::assert!(f1(-3int) > 0int);
+    trust_vc::assert!(f1(-3int) > 0int); // FAILS
 }
 
 // ===========================================================================
@@ -416,7 +416,7 @@ fn forallstmt2_test_fails1() {
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn forallstmt2_test_fails2() {
-    trust_vc::assert_forall_by!(|x: int| 1int <= f1(x), {
+    trust_vc::assert_forall_by!(|x: int| 1int <= f1(x), { // FAILS
         trust_vc::reveal!(f1);
     });
     trust_vc::assert!(f1(3int) > 0int);
@@ -478,7 +478,7 @@ fn forallstmt_typ() {
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn forallstmt_typ_fails() {
-    trust_vc::assert_forall_by!(|x: nat| 1int <= f1(x as int), {});
+    trust_vc::assert_forall_by!(|x: nat| 1int <= f1(x as int), {}); // FAILS
     trust_vc::assert!(f1(3int) > 0int);
 }
 

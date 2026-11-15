@@ -43,7 +43,9 @@ pub(super) fn lower_if(
     let else_ty = infer_expr_type(&else_raw);
     let then_branch = Box::new(coerce_unsuffixed_literal(then_raw, &else_ty));
     let else_branch = Box::new(coerce_unsuffixed_literal(else_raw, &then_ty));
-    let ty = infer_expr_type(&then_branch);
+    // Derived from BOTH branches, never copied from the then-branch: with
+    // `x: u8`, `y: i16`, `if c { x } else { y }` is an integer, not a `u8`.
+    let ty = super::derived_node_type(&then_branch, &else_branch);
     Ok(TrustVcExpr::Ite {
         cond,
         then_branch,

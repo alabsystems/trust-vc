@@ -17,6 +17,7 @@
 //!   - records a possibly-mutating struct receiver in the loop modified set
 //!     (`loop_modified_vars`), and
 //!   - havocs it in the straight-line scoped model (fresh unconstrained symbol),
+//!
 //! while leaving a pure `&self`/by-value reader untouched (NO over-rejection).
 //! An UNKNOWN-signature method on a struct receiver is conservatively treated as
 //! mutating (fail-closed) unless it is a universally-pure read.

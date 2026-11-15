@@ -4,22 +4,29 @@
 # co-development layout).
 #
 # trust-vc builds with the Trust toolchain (rust-toolchain.toml pins
-# channel = "trust"; build it from https://github.com/alabsystems/trust, or
-# register an existing stage2 with scripts/rustup-link-trust.sh). The Trust
-# compiler's verification pass is fail-closed BY DEFAULT and would try to
-# prove panic-freedom for every unit, including third-party build scripts.
-# Building the verifier itself is not a verification run, so the pass is
-# switched off per-unit here — the same off-switch dev builds inject through
-# targo. Verifying trust-vc under its own toolchain remains the separate,
-# explicit `targo trust-vc evidence` lane.
+# channel = "trust"). Install aterm (https://github.com/alabsystems/aterm);
+# atpkg installs Trust and links rustup's `trust` toolchain to it (`aterm pkg
+# install trust` does it by hand; atpkg ships Trust for Apple-silicon macOS
+# only, and no other platform has a public Trust package or supported install
+# path today). That
+# toolchain ships `targo`, and every build names its lane on the command line:
 #
-# rust-toolchain.toml pins the trust channel for every cargo invocation in
-# this repo, so a stock toolchain (which rejects -Ztrust-verify as unknown)
-# never sees these flags.
-
-[build]
-rustflags = ["-Ztrust-verify=off"]
-rustdocflags = ["-Ztrust-verify=off"]
+#   targo --unverified build            # build the verifier tool; no proof claim
+#   targo trust check --allow-l0-gaps   # verify it (the release gate's lane)
+#
+# NO VERIFICATION FLAGS LIVE HERE (2026-09-28), exactly as in the dev tree.
+# This file used to carry `[build] rustflags = ["-Ztrust-verify=off"]` and the
+# matching `rustdocflags`, a blanket off-switch for a consumer typing a
+# lane-less `cargo check`. The Trust repository's rule for consuming repos
+# forbids it: never put `-Ztrust-verify=off` in `build.rustflags` — the key
+# applies to every toolchain, stable rustc rejects the flag outright, and the
+# authenticated Targo lane owns activation and unit scope. It also bought
+# nothing on the lanes above: `targo --unverified` and `targo tippy` put
+# `-Ztrust-verify=off` on every unit themselves (build scripts, libraries,
+# tests and trustdoc), and `targo trust` replaces config build rustflags with
+# its own policy (measured on targo 450403669 with probe crates; see
+# publish/DECISIONS.md, 2026-09-28). publish/transforms.sh T2 now refuses any
+# `-Ztrust` flag in this file.
 
 [net]
 git-fetch-with-cli = true

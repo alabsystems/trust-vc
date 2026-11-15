@@ -16,6 +16,9 @@ use crate::counterexample_names::{self, CounterexampleVarMeta};
 use crate::ir::TrustVcType;
 use crate::verify_result::CounterexampleBinding;
 
+mod functions;
+pub(super) use functions::published_function_bindings;
+
 /// Format a counterexample model with type-aware rendering and source-level names.
 ///
 /// Uses `counterexample_var_meta` to filter hidden variables and display

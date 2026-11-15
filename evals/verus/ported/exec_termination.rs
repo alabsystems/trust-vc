@@ -45,9 +45,9 @@ pub const EXEC_TERMINATION_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "loop_with_break_with_decreases_clause_counterexample",
+        "loop_with_break_with_decreases_clause_verified",
         "loop_with_break_with_decreases_clause",
-        "counterexample",
+        "verified",
         8,
     ),
 ];
@@ -191,14 +191,16 @@ fn loop_with_break_loop_clause_safety_shape_verified(mut i: u64, limit: u64) {
     trust_vc::assert!(limit == 10u64);
 }
 
-// Break-interior non-flat body: the `if { break }` makes the loop body non-flat,
-// so no exact single-iteration transition is captured and the decrease cannot be
-// discharged ⇒ COUNTEREXAMPLE (trust-vc under-verifies a loop Verus accepts; it
-// must not false-verify). `requires(i <= 10)` makes the invariant hold at entry
-// so the CE is on the decrease, not the invariant. De-surrogated.
+// Upstream `loop_with_break_with_decreases_clause` (Verus: Ok). Since 2026-09-10
+// (audit rows 430/431) a break-only `if cond { break; }` keeps the body in the
+// exact-transition lane: the measure `10 - i` is registered (WF1 under the
+// invariant, WF2 under `guard ∧ ¬cond` with the exact `i + 1` transition), the
+// invariant is checked at the break site, and the loop VERIFIES — previously
+// pinned as an under-verifying Counterexample ("trust-vc under-verifies a loop
+// Verus accepts"). `requires(i <= 10)` establishes the invariant at entry.
 #[trust_vc::requires(i <= 10u64)]
 #[trust_vc::ensures(true)]
-fn loop_with_break_with_decreases_clause_counterexample(mut i: u64) {
+fn loop_with_break_with_decreases_clause_verified(mut i: u64) {
     while i < 10u64 {
         trust_vc::invariant!(i <= 10u64);
         trust_vc::loop_decreases!(10u64 - i);

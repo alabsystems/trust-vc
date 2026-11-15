@@ -147,6 +147,12 @@ pub const SEQS_RS_EXPECTED_CASES: &[SeqsExpectedCase] = &[
         1,
     ),
     (
+        "filter_lemmas_retained_membership_exact_subset",
+        "filter_lemmas",
+        "verified",
+        3,
+    ),
+    (
         "auto_extensionality_syntax1",
         "auto_extensionality_syntax1",
         "verified",
@@ -325,6 +331,24 @@ fn test1_seq_map_index() {
     );
 }
 
+// Liar twin of the verified `test1_seq_map_index` row: the SAME `Seq::map` over the SAME
+// push chain with a false mapped value (element 2 is `2*2 + 30 == 34`, not 35). Refuted
+// (Counterexample) and pinned by the suite's `TEST1_SHAPE_LIAR_TWINS`, deliberately NOT a
+// row of the table above: upstream `test1` is `=> Ok(())`, so a mapped `counterexample`
+// row would be a per-case verdict mismatch for the gate.
+#[trust_vc::ensures(true)]
+fn test1_seq_map_wrong_index_value_counterexample() {
+    trust_vc::assert!(
+        Seq::<i32>::empty()
+            .push(10i32)
+            .push(20i32)
+            .push(30i32)
+            .map(SpecFn::new(|(i, a): (usize, i32)| 2i32 * (i as i32) + a))
+            .index(2usize)
+            == 35i32
+    );
+}
+
 #[trust_vc::ensures(true)]
 fn test1_bool_and_repeat_literals() {
     trust_vc::assert!(!Seq::<bool>::empty().push(false).push(true).index(0usize));
@@ -359,6 +383,13 @@ fn test1_bool_and_repeat_literals() {
             .len()
             == 10usize
     );
+}
+
+// Liar twin of the verified `test1_bool_and_repeat_literals` row: the same two-element
+// bool push chain with the element-0 claim flipped (`index(0)` is `false`).
+#[trust_vc::ensures(true)]
+fn test1_bool_wrong_element_counterexample() {
+    trust_vc::assert!(Seq::<bool>::empty().push(false).push(true).index(0usize));
 }
 
 #[trust_vc::ensures(true)]
@@ -400,6 +431,15 @@ fn test1_seq_to_set_absent_variable_counterexample(s: Seq<i32>, needle: i32) {
 fn test1_subrange_add_len(s: Seq<i32>, t: Seq<i32>) {
     trust_vc::assert!(s.subrange(1usize, 4usize).len() == 3usize);
     trust_vc::assert!(s.subrange(1usize, 4usize).add(t).len() == 8usize);
+}
+
+// Liar twin of the verified `test1_subrange_add_len` row: the same two symbolic
+// five-element Seqs with the `subrange(1,4).add(t)` length off by one (3 + 5 == 8, not 9).
+#[trust_vc::requires(s.len() == 5usize)]
+#[trust_vc::requires(t.len() == 5usize)]
+#[trust_vc::ensures(true)]
+fn test1_subrange_add_wrong_len_counterexample(s: Seq<i32>, t: Seq<i32>) {
+    trust_vc::assert!(s.subrange(1usize, 4usize).add(t).len() == 9usize);
 }
 
 #[trust_vc::ensures(true)]
@@ -608,6 +648,13 @@ fn test1_seq_to_set_finite_exact_subset() {
     trust_vc::assert!(trust_vc_types::seq![10i32, 20i32, 30i32].to_set().finite());
 }
 
+// Liar twin of the verified `test1_seq_to_set_finite_exact_subset` row: the same literal
+// Seq's `to_set()` claimed NOT finite.
+#[trust_vc::ensures(true)]
+fn test1_seq_to_set_not_finite_counterexample() {
+    trust_vc::assert!(!trust_vc_types::seq![10i32, 20i32, 30i32].to_set().finite());
+}
+
 #[trust_vc::ensures(true)]
 fn test1_seq_to_set_five_element_absent_member_counterexample() {
     trust_vc::assert!(trust_vc_types::seq![0i32, 10i32, 20i32, 30i32, 40i32]
@@ -653,7 +700,7 @@ fn filter_lemmas_length_bound_exact_subset() {
 }
 
 #[trust_vc::ensures(true)]
-fn filter_lemmas_wrong_length_bound_currently_blocked() {
+fn filter_lemmas_wrong_length_bound_counterexample() {
     trust_vc::assert!(
         trust_vc_types::seq![10i32, 20i32, 30i32, 45i32, 55i32, 70i32]
             .filter(SpecFn::new(|x: i32| x < 40i32))
@@ -775,7 +822,7 @@ fn filter_lemmas_small_filter_to_set_excluded_member_counterexample() {
 }
 
 #[trust_vc::ensures(true)]
-fn filter_lemmas_small_wrong_len_currently_blocked() {
+fn filter_lemmas_small_wrong_len_counterexample() {
     trust_vc::assert!(
         trust_vc_types::seq![10i32, 45i32]
             .filter(SpecFn::new(|x: i32| x < 40i32))
@@ -785,7 +832,7 @@ fn filter_lemmas_small_wrong_len_currently_blocked() {
 }
 
 #[trust_vc::ensures(true)]
-fn filter_lemmas_small_wrong_index_currently_blocked() {
+fn filter_lemmas_small_wrong_index_counterexample() {
     trust_vc::assert!(
         trust_vc_types::seq![45i32, 10i32]
             .filter(SpecFn::new(|x: i32| x < 40i32))
@@ -795,7 +842,7 @@ fn filter_lemmas_small_wrong_index_currently_blocked() {
 }
 
 #[trust_vc::ensures(true)]
-fn filter_lemmas_retained_membership_currently_blocked() {
+fn filter_lemmas_retained_membership_exact_subset() {
     trust_vc::assert!(trust_vc_types::seq![10i32, 20i32, 30i32, 45i32, 55i32, 70i32]
         .filter(SpecFn::new(|x: i32| x < 40i32))
         .contains(10i32));
@@ -808,7 +855,7 @@ fn filter_lemmas_retained_membership_currently_blocked() {
 }
 
 #[trust_vc::ensures(true)]
-fn filter_lemmas_excluded_element_currently_blocked() {
+fn filter_lemmas_excluded_element_counterexample() {
     trust_vc::assert!(trust_vc_types::seq![10i32, 20i32, 30i32, 45i32, 55i32, 70i32]
         .filter(SpecFn::new(|x: i32| x < 40i32))
         .contains(45i32));

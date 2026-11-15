@@ -150,15 +150,15 @@ const UNSUPPORTED_FLAGS: &[(&str, &str)] = &[
     ),
     (
         "--no-verify",
-        "`trust-vc` only verifies — there is nothing to skip. Use `cargo build` to build",
+        "`trust-vc` only verifies — there is nothing to skip. Use `targo --unverified build` to build",
     ),
     (
         "--compile",
-        "`trust-vc` does not build code. Use `cargo build`, then `trust-vc <PATH>` to verify",
+        "`trust-vc` does not build code. Use `targo --unverified build`, then `trust-vc <PATH>` to verify",
     ),
     (
         "--crate-type",
-        "`trust-vc` does not build code. Use `cargo build`, then `trust-vc <PATH>` to verify",
+        "`trust-vc` does not build code. Use `targo --unverified build`, then `trust-vc <PATH>` to verify",
     ),
     (
         "--expand-errors",
@@ -471,8 +471,10 @@ fn help_text() -> String {
     );
     out.push_str("  suggest <FILE>  Suggest annotations for an unannotated function\n");
     out.push_str("  evidence        Generate replacement-parity evidence reports\n");
-    out.push_str("  gate            Run the full local gate (needs cargo, rustfmt, clippy)\n");
-    out.push_str("  fuzz            Run the libfuzzer targets (needs cargo-fuzz)\n\n");
+    out.push_str(
+        "  gate            Run the full local gate (needs targo: fmt, tippy, tests, fuzz smoke)\n",
+    );
+    out.push_str("  fuzz            Run the libfuzzer targets (fuzz/run.sh under targo)\n\n");
     out.push_str("Common options (`trust-vc verify --help` lists all of them):\n");
     out.push_str("  --function <NAME>    Verify one function, by exact name\n");
     out.push_str("  --filter <PATTERN>   Verify functions whose name contains PATTERN\n");

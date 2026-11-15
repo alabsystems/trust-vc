@@ -7,8 +7,13 @@
 //! These tests intentionally keep upstream loops.rs as an unsupported gap. They
 //! pin only stable Rust-valid TrustVc behavior around loop invariants,
 //! normal-exit facts, unmodified/shadowed variable facts, break/continue loop
-//! clauses, current-gap nested-break counterexamples, upstream shape pins, and
-//! fail-closed boundaries for loop_decreases! and old-state loop invariants.
+//! clauses, bare-loop regular invariants over unmodified state (audit row 429,
+//! 2026-09-10), the upstream `example_loop_break` family with invariants and
+//! loop ensures checked at `break` sites (rows 430/431, 2026-09-10), the
+//! Verus-faithful exec-counter overflow and stale-entry-read
+//! refutations for bare loops, current-gap nested-break counterexamples,
+//! upstream shape pins, and fail-closed boundaries for loop_decreases! and
+//! old-state loop invariants.
 
 mod common;
 
@@ -79,7 +84,24 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "example_loop_continue",
         4,
     ),
-    ("loop_break_invariant_except_break", "example_loop_break", 4),
+    (
+        "loop_break_invariant_except_break",
+        "example_loop_break (while slice)",
+        4,
+    ),
+    ("example_loop_break_verified", "example_loop_break", 13),
+    (
+        "example_loop_continue_verified",
+        "example_loop_continue",
+        16,
+    ),
+    (
+        "loop_continue_no_break_test_loop_verified",
+        "loop_continue_no_break test_loop",
+        5,
+    ),
+    ("loop2_ok_verified", "loop2_ok", 8),
+    ("loop2_ok_y_verified", "loop2_ok_y", 8),
     (
         "loop_break_regular_invariant_preserves_unmodified_fact",
         "basic_loop",
@@ -89,6 +111,16 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "loop_labeled_inner_break_regular_invariant_preserves_unmodified_fact",
         "loop2_ok_y unmodified-state subset",
         3,
+    ),
+    (
+        "loop_break_regular_unmodified_invariant_verified",
+        "basic_loop non-tautological invariant (unmodified-state subset)",
+        5,
+    ),
+    (
+        "loop_labeled_inner_break_regular_invariant_verified",
+        "loop2_ok_y non-tautological invariant (unmodified-state subset)",
+        6,
     ),
     (
         "while_nested_inner_break_current_gap_counterexample",
@@ -105,6 +137,40 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "loop_termination_supported / loop_decreases1 boundary",
         9,
     ),
+    // 2026-09-10 (audit row 430): code after a bare loop that no `break` can
+    // leave is unreachable — upstream infinite_loop / loop_infinite2 / loop_infinite2y.
+    ("infinite_loop_verified", "infinite_loop", 3),
+    ("loop_infinite2_verified", "loop_infinite2", 3),
+    ("loop_infinite2y_verified", "loop_infinite2y", 3),
+    // 2026-09-10 (audit row 430): `int`-typed let-local counters lower — upstream basic_loop.
+    ("basic_loop_int_counter_verified", "basic_loop", 4),
+    // 2026-09-10: six more upstream shapes measured and promoted (see the port).
+    (
+        "test_variables_no_effect_nested_verified",
+        "test_variables_no_effect_nested",
+        7,
+    ),
+    ("while_b_ok_verified", "while_b_ok", 4),
+    (
+        "while_to_loop_ensures_verified",
+        "while_to_loop_ensures (Verus rejects only through its while-to-loop conversion)",
+        4,
+    ),
+    // 2026-09-10 (rows 430/431): nested modifying loops summarized — upstream loop_decreases2.
+    (
+        "loop_decreases2_nested_counters_verified",
+        "loop_decreases2 test1",
+        11,
+    ),
+    // 2026-09-10 (row 433): range `for` with only an accumulator invariant — upstream for_loop1 / for_loop2.
+    (
+        "for_loop1_test_loop_peek_verified",
+        "for_loop1 test_loop_peek",
+        9,
+    ),
+    ("for_loop2_test_loop_verified", "for_loop2 test_loop", 10),
+    // 2026-09-11 (row 430): a guard block with flat scalar side effects — upstream complex_while.
+    ("complex_while_exit_values_verified", "complex_while", 11),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
@@ -135,14 +201,90 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
         1,
     ),
     (
-        "loop_break_regular_unmodified_invariant_current_gap_counterexample",
-        "basic_loop non-tautological invariant current TrustVc gap",
+        "loop_break_unbounded_counter_increment_overflow_counterexample",
+        "basic_loop exec-counter overflow at an arbitrary loop head",
+        6,
+    ),
+    (
+        "loop_break_modified_param_forgets_entry_value_counterexample",
+        "test_variables_havoc_basic bare-loop form",
+        4,
+    ),
+    (
+        "example_loop_break_fail1_counterexample",
+        "example_loop_break_fail1",
+        13,
+    ),
+    (
+        "example_loop_break_fail2_counterexample",
+        "example_loop_break_fail2",
+        13,
+    ),
+    (
+        "example_loop_break_fail3_counterexample",
+        "example_loop_break_fail3",
+        10,
+    ),
+    (
+        "example_loop_break_fail4_counterexample",
+        "example_loop_break_fail4",
+        12,
+    ),
+    (
+        "example_loop_continue_fail_counterexample",
+        "example_loop_continue_fail",
+        16,
+    ),
+    (
+        "loop_continue_no_break_fail_beginning_counterexample",
+        "loop_continue_no_break test_fail_beginning",
         3,
     ),
     (
-        "loop_labeled_inner_break_regular_invariant_current_gap_counterexample",
-        "loop2_ok_y non-tautological invariant current TrustVc gap",
-        3,
+        "loop_continue_no_break_fail_at_continue_counterexample",
+        "loop_continue_no_break test_fail_at_continue",
+        5,
+    ),
+    (
+        "loop_continue_no_break_fail_at_end_after_continue_counterexample",
+        "loop_continue_no_break test_fail_at_end_after_continue",
+        6,
+    ),
+    ("loop2_fail1_counterexample", "loop2_fail1", 6),
+    ("loop2_fail2_counterexample", "loop2_fail2", 8),
+    ("basic_loop_fail_counterexample", "basic_loop_fail", 4),
+    ("basic_while_fail2_counterexample", "basic_while_fail2", 5),
+    (
+        "test_variables_havoc_nested_counterexample",
+        "test_variables_havoc_nested",
+        6,
+    ),
+    ("while_b_fail_counterexample", "while_b_fail", 4),
+    (
+        "loop_decreases2_inner_measure_constant_counterexample",
+        "loop_decreases2 test2",
+        9,
+    ),
+    (
+        "loop_decreases2_outer_measure_constant_counterexample",
+        "loop_decreases2 test3",
+        9,
+    ),
+    // 2026-09-10: upstream loop_decreases1 — both FAIL where Verus fails.
+    (
+        "loop_decreases1_continue_skips_decrease_counterexample",
+        "loop_decreases1 test1",
+        6,
+    ),
+    (
+        "loop_decreases1_fall_through_never_decreases_counterexample",
+        "loop_decreases1 test2",
+        4,
+    ),
+    (
+        "complex_while_wrong_exit_value_counterexample",
+        "complex_while (exit-value liar)",
+        10,
     ),
 ];
 
@@ -190,7 +332,7 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
     ),
     (
         "loop_break_invariant_except_break",
-        "example_loop_break",
+        "example_loop_break (while slice)",
         "verified",
         4,
     ),
@@ -248,6 +390,106 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
         "counterexample",
         1,
     ),
+    ("infinite_loop_verified", "infinite_loop", "verified", 3),
+    ("loop_infinite2_verified", "loop_infinite2", "verified", 3),
+    ("loop_infinite2y_verified", "loop_infinite2y", "verified", 3),
+    (
+        "basic_loop_int_counter_verified",
+        "basic_loop",
+        "verified",
+        4,
+    ),
+    (
+        "basic_loop_fail_counterexample",
+        "basic_loop_fail",
+        "counterexample",
+        4,
+    ),
+    (
+        "basic_while_fail2_counterexample",
+        "basic_while_fail2",
+        "counterexample",
+        5,
+    ),
+    (
+        "test_variables_havoc_nested_counterexample",
+        "test_variables_havoc_nested",
+        "counterexample",
+        6,
+    ),
+    (
+        "test_variables_no_effect_nested_verified",
+        "test_variables_no_effect_nested",
+        "verified",
+        7,
+    ),
+    ("while_b_ok_verified", "while_b_ok", "verified", 4),
+    (
+        "while_b_fail_counterexample",
+        "while_b_fail",
+        "counterexample",
+        4,
+    ),
+    (
+        "while_to_loop_ensures_verified",
+        "while_to_loop_ensures (Verus rejects only through its while-to-loop conversion)",
+        "verified",
+        4,
+    ),
+    (
+        "loop_decreases2_nested_counters_verified",
+        "loop_decreases2 test1",
+        "verified",
+        11,
+    ),
+    (
+        "loop_decreases2_inner_measure_constant_counterexample",
+        "loop_decreases2 test2",
+        "counterexample",
+        9,
+    ),
+    (
+        "loop_decreases2_outer_measure_constant_counterexample",
+        "loop_decreases2 test3",
+        "counterexample",
+        9,
+    ),
+    (
+        "loop_decreases1_continue_skips_decrease_counterexample",
+        "loop_decreases1 test1",
+        "counterexample",
+        6,
+    ),
+    (
+        "loop_decreases1_fall_through_never_decreases_counterexample",
+        "loop_decreases1 test2",
+        "counterexample",
+        4,
+    ),
+    (
+        "for_loop1_test_loop_peek_verified",
+        "for_loop1 test_loop_peek",
+        "verified",
+        9,
+    ),
+    (
+        "for_loop2_test_loop_verified",
+        "for_loop2 test_loop",
+        "verified",
+        10,
+    ),
+    (
+        "complex_while_exit_values_verified",
+        "complex_while",
+        "verified",
+        11,
+    ),
+    (
+        "complex_while_wrong_exit_value_counterexample",
+        "complex_while (exit-value liar)",
+        "counterexample",
+        10,
+    ),
     (
         "loop_nested_break_to_outer_false_counterexample",
         "loop_infinite2x",
@@ -255,16 +497,108 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "loop_break_regular_unmodified_invariant_current_gap_counterexample",
-        "basic_loop non-tautological invariant current TrustVc gap",
+        "loop_break_regular_unmodified_invariant_verified",
+        "basic_loop non-tautological invariant (unmodified-state subset)",
+        "verified",
+        5,
+    ),
+    (
+        "loop_labeled_inner_break_regular_invariant_verified",
+        "loop2_ok_y non-tautological invariant (unmodified-state subset)",
+        "verified",
+        6,
+    ),
+    (
+        "loop_break_unbounded_counter_increment_overflow_counterexample",
+        "basic_loop exec-counter overflow at an arbitrary loop head",
+        "counterexample",
+        6,
+    ),
+    (
+        "loop_break_modified_param_forgets_entry_value_counterexample",
+        "test_variables_havoc_basic bare-loop form",
+        "counterexample",
+        4,
+    ),
+    (
+        "example_loop_break_verified",
+        "example_loop_break",
+        "verified",
+        13,
+    ),
+    (
+        "example_loop_break_fail1_counterexample",
+        "example_loop_break_fail1",
+        "counterexample",
+        13,
+    ),
+    (
+        "example_loop_break_fail2_counterexample",
+        "example_loop_break_fail2",
+        "counterexample",
+        13,
+    ),
+    (
+        "example_loop_break_fail3_counterexample",
+        "example_loop_break_fail3",
+        "counterexample",
+        10,
+    ),
+    (
+        "example_loop_break_fail4_counterexample",
+        "example_loop_break_fail4",
+        "counterexample",
+        12,
+    ),
+    (
+        "example_loop_continue_verified",
+        "example_loop_continue",
+        "verified",
+        16,
+    ),
+    (
+        "example_loop_continue_fail_counterexample",
+        "example_loop_continue_fail",
+        "counterexample",
+        16,
+    ),
+    (
+        "loop_continue_no_break_test_loop_verified",
+        "loop_continue_no_break test_loop",
+        "verified",
+        5,
+    ),
+    (
+        "loop_continue_no_break_fail_beginning_counterexample",
+        "loop_continue_no_break test_fail_beginning",
         "counterexample",
         3,
     ),
     (
-        "loop_labeled_inner_break_regular_invariant_current_gap_counterexample",
-        "loop2_ok_y non-tautological invariant current TrustVc gap",
+        "loop_continue_no_break_fail_at_continue_counterexample",
+        "loop_continue_no_break test_fail_at_continue",
         "counterexample",
-        3,
+        5,
+    ),
+    (
+        "loop_continue_no_break_fail_at_end_after_continue_counterexample",
+        "loop_continue_no_break test_fail_at_end_after_continue",
+        "counterexample",
+        6,
+    ),
+    ("loop2_ok_verified", "loop2_ok", "verified", 8),
+    ("loop2_ok_y_verified", "loop2_ok_y", "verified", 8),
+    (
+        "loop2_fail1_counterexample",
+        "loop2_fail1",
+        "counterexample",
+        6,
+    ),
+    (
+        "loop2_fail2_counterexample",
+        "loop2_fail2",
+        "counterexample",
+        8,
     ),
     (
         "while_loop_decreases_verified",

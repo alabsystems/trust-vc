@@ -84,6 +84,7 @@ pub(crate) mod assert_seqs_equal_parser;
 pub(crate) mod attr_doc_metadata;
 pub(crate) mod attributes;
 pub(crate) mod ay_contracts;
+#[doc(hidden)]
 pub(crate) mod broadcast;
 pub(crate) mod broadcast_state;
 pub(crate) mod calc_parser;
@@ -100,6 +101,7 @@ pub(crate) mod decreases_lex;
 pub(crate) mod decreases_runtime;
 #[doc(hidden)]
 pub mod decreases_to_runtime;
+pub(crate) mod default_constructor;
 pub(crate) mod diverging_if_desugar;
 pub(crate) mod encoder;
 pub(crate) mod encoder_instrumentation;
@@ -119,6 +121,7 @@ pub(crate) mod extern_spec_catalog;
 pub(crate) mod extern_spec_helpers;
 pub(crate) mod extern_spec_registry;
 pub(crate) mod extern_spec_verify;
+pub(crate) mod float_identity;
 pub(crate) mod for_range_desugar;
 pub mod full_verification;
 pub mod harness;
@@ -162,14 +165,20 @@ pub(crate) mod proof_var_mode;
 pub mod protocol;
 pub(crate) mod protocol_expand;
 pub mod proven_facts;
+pub mod query;
 pub(crate) mod recursion_graph;
+pub(crate) mod ref_binding_desugar;
+pub(crate) mod runtime_check;
 #[cfg(test)]
 pub(crate) mod smtlib2_emit;
 pub mod solver_budget;
 mod solver_mode_assert_parser;
+pub mod source_location;
 pub(crate) mod source_tree;
+pub(crate) mod spec_arith;
 pub(crate) mod spec_expand;
 pub(crate) mod spec_function_catalog;
+pub mod state_machine_dsl;
 #[cfg(test)]
 pub(crate) mod static_extraction;
 pub(crate) mod struct_rest_pattern_desugar;
@@ -178,6 +187,7 @@ pub(crate) mod theory_contracts;
 pub(crate) mod tracked_syntax;
 pub(crate) mod trait_catalog;
 pub(crate) mod trait_expand;
+pub(crate) mod trait_impl_groups;
 pub(crate) mod trait_instantiation;
 pub(crate) mod trait_path_resolution;
 pub(crate) mod trait_registry;
@@ -193,6 +203,7 @@ pub mod verify;
 #[doc(hidden)]
 pub mod verify_macro;
 mod verify_result;
+pub(crate) mod while_guard_desugar;
 // Scaffolding modules for v2/v3 features — not yet wired into the
 // verification pipeline.  Suppress dead-code warnings at the module level
 // so the scaffolding is preserved without noise.
@@ -233,6 +244,8 @@ pub use error::{TrustVcError, TrustVcResult};
 pub use ir_lowering::LoweringError;
 #[doc(hidden)]
 pub use solver_mode_assert_parser::{parse_solver_mode_assert, SolverModeAssertInput};
+
+pub use source_location::SourceLocation;
 
 #[doc(hidden)]
 pub use attributes::{
@@ -277,8 +290,11 @@ pub use translator::RustToSmtTranslator;
 pub use trigger_inference::TriggerInferenceMode;
 #[doc(hidden)]
 pub use vc_extraction::{
-    extract_verification_conditions, extract_verification_conditions_with_file_context,
-    verify_function_from_file,
+    crate_sibling_view, exec_running_call_paths, extract_verification_conditions,
+    extract_verification_conditions_located_in_crate_file,
+    extract_verification_conditions_located_in_file,
+    extract_verification_conditions_with_file_context, identifier_spelling_hazard,
+    static_signature_rejection, verify_function_from_file, CrateSiblingView,
 };
 
 /// Trait-impl conformance as first-class, addressable cases.
@@ -314,7 +330,9 @@ pub use assert_seqs_equal_parser::{parse_assert_seqs_equal, AssertSeqsEqualInput
 #[doc(hidden)]
 pub use calc_parser::{parse_calc, transitive_op, CalcBlock, CalcOp};
 #[doc(hidden)]
-pub use chained_comparisons::{parse_expr_str_with_chains, parse_expr_tokens_with_chains};
+pub use chained_comparisons::{
+    parse_expr_str_with_chains, parse_expr_tokens_with_chains, MUT_REF_FINAL_MARKER,
+};
 #[doc(hidden)]
 pub use context_management::enter_invariant_mask_scope;
 #[doc(hidden)]
@@ -336,6 +354,10 @@ pub use obligation_collection::{
 };
 #[doc(hidden)]
 pub use protocol_expand::{expand_action, expand_liveness, expand_protocol, expand_safety};
+#[doc(hidden)]
+pub use runtime_check::{
+    runtime_check_evaluates_as_read, runtime_check_or_typecheck, ClauseArithmetic,
+};
 #[doc(hidden)]
 pub use verify_macro::push_hide;
 

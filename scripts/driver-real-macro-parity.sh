@@ -22,8 +22,9 @@
 #   that TIMES OUT. This script instead reuses the workspace's already-built
 #   (Trust-toolchain) `trust_vc` proc-macro dylib + `trust_vc_core` rlib as the
 #   driver's `--extern`s and scans the same source with the syn path, so the ONLY
-#   heavy step is building the nightly driver bin itself (unavoidable, and cached
-#   after the first `scripts/build-trust-vc-driver.sh bin`).
+#   heavy step is building the rustc-driver bin itself (unavoidable, and cached
+#   after the first `targo --unverified build -p trust-vc-driver --features
+#   rustc-driver --bin trust-vc-driver`).
 #
 # OUTPUT (identical wire format to the cargo `--frontend=driver` witness)
 #   TRUST_VC_DRIVER_SYN_PARITY\t<fn>\tdriver=<v>\tsyn=<v>\t{agree|differ}
@@ -38,9 +39,13 @@
 # USAGE
 #   scripts/driver-real-macro-parity.sh
 #     Builds/locates the driver bin, then runs the witness.
-#   TRUST_VC_DRIVER_BIN=... TRUST_VC_DRIVER_DYLD=... scripts/driver-real-macro-parity.sh
-#     Reuses a prebuilt bin (skips the heavy build) — the paths printed by
-#     `scripts/build-trust-vc-driver.sh bin`.
+#   TRUST_VC_DRIVER_BIN=... [TRUST_VC_DRIVER_DYLD=...] scripts/driver-real-macro-parity.sh
+#     Reuses a prebuilt bin (skips the heavy build). The bin carries an rpath to
+#     its compiler's lib dir (crates/trust-vc-driver/build.rs), so DYLD is only
+#     needed for a bin built some other way.
+#
+# TOOLCHAIN: the Trust toolchain only (owner directive 2026-09-28) — `targo`
+# builds, `trustc` names the sysroot; no stock cargo/rustc fallback.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,28 +54,31 @@ cd "$REPO_ROOT"
 FIXTURE_DIR="$REPO_ROOT/crates/trust-vc-driver-parity-fixture"
 FIXTURE_SRC="$FIXTURE_DIR/src/lib.rs"
 FIXTURE_CRATE_NAME="trust_vc_driver_parity_fixture"
-DEPS_DIR="$REPO_ROOT/target/debug/deps"
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+DEPS_DIR="$TARGET_DIR/debug/deps"
 
 die() { echo "driver-real-macro-parity: $*" >&2; exit 1; }
 
 [ -f "$FIXTURE_SRC" ] || die "fixture source missing: $FIXTURE_SRC"
-command -v rustc >/dev/null 2>&1 || die "rustc not found on PATH"
+targo --unverified --version >/dev/null 2>&1 \
+  || die "the Trust toolchain's targo is not on PATH (\`targo --unverified --version\` failed)"
+command -v trustc >/dev/null 2>&1 || die "trustc not found on PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 not found on PATH"
 
-# --- 1. Driver bin + its runtime dylib search path ---------------------------
+# --- 1. Driver bin -----------------------------------------------------------
 # Reuse a prebuilt bin if the caller exported one; otherwise build it (the heavy,
-# but incremental-after-first, step). `build-trust-vc-driver.sh bin` prints the
-# resolved BIN + DYLD as `TRUST_VC_DRIVER_BIN=`/`TRUST_VC_DRIVER_DYLD=` lines.
+# but incremental-after-first, step). The Trust sysroot resolves rustc_private
+# itself, and build.rs bakes the rpath to librustc_driver into the bin.
 if [ -n "${TRUST_VC_DRIVER_BIN:-}" ] && [ -x "${TRUST_VC_DRIVER_BIN}" ]; then
   DRIVER_BIN="$TRUST_VC_DRIVER_BIN"
   DRIVER_DYLD="${TRUST_VC_DRIVER_DYLD:-}"
   echo "==> driver bin (prebuilt): $DRIVER_BIN"
 else
-  echo "==> building driver bin via scripts/build-trust-vc-driver.sh bin ..."
-  BUILD_OUT="$(bash "$REPO_ROOT/scripts/build-trust-vc-driver.sh" bin)"
-  echo "$BUILD_OUT" | sed 's/^/    /'
-  DRIVER_BIN="$(printf '%s\n' "$BUILD_OUT" | sed -n 's/^TRUST_VC_DRIVER_BIN=//p' | tail -1)"
-  DRIVER_DYLD="$(printf '%s\n' "$BUILD_OUT" | sed -n 's/^TRUST_VC_DRIVER_DYLD=//p' | tail -1)"
+  echo "==> building driver bin: targo --unverified build -p trust-vc-driver --features rustc-driver --bin trust-vc-driver ..."
+  targo --unverified build --locked -p trust-vc-driver --features rustc-driver --bin trust-vc-driver \
+    || die "failed to build the trust-vc-driver bin"
+  DRIVER_BIN="$TARGET_DIR/debug/trust-vc-driver"
+  DRIVER_DYLD="${TRUST_VC_DRIVER_DYLD:-}"
 fi
 [ -x "$DRIVER_BIN" ] || die "driver bin not found/executable: ${DRIVER_BIN:-<empty>}"
 
@@ -80,14 +88,14 @@ fi
 # native bin, fall back to the alias, honor the override.
 if [ -n "${CARGO_TRUST_VC_BIN:-}" ]; then
   CARGO_TRUST_VC="$CARGO_TRUST_VC_BIN"
-elif [ -x "$REPO_ROOT/target/debug/targo-trust-vc" ]; then
-  CARGO_TRUST_VC="$REPO_ROOT/target/debug/targo-trust-vc"
+elif [ -x "$TARGET_DIR/debug/targo-trust-vc" ]; then
+  CARGO_TRUST_VC="$TARGET_DIR/debug/targo-trust-vc"
 else
-  CARGO_TRUST_VC="$REPO_ROOT/target/debug/cargo-trust-vc"
+  CARGO_TRUST_VC="$TARGET_DIR/debug/cargo-trust-vc"
 fi
 if [ ! -x "$CARGO_TRUST_VC" ]; then
   echo "==> targo-trust-vc bin missing; building it ..."
-  cargo build -p targo-trust-vc >/dev/null 2>&1 \
+  targo --unverified build --locked -p targo-trust-vc >/dev/null 2>&1 \
     || die "failed to build targo-trust-vc (needed for the authoritative syn path)"
 fi
 [ -x "$CARGO_TRUST_VC" ] || die "targo-trust-vc bin not found: $CARGO_TRUST_VC"
@@ -97,13 +105,14 @@ fi
 # proc-macro dylib and the `trust_vc_core` rlib (whose `__driver_markers` the
 # `--cfg trust_vc_driver` expansion targets). Pick the newest of each; `-L
 # dependency` resolves their transitive deps by exact hash. These are the SAME
-# rustc build as the bin's sysroot (default == +trust toolchain), so they load.
-[ -d "$DEPS_DIR" ] || die "workspace deps dir missing: $DEPS_DIR (run \`targo build\` first)"
+# trustc build as the bin's sysroot, so they load.
+BUILD_HINT="run \`targo --unverified build --locked -p trust-vc\` first"
+[ -d "$DEPS_DIR" ] || die "workspace deps dir missing: $DEPS_DIR ($BUILD_HINT)"
 PROC_MACRO="$(ls -t "$DEPS_DIR"/libtrust_vc-*.dylib 2>/dev/null | head -1)"
 CORE_RLIB="$(ls -t "$DEPS_DIR"/libtrust_vc_core-*.rlib 2>/dev/null | head -1)"
-[ -n "$PROC_MACRO" ] || die "no libtrust_vc-*.dylib in $DEPS_DIR (run \`targo build\` first)"
-[ -n "$CORE_RLIB" ]  || die "no libtrust_vc_core-*.rlib in $DEPS_DIR (run \`targo build\` first)"
-SYSROOT="$(rustc --print sysroot)"
+[ -n "$PROC_MACRO" ] || die "no libtrust_vc-*.dylib in $DEPS_DIR ($BUILD_HINT)"
+[ -n "$CORE_RLIB" ]  || die "no libtrust_vc_core-*.rlib in $DEPS_DIR ($BUILD_HINT)"
+SYSROOT="$(trustc --print sysroot)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/trust_vc_driver_parity.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -116,7 +125,6 @@ echo "==> sysroot            : $SYSROOT"
 
 # --- 4. Driver verdicts (NON-authoritative, parallel producer) ---------------
 echo "==> running the rustc-driver front end on the real-macro fixture ..."
-RUSTC_BOOTSTRAP=1 \
 DYLD_FALLBACK_LIBRARY_PATH="${DRIVER_DYLD:-$SYSROOT/lib}" \
 "$DRIVER_BIN" \
   "$FIXTURE_SRC" \

@@ -402,11 +402,26 @@ fn attrs_match(left: &[syn::Attribute], right: &[syn::Attribute]) -> bool {
             .all(|(left, right)| token_string(left) == token_string(right))
 }
 
-fn item_fn_matches_item_fn(left: &ItemFn, right: &ItemFn) -> bool {
+pub(super) fn item_fn_matches_item_fn(left: &ItemFn, right: &ItemFn) -> bool {
     attrs_match(&left.attrs, &right.attrs)
         && token_string(&left.vis) == token_string(&right.vis)
         && token_string(&left.sig) == token_string(&right.sig)
         && token_string(left.block.as_ref()) == token_string(right.block.as_ref())
+}
+
+/// Source identity between two `ImplItemFn`s by ATTRIBUTES and BODY, used to
+/// decide whether a method handed to a body-axiom publisher IS the declaration
+/// sitting inside a trusted-boundary-marked `impl` or `mod`, rather than an
+/// unrelated method that merely shares its name.
+///
+/// The signature is deliberately NOT compared: a method reaches those publishers
+/// with its receiver already rewritten to an explicit typed argument (`&self`
+/// arrives as `&self : &Q`), so a signature comparison never matches the source
+/// AST. The caller pins the declaring type separately, so the remaining job here
+/// is to tell two same-named methods on the same type apart by what they DO.
+pub(super) fn impl_method_body_matches(left: &syn::ImplItemFn, right: &syn::ImplItemFn) -> bool {
+    attrs_match(&left.attrs, &right.attrs)
+        && token_string(&left.block) == token_string(&right.block)
 }
 
 pub(super) fn impl_method_matches_item_fn(method: &syn::ImplItemFn, func: &ItemFn) -> bool {
@@ -506,25 +521,50 @@ impl syn::visit_mut::VisitMut for SelfTypeSubstituter {
     fn visit_item_mut(&mut self, _item: &mut syn::Item) {}
 }
 
-/// A resolvable associated-type projection harvested from a file's
-/// `#[trust_vc::trait_impl]` blocks: `<concrete as trait>::assoc = bound`
+/// A resolvable associated-type projection harvested from ONE inline module's
+/// `#[trust_vc::trait_impl]` blocks: `<self_key as trait_key>::assoc = bound`
 /// (Phase A3).
 ///
-/// `concrete_key` is the whitespace-stripped token rendering of the impl's self
-/// type, matched against the same rendering of a projection's qualified self so
-/// incidental spacing never blocks a match.
+/// Both keys are CANONICAL token renderings of the impl header, unstripped:
+/// `trait_key` is the FULL trait path — leading `::`, every segment, every
+/// generic argument — and `self_key` the whole self type. An earlier key used
+/// the trait's last-segment ident and a whitespace-stripped self type, so
+/// `<S as Tr<u32>>::X` matched `impl Tr<bool> for S`, `std::ops::Add` matched a
+/// local `Add`, and `&'a mut S` collided with `&'amut S`. Resolution is by text
+/// equality ONLY under the scope rules in [`AssocProjectionResolver`], where
+/// equal text provably denotes the same entities.
 pub(super) struct AssocProjectionBinding {
-    trait_name: String,
-    concrete_key: String,
+    trait_key: String,
+    self_key: String,
     assoc_name: String,
     bound: syn::Type,
 }
 
-/// Whitespace-stripped token rendering of a type, used as a structural key.
+/// Canonical token rendering of a type, used as a structural key. The syn AST's
+/// token rendering is already spacing-independent, so it is NOT
+/// whitespace-stripped: stripping glued distinct tokens together (`'a mut` and
+/// `'amut` both became `'amut`), which made different types share a key.
 fn projection_type_key(ty: &syn::Type) -> String {
-    ty.to_token_stream()
-        .to_string()
-        .replace(char::is_whitespace, "")
+    ty.to_token_stream().to_string()
+}
+
+/// True iff `tokens` contain something whose text is not its identity: the
+/// `Self` keyword or a `!` (a type macro invocation, or the never type), at any
+/// depth. Inside a trait default method `Self` is the IMPLEMENTOR — a generic —
+/// while inside an impl header it is that impl's self type, so equal text
+/// containing `Self` does not denote equal types; and a type macro's expansion
+/// is not determined by its tokens alone. Neither can key a binding, and a
+/// bound containing either is not substituted into a signature.
+fn tokens_are_not_identity(tokens: &impl ToTokens) -> bool {
+    fn walk(stream: proc_macro2::TokenStream) -> bool {
+        stream.into_iter().any(|tree| match tree {
+            proc_macro2::TokenTree::Ident(ident) => ident == "Self",
+            proc_macro2::TokenTree::Punct(punct) => punct.as_char() == '!',
+            proc_macro2::TokenTree::Group(group) => walk(group.stream()),
+            proc_macro2::TokenTree::Literal(_) => false,
+        })
+    }
+    walk(tokens.to_token_stream())
 }
 
 /// True iff `attrs` carries `#[trust_vc::trait_impl]` (or the post-expansion
@@ -539,49 +579,248 @@ fn is_trait_impl_attr(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// Collects every associated-type binding declared by the file's
-/// `#[trust_vc::trait_impl] impl Trait for Concrete { type Assoc = Bound; }`
-/// blocks (recursing inline modules), keyed for resolving fully-qualified
-/// projections `<Concrete as Trait>::Assoc` in type position (Phase A3).
+/// True iff every attribute is one that cannot remove or rewrite the item it
+/// decorates: the engine's own `trust_vc::` markers (and a bare
+/// `#[trait_impl]`), documentation, and lint levels. `#[cfg]`/`#[cfg_attr]`
+/// can delete the item from the compiled program — a disabled impl binds
+/// nothing, yet its text is still in the file — and an arbitrary attribute
+/// macro can replace it, so either keeps a binding out of the registry.
+fn projection_binding_attrs_admissible(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        let path = attr.path();
+        let first = path.segments.first().map(|seg| seg.ident.to_string());
+        matches!(
+            (path.segments.len(), first.as_deref()),
+            (_, Some("trust_vc"))
+                | (
+                    1,
+                    Some("trait_impl" | "doc" | "allow" | "warn" | "deny" | "forbid" | "expect")
+                )
+        )
+    })
+}
+
+/// True iff `generics` introduces no type or const parameter and no
+/// where-clause. Lifetime parameters are allowed: trait selection never picks
+/// between impls by lifetime (impls that differ only by lifetime overlap and
+/// are rejected by coherence), and a lifetime cannot shadow a type name.
+fn generics_are_lifetime_only(generics: &syn::Generics) -> bool {
+    generics.where_clause.is_none()
+        && generics
+            .params
+            .iter()
+            .all(|param| matches!(param, syn::GenericParam::Lifetime(_)))
+}
+
+/// Collects the associated-type bindings declared DIRECTLY in the inline module
+/// at `module_path` (the target function's own module; empty for the file
+/// root) by `#[trust_vc::trait_impl] impl Trait for Concrete { type Assoc =
+/// Bound; }` blocks, keyed for resolving fully-qualified projections
+/// `<Concrete as Trait>::Assoc` in type position (Phase A3).
 ///
-/// Best-effort: a non-trait impl, or a trait path with no final segment, is
-/// skipped — the projection then stays unresolved and fails closed downstream,
-/// never silently mis-resolved.
-pub(super) fn collect_assoc_projection_bindings(file: &File) -> Vec<AssocProjectionBinding> {
+/// Fail-closed by construction: anything this refuses to collect leaves the
+/// projection unresolved, and an unresolved projection is an unrecognized type
+/// downstream (`Unknown`), never a guess. It collects NOTHING when
+/// `module_path` does not name exactly one inline module — two `mod a` blocks
+/// (e.g. `#[cfg]`-alternatives) share one path but not one scope. Within that
+/// module an impl binds only when it is monomorphic and ungated: a trait impl
+/// (not `impl !Trait`), not `default`, no type/const generics, no
+/// where-clause, only admissible attributes, no item macros, and no `Self` or
+/// type macro in its header. Each `type Assoc = Bound;` item must likewise be
+/// ungated, non-`default`, without own generics (GATs), and free of `Self` and
+/// type macros.
+pub(super) fn collect_assoc_projection_bindings(
+    file: &File,
+    module_path: &[String],
+) -> Vec<AssocProjectionBinding> {
     let mut bindings = Vec::new();
-    collect_assoc_projection_bindings_in_items(&file.items, &mut bindings);
+    let Some(items) = unique_inline_module_items(&file.items, module_path) else {
+        return bindings;
+    };
+    for item in items {
+        if let Item::Impl(item_impl) = item {
+            collect_assoc_projection_bindings_from_impl(item_impl, &mut bindings);
+        }
+    }
     bindings
 }
 
-fn collect_assoc_projection_bindings_in_items(
-    items: &[Item],
+/// The items of the inline module at `module_path`, or `None` unless every
+/// segment names exactly one module declaration among its siblings (counting
+/// out-of-line `mod m;` declarations too) and that declaration is inline.
+fn unique_inline_module_items<'a>(items: &'a [Item], module_path: &[String]) -> Option<&'a [Item]> {
+    let Some((head, rest)) = module_path.split_first() else {
+        return Some(items);
+    };
+    let mut named = items.iter().filter_map(|item| match item {
+        Item::Mod(module) if module.ident == head => Some(module),
+        _ => None,
+    });
+    let module = named.next()?;
+    if named.next().is_some() {
+        return None;
+    }
+    let (_, inner) = module.content.as_ref()?;
+    unique_inline_module_items(inner, rest)
+}
+
+fn collect_assoc_projection_bindings_from_impl(
+    item_impl: &syn::ItemImpl,
     bindings: &mut Vec<AssocProjectionBinding>,
+) {
+    if !is_trait_impl_attr(&item_impl.attrs)
+        || !projection_binding_attrs_admissible(&item_impl.attrs)
+        || item_impl.defaultness.is_some()
+        || !generics_are_lifetime_only(&item_impl.generics)
+    {
+        return;
+    }
+    let Some((negative, trait_path, _)) = &item_impl.trait_ else {
+        return;
+    };
+    if negative.is_some()
+        || tokens_are_not_identity(trait_path)
+        || tokens_are_not_identity(item_impl.self_ty.as_ref())
+        || item_impl.items.iter().any(|impl_item| {
+            !matches!(
+                impl_item,
+                syn::ImplItem::Fn(_) | syn::ImplItem::Type(_) | syn::ImplItem::Const(_)
+            )
+        })
+    {
+        return;
+    }
+    let trait_key = trait_path.to_token_stream().to_string();
+    let self_key = projection_type_key(&item_impl.self_ty);
+    for impl_item in &item_impl.items {
+        let syn::ImplItem::Type(assoc) = impl_item else {
+            continue;
+        };
+        if assoc.defaultness.is_some()
+            || !assoc.generics.params.is_empty()
+            || assoc.generics.where_clause.is_some()
+            || !projection_binding_attrs_admissible(&assoc.attrs)
+            || tokens_are_not_identity(&assoc.ty)
+        {
+            continue;
+        }
+        bindings.push(AssocProjectionBinding {
+            trait_key: trait_key.clone(),
+            self_key: self_key.clone(),
+            assoc_name: assoc.ident.to_string(),
+            bound: assoc.ty.clone(),
+        });
+    }
+}
+
+/// The inline-module path whose `#[trust_vc::trait_impl]` bindings may resolve
+/// `func`'s signature projections by text, or `None` when none may.
+///
+/// `Some(path)` requires that the target signature introduces no type/const
+/// generic parameter and no where-clause, and that EVERY source item whose
+/// complete identity (attributes, visibility, signature, body — the witnesses
+/// of [`enclosing_impl_self_ty`]) matches `func` sits in the module at `path`
+/// inside a container that introduces none either (a free function, an
+/// inherent or trait impl, or a trait default method). Must be given the
+/// ORIGINAL source function, before any rewrite, and a file holding EVERY
+/// exact-identity copy the target was selected among — never a copy with one
+/// removed (the duplicate-trait prune deletes a trait's default methods; the
+/// extraction entry refuses a target whose [`exact_source_identity_count`] the
+/// prune changed): a twin missing from `file` is a candidate this walk cannot
+/// see, and the remaining candidates could then agree on a module that is not
+/// the target's.
+///
+/// A generic parameter in scope can SHADOW a name in the key
+/// (`fn g<S: Tr<X = u16>>(x: <S as Tr>::X)` beside `struct S` with
+/// `impl Tr for S { type X = u8; }`), and a where-clause can supply the
+/// projection's normalization itself, so either disables resolution for the
+/// whole target — deliberately conservative.
+///
+/// There is deliberately NO crate-root precedence here, unlike
+/// [`enclosing_inline_module_path`]: token-identical items in different scopes
+/// are indistinguishable by identity, and `cargo trust-vc check` selects a
+/// target by its source LINE, so the lifted `func` may be any one of them. The
+/// scope is answered only when every candidate agrees — otherwise a nested copy
+/// selected by line would borrow the root copy's module and bindings.
+pub(super) fn signature_projection_module_scope(file: &File, func: &ItemFn) -> Option<Vec<String>> {
+    if !generics_are_lifetime_only(&func.sig.generics) {
+        return None;
+    }
+    let mut candidates = Vec::new();
+    collect_projection_scope_candidates(&file.items, func, &mut Vec::new(), &mut candidates);
+    let (first_path, _) = candidates.first()?;
+    candidates
+        .iter()
+        .all(|(path, container_generic_free)| *container_generic_free && path == first_path)
+        .then(|| first_path.clone())
+}
+
+/// How many source items in `file` — crate-root and inline-module free
+/// functions, impl methods, trait default methods — carry `func`'s complete
+/// identity (the witnesses of [`enclosing_impl_self_ty`]). The extraction
+/// entry's identity-keyed lookups ([`enclosing_inline_module_path`],
+/// [`enclosing_impl_self_ty`], [`signature_projection_module_scope`]) walk
+/// exactly these positions (the impl-only ones walk a subset the
+/// duplicate-trait prune never touches), so two files with equal counts give
+/// those lookups the same candidate set when one is the other with whole trait
+/// declarations removed.
+pub(super) fn exact_source_identity_count(file: &File, func: &ItemFn) -> usize {
+    let mut candidates = Vec::new();
+    collect_projection_scope_candidates(&file.items, func, &mut Vec::new(), &mut candidates);
+    candidates.len()
+}
+
+/// Every exact-identity candidate for `func` as `(inline module path, whether
+/// its container introduces no type/const generics or where-clause)`.
+fn collect_projection_scope_candidates(
+    items: &[Item],
+    func: &ItemFn,
+    module_path: &mut Vec<String>,
+    candidates: &mut Vec<(Vec<String>, bool)>,
 ) {
     for item in items {
         match item {
-            Item::Impl(item_impl) if is_trait_impl_attr(&item_impl.attrs) => {
-                let Some((_, trait_path, _)) = &item_impl.trait_ else {
-                    continue;
-                };
-                let Some(trait_name) = trait_path.segments.last().map(|seg| seg.ident.to_string())
-                else {
-                    continue;
-                };
-                let concrete_key = projection_type_key(&item_impl.self_ty);
-                for impl_item in &item_impl.items {
-                    if let syn::ImplItem::Type(assoc) = impl_item {
-                        bindings.push(AssocProjectionBinding {
-                            trait_name: trait_name.clone(),
-                            concrete_key: concrete_key.clone(),
-                            assoc_name: assoc.ident.to_string(),
-                            bound: assoc.ty.clone(),
-                        });
+            Item::Fn(candidate) => {
+                if candidate.sig.ident == func.sig.ident && item_fn_matches_item_fn(candidate, func)
+                {
+                    candidates.push((module_path.clone(), true));
+                }
+            }
+            Item::Impl(impl_block) => {
+                for impl_item in &impl_block.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        if method.sig.ident == func.sig.ident
+                            && impl_method_matches_item_fn(method, func)
+                        {
+                            candidates.push((
+                                module_path.clone(),
+                                generics_are_lifetime_only(&impl_block.generics),
+                            ));
+                        }
                     }
                 }
             }
             Item::Mod(module) => {
-                if let Some((_, inner)) = &module.content {
-                    collect_assoc_projection_bindings_in_items(inner, bindings);
+                if let Some((_, inner_items)) = &module.content {
+                    module_path.push(module.ident.to_string());
+                    collect_projection_scope_candidates(inner_items, func, module_path, candidates);
+                    module_path.pop();
+                }
+            }
+            Item::Trait(trait_block) => {
+                for trait_item in &trait_block.items {
+                    if let syn::TraitItem::Fn(method) = trait_item {
+                        if method.sig.ident == func.sig.ident {
+                            if let Some(block) = &method.default {
+                                if trait_method_matches_item_fn(method, block, func) {
+                                    candidates.push((
+                                        module_path.clone(),
+                                        generics_are_lifetime_only(&trait_block.generics),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -589,19 +828,32 @@ fn collect_assoc_projection_bindings_in_items(
     }
 }
 
-/// Rewrites fully-qualified associated-type projections
-/// `<Concrete as Trait>::Assoc` in TYPE position to the concrete type the file's
-/// matching `#[trust_vc::trait_impl]` binds (`type Assoc = Bound;`), using
-/// bindings harvested by [`collect_assoc_projection_bindings`] (Phase A3).
+/// Rewrites fully-qualified associated-type projections `<Q as P>::A` in TYPE
+/// position to the concrete type bound by the one `#[trust_vc::trait_impl]`
+/// the projection's text provably names (Phase A3).
 ///
-/// Only a projection naming a concrete self type with a matching in-file impl
-/// resolves. A bare-generic projection (`T::X`, whose self is a type parameter),
-/// or one naming a type/trait/assoc with no matching binding, is left as-is and
-/// fails closed downstream. SOUND: the rewrite only makes a type MORE concrete,
-/// and only to the type the impl actually binds; the resolved type lands in the
-/// lifted variable's OWN sort (a fresh parameter/return slot), never a shared
-/// per-trait UF slot, so the sort-divergence that keeps the trait-side bridged
-/// path fail-closed cannot arise here.
+/// SOUNDNESS — the rewrite is justified only when text equality is identity.
+/// The caller supplies bindings from the target's OWN inline module
+/// ([`collect_assoc_projection_bindings`]) and only for a target whose
+/// signature and container introduce no type/const generics or where-clause
+/// ([`signature_projection_module_scope`]). Then every name in `Q`,
+/// in `P` and in the impl header resolves in one scope, and a projection
+/// resolves iff its full trait path (leading `::`, all segments, generic
+/// arguments) and self type render exactly as one admitted impl's header, the
+/// assoc segment carries no arguments, nothing mentions `Self` or a type macro
+/// (a textually-scoped `macro_rules!` can expand the same text differently at
+/// the impl and at the signature), and EXACTLY ONE binding matches. For a program rustc accepts, coherence then allows no
+/// other impl — attributed or not, in this module or elsewhere — for that
+/// (trait instance, self type), so none can bind `A` differently; and the
+/// admission rules exclude the cases where text is not identity (`#[cfg]`,
+/// blanket/generic impls, specialization, GATs).
+///
+/// Anything else — a different spelling of the same instance (`Tr<u32>` for a
+/// defaulted `Tr`, `crate::Tr` for `Tr`), a projection whose binding is not
+/// attributed, several matches — is left as written and fails closed
+/// downstream as an unrecognized type. The resolved type lands in the lifted
+/// variable's OWN sort (a fresh parameter/return slot), never a shared
+/// per-trait UF slot.
 pub(super) struct AssocProjectionResolver<'a> {
     bindings: &'a [AssocProjectionBinding],
 }
@@ -611,32 +863,51 @@ impl<'a> AssocProjectionResolver<'a> {
         Self { bindings }
     }
 
-    /// Returns the bound type for a qualified projection `<C as Tr>::X` iff the
-    /// file binds it, else `None`.
+    /// Returns the bound type for a qualified projection `<C as Tr<..>>::X` iff
+    /// exactly one binding's header renders identically, else `None`.
     fn resolve(&self, ty: &syn::Type) -> Option<&syn::Type> {
         let syn::Type::Path(type_path) = ty else {
             return None;
         };
         let qself = type_path.qself.as_ref()?;
         let position = qself.position;
-        // `<C as Tr>::X`: the trait segment is immediately before the associated
-        // segment, and the associated segment must be the LAST one (a single
-        // projected assoc; nested `::Y::Z` is not resolved here). `position == 0`
-        // is `<C>::X` (inherent, no trait) — left unresolved.
+        // `<C as Tr>::X`: the trait path is `segments[..position]`, and the
+        // associated segment must be the LAST one (a single projected assoc;
+        // nested `::Y::Z` is not resolved here). `position == 0` is `<C>::X`
+        // (inherent, no trait) — left unresolved.
         if position == 0 || type_path.path.segments.len() != position + 1 {
             return None;
         }
-        let trait_name = type_path.path.segments[position - 1].ident.to_string();
-        let assoc_name = type_path.path.segments[position].ident.to_string();
-        let concrete_key = projection_type_key(&qself.ty);
-        self.bindings
-            .iter()
-            .find(|binding| {
-                binding.trait_name == trait_name
-                    && binding.assoc_name == assoc_name
-                    && binding.concrete_key == concrete_key
-            })
-            .map(|binding| &binding.bound)
+        let assoc_segment = &type_path.path.segments[position];
+        if !matches!(assoc_segment.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let trait_path = syn::Path {
+            leading_colon: type_path.path.leading_colon,
+            segments: type_path
+                .path
+                .segments
+                .iter()
+                .take(position)
+                .cloned()
+                .collect(),
+        };
+        if tokens_are_not_identity(&trait_path) || tokens_are_not_identity(qself.ty.as_ref()) {
+            return None;
+        }
+        let trait_key = trait_path.to_token_stream().to_string();
+        let self_key = projection_type_key(&qself.ty);
+        let assoc_name = assoc_segment.ident.to_string();
+        let mut matching = self.bindings.iter().filter(|binding| {
+            binding.trait_key == trait_key
+                && binding.self_key == self_key
+                && binding.assoc_name == assoc_name
+        });
+        let binding = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(&binding.bound)
     }
 }
 

@@ -408,6 +408,24 @@ impl<'a> AstExpressionParser<'a> {
             return Ok(result);
         }
 
+        // A MAP key is bound at the map's key type while its expression is
+        // known, exactly as `get`'s is (`bind_element_arguments`, §5b rule
+        // 10): `m[-56i8]` of a `Map<u8, u8>` read the key 200.
+        let bound_key;
+        let index = match crate::ir_lowering::infer_expr_type(receiver) {
+            TrustVcType::Map(key, _) => {
+                bound_key =
+                    crate::ir_lowering::bind_call_argument(index, &key).map_err(|found| {
+                        format!(
+                            "a map with keys of type `{}` indexed by a value of type `{}`",
+                            key.to_type_string(),
+                            found.to_type_string()
+                        )
+                    })?;
+                &bound_key
+            }
+            _ => index,
+        };
         let receiver_term = self.encode_subexpr(receiver)?;
         let index_term = self.encode_subexpr(index)?;
         let rname = receiver_name.unwrap_or("_anon");
@@ -438,21 +456,28 @@ impl<'a> AstExpressionParser<'a> {
         let idx = if is_map {
             self.coerce_key_for_store_in_int_mode(index_term, receiver_term, Some(rname))?
         } else {
-            self.coerce_seq_index(receiver_term, Some(rname), index_term)?
+            let own = self.own_sign(index, None);
+            self.coerce_seq_index(receiver_term, Some(rname), index_term, own)?
         };
 
         // Verus precondition: Map indexing requires key membership; Seq
         // indexing requires 0 <= idx < len.
-        if is_map {
+        let in_bounds = if is_map {
             self.add_map_index_domain_check(receiver_term, Some(rname), idx, "index")?;
+            None
         } else {
-            self.add_seq_index_bounds_check(receiver_term, Some(rname), idx, "index")?;
-        }
+            self.add_seq_index_bounds_check(receiver_term, Some(rname), idx, "index")?
+        };
 
         let result = self
             .solver
             .try_select(receiver_term, idx)
             .map_err(|e| e.to_string())?;
+        let result = if is_map || matches!(elem_ty, TrustVcType::Array(_, _)) {
+            result
+        } else {
+            self.read_within_carrier(receiver_term, index_term, result, in_bounds)?
+        };
 
         // Register element width for downstream coercion (parity: methods.rs:43-45)
         if let Some(info) = self.element_width_info(receiver_term, Some(rname)) {

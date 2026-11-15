@@ -85,7 +85,7 @@ pub(super) fn path_matches_suffix(path: &syn::Path, suffix: &[&str]) -> bool {
         .map(|segment| segment.ident.to_string())
         .collect();
     let suffix: Vec<_> = suffix.iter().map(|segment| segment.to_string()).collect();
-    segments.as_slice().ends_with(&suffix)
+    segments.ends_with(&suffix)
 }
 
 pub(super) fn placeholder_expr(ty: &Type) -> syn::Result<Expr> {

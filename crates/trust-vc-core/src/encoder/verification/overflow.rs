@@ -8,6 +8,7 @@ use super::outcome::AssertionOutcome;
 use super::panic::{is_ay_panic, is_sort_mismatch_error};
 use super::solve::{
     classify_unknown_reason, format_solver_observation_error, format_unknown_reason,
+    gate_relabelled_category, model_gate_rejection, render_model_gate_rejection,
     try_check_sat_with_details,
 };
 use super::unknown_category::UnknownCategory;
@@ -85,6 +86,7 @@ pub(in crate::encoder) fn check_overflow_predicates(
                     check_name,
                     assertion.condition
                 ),
+                location: assertion.location.clone(),
                 model: Some(format!(
                     "constant-folded overflow: '{}' overflows at a fixed-width \
                      operation with all-constant operands",
@@ -138,7 +140,8 @@ pub(in crate::encoder) fn check_overflow_predicates(
             return Err(overflow_error("assert overflow predicate", msg));
         }
 
-        let details = match try_check_sat_with_details(&mut scope) {
+        let details = match try_check_sat_with_details(&mut scope, &mut encoder.state.solver_panic)
+        {
             Ok(details) => details,
             Err(error) => {
                 return Ok(AssertionOutcome::unknown(
@@ -263,6 +266,7 @@ pub(in crate::encoder) fn check_overflow_predicates(
                 {
                     return Ok(AssertionOutcome::Counterexample {
                         obligation_name,
+                        location: assertion.location.clone(),
                         model: Some(format!(
                             "constant over-shift: shift amount is >= the bit width \
                              ('{}'); no free variable to assign",
@@ -301,6 +305,7 @@ pub(in crate::encoder) fn check_overflow_predicates(
                 {
                     return Ok(AssertionOutcome::Counterexample {
                         obligation_name,
+                        location: assertion.location.clone(),
                         model: Some(format!(
                             "out-of-bounds Seq index: index is >= len (or negative) \
                              for a constant Seq ('{}'); no free variable to assign",
@@ -337,19 +342,33 @@ pub(in crate::encoder) fn check_overflow_predicates(
                 .unwrap_or_default();
             return Ok(AssertionOutcome::Counterexample {
                 obligation_name,
+                location: assertion.location.clone(),
                 model: model_str,
                 bindings,
             });
         } else {
             let reason_str = format_unknown_reason(details.unknown_reason);
+            // Same third-category split as `solve::solver_unknown_outcome`: if
+            // ay caught its OWN invalid model, say so instead of letting the
+            // reason-code mapping call it a theory incompleteness. Verdict
+            // routing is unchanged (both are `is_incompleteness()`).
+            let gate = model_gate_rejection(&details);
+            let gate_suffix = gate
+                .as_ref()
+                .map(render_model_gate_rejection)
+                .unwrap_or_default();
             let reason = format!(
-                "Solver returned unknown ({}) for overflow check '{}' in '{}'",
-                reason_str, check_name, assertion.name
+                "Solver returned unknown ({}) for overflow check '{}' in '{}'{}",
+                reason_str, check_name, assertion.name, gate_suffix
             );
-            return Ok(AssertionOutcome::unknown(
-                reason.clone(),
-                Some(classify_unknown_reason(details.unknown_reason, &reason)),
-            ));
+            // Guarded relabel, never an unconditional override — see
+            // `solve::gate_relabelled_category` for why a resource unknown must
+            // keep its own category even when the gate fired.
+            let category = gate_relabelled_category(
+                classify_unknown_reason(details.unknown_reason, &reason),
+                gate.is_some(),
+            );
+            return Ok(AssertionOutcome::unknown(reason.clone(), Some(category)));
         }
     }
     Ok(AssertionOutcome::Verified)

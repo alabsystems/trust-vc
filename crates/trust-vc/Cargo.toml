@@ -31,7 +31,15 @@ trust-vc-core = { workspace = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }
+# Protocol components declared in other crates
+# (`tests/protocol_component_in_other_crate_soundness.rs`).
+trust-vc-protocol-fixture-mc = { path = "tests/protocol-fixtures/mc" }
+trust-vc-protocol-fixture-plain = { path = "tests/protocol-fixtures/plain" }
 serde_json = { workspace = true }
+# `assert_forall_by_rs_trust_vc_regressions` re-derives an obligation
+# fingerprint (sha256 of the rendered condition text) so the engine's rendering
+# and the manifest pin cannot drift apart unnoticed.
+sha2 = { workspace = true }
 trust-vc-types = { workspace = true }
 
 [lints]

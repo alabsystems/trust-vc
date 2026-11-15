@@ -52,7 +52,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn run_cli(args: &[&str]) -> (String, String, i32) {

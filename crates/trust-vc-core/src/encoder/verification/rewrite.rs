@@ -110,10 +110,22 @@ pub(in crate::encoder) fn replace_vars_with_pre_typed_with_targets(
     expr: &TrustVcExpr,
     targets: &HashSet<&str>,
 ) -> TrustVcExpr {
+    rename_vars_with_suffix_typed(expr, targets, PRE_STATE_SUFFIX)
+}
+
+/// Renames every free occurrence of a variable in `targets` (as a `Var`, a
+/// collection/index receiver, or a place root) to `name + suffix`. Bound
+/// occurrences (quantifier / `let` / match binders) are left alone.
+pub(in crate::encoder) fn rename_vars_with_suffix_typed(
+    expr: &TrustVcExpr,
+    targets: &HashSet<&str>,
+    suffix: &str,
+) -> TrustVcExpr {
     use crate::ir_expr_traversal::{fold_expr_scoped_children, ScopeAwareTrustVcExprFolder};
 
     struct Renamer<'a> {
         targets: &'a HashSet<&'a str>,
+        suffix: &'a str,
     }
     impl ScopeAwareTrustVcExprFolder for Renamer<'_> {
         fn fold_expr_scoped(&mut self, expr: TrustVcExpr, bound: &HashSet<&str>) -> TrustVcExpr {
@@ -125,7 +137,7 @@ pub(in crate::encoder) fn replace_vars_with_pre_typed_with_targets(
                         unreachable!()
                     };
                     TrustVcExpr::Var {
-                        name: format!("{}{}", name, PRE_STATE_SUFFIX),
+                        name: format!("{}{}", name, self.suffix),
                         ty,
                     }
                 }
@@ -136,22 +148,21 @@ pub(in crate::encoder) fn replace_vars_with_pre_typed_with_targets(
                             receiver_name: Some(n),
                             ..
                         } if should_rename(n) => {
-                            *n = format!("{}{}", n, PRE_STATE_SUFFIX);
+                            *n = format!("{}{}", n, self.suffix);
                         }
                         TrustVcExpr::Index {
                             receiver_name: Some(n),
                             ..
                         } if should_rename(n) => {
-                            *n = format!("{}{}", n, PRE_STATE_SUFFIX);
+                            *n = format!("{}{}", n, self.suffix);
                         }
                         TrustVcExpr::ReadPlace { place, .. } if should_rename(&place.root_name) => {
-                            place.root_name = format!("{}{}", place.root_name, PRE_STATE_SUFFIX);
+                            place.root_name = format!("{}{}", place.root_name, self.suffix);
                         }
                         TrustVcExpr::PlaceDisjoint { left, right } => {
                             for place in [left, right] {
                                 if should_rename(&place.root_name) {
-                                    place.root_name =
-                                        format!("{}{}", place.root_name, PRE_STATE_SUFFIX);
+                                    place.root_name = format!("{}{}", place.root_name, self.suffix);
                                 }
                             }
                         }
@@ -163,6 +174,6 @@ pub(in crate::encoder) fn replace_vars_with_pre_typed_with_targets(
         }
     }
 
-    let mut renamer = Renamer { targets };
+    let mut renamer = Renamer { targets, suffix };
     renamer.fold_expr_scoped(expr.clone(), &HashSet::new())
 }

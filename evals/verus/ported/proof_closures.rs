@@ -101,16 +101,28 @@ pub const PROOF_CLOSURES_RS_EXPECTED_CASES: &[ProofClosuresRsExpectedCase] = &[
         1,
     ),
     (
-        "proof_closure_local_application_currently_errors",
+        "proof_closure_local_application_verified",
         "basic_test",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
-        "proof_closure_zero_arg_local_application_currently_errors",
+        "proof_closure_local_application_liar_counterexample",
+        "basic_test",
+        "counterexample",
+        1,
+    ),
+    (
+        "proof_closure_zero_arg_local_application_verified",
         "",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "proof_closure_zero_arg_local_application_liar_counterexample",
+        "",
+        "counterexample",
+        1,
     ),
     (
         "proof_closure_move_capture_application_currently_errors",
@@ -125,25 +137,24 @@ pub const PROOF_CLOSURES_RS_EXPECTED_CASES: &[ProofClosuresRsExpectedCase] = &[
         0,
     ),
     (
-        "proof_closure_call_as_subexpression_currently_errors",
+        "proof_closure_call_as_subexpression_verified",
         "",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "proof_closure_call_as_subexpression_liar_counterexample",
+        "",
+        "counterexample",
+        1,
     ),
 ];
 
 pub const PROOF_CLOSURES_RS_EXPECTED_ERROR_PATTERNS: &[ProofClosuresRsExpectedErrorPatterns] = &[
     (
-        "proof_closure_local_application_currently_errors",
-        &["unknown return type for function 'f'", "standalone closure"],
-    ),
-    (
-        "proof_closure_zero_arg_local_application_currently_errors",
-        &["unknown return type for function 'f'", "standalone closure"],
-    ),
-    (
         "proof_closure_move_capture_application_currently_errors",
         &[
+            "unresolved variable `y`",
             "unknown return type for function 'f'",
             "standalone closure",
             "closure",
@@ -155,15 +166,6 @@ pub const PROOF_CLOSURES_RS_EXPECTED_ERROR_PATTERNS: &[ProofClosuresRsExpectedEr
             "unknown return type for function 'f'",
             "standalone closure",
             "assignment",
-            "closure",
-        ],
-    ),
-    (
-        "proof_closure_call_as_subexpression_currently_errors",
-        &[
-            "unknown return type for function 'f'",
-            "standalone closure",
-            "call function",
             "closure",
         ],
     ),
@@ -291,14 +293,26 @@ fn proof_closure_calls_in_assignment_false_tail_counterexample() {
     trust_vc::assert!(false);
 }
 
-fn proof_closure_local_application_currently_errors() {
+fn proof_closure_local_application_verified() {
     let f = |y: u64| -> u64 { y };
     trust_vc::assert!(f(2u64) == 2u64);
 }
 
-fn proof_closure_zero_arg_local_application_currently_errors() {
+// Liar twin (2026-09-11): the applied proof-local closure returns its argument.
+fn proof_closure_local_application_liar_counterexample() {
+    let f = |y: u64| -> u64 { y };
+    trust_vc::assert!(f(2u64) == 3u64);
+}
+
+fn proof_closure_zero_arg_local_application_verified() {
     let f = || -> u64 { 5u64 };
     trust_vc::assert!(f() == 5u64);
+}
+
+// Liar twin (2026-09-11): the zero-argument closure returns 5.
+fn proof_closure_zero_arg_local_application_liar_counterexample() {
+    let f = || -> u64 { 5u64 };
+    trust_vc::assert!(f() == 6u64);
 }
 
 fn proof_closure_move_capture_application_currently_errors(value: u64) {
@@ -321,7 +335,13 @@ fn proof_closure_requires_twenty(i: u64) {
     trust_vc::assert!(i == 20u64);
 }
 
-fn proof_closure_call_as_subexpression_currently_errors() {
+fn proof_closure_call_as_subexpression_verified() {
     let f = |i: u64| -> u64 { i };
     trust_vc::assert!(f(20u64) == 20u64);
+}
+
+// Liar twin (2026-09-11): the closure call as a comparison operand is its body.
+fn proof_closure_call_as_subexpression_liar_counterexample() {
+    let f = |i: u64| -> u64 { i };
+    trust_vc::assert!(f(20u64) == 21u64);
 }

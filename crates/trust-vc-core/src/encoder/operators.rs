@@ -314,10 +314,11 @@ impl<'a> AstExpressionParser<'a> {
         lhs_width: u32,
         check_name: &str,
     ) -> TrustVcResult<()> {
+        // The amount's width is its sort's (a hash-consed amount's
+        // `term_widths` entry may be contested; its width never is).
         let shift_amount_width = self
-            .term_widths
-            .get(&shift_amount)
-            .map(|(w, _)| *w)
+            .bv_term_width(shift_amount)
+            .or_else(|| self.term_widths.width(&shift_amount))
             .unwrap_or(lhs_width);
         let width_const = self
             .solver

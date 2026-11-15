@@ -373,10 +373,22 @@ fn test_function_local_macro_assignment_in_branch_invalidates_outer_scope() {
     let func = find_function(&file, "check_local_macro_rules_branch").unwrap();
     let vc = extract_verification_conditions(func).unwrap();
 
-    assert_eq!(
-        collect_assert_conditions(&vc),
-        vec!["x == 1".to_string()],
-        "macro assignments in control-flow blocks must invalidate outer scoped values"
+    // The silent-drop shape this guards against is `1 == 1` (the branch's
+    // macro assignment ignored, `x` kept at its pre-`if` value). Since the
+    // conditional join (2026-09-10) the branch write is SEEN and joined:
+    // `x` renders as `if (cond) { x + 1 } else { 1 }`, an even stronger
+    // witness than the bare `x == 1` invalidation this test used to pin.
+    let conditions = collect_assert_conditions(&vc);
+    assert_eq!(conditions.len(), 1, "exactly one assertion: {conditions:?}");
+    let condition = &conditions[0];
+    assert_ne!(
+        condition, "1 == 1",
+        "macro assignments in control-flow blocks must not be silently dropped"
+    );
+    assert!(
+        condition == "x == 1" || condition.contains("if (cond)"),
+        "the branch's macro assignment must invalidate or conditionally join the \
+         outer scoped value, got: {condition}"
     );
 }
 
@@ -1081,9 +1093,11 @@ fn test_file_context_registers_structs_for_field_projection_locals() {
         .iter()
         .find(|obligation| matches!(obligation.kind, ObligationKind::Assert))
         .expect("assertion should be collected");
+    // `let a: u8 = t2.a;` is substituted as its value BOUND at `u8` (§5b
+    // rule 6, `ir_lowering::LET_BOUND_MARKER`).
     assert_eq!(
         assertion.condition,
-        "(((Thing { a: ((Thing { a: (v).a })).a })).a) >= 0u8"
+        "(__trust_vc_let_bound::<u8>(((Thing { a: ((Thing { a: (v).a })).a })).a)) >= 0u8"
     );
     let result = vc.verify();
     assert!(

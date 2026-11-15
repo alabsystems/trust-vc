@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 //
-// Run with: cargo test -p trust-vc-driver --features certificates
+// Run with: targo --unverified test -p trust-vc-driver --features certificates
 //
 // These tests demonstrate the capability that makes trust-vc *better* than
 // Verus rather than merely equal: a verified result carries an ay UNSAT proof

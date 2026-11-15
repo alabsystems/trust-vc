@@ -121,7 +121,7 @@ pub fn with_serialized_env_vars<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T)
 /// process-wide env lock; previous values are restored afterwards.
 pub fn with_serialized_env_vars_removed<T>(vars: &[&str], f: impl FnOnce() -> T) -> T {
     let _env_lock = lock_env();
-    let _guards: Vec<_> = vars.iter().map(|key| ScopedEnvVar::unset(key)).collect();
+    let _guards: Vec<_> = vars.iter().map(ScopedEnvVar::unset).collect();
     f()
 }
 

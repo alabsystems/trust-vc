@@ -7,7 +7,7 @@
 //! disk exhaustion that many distinct `--test` binaries cause.
 //!
 //! Usage:  TVC_PROBE_FILE=/tmp/x.rs TVC_PROBE_FN=foo \
-//!           targo test -p trust-vc-core --test row_probe -- --nocapture
+//!           targo --unverified test -p trust-vc-core --test row_probe -- --nocapture
 
 use trust_vc_core::{verify_function_from_file, VerifyResult};
 

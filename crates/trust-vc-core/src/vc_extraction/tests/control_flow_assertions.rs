@@ -1009,7 +1009,8 @@ fn test_scoped_substitution_updates_direct_local_mut_ref_alias_field_assignment(
     assert!(
         conditions
             .iter()
-            .any(|condition| condition.contains("Pair { x: 13u64, ..")),
+            .any(|condition| condition.contains("Pair { x: __trust_vc_bind_like(")
+                && condition.contains(", 13u64), ..")),
         "direct mutable-reference field assignment should rewrite the owner through struct update syntax: {:?}",
         conditions
     );
@@ -1047,7 +1048,8 @@ fn test_scoped_substitution_updates_direct_local_mut_ref_field_borrow_assignment
     assert!(
         conditions
             .iter()
-            .any(|condition| condition.contains("Pair { x: p + 2u64, ..")),
+            .any(|condition| condition.contains("Pair { x: __trust_vc_bind_like(")
+                && condition.contains(", p + 2u64), ..")),
         "field-borrow mutable-reference assignment should rewrite the owner through struct update syntax: {:?}",
         conditions
     );
@@ -1327,9 +1329,10 @@ fn test_scoped_substitution_does_not_replay_block_initializer_side_effects() {
     let conditions = collect_assert_conditions(&vc);
 
     assert!(
-        conditions
-            .iter()
-            .any(|condition| condition.contains("x == 2")),
+        conditions.iter().any(|condition| {
+            // An invalidation POISON (cluster rank 2), not the bare name.
+            condition.contains("(x__invalidated_") && condition.contains(") == 2")
+        }),
         "external block-initializer assignment should invalidate the stale local value: {:?}",
         conditions
     );
@@ -1373,9 +1376,10 @@ fn test_statement_expr_helper_call_value_yield_is_sequenced_without_replaying_ou
         conditions
     );
     assert!(
-        conditions
-            .iter()
-            .any(|condition| condition.contains("a == 13u64")),
+        conditions.iter().any(|condition| {
+            // An invalidation POISON (cluster rank 2), not the bare name.
+            condition.contains("(a__invalidated_") && condition.contains(") == 13u64")
+        }),
         "side effects from the call-argument block must invalidate a instead of replaying a stale scoped value: {:?}",
         conditions
     );
@@ -1832,10 +1836,13 @@ fn test_generic_trait_method_requires_discharges_when_established() {
     // Same trait/impl, but the caller's OWN `requires(a.req())` supplies the
     // matching `T__req(a)` hypothesis, so the call-site obligation both EXISTS
     // and is dischargeable — pinning that the obligation is real (not dead /
-    // vacuous) and that the discharge path works.
+    // vacuous) and that the discharge path works. `req` is a spec function
+    // here: an exec `req` evaluated at entry and again at the call may answer
+    // differently, and that `Verified` answer is refused.
     let code = r#"
         #[trust_vc::trait_spec]
         trait T {
+            #[trust_vc::spec]
             fn req(&self) -> bool;
 
             #[trust_vc::requires(self.req())]
@@ -1846,6 +1853,7 @@ fn test_generic_trait_method_requires_discharges_when_established() {
 
         #[trust_vc::trait_impl]
         impl T for S {
+            #[trust_vc::spec]
             fn req(&self) -> bool {
                 true
             }
@@ -2180,10 +2188,18 @@ fn test_inherent_method_requires_discharges_when_established() {
         "the inherent-method `requires` obligation must still be emitted: {:?}",
         vc.obligations
     );
+    // `m` is a proof method, which panics when the exec body calls it at run
+    // time, so the ghost-call rule refuses the answer; it refuses only a
+    // `Verified` answer.
     let result = vc.verify();
     assert!(
-        matches!(result, crate::encoder::VerifyResult::Verified),
-        "an established inherent-method precondition must discharge, got: {result:?}"
+        matches!(
+            &result,
+            crate::encoder::VerifyResult::Error { message }
+                if message.contains("ghost function called from exec code")
+        ),
+        "an established inherent-method precondition must discharge (a `Verified` answer, \
+         refused by the ghost-call rule), got: {result:?}"
     );
 }
 
@@ -2577,8 +2593,10 @@ fn test_multi_arg_sibling_helper_contract_substitution_is_left_to_right() {
         })
         .expect("expected call-site requires obligation for pick_second");
 
+    // The invalidated local reads an invalidation POISON (never declared, so
+    // it fails closed), not its bare name (cluster rank 2).
     assert!(
-        requires.condition.contains("x >= 1"),
+        requires.condition.contains("(x__invalidated_") && requires.condition.contains(") >= 1"),
         "second argument should be rendered after invalidating side effects from the first argument: {:?}",
         requires
     );
@@ -2642,6 +2660,9 @@ fn test_unreferenced_sibling_helper_does_not_break_file_context() {
     );
 }
 
+/// In an exec body the write is refused outright
+/// (`test_statement_in_exec_assert_argument_block_is_refused`); a proof body
+/// keeps the rendering and the invalidation pinned here.
 #[test]
 fn test_statement_expr_direct_assert_invalidates_outer_state() {
     let code = r#"
@@ -2649,6 +2670,7 @@ fn test_statement_expr_direct_assert_invalidates_outer_state() {
             v
         }
 
+        #[trust_vc::proof]
         fn check_direct_assert() {
             let mut a = 12u64;
             assert!(id({
@@ -2672,9 +2694,11 @@ fn test_statement_expr_direct_assert_invalidates_outer_state() {
         conditions
     );
     assert!(
-        conditions
-            .iter()
-            .any(|condition| condition.contains("a == 12u64")),
+        conditions.iter().any(|condition| {
+            // An invalidation POISON (cluster rank 3: a write inside a block of
+            // an assertion argument), not the bare name.
+            condition.contains("(a__invalidated_") && condition.contains(") == 12u64")
+        }),
         "direct assertion side effects must invalidate later outer-state assertions: {:?}",
         conditions
     );
@@ -2685,6 +2709,35 @@ fn test_statement_expr_direct_assert_invalidates_outer_state() {
                 || condition.contains("a = a + 1u64")),
         "direct assertion must not keep stale outer bindings or raw assignment expressions: {:?}",
         conditions
+    );
+}
+
+/// A statement in a block of a run-time assertion's argument is evaluated,
+/// but the assertion's rendering keeps only the block's value, so the exec
+/// body is refused rather than left with no obligation for the statement.
+#[test]
+fn test_statement_in_exec_assert_argument_block_is_refused() {
+    let code = r#"
+        fn id(v: u64) -> u64 {
+            v
+        }
+
+        fn check_direct_assert() {
+            let mut a = 12u64;
+            assert!(id({
+                a = a + 1u64;
+                a
+            }) == 13u64);
+        }
+    "#;
+    let file = parse_file(code).unwrap();
+    let func = find_function(&file, "check_direct_assert").unwrap();
+    let err = extract_verification_conditions(func)
+        .expect_err("the exec assertion statement must be refused");
+    assert!(
+        err.to_string()
+            .contains("the lane reads only the block's value"),
+        "unexpected refusal: {err}"
     );
 }
 
@@ -2704,10 +2757,14 @@ fn test_scoped_substitution_applies_to_calc_steps() {
     let vc = extract_verification_conditions(func).unwrap();
     let conditions = collect_assert_and_assert_by_conditions(&vc);
 
+    // The tokens of `calc!` are not read as uses of `x`, so the binding's
+    // type is not determined here and its value is marked so
+    // (`__trust_vc_untyped_binding`, `ir_lowering::untyped_site`).
     assert!(
-        conditions
-            .iter()
-            .any(|condition| condition.contains("(5) == 5")),
+        conditions.iter().any(|condition| {
+            condition.contains("(5) == 5")
+                || condition.contains("(__trust_vc_untyped_binding(5)) == 5")
+        }),
         "calc obligations should use active scoped local bindings: {:?}",
         conditions
     );
@@ -3169,10 +3226,13 @@ fn test_scoped_substitution_does_not_assume_loop_first_iteration_state() {
     let vc = extract_verification_conditions(func).unwrap();
     let conditions = collect_assert_conditions(&vc);
 
+    // Since 2026-09-10 a body assertion is rendered over the loop-body HAVOC
+    // symbol of a modified var (`x__loopbody_N`), weakened by the guard and
+    // invariants — still symbolic, never the pre-loop value.
     assert!(
-        conditions
-            .iter()
-            .any(|condition| condition.contains("x == 0")),
+        conditions.iter().any(|condition| {
+            condition.contains("x == 0") || condition.contains("x__loopbody_0) == 0")
+        }),
         "loop body assertions should keep loop-carried variables symbolic: {:?}",
         conditions
     );

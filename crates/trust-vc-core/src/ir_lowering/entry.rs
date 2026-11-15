@@ -14,6 +14,54 @@ use super::{
     control_flow, dispatch, infer_expr_type, match_lowering, operators, LoweringError, TypeEnv,
 };
 
+/// Refuse an UNSUFFIXED float literal form (`0.1`, `-(1.5)`, `0.1 * 3.0`)
+/// held by an aggregate — a tuple, an array, an `Option`/`Result` payload.
+/// Its type is a Rust float that only a later use fixes, but it is lowered as
+/// the exact `real` it is next to a `real` peer, so `let p = (0.1, 0.2);
+/// p.0 + p.1 == 0.3` was `Verified` where `f64` arithmetic makes it false.
+pub(super) fn refuse_unsuffixed_float_elements<'e>(
+    elems: impl Iterator<Item = &'e syn::Expr>,
+    holder: &str,
+) -> Result<(), LoweringError> {
+    for elem in elems {
+        if operators::is_unsuffixed_float_literal_tree(elem) {
+            return Err(LoweringError::UnsupportedExpr(format!(
+                "`{}` is an unsuffixed float literal held by {holder}: its type is a Rust \
+                 float (`f64` by default), whose rounding an exact real does not model",
+                quote::ToTokens::to_token_stream(elem)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an unsuffixed float literal form written into a field of a struct
+/// literal or an enum-variant struct literal whose declared type is not the
+/// exact `real`: a generic field (`struct W<T> { x: T }`) takes the literal's
+/// own Rust float type, which only a later use fixes, and the literal was the
+/// exact `real` through it, so `W { x: 0.1 }.x + 0.2 == 0.3` was `Verified`
+/// where `f64` arithmetic makes it false. A field of a Rust float type is
+/// refused alike: the literal's `f64` rounding is not modelled.
+pub(super) fn refuse_unsuffixed_float_fields<'e>(
+    fields: impl Iterator<Item = &'e syn::FieldValue>,
+    declared: &[(String, TrustVcType)],
+    holder: &str,
+) -> Result<(), LoweringError> {
+    for field in fields {
+        let name = match &field.member {
+            syn::Member::Named(ident) => ident.to_string(),
+            syn::Member::Unnamed(index) => index.index.to_string(),
+        };
+        let exact_real = declared
+            .iter()
+            .any(|(declared_name, ty)| *declared_name == name && *ty == TrustVcType::Real);
+        if !exact_real {
+            refuse_unsuffixed_float_elements(std::iter::once(&field.expr), holder)?;
+        }
+    }
+    Ok(())
+}
+
 /// Lowers a `syn::Expr` into a `TrustVcExpr`.
 ///
 /// Every `syn::Expr` variant is explicitly handled. No silent drops.
@@ -68,11 +116,17 @@ pub(crate) fn lower_syn_expr_with_depth(
             }
         }
         syn::Expr::Tuple(tuple) if tuple.elems.is_empty() => Ok(TrustVcExpr::UnitLit),
-        syn::Expr::Tuple(tuple) => lower_tuple_expr(tuple, env, current_depth),
+        syn::Expr::Tuple(tuple) => {
+            refuse_unsuffixed_float_elements(tuple.elems.iter(), "a tuple")?;
+            lower_tuple_expr(tuple, env, current_depth)
+        }
         syn::Expr::Range(_) => Err(LoweringError::UnsupportedExpr("range".into())),
         syn::Expr::Assign(_) => Err(LoweringError::UnsupportedExpr("assignment".into())),
         syn::Expr::Let(_) => Err(LoweringError::UnsupportedExpr("if-let pattern".into())),
-        syn::Expr::Array(array) => lower_array_literal(array, env, current_depth),
+        syn::Expr::Array(array) => {
+            refuse_unsuffixed_float_elements(array.elems.iter(), "an array")?;
+            lower_array_literal(array, env, current_depth)
+        }
         syn::Expr::Async(_) => Err(LoweringError::UnsupportedExpr("async block".into())),
         syn::Expr::Await(_) => Err(LoweringError::UnsupportedExpr("await".into())),
         syn::Expr::Break(_) => Err(LoweringError::UnsupportedExpr("break".into())),

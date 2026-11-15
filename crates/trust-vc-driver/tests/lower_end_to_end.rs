@@ -13,7 +13,7 @@
 //      sound, not a rubber stamp).
 //
 // This is the load-bearing, stable-toolchain demonstration of the
-// rustc-driver-frontend architecture (see design-rustc-driver-frontend.md).
+// rustc-driver-frontend architecture (see docs/archive/design-rustc-driver-frontend.md).
 //
 // When the `rustc-driver` feature is on, linking the feature-on lib pulls in
 // `rustc_driver`, so this binary must opt into `rustc_private` to link it (a

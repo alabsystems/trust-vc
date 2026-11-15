@@ -56,7 +56,9 @@ fn g_arg_pos<T: Tr>(t: T, x: u64) { trust_vc::assert!(t.dbl(x) == x + x); }
 fn g_arg_liar<T: Tr>(t: T, x: u64) { trust_vc::assert!(t.dbl(x) == x + x + 1u64); }
 "#;
 
-// ── repeated calls on the same generic receiver agree (determinism) ──
+// ── repeated calls on the same generic receiver ──
+// An impl can read a counter or a `Cell`, so two calls need not agree; the
+// answer is refused rather than read off the trait function symbol.
 const DET: &str = r#"
 #[trust_vc::trait_spec]
 trait Tr { #[trust_vc::ensures(result == 7u64)] fn m(&self) -> u64; }
@@ -129,10 +131,11 @@ fn arg_referencing_ensures_on_generic_receiver() {
 }
 
 #[test]
-fn repeated_generic_dispatch_is_deterministic() {
+fn repeated_generic_dispatch_is_refused() {
+    let r = verify("d", "g_det", DET);
     assert!(
-        is_verified(&verify("d", "g_det", DET)),
-        "t.m()==t.m() must verify (same receiver, deterministic)"
+        matches!(&r, VerifyResult::Error { message } if message.starts_with("bodiless call repeated")),
+        "t.m()==t.m() must be refused as a repeated call, got {r:?}"
     );
 }
 

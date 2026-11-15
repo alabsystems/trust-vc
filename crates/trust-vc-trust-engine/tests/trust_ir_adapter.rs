@@ -3,15 +3,14 @@
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
 use trust_vc_trust_engine::{
-    TrustAliasFact, TrustAliasKind, TrustArithOp, TrustAssuranceLevel, TrustBorrow,
-    TrustBorrowKind, TrustCompareOp, TrustContractFrame, TrustExpr, TrustFunctionSignature,
-    TrustLifetimeRegion, TrustLogicOp, TrustNativeContext, TrustObligationKind, TrustOldValue,
-    TrustOutcome, TrustOwnedPlace, TrustOwnershipState, TrustPointerProvenance,
-    TrustPointerProvenanceOrigin, TrustProofEvidenceProfile, TrustProofLineage,
-    TrustProofLineageSource, TrustProofPolicy, TrustSort, TrustSourceSpan,
-    TrustTrustIrAdapterRequest, TrustTrustIrObligation, TrustTrustIrObligationKind,
-    TrustTrustIrProofUnit, TrustUnsupportedTrustIrConstruct, TrustVariable, TrustVcTrustEngine,
-    TRUST_TRUST_IR_ADAPTER_SCHEMA_VERSION,
+    TrustAliasFact, TrustAliasKind, TrustArithOp, TrustBorrow, TrustBorrowKind, TrustCompareOp,
+    TrustContractFrame, TrustExpr, TrustFunctionSignature, TrustLifetimeRegion, TrustLogicOp,
+    TrustNativeContext, TrustObligationKind, TrustOldValue, TrustOutcome, TrustOwnedPlace,
+    TrustOwnershipState, TrustPointerProvenance, TrustPointerProvenanceOrigin,
+    TrustProofEvidenceProfile, TrustProofLineage, TrustProofLineageSource, TrustProofPolicy,
+    TrustSort, TrustSourceSpan, TrustTrustIrAdapterRequest, TrustTrustIrObligation,
+    TrustTrustIrObligationKind, TrustTrustIrProofUnit, TrustUnsupportedTrustIrConstruct,
+    TrustVariable, TrustVcTrustEngine, TRUST_TRUST_IR_ADAPTER_SCHEMA_VERSION,
 };
 
 const TRUST_X86_LOAD_TRUST_IR_ADAPTER_GOLDEN: &str =
@@ -357,56 +356,8 @@ fn trust_ir_adapter_lowers_trust_types_contracts_with_lineage_and_spans() {
         .is_some());
 }
 
-#[test]
-fn trust_ir_adapter_preserves_recommends_as_soft_contract_obligation() {
-    let engine = TrustVcTrustEngine::new();
-    let request = TrustTrustIrAdapterRequest::new("crate-under-test").with_unit(
-        TrustTrustIrProofUnit::new("crate::increment", increment_context()).with_obligation(
-            TrustTrustIrObligation::expr(
-                "recommends.false_soft",
-                TrustTrustIrObligationKind::Recommends,
-                TrustExpr::bool_literal(false),
-                TrustProofLineage::trust_types_contract("trust-types-json-v1", "recommends-clause")
-                    .with_input_digest("sha256:recommends"),
-            )
-            .with_span(TrustSourceSpan::new("src/lib.rs", 4, 5, 4, 42)),
-        ),
-    );
-
-    engine
-        .validate_trust_ir_adapter_request(&request)
-        .expect("typed recommends TrustIr request should pass validation");
-    let lowered = engine
-        .lower_trust_ir_adapter_request(&request)
-        .expect("typed recommends TrustIr request should lower");
-
-    assert_eq!(
-        lowered.units()[0].obligations()[0].kind(),
-        &TrustObligationKind::Recommends
-    );
-
-    let report = engine
-        .verify_trust_ir_adapter_request(&request)
-        .expect("false recommends should verify as a warning-only obligation");
-    assert!(matches!(
-        report.units()[0].outcome(),
-        TrustOutcome::Verified
-    ));
-    let evidence = &report.units()[0].proof_evidence()[0];
-    assert_eq!(
-        evidence.evidence_profile(),
-        TrustProofEvidenceProfile::TypedContractFrame
-    );
-    assert_eq!(
-        evidence.assurance_level(),
-        TrustAssuranceLevel::MetadataOnly
-    );
-    let lineage = evidence
-        .proof_lineage()
-        .expect("report evidence should preserve recommends proof lineage");
-    assert_eq!(lineage.rule(), "recommends-clause");
-    assert_eq!(lineage.input_digest(), Some("sha256:recommends"));
-}
+#[path = "trust_ir_adapter/recommends.rs"]
+mod recommends;
 
 #[test]
 fn trust_ir_adapter_preserves_compiler_assertion_source_ids_in_artifact_coverage() {

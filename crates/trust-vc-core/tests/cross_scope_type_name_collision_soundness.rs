@@ -206,7 +206,7 @@ fn assert_rejected_for_collision(label: &str, result: VerifyResult) {
 
 fn assert_verified(label: &str, result: VerifyResult) {
     match result {
-        VerifyResult::Verified { .. } => {}
+        VerifyResult::Verified => {}
         other => panic!("{label} Got: {other:?}"),
     }
 }
@@ -608,7 +608,7 @@ fn a_guard_struck_collision_still_decides_the_rest_of_the_file() {
 fn a_guard_struck_collision_cannot_cross_contaminate_either_way() {
     for (id, func) in [("gst_r", "root_liar"), ("gst_s", "shadow_liar")] {
         match verify(id, func, GUARD_STRUCK_TWIN) {
-            VerifyResult::Verified { .. } => {
+            VerifyResult::Verified => {
                 panic!("FALSE-VERIFY: `{func}` read the other `LeafClash`'s `grab` body")
             }
             VerifyResult::Error { ref message } if message.contains("both named") => {

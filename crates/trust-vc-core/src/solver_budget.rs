@@ -33,7 +33,7 @@
 //!   `rlimit_count` would name a unit nothing enforces.
 //! * `rlimit_count` is not calibrated against Z3's `RLIMIT_PER_SECOND`; it is
 //!   a derived sum over conflicts/decisions/propagations
-//!   (`docs/ay-solver-inventory-2026-07-13.md` R12). Quoting it as a Z3
+//!   (`docs/archive/ay-solver-inventory-2026-07-13.md` R12). Quoting it as a Z3
 //!   resource count would be a fake parity claim, and the scales genuinely
 //!   differ: a measured swap_t3 solve took 519 conflicts and 55794
 //!   `rlimit_count`.
@@ -49,7 +49,7 @@
 /// (`encoder::verification::timeout::DEFAULT_CONFLICT_BUDGET_CONFLICTS`,
 /// 400_000) exactly. That anchor is the only defensible one available: ay's
 /// `rlimit_count` is NOT calibrated against Z3's `RLIMIT_PER_SECOND`
-/// (`docs/ay-solver-inventory-2026-07-13.md` R12), so there is no honest
+/// (`docs/archive/ay-solver-inventory-2026-07-13.md` R12), so there is no honest
 /// conversion from a Z3 resource unit to an ay conflict. What DOES carry over
 /// faithfully is the attribute's MEANING: a monotone multiplier on a
 /// deterministic work budget, where `rlimit(2N)` grants exactly twice the work

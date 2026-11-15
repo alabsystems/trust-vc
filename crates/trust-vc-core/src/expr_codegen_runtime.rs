@@ -31,7 +31,12 @@ fn lower_lit(lit: &syn::ExprLit) -> Option<TrustVcExpr> {
             } else {
                 type_from_int_suffix(value.suffix()).ok()?
             };
-            Some(ir_builder::int_lit(parsed, ty))
+            // A literal the source types `i32` is pinned (it is not the
+            // unsuffixed placeholder): `ir_lowering::typed_int_literal`.
+            Some(crate::ir_lowering::typed_int_literal(
+                ir_builder::int_lit(parsed, ty),
+                value.suffix(),
+            ))
         }
         _ => None,
     }

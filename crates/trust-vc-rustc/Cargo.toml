@@ -1,0 +1,244 @@
+# trust-vc-rustc: reads Verus programs out of rustc and answers upstream
+# Verus's test harness as target-verus/<profile>/rust_verify.
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+#
+# The crate has two layers:
+#   * rustc-free (always built): the Verus command-line table that splits the
+#     harness argv into Verus options and rustc arguments, the verdict record
+#     format, the table of Verus diagnostic items, Verus's message texts and
+#     its type spelling. These build and test with plain `targo --unverified`.
+#   * rustc (feature `rustc`): the reader (HIR + type-check results to VcIR),
+#     the rustc_driver callbacks and the `rust_verify` binary. They use
+#     `extern crate rustc_*` resolved from the installed Trust sysroot (which
+#     ships rustc-dev), so the feature only builds on trustc.
+#
+# Build the harness binary:
+#   targo --unverified build -p trust-vc-rustc --features rustc
+# build.rs bakes an rpath to the compiler's lib directory into the binary, so it
+# runs without DYLD_LIBRARY_PATH.
+
+[package]
+name = "trust-vc-rustc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rustc front end that reads Verus programs for trust-vc and answers Verus's test harness"
+
+[features]
+default = []
+# The rustc_driver layer and the `rust_verify` binary. Requires a compiler that
+# ships rustc-dev and accepts `feature(rustc_private)` (trustc does).
+# It also answers the generated queries, so it pulls in trust-vc-core (and
+# ay) through trust-vc-vcir's `solve` feature, and libc to keep the solver's
+# own output off standard error.
+rustc = ["trust-vc-vcir/solve", "dep:libc"]
+
+[dependencies]
+libc = { workspace = true, optional = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+trust-vc-vcir = { path = "../trust-vc-vcir" }
+
+[[bin]]
+name = "rust_verify"
+path = "src/bin/rust_verify.rs"
+required-features = ["rustc"]
+
+# cargo-verus resolves a sibling executable named verus for RUSTC_WRAPPER.
+[[bin]]
+name = "verus"
+path = "src/bin/verus.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_metadata_inspect"
+path = "src/bin/vstd_metadata_inspect.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_declaration_observe"
+path = "src/bin/vstd_declaration_observe.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_declaration_stage"
+path = "src/bin/vstd_declaration_stage.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_macro_context_observe"
+path = "src/bin/vstd_macro_context_observe.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_declaration_read"
+path = "src/bin/vstd_declaration_read.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_declaration_verify"
+path = "src/bin/vstd_declaration_verify.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_normal_client_verify"
+path = "src/bin/vstd_normal_client_verify.rs"
+required-features = ["rustc"]
+
+# Runs the binary on tests/golden/*.rs; needs TRUST_VC_VERUS_BUILTINS (see the
+# test's documentation).
+[[test]]
+name = "reader_golden"
+path = "tests/reader_golden.rs"
+required-features = ["rustc"]
+
+# Verus's rejections the reader reproduces, each with a liar twin; needs
+# TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "verus_rules"
+path = "tests/verus_rules.rs"
+required-features = ["rustc"]
+
+# Proof blocks wherever they appear, each with a one-line twin; needs
+# TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "ghost_blocks"
+path = "tests/ghost_blocks.rs"
+required-features = ["rustc"]
+
+# Programs a false-pass hunt found, each with a one-line twin; needs
+# TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "false_passes"
+path = "tests/false_passes.rs"
+required-features = ["rustc"]
+
+# Loops, each with a one-line twin; needs TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "loops"
+path = "tests/loops.rs"
+required-features = ["rustc"]
+
+# Traits, each with a one-line twin; needs TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "traits"
+path = "tests/traits.rs"
+required-features = ["rustc"]
+
+# Termination, each with a one-line twin; needs TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "termination"
+path = "tests/termination.rs"
+required-features = ["rustc"]
+
+# Where recursive spec functions unfold, each with a one-line twin; needs
+# TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "relevance"
+path = "tests/relevance.rs"
+required-features = ["rustc"]
+
+# Quantifiers, triggers and choices, each with a one-line twin; needs
+# TRUST_VC_VERUS_BUILTINS.
+[[test]]
+name = "quantifiers"
+path = "tests/quantifiers.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "trigger_error_fidelity"
+path = "tests/trigger_error_fidelity.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "tuple_patterns"
+path = "tests/tuple_patterns.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "tracked_ownership"
+path = "tests/tracked_ownership.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "local_struct_values"
+path = "tests/local_struct_values.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "tracked_value_flow"
+path = "tests/tracked_value_flow.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "function_identity_observer"
+path = "tests/function_identity_observer.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "declaration_headers"
+path = "tests/declaration_headers.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "constant_declarations"
+path = "tests/constant_declarations.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "compound_spec_results"
+path = "tests/compound_spec_results.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "normal_owned_import"
+path = "tests/normal_owned_import.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "cargo_ingress"
+path = "tests/cargo_ingress.rs"
+required-features = ["rustc"]
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[lints]
+workspace = true
+
+[[example]]
+name = "staging_bindings"
+path = "examples/staging_bindings.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "bitvector_architecture_diagnostics"
+path = "tests/bitvector_architecture_diagnostics.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "native_entrypoints"
+path = "tests/native_entrypoints.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "upstream_suite_owner"
+path = "tests/upstream_suite_owner.rs"
+required-features = ["rustc"]
+
+# Source-typed enum constructors, genuine false twins and native WF/mode guards.
+[[test]]
+name = "enum_values"
+path = "tests/enum_values.rs"
+required-features = ["rustc"]
+
+# Actual optional recommends diagnostics after a genuine proof failure.
+[[test]]
+name = "recommends"
+path = "tests/recommends.rs"
+required-features = ["rustc"]

@@ -71,6 +71,7 @@ const FOCUSED_COMPILE_FAIL_GLOBS: &[&str] = &[
     "tests/compile-fail/contract_combined_with_proof.rs",
     "tests/compile-fail/inline_*.rs",
     "tests/compile-fail/old_*.rs",
+    "tests/compile-fail/protocol_*.rs",
 ];
 
 #[test]

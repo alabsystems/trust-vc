@@ -303,6 +303,50 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "loop_termination_unsupported",
         9,
     ),
+    // 2026-09-10 (audit rows 430/433): the range guard `x < 10` reaches the body
+    // assertion, so upstream for_loop1's `assert(x < 10)` verifies — re-pinned
+    // from the "sound over-rejection" counterexample it used to be.
+    (
+        "loops_no_spinoff_for_loop_range_fact_verified",
+        "for_loop1",
+        5,
+    ),
+    // 2026-09-10 (audit row 430): upstream loop2_ok / loop2_ok_y verify — the
+    // effect-free inner loop no longer drops the outer body out of the exact
+    // lane, and its invariant is checked at the outer loop's arbitrary head.
+    (
+        "loops_no_spinoff_loop2_restore_before_break_verified",
+        "loop2_ok",
+        10,
+    ),
+    (
+        "loops_no_spinoff_loop2_restore_before_labeled_inner_break_verified",
+        "loop2_ok_y",
+        10,
+    ),
+    // 2026-09-10 (audit row 430): code after a bare loop with no exit is
+    // unreachable — upstream infinite_loop / loop_infinite2 / loop_infinite2y verify.
+    (
+        "loops_no_spinoff_infinite_loop_unreachable_verified",
+        "infinite_loop",
+        3,
+    ),
+    (
+        "loops_no_spinoff_loop_infinite_nested_inner_break_verified",
+        "loop_infinite2",
+        3,
+    ),
+    (
+        "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_verified",
+        "loop_infinite2y",
+        3,
+    ),
+    // 2026-09-11 (row 430): the side-effect guard block (upstream complex_while) verifies.
+    (
+        "loops_no_spinoff_complex_while_side_effect_guard_verified",
+        "complex_while",
+        12,
+    ),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
@@ -310,9 +354,9 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
     // (for_range_desugar.rs). `assert!(x < 10)` over just the auto lower bound, and
     // `assert!(n == 30)` over an un-invariant-pinned accumulator, both Counterexample.
     (
-        "loops_no_spinoff_for_loop_range_fact_boundary_counterexample",
-        "for_loop1",
-        1,
+        "loops_no_spinoff_for_loop_range_fact_liar_counterexample",
+        "for_loop1 test_loop_fail",
+        5,
     ),
     (
         "loops_no_spinoff_for_loop_accumulator_post_boundary_counterexample",
@@ -333,16 +377,6 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
         "loops_no_spinoff_loop_break_false_counterexample",
         "loop_break_false",
         1,
-    ),
-    (
-        "loops_no_spinoff_loop2_restore_before_break_current_gap_counterexample",
-        "loop2_ok",
-        3,
-    ),
-    (
-        "loops_no_spinoff_loop2_restore_before_labeled_inner_break_current_gap_counterexample",
-        "loop2_ok_y",
-        3,
     ),
     (
         "loops_no_spinoff_example_loop_break_without_progress_counterexample",
@@ -375,28 +409,8 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
         1,
     ),
     (
-        "loops_no_spinoff_complex_while_side_effect_guard_current_gap_counterexample",
-        "complex_while",
-        1,
-    ),
-    (
         "loops_no_spinoff_loop_break_false_labeled_counterexample",
         "loop_break_false_y",
-        1,
-    ),
-    (
-        "loops_no_spinoff_infinite_loop_unreachable_current_gap_counterexample",
-        "infinite_loop",
-        1,
-    ),
-    (
-        "loops_no_spinoff_loop_infinite_nested_inner_break_current_gap_counterexample",
-        "loop_infinite2",
-        1,
-    ),
-    (
-        "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_current_gap_counterexample",
-        "loop_infinite2y",
         1,
     ),
     (

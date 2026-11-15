@@ -139,7 +139,8 @@ impl<'a> AstExpressionParser<'a> {
 
         let pw = crate::ir::pointer_width();
         let len_bv = self.encode_subexpr(len_expr)?;
-        let len_bv = self.coerce_to_len_width(len_bv)?;
+        let len_own = self.own_sign(len_expr, None);
+        let len_bv = self.coerce_to_len_width(len_bv, len_own)?;
         // Route A (#2779): store the spec length as Int; keep a BV view of the
         // user-supplied length for the BV-indexed range guard.
         let len_int = self

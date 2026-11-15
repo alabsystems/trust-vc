@@ -6,14 +6,15 @@
 //! (diagnostic-parity foundation slice 2, FAMILY B).
 //!
 //! Upstream semantics (vir/src/modes.rs), in CHECK ORDER:
-//!   * ExprX::Return: (1) exec fn + ghost context — "cannot return from
-//!     non-exec code in exec function"; (2) `in_forall_stmt` — "return is not
-//!     allowed in 'assert ... by' statements"; (3) `in_proof_in_spec`;
-//!     (4) `in_pure` — "return is not allowed in pure context".
-//!   * ExprX::BreakOrContinue: only (2)(3)(4), with "break/continue …" — NO
-//!     exec-ghost check.
-//!   * ExprX::Loop in a ghost context errors FIRST with "cannot use while in
-//!     proof or spec mode", before any break/continue inside it is checked.
+//! * ExprX::Return: (1) exec fn + ghost context — "cannot return from
+//!   non-exec code in exec function"; (2) `in_forall_stmt` — "return is not
+//!   allowed in 'assert ... by' statements"; (3) `in_proof_in_spec`;
+//!   (4) `in_pure` — "return is not allowed in pure context".
+//! * ExprX::BreakOrContinue: only (2)(3)(4), with "break/continue …" — NO
+//!   exec-ghost check.
+//! * ExprX::Loop in a ghost context errors FIRST with "cannot use while in
+//!   proof or spec mode", before any break/continue inside it is checked.
+//!
 //! `in_pure` contexts include spec-fn bodies, quantifier bodies, spec-closure
 //! bodies, and assert!/assume! arguments.
 //!

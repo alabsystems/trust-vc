@@ -16,14 +16,14 @@
 //! `driver::run` itself injects `-Zno-steal-thir` and `--cfg trust_vc_driver`
 //! (the contract-macro surface bridge) if absent, so the caller need not.
 //!
-//! # Why a bin (and why nightly-only)
+//! # Why a bin (and why feature-gated)
 //!
 //! The `driver` module does `extern crate rustc_{driver,hir,interface,middle}`
-//! behind `feature = "rustc-driver"`, so this binary links the fork toolchain's
-//! `rustc_private` libraries. It builds ONLY via
-//! `scripts/build-trust-vc-driver.sh bin` (the `-L`/`-Cprefer-dynamic`/DYLD
-//! recipe), never a bare `cargo build`. It is excluded from the default
-//! (stable) workspace build by `required-features = ["rustc-driver"]`.
+//! behind `feature = "rustc-driver"`, so this binary links the Trust
+//! toolchain's `rustc_private` libraries, which the Trust sysroot serves:
+//! `targo --unverified build -p trust-vc-driver --features rustc-driver --bin
+//! trust-vc-driver` (build.rs bakes the librustc_driver rpath). It is excluded
+//! from the default workspace build by `required-features = ["rustc-driver"]`.
 //!
 //! # Output contract (machine-parseable; consumed by cargo-trust-vc)
 //!
@@ -57,7 +57,7 @@
 // final artifact — this bin — to opt into `feature(rustc_private)`; without it
 // the linker reports "cannot satisfy dependencies so `<std dep>` only shows up
 // once". The bin only ever compiles under `required-features = ["rustc-driver"]`
-// (always the fork toolchain + `RUSTC_BOOTSTRAP=1`), so the gate mirrors lib.rs.
+// (always the Trust toolchain, a dev channel), so the gate mirrors lib.rs.
 #![cfg_attr(feature = "rustc-driver", feature(rustc_private))]
 
 use std::io::Write;

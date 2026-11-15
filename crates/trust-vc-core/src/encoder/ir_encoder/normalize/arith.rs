@@ -23,22 +23,32 @@ fn is_exact_arithmetic_type(ty: &TrustVcType) -> bool {
 /// Folder that normalizes only the expression forms that currently recurse.
 struct IntNormalizer;
 
+/// The DERIVED type of an arithmetic node (`ir_lowering::types`): the one
+/// type every rewrite below must preserve. Flattening, sorting, distributing
+/// and cancelling are ring identities WITHIN one type — two's complement in a
+/// fixed-width `T`, or the exact integers — so a node is only ever merged with
+/// nodes of its own derived type. Merging by the DECLARED type moved a
+/// wrapping `u8` sum into an exact mixed-type sum (or the reverse): `(a_u8 +
+/// b_u8) + c_i16` is `wrap8(a + b) + c`, never `a + b + c`.
+fn derived_ty(expr: &TrustVcExpr) -> TrustVcType {
+    crate::ir_lowering::infer_expr_type(expr)
+}
+
 impl TrustVcExprFolder for IntNormalizer {
     fn fold_expr(&mut self, expr: TrustVcExpr) -> TrustVcExpr {
+        let root_ty = matches!(expr, TrustVcExpr::Arith { .. }).then(|| derived_ty(&expr));
         match expr {
             TrustVcExpr::Arith {
-                op,
-                left,
-                right,
-                ty,
-            } if is_exact_arithmetic_type(&ty) => {
+                op, left, right, ..
+            } if root_ty.as_ref().is_some_and(is_exact_arithmetic_type) => {
+                let ty = root_ty.unwrap_or(TrustVcType::MathInt);
                 let left_n = self.fold_expr(*left);
                 let right_n = self.fold_expr(*right);
 
                 if matches!(op, ArithOp::Add | ArithOp::Mul) {
                     let mut operands = Vec::new();
-                    flatten_assoc(op, &left_n, &mut operands);
-                    flatten_assoc(op, &right_n, &mut operands);
+                    flatten_assoc(op, &ty, &left_n, &mut operands);
+                    flatten_assoc(op, &ty, &right_n, &mut operands);
 
                     // Distribution: for Mul, if exactly one operand is a sum
                     // or difference, distribute the product over its terms.
@@ -47,31 +57,22 @@ impl TrustVcExprFolder for IntNormalizer {
                     // Gated to exactly one Add/Sub to avoid exponential blowup
                     // from products such as (a+b)*(c+d). Part of #2400.
                     if op == ArithOp::Mul {
-                        let distributive_count = operands
-                            .iter()
-                            .filter(|o| {
-                                matches!(
-                                    o,
-                                    TrustVcExpr::Arith {
-                                        op: ArithOp::Add | ArithOp::Sub,
-                                        ty: t,
-                                        ..
-                                    } if is_exact_arithmetic_type(t)
-                                )
-                            })
-                            .count();
+                        let is_sum_of_this_type = |o: &TrustVcExpr| {
+                            matches!(
+                                o,
+                                TrustVcExpr::Arith {
+                                    op: ArithOp::Add | ArithOp::Sub,
+                                    ..
+                                }
+                            ) && derived_ty(o) == ty
+                        };
+                        let distributive_count =
+                            operands.iter().filter(|o| is_sum_of_this_type(o)).count();
 
                         if distributive_count == 1 {
-                            let Some(distributive_idx) = operands.iter().position(|o| {
-                                matches!(
-                                    o,
-                                    TrustVcExpr::Arith {
-                                        op: ArithOp::Add | ArithOp::Sub,
-                                        ty: t,
-                                        ..
-                                    } if is_exact_arithmetic_type(t)
-                                )
-                            }) else {
+                            let Some(distributive_idx) =
+                                operands.iter().position(is_sum_of_this_type)
+                            else {
                                 operands.sort_by_key(expr_sort_key);
                                 return rebuild_left_assoc(op, ty.clone(), operands);
                             };
@@ -90,6 +91,7 @@ impl TrustVcExprFolder for IntNormalizer {
                                         let mut sum_terms = Vec::new();
                                         flatten_assoc(
                                             ArithOp::Add,
+                                            &ty,
                                             &distributive_expr,
                                             &mut sum_terms,
                                         );
@@ -170,15 +172,16 @@ impl TrustVcExprFolder for IntNormalizer {
                 // For equalities between exact-arithmetic sums, cancel common addends.
                 // This turns `(d*q)*q2 + r == (d*q)*q2 + d*q3` into `r == d*q3`,
                 // closing the GCD chain where ay-dpll lacks Int cancellation. #2400.
-                if matches!(op, CompareOp::Eq) {
-                    let ty = match (&*left, &*right) {
-                        (TrustVcExpr::Arith { ty, .. }, _) | (_, TrustVcExpr::Arith { ty, .. })
-                            if is_exact_arithmetic_type(ty) =>
-                        {
-                            Some(ty.clone())
-                        }
-                        _ => None,
-                    };
+                // Only between two sides of ONE derived type: cancellation is a
+                // ring identity within a type, not across a wrapping and an
+                // exact side.
+                if matches!(op, CompareOp::Eq)
+                    && (matches!(*left, TrustVcExpr::Arith { .. })
+                        || matches!(*right, TrustVcExpr::Arith { .. }))
+                {
+                    let (left_ty, right_ty) = (derived_ty(&left), derived_ty(&right));
+                    let ty = (left_ty == right_ty && is_exact_arithmetic_type(&left_ty))
+                        .then_some(left_ty);
                     if let Some(ty) = ty {
                         if let Some(simplified) = try_cancel_common_addends(&left, &right, &ty) {
                             return simplified;
@@ -215,19 +218,21 @@ pub(crate) fn normalize_int_expr(expr: &TrustVcExpr) -> TrustVcExpr {
 /// For `Add`: `(a + b) + c` → `[a, b, c]`
 /// For `Mul`: `a * (b * c)` → `[a, b, c]`
 ///
-/// Only flattens when the nested Arith has the same op and an exact arithmetic
-/// type supported by this normalizer.
-fn flatten_assoc(target_op: ArithOp, expr: &TrustVcExpr, out: &mut Vec<TrustVcExpr>) {
+/// Only flattens a nested Arith with the same op and the same DERIVED type
+/// (`target_ty`, an exact arithmetic type supported by this normalizer).
+fn flatten_assoc(
+    target_op: ArithOp,
+    target_ty: &TrustVcType,
+    expr: &TrustVcExpr,
+    out: &mut Vec<TrustVcExpr>,
+) {
     if let TrustVcExpr::Arith {
-        op,
-        left,
-        right,
-        ty,
+        op, left, right, ..
     } = expr
     {
-        if *op == target_op && is_exact_arithmetic_type(ty) {
-            flatten_assoc(target_op, left, out);
-            flatten_assoc(target_op, right, out);
+        if *op == target_op && derived_ty(expr) == *target_ty {
+            flatten_assoc(target_op, target_ty, left, out);
+            flatten_assoc(target_op, target_ty, right, out);
             return;
         }
     }
@@ -276,9 +281,9 @@ pub(super) fn try_cancel_common_addends(
     }
 
     let mut left_terms = Vec::new();
-    flatten_assoc(ArithOp::Add, left, &mut left_terms);
+    flatten_assoc(ArithOp::Add, ty, left, &mut left_terms);
     let mut right_terms = Vec::new();
-    flatten_assoc(ArithOp::Add, right, &mut right_terms);
+    flatten_assoc(ArithOp::Add, ty, right, &mut right_terms);
 
     // Cancel common terms (by structural equality on normalized exprs).
     let mut cancelled = false;

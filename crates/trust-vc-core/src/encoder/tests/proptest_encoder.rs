@@ -196,8 +196,11 @@ fn terms_are_equivalent(left: &TrustVcExpr, right: &TrustVcExpr) -> TrustVcResul
 fn expr_to_source(expr: &TrustVcExpr) -> String {
     match expr {
         TrustVcExpr::BoolLit(value) => value.to_string(),
+        // A bare `Int { width: 32 }` literal is the unsuffixed placeholder; a
+        // source `5i32` is the `i32` literal, pinned by an identity cast
+        // (`ir_lowering::atoms::typed_int_literal`).
         TrustVcExpr::IntLit { value, ty } => match ty {
-            TrustVcType::Int { width: 32 } => format!("{value}i32"),
+            TrustVcType::Int { width: 32 } => format!("{value}"),
             other => panic!("unexpected literal type in property source printer: {other:?}"),
         },
         TrustVcExpr::Var { name, .. } => name.clone(),

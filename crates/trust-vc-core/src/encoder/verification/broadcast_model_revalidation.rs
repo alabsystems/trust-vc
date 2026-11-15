@@ -158,7 +158,7 @@ impl AYEncoder {
         // Re-check with the entailed premise instances added. UNSAT proves the
         // goal (the original model was spurious); any other result means we
         // found no refutation, so the candidate counterexample stands.
-        match try_check_sat_with_details(&mut self.solver) {
+        match try_check_sat_with_details(&mut self.solver, &mut self.state.solver_panic) {
             Ok(details) if details.result.result().is_unsat() => {
                 BroadcastModelRevalidation::Refuted
             }

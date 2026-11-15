@@ -320,6 +320,7 @@ impl TrustVcType {
             }
             TrustVcType::Datatype { name, .. } => name.clone(),
             TrustVcType::RecursiveRef(name) => name.clone(),
+            TrustVcType::NamedCarrier(name) => format!("named-carrier<{name}>"),
             TrustVcType::TypeParam(name) => name.clone(),
             TrustVcType::Poly => "Poly".to_string(),
             TrustVcType::Opaque(name) => name.clone(),

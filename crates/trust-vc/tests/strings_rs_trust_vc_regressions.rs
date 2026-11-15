@@ -165,17 +165,6 @@ fn assert_verify_counterexample(case: &str) {
     );
 }
 
-fn assert_verify_not_verified(case: &str) {
-    let path = strings_port_path();
-    let path = path.to_str().expect("strings port path should be UTF-8");
-    let result = verify_function_from_file(path, case)
-        .unwrap_or_else(|err| panic!("{case} should extract from strings.rs: {err}"));
-    assert!(
-        !matches!(result, VerifyResult::Verified),
-        "{case} should not verify until String::view() refutation is precise, got {result:?}"
-    );
-}
-
 fn assert_verify_error_contains(case: &str, expected_fragments: &[&str]) {
     let path = strings_port_path();
     let path = path.to_str().expect("strings port path should be UTF-8");
@@ -289,9 +278,11 @@ fn strings_rs_counterexample_subset_is_rejected_from_file() {
 
 #[test]
 fn strings_rs_false_string_view_cases_do_not_verify_from_file() {
-    assert_verify_not_verified("string_view_len_inconsistent_currently_unknown");
-    assert_verify_not_verified("string_view_len_irreflexive_currently_unknown");
-    assert_verify_not_verified("string_view_equality_irreflexive_currently_unknown");
+    // RE-PINNED 2026-09-13: each false `String::view()` claim is refuted with
+    // a model (was: any non-Verified verdict accepted).
+    assert_verify_counterexample("string_view_len_inconsistent_counterexample");
+    assert_verify_counterexample("string_view_len_irreflexive_counterexample");
+    assert_verify_counterexample("string_view_equality_irreflexive_counterexample");
 }
 
 #[test]

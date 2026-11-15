@@ -55,7 +55,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn rustc_command() -> PathBuf {
@@ -70,7 +72,8 @@ fn rustc_command() -> PathBuf {
             }
         }
     }
-    PathBuf::from(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+    // Never a bare `rustc` from PATH: targo exports only `$CARGO` to tests.
+    PathBuf::from(format!("trustc{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn write_package(package_root: &Path, name: &str, verify: Option<bool>, deps: &[&str]) {
@@ -224,7 +227,7 @@ fn main() {
 fn run_verify(current_dir: Option<&Path>, record_root: &Path, args: &[&str]) -> Value {
     let fake_cargo = build_fake_cargo_recorder(record_root);
     let record_path = record_root.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let mut command = Command::new(cargo_trust_vc_bin());
     if let Some(current_dir) = current_dir {
@@ -389,7 +392,7 @@ fn crate_optin_workdir() {
     let package_dir = single_package("crate_optin_workdir", Some(true));
     let record = run_verify(Some(&package_dir), &package_dir, &[]);
 
-    assert_eq!(record_args(&record), vec!["check"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "check"]);
     assert_single_verify_env(&record, &package_dir, true);
 
     std::fs::remove_dir_all(package_dir).ok();
@@ -403,7 +406,12 @@ fn crate_optin_manifest() {
 
     assert_eq!(
         record_args(&record),
-        vec!["check", "--manifest-path", manifest_arg.as_str()]
+        vec![
+            "--unverified",
+            "check",
+            "--manifest-path",
+            manifest_arg.as_str()
+        ]
     );
     assert_single_verify_env(&record, &package_dir, true);
 
@@ -415,7 +423,7 @@ fn crate_optout_workdir() {
     let package_dir = single_package("crate_optout_workdir", Some(false));
     let record = run_verify(Some(&package_dir), &package_dir, &[]);
 
-    assert_eq!(record_args(&record), vec!["check"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "check"]);
     assert_single_verify_env(&record, &package_dir, false);
 
     std::fs::remove_dir_all(package_dir).ok();
@@ -429,7 +437,12 @@ fn crate_optout_manifest() {
 
     assert_eq!(
         record_args(&record),
-        vec!["check", "--manifest-path", manifest_arg.as_str()]
+        vec![
+            "--unverified",
+            "check",
+            "--manifest-path",
+            manifest_arg.as_str()
+        ]
     );
     assert_single_verify_env(&record, &package_dir, false);
 
@@ -441,7 +454,7 @@ fn crate_unset_workdir() {
     let package_dir = single_package("crate_unset_workdir", None);
     let record = run_verify(Some(&package_dir), &package_dir, &[]);
 
-    assert_eq!(record_args(&record), vec!["check"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "check"]);
     assert_single_verify_env(&record, &package_dir, false);
 
     std::fs::remove_dir_all(package_dir).ok();
@@ -455,7 +468,12 @@ fn crate_unset_manifest() {
 
     assert_eq!(
         record_args(&record),
-        vec!["check", "--manifest-path", manifest_arg.as_str()]
+        vec![
+            "--unverified",
+            "check",
+            "--manifest-path",
+            manifest_arg.as_str()
+        ]
     );
     assert_single_verify_env(&record, &package_dir, false);
 
@@ -467,7 +485,7 @@ fn workspace_workdir() {
     let workspace = workspace_fixture("workspace_workdir");
     let record = run_verify(Some(&workspace), &workspace, &[]);
 
-    assert_eq!(record_args(&record), vec!["check"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "check"]);
     assert_workspace_verify_env(&record, &workspace, true, true);
 
     std::fs::remove_dir_all(workspace).ok();
@@ -481,7 +499,12 @@ fn workspace_manifest() {
 
     assert_eq!(
         record_args(&record),
-        vec!["check", "--manifest-path", manifest_arg.as_str()]
+        vec![
+            "--unverified",
+            "check",
+            "--manifest-path",
+            manifest_arg.as_str()
+        ]
     );
     assert_workspace_verify_env(&record, &workspace, true, true);
 
@@ -501,6 +524,7 @@ fn workspace_manifest_package_optin() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--manifest-path",
             manifest_arg.as_str(),
@@ -526,6 +550,7 @@ fn workspace_manifest_package_hasdeps() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--manifest-path",
             manifest_arg.as_str(),

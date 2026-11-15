@@ -200,14 +200,24 @@ fn falsehood() -> u64 {
 }
 
 #[trust_vc::ensures(true)]
-fn crate_rooted_truth() -> u64 {
-    trust_vc::assert!((crate::m::E::C as u8) == 2u8);
+fn self_rooted_truth() -> u64 {
+    trust_vc::assert!((self::m::E::C as u8) == 2u8);
     0u64
+}
+"#;
+
+/// `NO_COLLISION`'s `self_rooted_truth` with `crate::` for `self::`. A file
+/// need not be its crate's root: as a module file whose crate root declares
+/// `mod m { pub enum E { C } }`, `crate::m::E::C as u8` is 0 (measured with
+/// `trustc`), while the lane reads `crate::m::E` as the file's own `m::E`.
+const CRATE_ROOTED: &str = r#"
+mod m {
+    pub enum E { A, B, C }
 }
 
 #[trust_vc::ensures(true)]
-fn self_rooted_truth() -> u64 {
-    trust_vc::assert!((self::m::E::C as u8) == 2u8);
+fn crate_rooted_truth() -> u64 {
+    trust_vc::assert!((crate::m::E::C as u8) == 2u8);
     0u64
 }
 "#;
@@ -233,13 +243,18 @@ fn module_qualified_cast_still_refutes_a_falsehood() {
 }
 
 #[test]
-fn crate_rooted_path_resolves() {
-    let r = verify("nc_c", "crate_rooted_truth", NO_COLLISION);
+fn crate_rooted_path_is_refused() {
+    let r = verify("nc_c", "crate_rooted_truth", CRATE_ROOTED);
     eprintln!("[EIC-SCOPE-PIN6] crate_rooted_truth => {r:?}");
     assert!(
-        verified(&r),
-        "NARROWNESS PIN: `crate::m::E::C == 2` must resolve; got {r:?}"
+        matches!(&r, VerifyResult::Error { message } if message.starts_with("type-name rebinding")),
+        "`crate::m::E` need not be this file's `m::E`; expected the type-name rule's \
+         refusal, got {r:?}"
     );
+    // The twin differs by that one line, and `self::m::E` is this file's.
+    let twin = CRATE_ROOTED.replace("(crate::m::E::C", "(self::m::E::C");
+    let r = verify("nc_c_twin", "crate_rooted_truth", &twin);
+    assert!(verified(&r), "`self::m::E::C == 2` must verify; got {r:?}");
 }
 
 #[test]

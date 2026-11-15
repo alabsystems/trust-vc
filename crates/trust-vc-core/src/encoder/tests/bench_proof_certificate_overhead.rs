@@ -10,8 +10,8 @@
 //!
 //! Since `proof-certificates` is a compile-time feature flag, the benchmark
 //! records absolute timings for a suite of representative workloads. Running
-//! `cargo test -p trust-vc-core` (without the feature) and then
-//! `cargo test -p trust-vc-core --features proof-certificates` produces
+//! `targo --unverified test -p trust-vc-core` (without the feature) and then
+//! `targo --unverified test -p trust-vc-core --features proof-certificates` produces
 //! comparable wall-clock data.
 //!
 //! When `proof-certificates` is enabled, the benchmark also records:
@@ -351,7 +351,7 @@ fn bench_proof_certificate_overhead_summary() {
 
     eprintln!();
     eprintln!("To compare: run this test with and without --features proof-certificates");
-    eprintln!("  cargo test -p trust-vc-core --features expensive-tests bench_proof_certificate_overhead_summary -- --nocapture");
-    eprintln!("  cargo test -p trust-vc-core --features expensive-tests,proof-certificates bench_proof_certificate_overhead_summary -- --nocapture");
+    eprintln!("  targo --unverified test -p trust-vc-core --features expensive-tests bench_proof_certificate_overhead_summary -- --nocapture");
+    eprintln!("  targo --unverified test -p trust-vc-core --features expensive-tests,proof-certificates bench_proof_certificate_overhead_summary -- --nocapture");
     eprintln!();
 }

@@ -62,6 +62,27 @@ pub const STRINGS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "error",
         0,
     ),
+    // RE-PINNED 2026-09-13: the three false `String::view()` claims were held
+    // as "not verified" (an Unknown was tolerated); the engine refutes each with
+    // a model now, so they are pinned as Counterexamples.
+    (
+        "string_view_len_irreflexive_counterexample",
+        "test_passes_len",
+        "counterexample",
+        1,
+    ),
+    (
+        "string_view_equality_irreflexive_counterexample",
+        "test_string_1_pass",
+        "counterexample",
+        1,
+    ),
+    (
+        "string_view_len_inconsistent_counterexample",
+        "test_passes_len",
+        "counterexample",
+        2,
+    ),
 ];
 
 pub const STRINGS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
@@ -146,11 +167,11 @@ fn string_view_equality_reflexive_verified(s: String) {
     trust_vc::assert!(s.view() == s.view());
 }
 
-fn string_view_len_irreflexive_currently_unknown(s: String) {
+fn string_view_len_irreflexive_counterexample(s: String) {
     trust_vc::assert!(s.view().len() != s.view().len());
 }
 
-fn string_view_equality_irreflexive_currently_unknown(s: String) {
+fn string_view_equality_irreflexive_counterexample(s: String) {
     trust_vc::assert!(s.view() != s.view());
 }
 
@@ -163,7 +184,7 @@ fn str_literal_equality_verified() {
     trust_vc::assert!(x == y);
 }
 
-fn string_view_len_inconsistent_currently_unknown(s: String) {
+fn string_view_len_inconsistent_counterexample(s: String) {
     trust_vc::assume!(s.view().len() == 6usize);
     trust_vc::assert!(s.view().len() == 1usize);
 }

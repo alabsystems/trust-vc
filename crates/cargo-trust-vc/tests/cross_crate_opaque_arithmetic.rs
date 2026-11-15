@@ -57,7 +57,7 @@ fn cargo_trust_vc_bin() -> PathBuf {
     let fallback = repo_root().join("target/debug").join(&binary_name);
     assert!(
         fallback.exists(),
-        "cargo-trust-vc binary not found; run `cargo build -p cargo-trust-vc` first"
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
     );
     fallback
 }
@@ -93,6 +93,8 @@ fn write_consumer_crate() -> PathBuf {
     )
     .expect("consumer manifest should be written");
 
+    // These consumers are proof functions: the body-call probes are ghost
+    // code, and exec-to-spec refusal must not replace an opacity verdict.
     // Every asserted call is also "touched" in a real expression statement so
     // the importer's body-call scan sees the qualified call and fires (calls
     // that appear only inside `assert!(...)` macro tokens are not scanned).
@@ -100,12 +102,14 @@ fn write_consumer_crate() -> PathBuf {
         root.join("src/lib.rs"),
         r#"// Test consumer for cross-crate opaque spec imports.
 
+#[trust_vc::proof]
 #[trust_vc::ensures(true)]
 fn xc_mul_without_reveal() {
     let _ = trust_vc_std::arithmetic::mul(2, 3);
     trust_vc::assert!(trust_vc_std::arithmetic::mul(2, 3) == 6);
 }
 
+#[trust_vc::proof]
 #[trust_vc::ensures(true)]
 fn xc_mul_with_reveal() {
     let _ = trust_vc_std::arithmetic::mul(2, 3);
@@ -113,6 +117,7 @@ fn xc_mul_with_reveal() {
     trust_vc::assert!(trust_vc_std::arithmetic::mul(2, 3) == 6);
 }
 
+#[trust_vc::proof]
 #[trust_vc::ensures(true)]
 fn xc_mul_revealed_false_goal() {
     let _ = trust_vc_std::arithmetic::mul(2, 3);
@@ -120,6 +125,7 @@ fn xc_mul_revealed_false_goal() {
     trust_vc::assert!(trust_vc_std::arithmetic::mul(2, 3) == 7);
 }
 
+#[trust_vc::proof]
 #[trust_vc::ensures(true)]
 fn xc_reveal_mul_does_not_reveal_add() {
     let _ = trust_vc_std::arithmetic::mul(2, 3);

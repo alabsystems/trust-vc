@@ -58,30 +58,34 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "verus_style_multi_trigger_groups_verified",
         "test_multiple_triggers",
     ),
+    // 2026-09-11: quantifier-level `#![trigger …]` syntax parses and verifies (upstream test_multiple_triggers).
+    (
+        "quantifier_level_trigger_syntax_verified",
+        "test_multiple_triggers",
+    ),
 ];
 
-const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[(
-    "trigger_adjacent_quantifier_counterexample",
-    "test_arith_function_trigger_fail",
-)];
+const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
+    (
+        "trigger_adjacent_quantifier_counterexample",
+        "test_arith_function_trigger_fail",
+    ),
+    (
+        "quantifier_level_trigger_false_universal_counterexample",
+        "test_multiple_triggers",
+    ),
+];
 
 const UNKNOWN_CASES: &[(&str, &str)] = &[(
     "explicit_trigger_false_universal_currently_unknown",
     "test_arith_function_trigger_fail explicit-trigger false universal scout",
 )];
 
-const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
-    (
-        "trigger_without_bound_var_fails_closed",
-        "test_fails_single_trigger",
-        &["does not reference any bound variable"],
-    ),
-    (
-        "quantifier_level_trigger_syntax_fails_closed",
-        "test_multiple_triggers",
-        &["Failed to parse assert_forall_by!() expression"],
-    ),
-];
+const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[(
+    "trigger_without_bound_var_fails_closed",
+    "test_fails_single_trigger",
+    &["does not reference any bound variable"],
+)];
 
 #[derive(Debug, Eq, PartialEq)]
 struct CaseMetadata {

@@ -1,0 +1,68 @@
+exit: 0
+outcome: "checked"
+diagnostics:
+  warning unreachable_code unreachable call @[27:unreachable call, 27:any code following this expression is unreachable]
+  warning unreachable_code unreachable expression @[32:unreachable expression, 31:any code following this expression is unreachable]
+  warning - 2 warnings emitted @[]
+functions:
+  early verified -
+  both verified -
+  foo verified -
+  as_argument verified -
+  in_let verified -
+  endless verified -
+vcir:
+exec fn test_crate::early(b: exec bool) -> i: exec u64
+  ensures ((10nat as= int) <= (i as= int))
+  if b {
+    {
+      return[#1] 20u64
+    }
+    unreachable
+  } else {
+  }
+  return[#2] 30u64
+exec fn test_crate::both(b: exec bool) -> result: exec u64
+  let mut tmp%4: exec u64
+  if b {
+    {
+      return[#1] 1u64
+    }
+    unreachable
+    let mut tmp%2: exec u64
+    tmp%4 := tmp%2
+  } else {
+    {
+      return[#2] 2u64
+    }
+    unreachable
+    let mut tmp%3: exec u64
+    tmp%4 := tmp%3
+  }
+  return[#3] tmp%4
+exec fn test_crate::foo(x: exec u64) -> result: exec ()
+  return[#1]
+exec fn test_crate::as_argument() -> result: exec ()
+  {
+    return[#1]
+  }
+  unreachable
+  let mut tmp%1: exec u64
+  call[#2] test_crate::foo(tmp%1)
+  return[#3]
+exec fn test_crate::in_let() -> result: exec u32
+  {
+    return[#1] 2u32
+  }
+  unreachable
+  let mut tmp%1: exec u32
+  let y: exec u32 = tmp%1
+  return[#2] y
+exec fn test_crate::endless() -> result: exec ()
+  #[exec_allows_no_decreases=true decreases_by=false]
+  loop#0[#1 #2 #3] {
+    do {
+    }
+  }
+  unreachable
+  return[#4]

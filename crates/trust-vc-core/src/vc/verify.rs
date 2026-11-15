@@ -26,8 +26,17 @@ impl VerificationContext {
     /// Verify all obligations and return a [`VerificationReport`] with
     /// detailed diagnostics (per-step timing, solver statistics, and
     /// optional proof certificates).
+    ///
+    /// When this context carries a `verified_refusal`, no step of the report
+    /// is `Verified` and it carries no proof certificate: the refusal covers
+    /// each obligation, not only the function's result.
     pub fn verify_with_report(&self, _options: VerificationReportOptions) -> VerificationReport {
-        capture_report(None, || self.verify_internal_uncached())
+        let report = capture_report(None, || self.verify_internal_uncached());
+        if self.verified_refusal.is_some() {
+            report.without_verified_steps()
+        } else {
+            report
+        }
     }
 
     fn verify_internal(&self) -> VerifyResult {
@@ -49,7 +58,7 @@ impl VerificationContext {
             };
         }
 
-        self.apply_proof_note_verdict(AYEncoder::verify(self))
+        self.apply_verified_refusal(self.apply_proof_note_verdict(AYEncoder::verify(self)))
     }
 
     fn verify_internal_uncached(&self) -> VerifyResult {
@@ -76,7 +85,9 @@ impl VerificationContext {
             Err(err) => return VerifyResult::from(err),
         };
 
-        self.apply_proof_note_verdict(AYEncoder::verify_prepared_inner(&prepared))
+        self.apply_verified_refusal(
+            self.apply_proof_note_verdict(AYEncoder::verify_prepared_inner(&prepared)),
+        )
     }
 
     /// Verus diagnostic-parity channel for user-labeled failing obligations

@@ -68,7 +68,7 @@ fn test_verify_multiple_assertions() {
         VerifyResult::Verified => {
             // Expected: assertions are logically valid with bounded values
         }
-        VerifyResult::Unknown { reason: _, .. } => {
+        VerifyResult::Unknown { .. } => {
             // Acceptable: ay-dpll limitation with multi-variable constraints
             // The solver returns "Unknown" for complex multi-variable constraints
         }

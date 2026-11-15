@@ -1,0 +1,42 @@
+exit: 0
+outcome: "checked"
+diagnostics:
+functions:
+  lemma verified -
+  e verified -
+  branches verified -
+  initializers verified -
+vcir:
+proof fn test_crate::lemma(x: spec u64) -> result: spec ()
+  ensures ((x as= int) >= (0nat as= int))
+  return[#1]
+exec fn test_crate::e(u: exec ()) -> result: exec ()
+  return[#1]
+exec fn test_crate::branches(b: exec bool, x: exec u64) -> r: exec u64
+  ensures (r == x)
+  if b {
+    ghost {
+      call[#1] test_crate::lemma(x)
+      let y: spec int = ((x as= int) + (1nat as= int))
+      assert[#2] (y > (x as= int))
+    }
+  } else {
+    ghost {
+      assert[#3] ((x as= int) >= (0nat as= int))
+    }
+  }
+  return[#4] x
+exec fn test_crate::initializers(x: exec u64) -> result: exec ()
+  ghost {
+    assert[#1] (x == x)
+  }
+  let u: exec () = ()
+  ghost {
+    call[#2] test_crate::lemma(x)
+  }
+  let v: exec () = ()
+  ghost {
+    assert[#3] ((x as= int) >= (0nat as= int))
+  }
+  call[#4] test_crate::e(())
+  return[#5]

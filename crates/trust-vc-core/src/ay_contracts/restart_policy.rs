@@ -157,11 +157,7 @@ pub(crate) fn validate_restart_decision(
     }
 
     // (4) Learned clauses must be preserved (count does not decrease).
-    if learned_count_after < learned_count_before {
-        return false;
-    }
-
-    true
+    learned_count_after >= learned_count_before
 }
 
 // =========================================================================
@@ -213,9 +209,7 @@ impl ContractPhaseSaving {
 
     /// Clear all saved phases.
     pub(crate) fn clear_phases(&mut self) {
-        for phase in &mut self.saved_phases {
-            *phase = None;
-        }
+        self.saved_phases.fill(None);
     }
 
     /// Number of variables this structure tracks.

@@ -90,6 +90,18 @@ fn assert_verified(label: &str, source: &str) {
     );
 }
 
+/// A claim the lane proves by reading two calls of one trait method on a
+/// generic receiver as one term. An impl can read a `Cell` or a counter, so
+/// that `Verified` answer is refused. Only a `Verified` answer becomes this
+/// refusal, so the pin still shows the framing did not reject the claim.
+fn assert_refused_as_repeated(label: &str, source: &str) {
+    let result = verdict(label, source);
+    assert!(
+        matches!(&result, VerifyResult::Error { message } if message.starts_with("bodiless call repeated")),
+        "{label}: expected the repeated-call refusal of a `Verified` answer, got: {result:?}"
+    );
+}
+
 /// A claim that does NOT follow must be REFUTED, and refuted for a reason that
 /// means the solver actually ran. `Counterexample` (a model), `NotProved` (the
 /// obligation was put to the solver and not discharged) and `Unknown` all count.
@@ -349,11 +361,12 @@ pub fn g(t: &mut impl Ctr, mut i: u64, n: u64) {{
 }
 
 /// NO over-rejection in a loop: a pure `&self` call must NOT put the receiver in
-/// the modified set, so a true fact about an only-read generic receiver stays
-/// framed across the loop.
+/// the modified set, so the fact about an only-read generic receiver stays
+/// framed across the loop. `peek` runs once per iteration and `a` twice, so the
+/// answer is the repeated-call refusal, not a refutation.
 #[test]
 fn pure_generic_receiver_read_in_a_loop_stays_framed() {
-    assert_verified(
+    assert_refused_as_repeated(
         "loop_pure_generic",
         "
 #[trust_vc::trait_spec]
@@ -448,12 +461,13 @@ pub fn g(t: &mut impl Ctr) -> int {{ t.a() }}
     );
 }
 
-/// Two reads bracketing a `&self` method: `peek` is PURE, so the receiver is not
-/// havoced and the two `t.a()` terms still collapse. A fix that havoced on any
-/// call — rather than on the resolved receiver kind — would break this.
+/// Two reads bracketing a `&self` method: `peek` takes `&self`, so the receiver
+/// is not havoced and the two `t.a()` terms still collapse. A fix that havoced
+/// on any call — rather than on the resolved receiver kind — would refute it;
+/// the collapse itself is the repeated-call refusal.
 #[test]
 fn pure_read_across_mut_receiver_does_not_havoc() {
-    assert_verified(
+    assert_refused_as_repeated(
         "pure_call_no_havoc",
         "
 #[trust_vc::trait_spec]

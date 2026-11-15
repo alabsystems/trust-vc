@@ -202,6 +202,7 @@ mod tests {
                 StepResultKind::Verified => VerifyResult::Verified,
                 StepResultKind::Counterexample => VerifyResult::Counterexample {
                     obligation_name: label.to_string(),
+                    location: None,
                     model: None,
                     bindings: Vec::new(),
                 },

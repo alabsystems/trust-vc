@@ -1,0 +1,377 @@
+{
+  "name": "guarded_checked_add_u8",
+  "functions": [
+    {
+      "id": 0,
+      "name": "guarded_checked_add_u8",
+      "ty": 0,
+      "entry": 0,
+      "blocks": [
+        {
+          "id": 0,
+          "params": [
+            [
+              0,
+              "U8"
+            ],
+            [
+              1,
+              "U8"
+            ]
+          ],
+          "body": [
+            {
+              "inst": {
+                "Const": {
+                  "ty": "U8",
+                  "value": {
+                    "Int": 100
+                  }
+                }
+              },
+              "results": [
+                2
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "ICmp": {
+                  "op": "Ult",
+                  "ty": "U8",
+                  "lhs": 0,
+                  "rhs": 2
+                }
+              },
+              "results": [
+                3
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Assume": {
+                  "cond": 3
+                }
+              },
+              "results": [],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Const": {
+                  "ty": "U8",
+                  "value": {
+                    "Int": 100
+                  }
+                }
+              },
+              "results": [
+                4
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "ICmp": {
+                  "op": "Ult",
+                  "ty": "U8",
+                  "lhs": 1,
+                  "rhs": 4
+                }
+              },
+              "results": [
+                5
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Assume": {
+                  "cond": 5
+                }
+              },
+              "results": [],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Overflow": {
+                  "op": "AddOverflow",
+                  "ty": "U8",
+                  "lhs": 0,
+                  "rhs": 1
+                }
+              },
+              "results": [
+                6,
+                7
+              ],
+              "proofs": [
+                "NoOverflow"
+              ],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Undef": {
+                  "ty": {
+                    "Tuple": [
+                      "U8",
+                      "Bool"
+                    ]
+                  }
+                }
+              },
+              "results": [
+                8
+              ],
+              "proofs": [
+                "FreshSymbolicHavoc"
+              ],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "InsertField": {
+                  "ty": {
+                    "Tuple": [
+                      "U8",
+                      "Bool"
+                    ]
+                  },
+                  "aggregate": 8,
+                  "field": 0,
+                  "value": 6
+                }
+              },
+              "results": [
+                9
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "InsertField": {
+                  "ty": {
+                    "Tuple": [
+                      "U8",
+                      "Bool"
+                    ]
+                  },
+                  "aggregate": 9,
+                  "field": 1,
+                  "value": 7
+                }
+              },
+              "results": [
+                10
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "ExtractField": {
+                  "ty": "Bool",
+                  "aggregate": 10,
+                  "field": 1
+                }
+              },
+              "results": [
+                11
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Const": {
+                  "ty": "Bool",
+                  "value": {
+                    "Bool": false
+                  }
+                }
+              },
+              "results": [
+                12
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "ICmp": {
+                  "op": "Eq",
+                  "ty": "Bool",
+                  "lhs": 11,
+                  "rhs": 12
+                }
+              },
+              "results": [
+                13
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Assert": {
+                  "cond": 13,
+                  "kind": "Unspecified"
+                }
+              },
+              "results": [],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Br": {
+                  "target": 1,
+                  "args": []
+                }
+              },
+              "results": [],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "params": [],
+          "body": [
+            {
+              "inst": {
+                "ExtractField": {
+                  "ty": "U8",
+                  "aggregate": 10,
+                  "field": 0
+                }
+              },
+              "results": [
+                14
+              ],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            },
+            {
+              "inst": {
+                "Return": {
+                  "values": [
+                    14
+                  ]
+                }
+              },
+              "results": [],
+              "proofs": [],
+              "span": null,
+              "proof_context": null
+            }
+          ]
+        }
+      ],
+      "proofs": [],
+      "calling_conv": "C",
+      "linkage": "External",
+      "attrs": {
+        "readonly": false,
+        "readnone": false,
+        "inlinehint": false,
+        "cold": false,
+        "params": [],
+        "naked": false,
+        "target_features": []
+      },
+      "summary": null,
+      "producer": null,
+      "value_names": null,
+      "scopes": null,
+      "source_provenance": null,
+      "body_gate": null,
+      "display_path": null,
+      "section": null,
+      "visibility": "Default"
+    }
+  ],
+  "structs": [],
+  "enums": [],
+  "records": [],
+  "closure_types": [],
+  "globals": [],
+  "func_types": [
+    {
+      "params": [
+        "U8",
+        "U8"
+      ],
+      "returns": [
+        "U8"
+      ],
+      "is_vararg": false
+    }
+  ],
+  "types": [],
+  "proof_obligations": [
+    {
+      "id": 0,
+      "kind": "ArithmeticSafety",
+      "status": "Pending",
+      "description": "guarded_checked_add_u8 obligation 0",
+      "formula": {
+        "schema": "trust-types.Formula@1",
+        "payload": "{\"fixture\":\"guarded_checked_add_u8\",\"obligation\":0}",
+        "smtlib": null,
+        "sort": null
+      },
+      "function": 0,
+      "source": {
+        "source_id": "fixture/guarded_checked_add_u8.rs",
+        "assertion_id": "guarded_checked_add_u8::obligation0",
+        "range": null
+      },
+      "site": {
+        "function": 0,
+        "block": 0,
+        "inst_index": 13
+      }
+    }
+  ],
+  "proof_certificates": [],
+  "target_info": null,
+  "files": [],
+  "obligation_diagnostics": [],
+  "spec_modules": [],
+  "universes": [],
+  "predicates": [],
+  "global_asm": [],
+  "imports": [],
+  "tuple_layouts": [],
+  "completeness": null,
+  "drop_glue": [],
+  "closure_layouts": []
+}

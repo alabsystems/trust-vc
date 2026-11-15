@@ -41,7 +41,7 @@ fn seq_count_literal_two_occurrences_verifies() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "count_eq_2",
-        &format!("{SEQ_1_2_1}.count(1i32) == 2"),
+        format!("{SEQ_1_2_1}.count(1i32) == 2"),
     ));
     let result = AYEncoder::verify(&ctx);
     expect_verified(
@@ -66,7 +66,7 @@ fn seq_count_absent_element_is_zero_verifies() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "absent_count_zero",
-        &format!("{SEQ_1_2_1}.count(9i32) == 0"),
+        format!("{SEQ_1_2_1}.count(9i32) == 0"),
     ));
     let result = AYEncoder::verify(&ctx);
     expect_verified(
@@ -84,7 +84,7 @@ fn seq_count_literal_wrong_value_refutes() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "count_eq_3",
-        &format!("{SEQ_1_2_1}.count(1i32) == 3"),
+        format!("{SEQ_1_2_1}.count(1i32) == 3"),
     ));
     let result = AYEncoder::verify(&ctx);
     expect_counterexample(
@@ -98,7 +98,7 @@ fn seq_count_absent_element_nonzero_refutes() {
     let mut ctx = VerificationContext::new();
     ctx.push_obligation(ProofObligation::assert(
         "absent_count_one",
-        &format!("{SEQ_1_2_1}.count(9i32) == 1"),
+        format!("{SEQ_1_2_1}.count(9i32) == 1"),
     ));
     let result = AYEncoder::verify(&ctx);
     expect_counterexample(

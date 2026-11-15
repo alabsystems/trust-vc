@@ -1,0 +1,59 @@
+exit: 0
+outcome: "checked"
+diagnostics:
+functions:
+  count verified -
+  search verified -
+vcir:
+exec fn test_crate::count(n: exec u32) -> r: exec u32
+  requires ((n as= int) <= (100nat as= int))
+  ensures (r == n)
+  let mut i: exec u32 = 0u32
+  let mut steps: exec u32 = 0u32
+  loop#0[#3 #4 #5] {
+    while {
+      steps := (steps +[#1] 1u32)
+    } (i < n)
+    invariant (i <= n)
+    invariant ((n as= int) <= (100nat as= int))
+    invariant (steps == i)
+    decreases ((n as= int) - (i as= int))
+    do {
+      i := (i +[#2] 1u32)
+    }
+  }
+  return[#6] i
+exec fn test_crate::search(b: exec bool) -> result: exec ()
+  let mut i: exec u8 = 0u8
+  loop#0[#8 #9 #10] {
+    invariant_except_break ((i as= int) <= (10nat as= int))
+    ensures ((i as= int) <= (10nat as= int))
+    decreases ((10nat as= int) - (i as= int))
+    do {
+      if (i == 10u8) {
+        {
+          break[#1] loop#0
+        }
+        unreachable
+      } else {
+      }
+      i := (i +[#2] 1u8)
+      loop#1[#4 #5 #6] no-isolation {
+        while {
+        } b
+        invariant ((i as= int) <= (10nat as= int))
+        decreases 0int
+        do {
+          break[#3] loop#0
+        }
+      }
+      if b {
+        {
+          continue[#7] loop#0
+        }
+        unreachable
+      } else {
+      }
+    }
+  }
+  return[#11]

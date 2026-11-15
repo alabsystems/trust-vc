@@ -105,10 +105,16 @@ pub const EQ_CMP_RS_EXPECTED_CASES: &[EqCmpRsExpectedCase] = &[
         2,
     ),
     (
-        "eq_cmp_structural_tuple_eq_method_currently_blocked",
+        "eq_cmp_structural_tuple_eq_method_verified",
         "eq_cmp1::check_eq",
-        "error",
-        0,
+        "verified",
+        3,
+    ),
+    (
+        "eq_cmp_structural_tuple_eq_method_liar_counterexample",
+        "eq_cmp1::check_eq",
+        "counterexample",
+        2,
     ),
     (
         "eq_cmp_option_partial_ord_method_verified",
@@ -123,10 +129,16 @@ pub const EQ_CMP_RS_EXPECTED_CASES: &[EqCmpRsExpectedCase] = &[
         1,
     ),
     (
-        "eq_cmp_custom_partial_eq_method_currently_blocked",
+        "eq_cmp_custom_partial_eq_method_verified",
         "eq_cmp1::test_p_eq",
-        "error",
-        0,
+        "verified",
+        2,
+    ),
+    (
+        "eq_cmp_custom_partial_eq_method_liar_counterexample",
+        "eq_cmp1::test_p_eq",
+        "counterexample",
+        2,
     ),
     (
         "eq_cmp_custom_partial_eq_operator_verified",
@@ -134,26 +146,15 @@ pub const EQ_CMP_RS_EXPECTED_CASES: &[EqCmpRsExpectedCase] = &[
         "verified",
         1,
     ),
+    (
+        "eq_cmp_custom_partial_eq_operator_liar_counterexample",
+        "eq_cmp1::test_p_ee",
+        "counterexample",
+        1,
+    ),
 ];
 
-pub const EQ_CMP_RS_EXPECTED_ERROR_PATTERNS: &[EqCmpRsExpectedErrorPatterns] = &[
-    (
-        "eq_cmp_structural_tuple_eq_method_currently_blocked",
-        &[
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpTuple`",
-            "method is not available in specification context",
-        ],
-    ),
-    (
-        "eq_cmp_custom_partial_eq_method_currently_blocked",
-        &[
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpCustomPartialEq`",
-            "method is not available in specification context",
-        ],
-    ),
-];
+pub const EQ_CMP_RS_EXPECTED_ERROR_PATTERNS: &[EqCmpRsExpectedErrorPatterns] = &[];
 
 pub fn eq_cmp_rs_expected_cases() -> &'static [EqCmpRsExpectedCase] {
     EQ_CMP_RS_EXPECTED_CASES
@@ -305,7 +306,7 @@ fn eq_cmp_structural_tuple_operator_verified() {
     trust_vc::assert!(left != different);
 }
 
-fn eq_cmp_structural_tuple_eq_method_currently_blocked() {
+fn eq_cmp_structural_tuple_eq_method_verified() {
     let left = EqCmpTuple(3u8, true);
     let same = EqCmpTuple(3u8, true);
     let different = EqCmpTuple(3u8, false);
@@ -314,16 +315,47 @@ fn eq_cmp_structural_tuple_eq_method_currently_blocked() {
     trust_vc::assert!(!left.eq(&different));
 }
 
-fn eq_cmp_custom_partial_eq_method_currently_blocked() {
+// Liar twin of upstream `check_eq` (2026-09-11): the derived `PartialEq::eq`
+// method is structural, so `left.eq(&different)` is refuted.
+fn eq_cmp_structural_tuple_eq_method_liar_counterexample() {
+    let left = EqCmpTuple(3u8, true);
+    let different = EqCmpTuple(3u8, false);
+
+    trust_vc::assert!(left.eq(&different));
+}
+
+fn eq_cmp_custom_partial_eq_method_verified() {
     let left = EqCmpCustomPartialEq(3u8, true);
     let different = EqCmpCustomPartialEq(3u8, false);
 
     trust_vc::assert!(!left.eq(&different));
 }
 
+// Liar twin of upstream `test_p_eq` (2026-09-11): the hand-written `eq` body
+// (`self.0 == other.0 && self.1 == other.1`) is what the call means, so
+// `left.eq(&different)` is refuted.
+fn eq_cmp_custom_partial_eq_method_liar_counterexample() {
+    let left = EqCmpCustomPartialEq(3u8, true);
+    let different = EqCmpCustomPartialEq(3u8, false);
+
+    trust_vc::assert!(left.eq(&different));
+}
+
+// Upstream `test_p_ee` (VERIFIED again 2026-09-11): the `!=` OPERATOR on a datatype
+// with a hand-written `PartialEq` lowers to the impl's own `eq` (as `!eq`, or the
+// written `ne`) — the same inherent-method axiom the `.eq()` method call uses —
+// so the structural gate of 2026-07-24 no longer refuses it.
 fn eq_cmp_custom_partial_eq_operator_verified() {
     let left = EqCmpCustomPartialEq(3u8, true);
     let different = EqCmpCustomPartialEq(3u8, false);
 
     trust_vc::assert!(left != different);
+}
+
+// Liar twin: `==` of those two is refuted under the field-wise custom body.
+fn eq_cmp_custom_partial_eq_operator_liar_counterexample() {
+    let left = EqCmpCustomPartialEq(3u8, true);
+    let different = EqCmpCustomPartialEq(3u8, false);
+
+    trust_vc::assert!(left == different);
 }

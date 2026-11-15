@@ -50,6 +50,44 @@ pub enum UnknownCategory {
     /// `Invalid(None, None, None)`, an assert-fails outcome with no model). See
     /// `design-unknown-as-failure.md`.
     Incompleteness,
+    /// ay's INDEPENDENT MODEL-CHECK GATE refuted the model ay had just
+    /// produced, and ay fail-closed `Sat -> Unknown`.
+    ///
+    /// This is the THIRD category, and it is neither of the other two halves of
+    /// the `design-unknown-as-failure.md` split:
+    ///
+    /// * it is NOT a refutation of the user's proof — nothing showed the
+    ///   obligation false; a candidate *witness* was shown false;
+    /// * it is NOT a resource limit — no amount of budget changes it (the
+    ///   trigger measured on 2026-09-17 is deterministic, 15/15 runs);
+    /// * it is NOT a theory incompleteness either — the decision procedure did
+    ///   produce an answer, and then ay's own gate caught that answer being
+    ///   wrong.
+    ///
+    /// The solver found a model, could not independently confirm it, and
+    /// refused to publish it. That is ay behaving CORRECTLY (a caught internal
+    /// solver bug, fail-closed), and it is the one thing the user's own proof
+    /// text cannot be blamed for.
+    ///
+    /// # Why this still routes to a FAILURE
+    ///
+    /// [`Self::is_incompleteness`] is `true` for this variant, so it lands on
+    /// [`crate::VerifyResult::NotProved`] exactly as
+    /// [`Self::Incompleteness`] does, and **no verdict moves**. That is
+    /// deliberate: the obligation genuinely was not discharged and must fail
+    /// closed. What this variant changes is WHICH failure the user is told
+    /// about — `actionable_suggestion` and the rendered detail line say the
+    /// solver caught its own invalid model, instead of asserting that the
+    /// proof is wrong.
+    ///
+    /// # Provenance
+    ///
+    /// Detected from ay's own attribution on the same solve envelope:
+    /// `unknown.phase == "independent-model-check-gate"` (also carried typed on
+    /// `SolveDetails::unknown_diagnostic.phase`) or
+    /// `model_check_gate.result == "model-violates"`. See
+    /// `docs/ay-defect-2026-09-17-quantified-axiom-family.md`.
+    ModelGateRejected,
     /// Encoding used approximations that make Verified unreliable
     EncodingDemotion,
     /// Variables have types that cannot be soundly encoded
@@ -164,7 +202,24 @@ impl UnknownCategory {
     /// Classify an Unknown reason string into an actionable category.
     #[must_use]
     pub fn classify(reason: &str) -> Self {
-        if reason.contains("timed out") || reason.contains("Solver returned unknown (timeout)") {
+        // MARKER BEFORE HEURISTIC. The confirmation sites emit a fixed
+        // prefix and now quote the re-solve's own outcome after it
+        // (`encoder/verification/assertion.rs`,
+        // `encoder/verification/confirmation.rs`), so a quoted
+        // "Solver returned unknown (timeout)" would otherwise make this
+        // fall-back classifier read a confirmation failure as a plain
+        // Timeout — and Timeout is the retriable category. The generated
+        // prefix is unambiguous where a substring of the quoted reason is
+        // not, so it is tested first. (Callers that already carry a typed
+        // category never reach here; this is the recovery path for a bare
+        // reason string.)
+        if reason.contains("Confirmation check disagreed")
+            || reason.contains("Confirmation check encoder error")
+        {
+            Self::ConfirmationDisagree
+        } else if reason.contains("timed out")
+            || reason.contains("Solver returned unknown (timeout)")
+        {
             Self::Timeout
         } else if is_sort_mismatch_error(reason)
             || reason.contains("ay solver panic")
@@ -174,10 +229,6 @@ impl UnknownCategory {
             Self::SolverPanic
         } else if reason.contains("Solver thread panicked") {
             Self::ThreadPanic
-        } else if reason.contains("Confirmation check disagreed")
-            || reason.contains("Confirmation check encoder error")
-        {
-            Self::ConfirmationDisagree
         } else if reason.contains("model not validated") {
             Self::ModelNotValidated
         } else if reason.contains("empty model") {
@@ -211,6 +262,10 @@ impl UnknownCategory {
             | Self::EmptyModel
             | Self::SolverUnknown
             | Self::Incompleteness
+            // Deterministic in every run measured on 2026-09-17 (15/15 on the
+            // two corpus files, 3 banners per affected function whether the
+            // goal is valid or genuinely false): a retry buys nothing.
+            | Self::ModelGateRejected
             | Self::EncodingDemotion
             | Self::OpaqueTypes
             | Self::VacuousTruth
@@ -232,7 +287,14 @@ impl UnknownCategory {
     #[must_use]
     pub fn is_incompleteness(&self) -> bool {
         match self {
-            Self::Incompleteness => true,
+            // BOTH route to the model-less FAILURE outcome
+            // (`VerifyResult::NotProved`), and for the same reason: the
+            // obligation was not discharged and no counterexample model may be
+            // shown for it. They are NOT the same diagnosis — see
+            // `Self::ModelGateRejected` — and the user-facing rendering splits
+            // them; only the verdict routing is shared, which is what keeps
+            // this a reporting fix with no verdict movement.
+            Self::Incompleteness | Self::ModelGateRejected => true,
             Self::Timeout
             | Self::SolverPanic
             | Self::ThreadPanic
@@ -254,7 +316,14 @@ impl UnknownCategory {
     #[must_use]
     pub fn is_soundness_relevant(&self) -> bool {
         match self {
+            // `ModelGateRejected` is soundness-RELEVANT in the same sense as
+            // `ConfirmationDisagree`: a solver that produced a model it then
+            // refuted has an internal defect worth chasing. It is NOT a
+            // soundness FAILURE here — the gate fail-closed, which is the
+            // system working — but it must be countable, and
+            // `is_soundness_relevant` is the channel that counts it.
             Self::ConfirmationDisagree
+            | Self::ModelGateRejected
             | Self::ModelNotValidated
             | Self::VacuousTruth
             | Self::EncodingDemotion => true,
@@ -280,6 +349,10 @@ impl UnknownCategory {
             | Self::EmptyModel
             | Self::SolverUnknown
             | Self::Incompleteness
+            // An ay-side defect by construction: the gate that fired is ay's
+            // own, and the model it refuted was ay's own. Nothing in the user's
+            // proof text or in trust-vc's encoding is implicated.
+            | Self::ModelGateRejected
             | Self::SolverPanic => true,
             Self::ThreadPanic
             | Self::ConfirmationDisagree
@@ -318,6 +391,12 @@ impl UnknownCategory {
             Self::Incompleteness => {
                 "The decision procedure cannot decide this (e.g. nonlinear arithmetic); \
                  supply an explicit proof (by(nonlinear_arith) / lemma) — it will not verify as-is."
+            }
+            Self::ModelGateRejected => {
+                "Not a refutation of your proof: the solver produced a model it could not \
+                 independently confirm and fail-closed. This is an ay-side defect \
+                 (docs/ay-defect-2026-09-17-quantified-axiom-family.md); the obligation is \
+                 undecided, not disproved."
             }
             Self::EncodingDemotion => {
                 "Inspect encoding approximations before trusting a proved result."

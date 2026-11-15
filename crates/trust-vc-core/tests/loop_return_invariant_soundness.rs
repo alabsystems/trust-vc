@@ -75,11 +75,8 @@ fn assert_counterexample(func: &str) {
 /// solver non-`Verified` verdict (incl. `Unknown`) is a sound non-verify. Only an
 /// exact `Verified` is a failure.
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("LOOP-RETURN FALSE-VERIFY: `{func}` must not verify")
-        }
-        _ => {}
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("LOOP-RETURN FALSE-VERIFY: `{func}` must not verify")
     }
 }
 

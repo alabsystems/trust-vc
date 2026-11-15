@@ -36,9 +36,7 @@ fn classify_internal_closure_uf(
     args: &[TrustVcExpr],
     return_ty: &TrustVcType,
 ) -> Option<InternalClosureUf> {
-    let Some((function, application_args)) = args.split_first() else {
-        return None;
-    };
+    let (function, application_args) = args.split_first()?;
     let TrustVcType::SpecFn(param_tys, declared_return_ty) = infer_expr_type(function) else {
         return None;
     };
@@ -236,6 +234,26 @@ impl<'a> AstExpressionParser<'a> {
 
         let mut arg_terms = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
+            // Every argument is BOUND at its parameter's type where that type
+            // holds it, and the call is refused otherwise — the rule the
+            // source lowering applies (`ir_lowering::bind_call_argument`),
+            // applied here too so a typed producer's call cannot hand the
+            // callee a value of another type (a `u8` term for an `i32`
+            // parameter wrapped `x + 1` at 8 bits).
+            let bound = match param_types.as_ref().and_then(|pts| pts.get(i)) {
+                Some(param_ty) => Some(
+                    crate::ir_lowering::bind_call_argument(arg, param_ty).map_err(|arg_ty| {
+                        format!(
+                            "call to `{name}` passes a value of type `{}` for parameter {i} of \
+                             type `{}`, which cannot hold it",
+                            arg_ty.to_type_string(),
+                            param_ty.to_type_string()
+                        )
+                    })?,
+                ),
+                None => None,
+            };
+            let arg = bound.as_ref().unwrap_or(arg);
             let mut term = self.encode_subexpr(arg)?;
 
             // Box concrete args into Poly when param expects TypeParam (#2053).
@@ -408,6 +426,58 @@ impl<'a> AstExpressionParser<'a> {
             }
         }
 
+        // A collection reached through a UF APPLICATION has no dom/len metadata.
+        // `collection_meta_by_term` is pre-populated from DECLARED VARIABLES only
+        // (parser_state.rs), and the projection route that mints it
+        // (`ensure_projected_collection_meta`) is reachable only from
+        // `encode_place`. A struct FIELD in a spec expression never becomes a
+        // place: `lower_field_access` emits `FnCall { name: <selector UF>, .. }`.
+        // So `self.m.contains_key(k)` used to fail closed with "contains_key()
+        // not supported without dom tracking" while the very same `Map` passed as
+        // a parameter verified. Mint the same fresh, unconstrained metadata here.
+        //
+        // Three properties this relies on, each pinned by a test in
+        // `tests/field_collection_dom_capability.rs`:
+        //   * SAME PLACE => SAME TERM => SAME DOM. `try_apply` hash-conses, so
+        //     the second occurrence of `self.m` is the same `Term` and
+        //     `ensure_projected_collection_meta` early-returns on it.
+        //   * UNCONSTRAINED IN THE GOAL TOO. The dom is a free array with no
+        //     axiom, so a false claim still refutes (liar twins).
+        //   * FRAMING. `frame_state.rs` frames `{name}_dom` BY NAME and a field
+        //     dom has no name. See the framing witnesses in that test file for
+        //     what actually happens across a mutation.
+        //
+        // TWO EXCLUSIONS, both measured rather than guessed.
+        //
+        // `Array(_, N)`: `encode_index` / `encode_view` fill a missing entry
+        // from `typed_collection_meta_with_static_array_len`, which mints the
+        // CONCRETE length `N`. Registering a fresh unconstrained BV here first
+        // would preempt that and lose the static bound, turning verified array
+        // index checks into counterexamples. A ghost `Seq`/`Set`/`Multiset`/
+        // `Map` has no static companion to lose.
+        //
+        // ARITY 0 (`args.is_empty()`): this hook mints a companion for a value
+        // reached BY PROJECTION FROM a receiver — a field selector always
+        // carries exactly one argument, the receiver. A declared nullary UF has
+        // no receiver, and the fail-closed control
+        // `encoder::tests::basic::collections::anonymous_receiver::contains::
+        // test_contains_on_typed_anonymous_seq_receiver_fails_closed_without_length_tracking`
+        // ("should fail closed instead of using Set semantics") declares its
+        // `mk_seq` at arity 0, so minting a length here would silently retire it.
+        //
+        // READ THE DISCRIMINATOR LITERALLY: it is ARITY, not OPACITY. A ONE-ARG
+        // opaque UF returning a `Seq` is exactly as anonymous as `mk_seq` and
+        // now DOES get an unconstrained length instead of that error — no
+        // control covers that shape. Measured: both
+        // polarities still refuse (`assert!(f(z).contains(5))` and
+        // `assert!(!f(z).contains(5))` are each NOT-VERIFIED), so the direction
+        // is refusal, not a wrong answer. Whether an opaque anonymous Seq should
+        // get an unconstrained length at ANY arity is a separate question with
+        // its own control; it is not settled here.
+        if !args.is_empty() && !matches!(return_ty, TrustVcType::Array(_, _)) {
+            self.ensure_projected_collection_meta(result, return_ty);
+        }
+
         Ok(result)
     }
 
@@ -426,11 +496,40 @@ impl<'a> AstExpressionParser<'a> {
         let right_hint_ty = self.infer_effective_expr_type(&args[0], None);
         let left = self.encode_expr_with_integer_hint(&args[0], Some(&left_hint_ty))?;
         let right = self.encode_expr_with_integer_hint(&args[1], Some(&right_hint_ty))?;
-        let (left, right) = self.coerce_bv_widths(left, right)?;
-        let raw_eq = self
-            .solver
-            .try_eq(left, right)
-            .map_err(|err| err.to_string())?;
+        // Widen by each argument's OWN IR-type signedness only (never its
+        // peer's), never by a hash-consed argument term's `term_widths` entry.
+        let left_signed = self.own_sign(&args[0], Some(&left_hint_ty));
+        let right_signed = self.own_sign(&args[1], Some(&right_hint_ty));
+        // `===` on integers is equality of the VALUES they denote. Two
+        // bit-vectors are compared as integers, each with its own type's sign
+        // (`try_encode_bv_compare_signed`: a mixed-sign pair is extended to
+        // `max(width) + 1` bits); an Int-sorted operand meets the other lifted
+        // by its own sign. Comparing the BITS after own-sign extension made
+        // `255u8 === -1i8` and `u64::MAX === -1i16` hold.
+        let raw_eq = if let Some(eq) = self.try_encode_bv_compare_signed(
+            crate::ir::CompareOp::Eq,
+            (left, left_signed),
+            (right, right_signed),
+        )? {
+            eq
+        } else if self.bv_term_width(left).is_some() != self.bv_term_width(right).is_some()
+            && [left, right].iter().all(|t| {
+                matches!(
+                    self.solver.term_sort(*t),
+                    ay_dpll::api::Sort::Int | ay_dpll::api::Sort::BitVec(_)
+                )
+            })
+        {
+            let left = self.lift_bv_operand_to_int(left, left_signed)?;
+            let right = self.lift_bv_operand_to_int(right, right_signed)?;
+            self.solver
+                .try_eq(left, right)
+                .map_err(|err| err.to_string())?
+        } else {
+            self.solver
+                .try_eq(left, right)
+                .map_err(|err| err.to_string())?
+        };
 
         // Extensionality bridge (sound, additive). For the mathematical value
         // types Verus identifies by their extension (Set/Map/Seq/Multiset/SpecFn),

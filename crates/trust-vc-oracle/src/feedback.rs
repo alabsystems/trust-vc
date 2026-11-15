@@ -107,6 +107,9 @@ pub struct StepSummary {
 }
 
 /// Proof certificate metadata (without the full certificate content).
+///
+/// It describes the last certificate recorded for the run, which refutes one
+/// obligation; it is not a claim about every obligation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CertificateInfo {
     pub strict_verified: bool,

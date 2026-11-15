@@ -27,6 +27,15 @@ pub(crate) fn assert(input: TokenStream) -> TokenStream {
         }
     };
 
+    // `assert!` does not route through `macro_expand::normalize_expr_tokens`
+    // (it is handed an already-parsed `syn::Expr`), so the reserved-keyword
+    // marker refusal has to be applied here too. Without it, `assert!(*final(x)
+    // == 5)` expands `__trust_vc_mut_ref_final(x)` into the `not(test)` runtime
+    // assertion and rustc reports E0425 on a symbol the author never wrote.
+    if let Err(err) = macro_expand::reject_mut_ref_final_marker(&expr, &quote!(#parsed_expr)) {
+        return TokenStream::from(err.to_compile_error());
+    }
+
     TokenStream::from(macro_expand::expand_assert(expr, &parsed_expr))
 }
 

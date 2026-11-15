@@ -75,9 +75,11 @@ Check the current surface against the checked-in baselines:
 bash scripts/api_surface_check.sh
 ```
 
-The script uses the pinned stock Rust 1.97.1 rustup toolchain so rustdoc JSON
-generation is reproducible and does not inherit the workspace's Trust compiler
-verification lane.
+The script runs on the Trust toolchain: the snapshots are generated from
+trustdoc's rustdoc JSON (`targo --unverified rustdoc ... --output-format json`),
+and it refuses to run unless `targo` is the Trust targo. The JSON format is
+compiler-versioned, so when trustdoc's `format_version` moves, bump
+`rustdoc-types` to match and refresh the baselines.
 
 Refresh the checked-in baselines after an intentional, reviewed API change,
 then immediately check the refreshed surface:

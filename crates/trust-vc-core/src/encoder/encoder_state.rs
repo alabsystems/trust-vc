@@ -262,6 +262,15 @@ pub(crate) struct VerificationState {
             crate::ir::TrustVcExpr,
         ),
     >,
+    /// Set when a demand-inline retry promoted body axioms to call-site
+    /// substitution (`inline_overrides`). The separate overflow encoder never
+    /// expands those bodies, so the predicates their operations produce were
+    /// never checked: `verify_assertion_typed` then installs NO overflow
+    /// assumptions (it may only assume what was checked). Assuming them made
+    /// `requires x0 == 34862; ensures q(x0) == 7` with `spec fn q(x0: u16) ->
+    /// int { 18252i16 / (x0 * 3) }` vacuous — the inlined `x0 * 3` "does not
+    /// overflow" is false at 34862 — and `Verified`.
+    pub(crate) demand_inlined_bodies: bool,
     /// Overflow behavior for the assert+assume pattern. When `should_check()`
     /// is true, `verify_assertion_typed` re-encodes the assertion with overflow
     /// tracking and assumes the predicates hold (they were already verified in
@@ -279,6 +288,13 @@ pub(crate) struct VerificationState {
     /// Shared-BV reuse must drop the encoder rather than keep reusing a
     /// potentially poisoned incremental solver. Part of #2552.
     pub(crate) reusable_after_scope: bool,
+    /// The panic text of the first solve on this encoder's solver that
+    /// unwound. A solve that unwinds can stop part-way through ay's
+    /// inprocessing, leaving the clause database, proof stream or assumption
+    /// stack in a state the next `check_sat` would trust, so the solver is
+    /// poisoned: every later solve on it answers `SolverPanic` without
+    /// solving, and the encoder is never reused for another assertion.
+    pub(crate) solver_panic: Option<String>,
     /// Stable per-query counters for UNSAT-core assertion names. Keeps
     /// duplicate display labels distinct without leaking SMT-safe symbol
     /// mangling into user-facing diagnostics. Part of #2706.
@@ -326,6 +342,16 @@ pub(crate) struct VerificationState {
     /// backend array term and connect via E-matching. See
     /// `parser_state::AstExpressionParser::pure_collection_cache`.
     pub(crate) pure_collection_cache: std::collections::HashMap<String, ay_dpll::api::Term>,
+    /// Persistent dom/len companions for PROJECTED collections (a struct FIELD
+    /// read, or any other collection-typed UF application) across
+    /// `AstExpressionParser` instances within one verification query.
+    ///
+    /// Keyed by the ay carrier `Term`. Without it the assumption round and the
+    /// assertion round mint two independent dom arrays for the same
+    /// `self.m`, and a precondition cannot discharge the identical assertion.
+    /// See `parser_state::AstExpressionParser::projected_collection_meta`.
+    pub(in crate::encoder) projected_collection_meta:
+        std::collections::HashMap<ay_dpll::api::Term, super::parser_state::CollectionMeta>,
     /// F3 point-interval length pins: declared Seq variables whose length is
     /// ENTAILED to a concrete literal by this query's own assumption set
     /// (`setup.rs::collect_finite_len_pins` — top-level `s == <finite chain>`
@@ -368,6 +394,21 @@ pub(crate) struct VerificationState {
     /// from `Verified` toward `Counterexample`/`Unknown`. See
     /// `pruning::context_element_demand`.
     pub(crate) seq_element_model_demanded: bool,
+    /// True when this encoder was built with DEMAND-INLINE OVERRIDES
+    /// (`setup_from_prepared_with_inline_overrides*`, #2655) — i.e. bodies the
+    /// PROGRAM did not declare `#[trust_vc::inline]` were substituted anyway,
+    /// as a retry strategy of trust-vc's own.
+    ///
+    /// Read by `encode_choose`, and by nothing else: the combined Hilbert axiom
+    /// of a `choose` over a spec-fn predicate is marked `no_mbqi` so a
+    /// witnessless choose cannot be proved by a witness MBQI invented, and that
+    /// mark used to be decided by asking whether the axiom still mentions a
+    /// `FnCall` — a question substitution answers `false`. An explicit
+    /// `#[trust_vc::inline]` SHOULD lose the gate (Verus substitutes such a body
+    /// too, and loses the trigger itself); a demand-inline override must NOT,
+    /// because it is invisible to the program and may not change which facts are
+    /// derivable. This flag is what separates the two.
+    pub(crate) demand_inline_overrides_active: bool,
 }
 
 impl VerificationState {
@@ -390,10 +431,12 @@ impl VerificationState {
             assumption_count: 0,
             unpruned_proof_fact_count: 0,
             inline_bodies: std::collections::HashMap::new(),
+            demand_inlined_bodies: false,
             overflow_behavior: crate::vc::OverflowBehavior::default(),
             div0_behavior: crate::vc::Div0Behavior::default(),
             bitshift_behavior: crate::vc::BitshiftBehavior::default(),
             reusable_after_scope: true,
+            solver_panic: None,
             #[cfg(feature = "named-assertions")]
             named_assertion_counters: std::collections::HashMap::new(),
             #[cfg(feature = "named-assertions")]
@@ -404,9 +447,11 @@ impl VerificationState {
             map_subset_seen: false,
             map_dom_bridges: std::collections::HashMap::new(),
             pure_collection_cache: std::collections::HashMap::new(),
+            projected_collection_meta: std::collections::HashMap::new(),
             pinned_seq_lens: std::collections::HashMap::new(),
             usize_bounded_lens: std::collections::HashSet::new(),
             seq_element_model_demanded: true,
+            demand_inline_overrides_active: false,
         }
     }
 }

@@ -10,27 +10,29 @@ use crate::ir::TrustVcType;
 use crate::ir_expr::TrustVcExpr;
 use crate::ir_lowering::{LoweringError, TypeEnv, COLLECTION_CONSTRUCTOR_PREFIX};
 
-/// Coerce an unsuffixed integer literal's type to match the receiver type.
+/// Type an unsuffixed integer literal argument by the receiver type — only
+/// where that never changes its value.
 ///
-/// In Rust, `x.checked_add(100)` where `x: u8` means `100` is `u8`.
-/// IR lowering defaults unsuffixed literals to `Int{32}`, which is wrong
-/// in method-call context. Only coerces `IntLit` nodes with the default
-/// `Int{32}` type; suffixed literals and non-literal expressions are
-/// left unchanged.
+/// In Rust, `x.checked_add(100)` where `x: u8` means `100` is `u8`. IR
+/// lowering defaults unsuffixed literals to `Int{32}`; the literal (for `-v`,
+/// the literal `-v`) takes the receiver's type exactly when it is a value of
+/// that type (`ir_lowering::untyped_literal_at_peer`). This used to retype any
+/// `Int{32}` literal by shape: `x.wrapping_add(300)` made a `u8` literal of
+/// 300. A literal the receiver type cannot hold keeps its own type, and the
+/// encoder refuses the mixed-type wrapping operation.
 pub(in crate::ir_lowering::dispatch) fn coerce_literal_to_receiver_type(
     expr: TrustVcExpr,
     receiver_ty: &TrustVcType,
 ) -> TrustVcExpr {
-    match expr {
-        TrustVcExpr::IntLit {
-            value,
-            ty: TrustVcType::Int { width: 32 },
-        } => TrustVcExpr::IntLit {
-            value,
-            ty: receiver_ty.clone(),
-        },
-        other => other,
+    let literal = match &expr {
+        TrustVcExpr::IntLit { .. } => true,
+        TrustVcExpr::Neg(inner) => matches!(inner.as_ref(), TrustVcExpr::IntLit { .. }),
+        _ => false,
+    };
+    if !literal {
+        return expr;
     }
+    crate::ir_lowering::untyped_literal_at_peer(&expr, receiver_ty).unwrap_or(expr)
 }
 
 pub(in crate::ir_lowering::dispatch) fn lower_collection_constructor(
@@ -99,7 +101,19 @@ fn collection_type_from_segment(
     };
 
     match segment.ident.to_string().as_str() {
-        "Seq" | "Vec" => Ok(Some(TrustVcType::Seq(Box::new(parse_generic(0)?)))),
+        // `String::new()` is the empty string: a zero-arity constructor whose
+        // tracked length the encoder registers as the literal 0 (the same lane
+        // `Vec::<T>::new()` uses), so `s.view().len() == 0` is decidable on it.
+        // `String` has no type arguments and no `empty` spelling.
+        "String"
+            if constructor_name == "new"
+                && matches!(segment.arguments, syn::PathArguments::None) =>
+        {
+            Ok(Some(TrustVcType::String))
+        }
+        // `VecDeque<T>` views as the same `Seq<T>` a `Vec<T>` does (vstd
+        // `VecDeque::view`), so its empty constructor is the empty sequence.
+        "Seq" | "Vec" | "VecDeque" => Ok(Some(TrustVcType::Seq(Box::new(parse_generic(0)?)))),
         "Set" | "HashSet" => Ok(Some(TrustVcType::Set(Box::new(parse_generic(0)?)))),
         "Multiset" => Ok(Some(TrustVcType::Multiset(Box::new(parse_generic(0)?)))),
         "Map" | "HashMap" => Ok(Some(TrustVcType::Map(

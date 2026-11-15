@@ -9,6 +9,23 @@
 //! check declared verified/counterexample/error outcomes and obligation floors,
 //! pin Rust runtime witnesses, and require precise fail-closed fragments for
 //! the mutable-reference library surfaces TrustVc does not yet model.
+//!
+//! 2026-09-16: the four `test_options_as_mut_slice` `as_slice` cases moved off
+//! the fail-closed lane — `Option::as_slice` on a known None / Some(scalar)
+//! receiver is a pure `Seq` view in spec lowering (`crates/trust-vc-core/tests/
+//! option_as_slice_view_capability.rs`), so `test_as_slice_none` /
+//! `test_as_slice_some` verify and `fail_as_slice_none` / `fail_as_slice_some`
+//! are counterexamples on their trailing `false`. The four `as_mut_slice`
+//! cases keep their generic refusal fragments unchanged.
+//!
+//! 2026-09-17: the twelve `test_option_insert_and_get_or_insert` cases moved
+//! off the fail-closed lane — the `&mut` returned by `Option::insert` /
+//! `Option::get_or_insert` on a KNOWN None / Some(scalar) local is an erased
+//! alias of the Option's payload (`crates/trust-vc-core/tests/
+//! option_payload_alias_capability.rs`), so the four `test_*` bodies and the
+//! four pre-mutation result observations verify, and the four `fail_*` bodies
+//! are counterexamples on their trailing `false`. Their refusal fragments are
+//! gone; the case names keep their historical `_currently_blocked` suffix.
 
 #![allow(clippy::useless_vec)]
 
@@ -303,39 +320,11 @@ fn mut_refs_libs_error_fragments(case: &str) -> Option<&'static [&'static str]> 
             "unresolved variable `opt`",
             "current scope",
         ],
-        "mut_refs_libs_option_as_slice_none_observation_currently_blocked"
-        | "mut_refs_libs_option_as_slice_some_observation_currently_blocked"
-        | "mut_refs_libs_option_as_slice_none_false_tail_currently_blocked"
-        | "mut_refs_libs_option_as_slice_some_false_tail_currently_blocked" => &[
-            "as_slice() on type `Option<u64>`",
-            "method is not available in specification context",
-        ],
         "mut_refs_libs_option_as_mut_slice_none_observation_currently_blocked"
         | "mut_refs_libs_option_as_mut_slice_write_currently_blocked"
         | "mut_refs_libs_option_as_mut_slice_none_false_tail_currently_blocked"
         | "mut_refs_libs_option_as_mut_slice_write_false_tail_currently_blocked" => &[
             "as_mut_slice() on type `Option<u64>`",
-            "method is not available in specification context",
-        ],
-        "mut_refs_libs_option_insert_mut_ref_currently_blocked"
-        | "mut_refs_libs_option_insert_some_mut_ref_currently_blocked"
-        | "mut_refs_libs_option_insert_none_false_tail_currently_blocked"
-        | "mut_refs_libs_option_insert_some_false_tail_currently_blocked"
-        | "mut_refs_libs_option_get_or_insert_none_mut_ref_currently_blocked"
-        | "mut_refs_libs_option_get_or_insert_some_mut_ref_currently_blocked"
-        | "mut_refs_libs_option_get_or_insert_none_false_tail_currently_blocked"
-        | "mut_refs_libs_option_get_or_insert_some_false_tail_currently_blocked" => &[
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r",
-        ],
-        "mut_refs_libs_option_insert_none_result_observation_currently_blocked"
-        | "mut_refs_libs_option_insert_some_result_observation_currently_blocked" => &[
-            "collection operation 'insert'",
-            "requires a collection receiver, got 'Option<u64>'",
-        ],
-        "mut_refs_libs_option_get_or_insert_none_result_observation_currently_blocked"
-        | "mut_refs_libs_option_get_or_insert_some_result_observation_currently_blocked" => &[
-            "get_or_insert() on type `Option<u64>`",
             "method is not available in specification context",
         ],
         "mut_refs_libs_vec_of_mut_refs_currently_blocked"
@@ -345,17 +334,12 @@ fn mut_refs_libs_error_fragments(case: &str) -> Option<&'static [&'static str]> 
             "assignment through a dereferenced reference is unsupported in vc_extraction",
             "* v [0]",
         ],
-        "mut_refs_libs_vec_push_nested_index_assign_currently_blocked" => &[
-            "indexed assignment target is unsupported in vc_extraction",
-            "v [1usize] [1usize]",
-        ],
-        "mut_refs_libs_vec_index_assign_nested_currently_blocked"
-        | "mut_refs_libs_vec_index_assign_nested_false_tail_currently_blocked" => &[
-            "indexed assignment target is unsupported in vc_extraction",
-            "v [1] [1]",
-        ],
+        // 2026-09-12: the nested write path now checks the inner literal's
+        // length itself (the selected element `vec![6u64]` has length 1), so the
+        // rejection is the precise out-of-bounds one, not the former blanket
+        // "unsupported target".
         "mut_refs_libs_vec_index_out_of_bounds_nested_assign_currently_blocked" => &[
-            "indexed assignment target is unsupported in vc_extraction",
+            "Vec literal indexed assignment is out of bounds in vc_extraction",
             "v [2] [1]",
         ],
         "mut_refs_libs_vec_index_out_of_bounds_assign_currently_blocked" => &[
@@ -370,14 +354,7 @@ fn mut_refs_libs_error_fragments(case: &str) -> Option<&'static [&'static str]> 
             "length 3",
             "index is 3",
         ],
-        "mut_refs_libs_vec_push_index_mut_ref_currently_blocked" => &[
-            "assignment through a dereferenced reference is unsupported in vc_extraction",
-            "* r",
-            "tuple/index/nested",
-        ],
-        "mut_refs_libs_vec_index_mut_ref_currently_blocked"
-        | "mut_refs_libs_vec_index_mut_ref_false_tail_currently_blocked"
-        | "mut_refs_libs_vec_index_mut_ref_fields_currently_blocked"
+        "mut_refs_libs_vec_index_mut_ref_fields_currently_blocked"
         | "mut_refs_libs_vec_index_mut_ref_fields_false_tail_currently_blocked"
         | "mut_refs_libs_vec_index_mut_ref_nested_currently_blocked"
         | "mut_refs_libs_vec_index_mut_ref_nested_false_tail_currently_blocked"
@@ -390,10 +367,9 @@ fn mut_refs_libs_error_fragments(case: &str) -> Option<&'static [&'static str]> 
             "assignment through a dereferenced reference is unsupported in vc_extraction",
             "* v [0usize]",
         ],
-        "mut_refs_libs_vec_of_mut_refs_has_resolved_currently_blocked" => &[
-            "has_resolved",
-            "unknown return type for function 'has_resolved'",
-        ],
+        "mut_refs_libs_vec_of_mut_refs_has_resolved_currently_blocked" => {
+            &["has_resolved", "`has_resolved()` is refused"]
+        }
         _ => return None,
     })
 }

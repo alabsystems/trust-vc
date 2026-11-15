@@ -125,6 +125,31 @@ pub(in crate::encoder) fn can_use_shared_bv_fast_path(
             .is_some()))
 }
 
+/// TRAIT-PRUNE FALLBACK (2026-09-11). The shared BV encoder is built once for
+/// the batch with `assertion_focus = None`, and a focus-less setup registers
+/// EVERY trait of the file — each a quantified postcondition axiom over the
+/// `Poly` self sort. Under those axioms ay could not confirm a model for a
+/// goal that names no trait at all: upstream returns_postcondition
+/// `returns_basic_wrong_value`, a plain false `ensures(result == 20u8)`
+/// beside ten trait_spec traits, came back `Unknown (quantifier-unhandled)`
+/// although it refutes with `result = 19` the moment the traits are absent.
+/// The per-assertion fallback builds a FOCUSED plan that prunes the traits the
+/// goal cannot reach, so a shared-lane Unknown in a trait-bearing context is
+/// handed to it instead of being reported as final. Sound in both directions:
+/// both lanes prove "context ∧ ¬goal is UNSAT" from sound axiom sets, and the
+/// fallback only runs where the shared lane already gave up. Widening the
+/// pruning into the shared lane itself was measured and rejected the same day:
+/// the two lanes' DIFFERENT axiom sets are what lets a concrete-call goal
+/// verify through the impl's own contract while an associated-type client
+/// verifies through the trait's (see the 2026-09-11 ledger row).
+pub(in crate::encoder) fn shared_unknown_should_fall_back_to_focused(
+    slices: &VerificationSlices<'_>,
+    outcome: &AssertionOutcome,
+) -> bool {
+    matches!(outcome, AssertionOutcome::Unknown { .. })
+        && (!slices.ctx.trait_decls.is_empty() || !slices.ctx.trait_impl_decls.is_empty())
+}
+
 pub(in crate::encoder) fn verify_assertion_with_shared_bv_encoder(
     slices: &VerificationSlices<'_>,
     assertion: &crate::prepared_context::PreparedObligation,
@@ -171,15 +196,13 @@ fn verify_assertion_with_shared_bv_encoder_inner(
 
     // BitVector mode (`assert by(bit_vector)`) wraps, so arithmetic carries no
     // overflow obligation; suppress arithmetic overflow predicates while still
-    // running collection-precondition checks below.
-    let arith_overflow_enabled = ctx.check_overflow()
-        && !assertion
-            .solver_mode
-            .is_some_and(|m| m == crate::vc::SolverMode::BitVector)
-        // Spec-predicate obligations (calc! steps, call-site precondition checks,
-        // contract clauses) carry mathematical-int arithmetic, never overflow-checked
-        // in Verus — same gate as the main path (#2778 spec-arith leak).
-        && !super::assertion::obligation_carries_spec_arithmetic(assertion);
+    // running collection-precondition checks below. Spec-predicate obligations
+    // (calc! steps, call-site precondition checks, contract clauses) carry
+    // mathematical-int arithmetic and are never overflow-checked in Verus
+    // either. ONE gate for both, shared with the assume site in `solve.rs` —
+    // see `assertion::exec_arith_overflow_in_scope`.
+    let arith_overflow_enabled =
+        super::assertion::exec_arith_overflow_in_scope(ctx.check_overflow(), assertion);
 
     // Collection precondition checks (nonempty, bounds) must run even when
     // check_overflow is false — may_emit_overflow_checks returns true for

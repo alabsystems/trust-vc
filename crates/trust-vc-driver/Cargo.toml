@@ -11,16 +11,16 @@
 # backend on the pure-Rust ay solver. This crate provides the shared `lower`
 # seam, the Verus-compat standalone driver (the parity benchmark/gate), and the
 # ay-certificate capability. North star: design-trust-proof-backend.md.
-# See also README.md and design-rustc-driver-frontend.md.
+# See also README.md and docs/archive/design-rustc-driver-frontend.md.
 #
 # Two layers, deliberately split by buildability:
 #   * `lower` (default features, STABLE): the driver-independent IR bridge that
 #     turns a fully-typed `DriverFn` into a `VerificationContext` and verifies it
-#     with the real encoder + ay. Builds and tests on the pinned stable toolchain.
-#   * `driver` (feature = "rustc-driver", NIGHTLY + rustc-dev): the real
+#     with the real encoder + ay. Builds and tests on the pinned Trust toolchain.
+#   * `driver` (feature = "rustc-driver", Trust `rustc_private`): the real
 #     `rustc_driver::Callbacks` that obtains `TyCtxt`, walks THIR, and feeds
-#     `lower`. Compiled only when the `rustc-driver` feature is on, which requires
-#     the nightly toolchain pinned in this crate's rust-toolchain.toml.
+#     `lower`. Compiled only when the `rustc-driver` feature is on; the Trust
+#     sysroot serves its `rustc_private` crates (root rust-toolchain.toml).
 
 [package]
 name = "trust-vc-driver"
@@ -33,10 +33,11 @@ description = "rustc-driver (THIR) front end lowering Rust into trust-vc-core's 
 
 [features]
 default = []
-# Enable the real rustc_driver front end. Requires a nightly toolchain with the
-# `rustc-dev` and `llvm-tools` components (see rust-toolchain.toml) and
-# `RUSTC_BOOTSTRAP=1`. NOT part of the default workspace build; the stable
-# `lower` layer carries the load-bearing, testable logic.
+# Enable the real rustc_driver front end. The Trust toolchain's sysroot serves
+# its `rustc_private` crates directly (`targo --unverified test -p
+# trust-vc-driver --features rustc-driver`; build.rs bakes the librustc_driver
+# rpath). NOT part of the default workspace build; the `lower` layer carries
+# the load-bearing, testable logic.
 rustc-driver = []
 # Emit ay UNSAT proof certificates (re-checked by trust-vc-kernel) from the
 # `lower` seam — trust-vc's soundness edge over Verus's black-box Z3. Builds on
@@ -76,11 +77,11 @@ trust-vc-core = { workspace = true }
 # resolved compiler facts (NativeCompilerFactRef) into frame/alias VCs.
 trust-ir = { workspace = true, optional = true }
 
-# The nightly rustc-driver verification binary. It links the fork toolchain's
-# `rustc_private` libraries (via the `rustc-driver` feature + `driver` module),
-# so it builds ONLY through `scripts/build-trust-vc-driver.sh bin`, never a bare
-# `cargo build`. `required-features` keeps it out of the default (stable)
-# workspace build, so `targo build`/`targo test` are undisturbed.
+# The rustc-driver verification binary. It links the Trust toolchain's
+# `rustc_private` libraries (via the `rustc-driver` feature + `driver` module):
+# `targo --unverified build -p trust-vc-driver --features rustc-driver --bin
+# trust-vc-driver`. `required-features` keeps it out of the default workspace
+# build, so `targo --unverified build|test` are undisturbed.
 [[bin]]
 name = "trust-vc-driver"
 path = "src/bin/trust-vc-driver.rs"

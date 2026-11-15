@@ -1,0 +1,58 @@
+# trust-vc-vcir: the rustc-free program IR (VcIR) that trust-vc verifies.
+#
+# Copyright 2026 Andrew Yates
+# SPDX-License-Identifier: Apache-2.0
+# Author: Andrew Yates <andrewyates.name@gmail.com>
+#
+# Producers (the rustc reader in trust-vc-rustc, later a trust-ir adapter)
+# build a `VcCrate`; the well-formedness checker here accepts or rejects it;
+# the VC generator turns accepted functions into one-goal queries for
+# trust-vc-core. The crate has no rustc dependency, so it builds and tests
+# with plain `targo --unverified` and is meant to build under `targo trust`.
+#
+# By default it has no dependencies at all: the generator's queries are plain
+# data. The `solve` feature adds trust-vc-core and the translation of those
+# queries into its one-goal query API.
+
+[package]
+name = "trust-vc-vcir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rustc-free program IR (VcIR) for trust-vc: items, bodies, spec expressions, well-formedness"
+
+[features]
+default = []
+# Answer generated queries with trust-vc-core (and so ay).
+solve = ["dep:trust-vc-core"]
+
+[dependencies]
+trust-vc-bitvector = { workspace = true }
+# Bounded diagnostic-only evaluation matches upstream effective BV source.
+num-bigint = { workspace = true }
+trust-vc-core = { workspace = true, optional = true }
+
+[[test]]
+name = "vcgen_basic"
+path = "tests/vcgen_basic.rs"
+required-features = ["solve"]
+
+[[test]]
+name = "opaque_carriers"
+path = "tests/opaque_carriers.rs"
+required-features = ["solve"]
+
+[[test]]
+name = "generic_poly"
+path = "tests/generic_poly.rs"
+required-features = ["solve"]
+
+[[test]]
+name = "finite_sums"
+path = "tests/finite_sums.rs"
+required-features = ["solve"]
+
+[lints]
+workspace = true

@@ -7,7 +7,8 @@
 
 The audit intentionally uses only Python's standard library so it can run in a
 fresh checkout. It checks Git-tracked files for editor/build cruft, leaked local
-paths, oversized Rust source files, and production Rust panic-style escapes.
+paths, split first-party lock authorities, oversized Rust source files, and
+production Rust panic-style escapes.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 DEFAULT_MAX_RUST_LINES = 500
@@ -29,6 +31,40 @@ TEST_PATH_PARTS = {"benches", "examples", "fuzz", "tests"}
 EVIDENCE_FIXTURE_PREFIXES = (("evals", "verus", "ported"),)
 SRC_TEST_MODULE_RE = re.compile(r"^(?:tests?|tests_.*)\.rs$")
 SRC_TEST_MODULE_DIR_RE = re.compile(r"^(?:tests_.*|.*_tests)$")
+FULL_GIT_REV_RE = re.compile(r"^[0-9a-f]{40}$")
+FULL_PACKAGE_VERSION_RE = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+FIRST_PARTY_REPOS = {
+    "github.com/alabsystems/ay": "ay",
+    "github.com/alabsystems/clean": "clean",
+    "github.com/alabsystems/trust-cg": "trust-cg",
+    "github.com/alabsystems/trust-ir": "trust-ir",
+    "github.com/alabsystems/ty": "ty",
+}
+# ty is not linked: the protocol lane runs the `ty` binary.
+DIRECT_FIRST_PARTY_REPOS = {"ay", "trust-ir"}
+# The first-party repos the lock must hold: the direct ones and Clean, which
+# trust-ir reaches. TrustCG and ty were reached only through ty's crates; a
+# lock that holds one of them still needs one exact rev for it.
+REQUIRED_LOCK_REPOS = {"ay", "clean", "trust-ir"}
+
+
+def first_party_package_repo(name: str) -> str | None:
+    """Return the owned repository expected to supply a Cargo package name."""
+    if name == "ay" or name.startswith("ay-"):
+        return "ay"
+    if name.startswith("clean-"):
+        return "clean"
+    if name.startswith("trust-cg-"):
+        return "trust-cg"
+    if name == "trust-ir" or name.startswith("trust-ir-"):
+        return "trust-ir"
+    if name.startswith("tla-"):
+        return "ty"
+    return None
 
 
 @dataclass(frozen=True)
@@ -246,6 +282,318 @@ def audit_local_paths(root: Path, paths: list[str]) -> list[Finding]:
                 if pattern.regex.search(line):
                     findings.append(Finding("local path leakage", rel_path, pattern.label, line_number))
                     break
+    return findings
+
+
+def first_party_git_source(source: str) -> tuple[str, str | None, str] | None:
+    if not source.startswith("git+"):
+        return None
+    parsed = urlsplit(source.removeprefix("git+"))
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
+        return None
+    repo_path = parsed.path.removesuffix(".git").strip("/").lower()
+    repo = FIRST_PARTY_REPOS.get(f"{parsed.netloc.lower()}/{repo_path}")
+    if repo is None:
+        return None
+    if parsed.path != f"/alabsystems/{repo}.git":
+        return None
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    revisions = query.get("rev", [])
+    if set(query) != {"rev"}:
+        revisions = []
+    requested = revisions[0] if len(revisions) == 1 else None
+    return repo, requested, parsed.fragment
+
+
+def first_party_source_candidate(source: str) -> str | None:
+    """Recognize a known owned origin even when its authority is malformed."""
+    parsed = urlsplit(source.removeprefix("git+"))
+    if parsed.hostname is None or parsed.hostname.lower() != "github.com":
+        return None
+    path = unquote(parsed.path).strip("/").lower().removesuffix(".git")
+    parts = path.split("/")
+    if len(parts) != 2 or parts[0] != "alabsystems":
+        return None
+    repo = parts[1]
+    return repo if repo in FIRST_PARTY_REPOS.values() else None
+
+
+def manifest_first_party_authorities(
+    manifest: str,
+) -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
+    revisions: dict[str, set[str]] = {}
+    versions: dict[str, set[str]] = {}
+    issues: list[str] = []
+    in_workspace_dependencies = False
+    for raw_line in manifest.splitlines():
+        line = raw_line.strip()
+        if line.startswith("["):
+            table_match = re.fullmatch(r"\[workspace\.dependencies\.([^]]+)\]", line)
+            if table_match is not None:
+                name = table_match.group(1).strip('"')
+                if first_party_package_repo(name) is not None:
+                    issues.append(
+                        f"{name} must use one inline git + exact rev entry so "
+                        "the offline audit can authenticate it"
+                    )
+            in_workspace_dependencies = line == "[workspace.dependencies]"
+            continue
+        if not in_workspace_dependencies or not line or line.startswith("#"):
+            continue
+        dependency_match = re.match(r'^([A-Za-z0-9_-]+)\s*=\s*(.+)$', line)
+        if dependency_match is None:
+            continue
+        name = dependency_match.group(1)
+        expected_repo = first_party_package_repo(name)
+        git_match = re.search(r'\bgit\s*=\s*"([^"]+)"', line)
+        revision_match = re.search(r'\brev\s*=\s*"([^"]+)"', line)
+        version_match = re.search(r'\bversion\s*=\s*"([^"]+)"', line)
+        if git_match is None or revision_match is None:
+            if expected_repo in DIRECT_FIRST_PARTY_REPOS:
+                issues.append(
+                    f"{name} must use a first-party git source with one exact rev"
+                )
+            continue
+        git = git_match.group(1)
+        revision = revision_match.group(1)
+        parsed = first_party_git_source(f"git+{git}?rev={revision}#{revision}")
+        if parsed is None:
+            if expected_repo in DIRECT_FIRST_PARTY_REPOS:
+                issues.append(f"{name} does not use the expected {expected_repo} repository")
+            continue
+        repo = parsed[0]
+        requested = parsed[1]
+        if expected_repo is not None and repo != expected_repo:
+            issues.append(f"{name} uses {repo}, expected {expected_repo}")
+            continue
+        if requested != revision:
+            issues.append(
+                f"{name} must use the canonical HTTPS {repo} Git URL without "
+                "branch/tag/query authority"
+            )
+            continue
+        revisions.setdefault(repo, set()).add(revision)
+        if not FULL_GIT_REV_RE.fullmatch(revision):
+            issues.append(
+                f"{name} rev must be exactly 40 lowercase hex characters; "
+                f"found {revision!r}"
+            )
+        if repo == "ay":
+            if version_match is None:
+                issues.append(
+                    f"{name} must carry AY's exact package version with its rev"
+                )
+                continue
+            version = version_match.group(1)
+            versions.setdefault(repo, set()).add(version)
+            if FULL_PACKAGE_VERSION_RE.fullmatch(version) is None:
+                issues.append(
+                    f"{name} version must be one complete Cargo package version; "
+                    f"found {version!r}"
+                )
+    return revisions, versions, issues
+
+
+def lock_packages(lock: str) -> list[dict[str, str]]:
+    packages: list[dict[str, str]] = []
+    package: dict[str, str] | None = None
+    for raw_line in lock.splitlines():
+        line = raw_line.strip()
+        if line == "[[package]]":
+            if package is not None:
+                packages.append(package)
+            package = {}
+            continue
+        if package is None:
+            continue
+        match = re.match(r'^(name|version|source)\s*=\s*"([^"]*)"$', line)
+        if match is not None:
+            package[match.group(1)] = match.group(2)
+    if package is not None:
+        packages.append(package)
+    return packages
+
+
+def audit_first_party_lock(root: Path) -> list[Finding]:
+    group = "first-party Cargo.lock provenance"
+    manifest_path = root / "Cargo.toml"
+    lock_path = root / "Cargo.lock"
+    try:
+        manifest = manifest_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [Finding(group, "Cargo.toml", f"could not read workspace manifest: {error}")]
+    try:
+        lock = lock_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [Finding(group, "Cargo.lock", f"could not read tracked lockfile: {error}")]
+
+    findings: list[Finding] = []
+    manifest_revisions, manifest_versions, manifest_issues = (
+        manifest_first_party_authorities(manifest)
+    )
+    findings.extend(Finding(group, "Cargo.toml", issue) for issue in manifest_issues)
+    for repo in sorted(DIRECT_FIRST_PARTY_REPOS):
+        revisions = manifest_revisions.get(repo, set())
+        if len(revisions) != 1:
+            findings.append(
+                Finding(
+                    group,
+                    "Cargo.toml",
+                    f"{repo} direct dependencies must share one exact rev; "
+                    f"found {sorted(revisions)}",
+                )
+            )
+    ay_manifest_versions = manifest_versions.get("ay", set())
+    if len(ay_manifest_versions) != 1:
+        findings.append(
+            Finding(
+                group,
+                "Cargo.toml",
+                "ay direct dependencies must share one exact package version; "
+                f"found {sorted(ay_manifest_versions)}",
+            )
+        )
+
+    lock_revisions: dict[str, set[str]] = {}
+    lock_versions: dict[str, set[str]] = {}
+    path_repos: set[str] = set()
+    packages = lock_packages(lock)
+    if not packages:
+        return findings + [Finding(group, "Cargo.lock", "package array is missing")]
+    for package in packages:
+        name = package.get("name")
+        source = package.get("source")
+        expected_repo = first_party_package_repo(name) if name is not None else None
+        version = package.get("version")
+        if expected_repo is not None:
+            if version is None or FULL_PACKAGE_VERSION_RE.fullmatch(version) is None:
+                findings.append(
+                    Finding(
+                        group,
+                        "Cargo.lock",
+                        f"{name} has no complete package version",
+                    )
+                )
+            else:
+                lock_versions.setdefault(expected_repo, set()).add(version)
+        if source is None and expected_repo == "ay":
+            # Cargo omits `source` for the committed sibling-path AY patch.
+            # The strict evidence gate authenticates that sibling's origin,
+            # clean HEAD, and equality to the manifest rev; this lightweight
+            # audit only prevents any simultaneous Git AY lane from disagreeing.
+            path_repos.add("ay")
+            continue
+        if source is None:
+            if expected_repo is not None:
+                findings.append(
+                    Finding(
+                        group,
+                        "Cargo.lock",
+                        f"{name} has unsupported sourceless {expected_repo} provenance",
+                    )
+                )
+            continue
+        parsed = first_party_git_source(source)
+        if parsed is None:
+            candidate_repo = first_party_source_candidate(source)
+            if candidate_repo is not None:
+                findings.append(
+                    Finding(
+                        group,
+                        "Cargo.lock",
+                        f"{name or '<unnamed>'} has noncanonical "
+                        f"{candidate_repo} Git authority",
+                    )
+                )
+            elif expected_repo is not None:
+                findings.append(
+                    Finding(
+                        group,
+                        "Cargo.lock",
+                        f"{name} does not resolve from the expected {expected_repo} Git repository",
+                    )
+                )
+            continue
+        repo, requested, resolved = parsed
+        package_label = name or "<unnamed>"
+        if expected_repo is not None and repo != expected_repo:
+            findings.append(
+                Finding(
+                    group,
+                    "Cargo.lock",
+                    f"{package_label} resolves from {repo}, expected {expected_repo}",
+                )
+            )
+        if requested is None or not FULL_GIT_REV_RE.fullmatch(requested):
+            findings.append(
+                Finding(group, "Cargo.lock", f"{package_label} has no single exact {repo} ?rev")
+            )
+            continue
+        lock_revisions.setdefault(repo, set()).add(requested)
+        if resolved != requested:
+            findings.append(
+                Finding(
+                    group,
+                    "Cargo.lock",
+                    f"{package_label} {repo} requested rev {requested} resolves "
+                    f"as {resolved or '<missing>'}",
+                )
+            )
+
+    for repo in sorted(FIRST_PARTY_REPOS.values()):
+        revisions = lock_revisions.get(repo, set())
+        if repo == "ay" and not revisions and repo in path_repos:
+            continue
+        if not revisions and repo not in REQUIRED_LOCK_REPOS:
+            continue
+        if len(revisions) != 1:
+            findings.append(
+                Finding(
+                    group,
+                    "Cargo.lock",
+                    f"{repo} packages must resolve from one exact Git rev; "
+                    f"found {sorted(revisions)}",
+                )
+            )
+
+    ay_lock_versions = lock_versions.get("ay", set())
+    if len(ay_lock_versions) != 1:
+        findings.append(
+            Finding(
+                group,
+                "Cargo.lock",
+                "ay packages must resolve at one package version; "
+                f"found {sorted(ay_lock_versions)}",
+            )
+        )
+    if (
+        len(ay_manifest_versions) == 1
+        and len(ay_lock_versions) == 1
+        and ay_manifest_versions != ay_lock_versions
+    ):
+        findings.append(
+            Finding(
+                group,
+                "Cargo.lock",
+                f"ay lock version {next(iter(ay_lock_versions))} does not match "
+                f"manifest version {next(iter(ay_manifest_versions))}",
+            )
+        )
+
+    for repo in sorted(DIRECT_FIRST_PARTY_REPOS):
+        expected = manifest_revisions.get(repo, set())
+        observed = lock_revisions.get(repo, set())
+        if repo == "ay" and not observed and repo in path_repos:
+            continue
+        if len(expected) == 1 and len(observed) == 1 and expected != observed:
+            findings.append(
+                Finding(
+                    group,
+                    "Cargo.lock",
+                    f"{repo} lock rev {next(iter(observed))} does not match "
+                    f"manifest rev {next(iter(expected))}",
+                )
+            )
     return findings
 
 
@@ -500,6 +848,7 @@ def main(argv: list[str]) -> int:
     findings: list[Finding] = []
     findings.extend(audit_cruft_paths(paths))
     findings.extend(audit_local_paths(root, paths))
+    findings.extend(audit_first_party_lock(root))
     if not args.skip_rust_size:
         findings.extend(audit_rust_size(root, paths, args.max_rust_lines))
     if not args.skip_production_policy:

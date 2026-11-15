@@ -8,11 +8,19 @@
 //! `source/rust_verify_test/tests/mut_refs.rs` as an unsupported gap. They pin
 //! only stable source-extraction behavior: direct local mutable-reference
 //! writes, field-borrow writes, copy-after-write reads, nested alias
-//! reassignment, conditional local writes, aliased mutable-reference parameter
-//! writes, stale-value counterexamples, and fail-closed boundaries for
-//! reborrows, compound mutable-reference assignment, direct mutable-reference
-//! parameter writes, aggregate-stored mutable references, and Verus-only
-//! old/final/current/future-state/proph/resolvedness helpers.
+//! reassignment, conditional local writes, scalar reborrow updates, direct and
+//! aliased scalar mutable-reference parameter writes, scalar compound
+//! assignment through a local alias, writes through mutable references held in
+//! tuple / struct-literal locals (straight-line, branch, and after a move —
+//! 2026-09-14), stale-value counterexamples, and fail-closed boundaries for
+//! compound assignment through a mutable-reference field projection, alias
+//! reassignment in a short-circuit operand or an assignment right-hand side,
+//! primitive compound-op evaluation order, and Verus-only
+//! old/final/current/future/after_borrow-state and resolvedness helpers. The
+//! aggregate-held shapes that stay refused (loop-body / compound holder writes,
+//! by-value tuple-of-`&mut` parameters, holder escapes) are pinned by
+//! `trust-vc-core`'s `mut_ref_aggregate_holder_capability` harness and the
+//! sibling mut_refs_* suites, not by a case of this port.
 //! Solver `Unknown` is not accepted as expected-case evidence.
 
 mod common;
@@ -322,35 +330,11 @@ fn expect_fail_closed_error_contains_all(
 
 const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
-        "mut_refs_basic_mut_ref_in_pair_write_currently_blocked",
-        "test_basic::test_mut_ref_in_pair aggregate-stored mutable-reference write boundary",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* u_ref . x",
-        ],
-    ),
-    (
         "mut_refs_assign_op_field_add_assign_currently_blocked",
         "assign_op_to_mut_ref::test_add_assign_fields compound field assignment boundary",
         &[
             "assignment through a mutable-reference projection is unsupported",
             "x_ref . x",
-        ],
-    ),
-    (
-        "mut_refs_control_flow_tuple_pair_write_currently_blocked",
-        "control_flow_conditional_with_pair::test tuple-projected mutable-reference write boundary",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* x_ref . 0",
-        ],
-    ),
-    (
-        "mut_refs_moves_via_let_tuple_write_currently_blocked",
-        "test_moves_via_let_decl::test tuple-moved mutable-reference write boundary",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* refs2 . 0",
         ],
     ),
     (
@@ -375,35 +359,28 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
         "mut_refs_compound_primitive_eval_order_currently_blocked",
         "compound_op_primitive_evaluation_order::test_primitive_mut_refs boundary",
         &[
-            "Failed to lower obligation 'assertion_0'",
-            "unresolved variable `a`",
-            "ensure the variable is declared as a function parameter, let-binding, or quantifier-bound variable",
+            "assignment through a dereferenced reference is unsupported in vc_extraction",
         ],
     ),
     (
         "mut_refs_has_resolved_currently_blocked",
         "test_basic::test_mut_ref_in_pair has_resolved boundary",
-        &["has_resolved", "unknown return type for function"],
+        &["has_resolved", "is refused"],
     ),
     (
         "mut_refs_after_borrow_currently_blocked",
         "test_after_borrow_ok after_borrow boundary",
-        &["after_borrow", "unknown return type for function"],
-    ),
-    (
-        "mut_refs_mut_ref_current_currently_blocked",
-        "test_spec_functions_ok mut_ref_current boundary",
-        &["mut_ref_current", "unknown return type for function"],
+        &["after_borrow", "is refused"],
     ),
     (
         "mut_refs_mut_ref_future_currently_blocked",
         "test_spec_functions_ok mut_ref_future boundary",
-        &["mut_ref_future", "unknown return type for function"],
+        &["mut_ref_future", "END of its borrow"],
     ),
     (
         "mut_refs_final_currently_blocked",
         "test_spec_functions_ok final boundary",
-        &["Failed to parse assert!() expression", "expected an expression"],
+        &["final", "END of its borrow"],
     ),
     (
         "mut_refs_old_state_currently_blocked",
@@ -453,8 +430,8 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
     (
         "mut_refs_basic_mut_ref_in_pair_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     ("mut_refs_assign_op_add_assign_verified", "", "verified", 4),
     (
@@ -520,14 +497,14 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
     (
         "mut_refs_control_flow_tuple_pair_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_moves_via_let_tuple_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_short_circuit_alias_reassignment_currently_blocked",
@@ -549,10 +526,45 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
     ),
     ("mut_refs_has_resolved_currently_blocked", "", "error", 0),
     ("mut_refs_after_borrow_currently_blocked", "", "error", 0),
-    ("mut_refs_mut_ref_current_currently_blocked", "", "error", 0),
+    (
+        "mut_refs_mut_ref_current_unconstrained_counterexample",
+        "",
+        "counterexample",
+        1,
+    ),
+    (
+        "mut_refs_mut_ref_current_after_write_verified",
+        "",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_mut_ref_current_after_write_stale_counterexample",
+        "",
+        "counterexample",
+        1,
+    ),
     ("mut_refs_mut_ref_future_currently_blocked", "", "error", 0),
     ("mut_refs_final_currently_blocked", "", "error", 0),
     ("mut_refs_old_state_currently_blocked", "", "error", 0),
+    (
+        "mut_refs_two_phase_call_takes_mut_ref_verified",
+        "two_phase_borrow_basic::call_takes_mut_ref mut_ref_future ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_two_phase_direct_call_verified",
+        "two_phase_borrow_basic::test1 caller instantiates the mut_ref_future ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_two_phase_direct_call_wrong_value_counterexample",
+        "two_phase_borrow_basic::test1 caller, wrong post value",
+        "counterexample",
+        1,
+    ),
 ];
 
 #[test]

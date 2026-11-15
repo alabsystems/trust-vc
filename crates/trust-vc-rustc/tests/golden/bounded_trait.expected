@@ -1,0 +1,8 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - trust-vc refused: trait: the associated type `A` @[5]
+  error - mismatched types; types must be compatible to use == or != @[11:this is `u64`, 11:this is `core::option::Option<u64>`, 11]
+functions:
+  test rejected -
+vcir:

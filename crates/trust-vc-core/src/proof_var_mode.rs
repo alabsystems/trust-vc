@@ -87,7 +87,7 @@ fn default_param_mode(function_mode: FunctionMode) -> VarMode {
 /// `#[trust_vc::proof]`, `#[verifier::proof]`, `#[proof]`, and likewise for
 /// `spec` / `exec`. `parse_file_allow_tracked` rewrites the Verus `tracked p: T`
 /// surface into `#[trust_vc::proof] p: T`, so `tracked` lands here too.
-fn explicit_param_mode(attrs: &[syn::Attribute]) -> Option<VarMode> {
+pub(crate) fn explicit_param_mode(attrs: &[syn::Attribute]) -> Option<VarMode> {
     for attr in attrs {
         let segments: Vec<String> = attr
             .path()

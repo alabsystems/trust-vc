@@ -85,9 +85,52 @@ impl<'a> AstExpressionParser<'a> {
         expr: &TrustVcExpr,
         hint_ty: Option<&TrustVcType>,
     ) -> TrustVcType {
+        self.infer_expr_type_with_hint(expr, hint_ty, true)
+    }
+
+    /// Whether `encode_compare` reads `left OP right` as a float comparison:
+    /// either operand's effective type, inferred with the same peer hints
+    /// `encode_compare` uses, is a float.
+    ///
+    /// IEEE 754 order is partial: every comparison with a NaN is false, so
+    /// `!(a <= b)` is not `a > b` for floats.
+    pub(in crate::encoder::ir_encoder) fn compare_operands_are_float(
+        &self,
+        left: &TrustVcExpr,
+        right: &TrustVcExpr,
+    ) -> bool {
+        let left_hint_ty = self.infer_effective_expr_type(right, None);
+        let right_hint_ty = self.infer_effective_expr_type(left, None);
+        let left_ty = self.infer_effective_expr_type(left, Some(&left_hint_ty));
+        let right_ty = self.infer_effective_expr_type(right, Some(&right_hint_ty));
+        matches!(left_ty, TrustVcType::Float { .. })
+            || matches!(right_ty, TrustVcType::Float { .. })
+    }
+
+    /// The type of the VALUE `expr` denotes at this use site: the literal
+    /// hint coercion applies, but not Route A's `.len()` → `MathInt` routing
+    /// label, so a length reports its own IR type.
+    ///
+    /// This is what an operand's signedness is read from
+    /// ([`crate::encoder::width_coercion::ir_type_signedness`]); it is never
+    /// read from the operand's hash-consed term.
+    pub(in crate::encoder) fn infer_operand_value_type(
+        &self,
+        expr: &TrustVcExpr,
+        hint_ty: Option<&TrustVcType>,
+    ) -> TrustVcType {
+        self.infer_expr_type_with_hint(expr, hint_ty, false)
+    }
+
+    fn infer_expr_type_with_hint(
+        &self,
+        expr: &TrustVcExpr,
+        hint_ty: Option<&TrustVcType>,
+        len_as_math_int: bool,
+    ) -> TrustVcType {
         if let Some(hint_ty) = hint_ty {
             if let Some(coerced) = Self::coerce_default_int_literal(expr, hint_ty) {
-                return self.infer_effective_expr_type(&coerced, None);
+                return self.infer_expr_type_with_hint(&coerced, None, len_as_math_int);
             }
         }
 
@@ -95,7 +138,7 @@ impl<'a> AstExpressionParser<'a> {
         // report MathInt and let the comparison encoder use Int semantics
         // instead of attempting BV comparison on an Int-sorted length term.
         // Mirrors native-seq/native-strings; see `len_op_yields_int`.
-        if Self::len_op_yields_int(expr) {
+        if len_as_math_int && Self::len_op_yields_int(expr) {
             return TrustVcType::MathInt;
         }
 

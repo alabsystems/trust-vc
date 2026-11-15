@@ -79,6 +79,7 @@ fn proof_mode_block(
     body_axiom_expr_tokens: Option<TokenStream>,
     is_recursive: bool,
     suppress_recursive_body_axiom: bool,
+    is_external_trusted: bool,
     is_opaque: bool,
     is_inline: bool,
     rlimit_ms: Option<u64>,
@@ -93,7 +94,18 @@ fn proof_mode_block(
     // measure — for a non-terminating body it has no model and entails `false`.
     // The helper declaration below still stands, so the function stays
     // uninterpreted (fail-closed) rather than admitting a contradiction.
-    let emit_body_axiom = return_type != "()" && !suppress_recursive_body_axiom;
+    // SOUNDNESS-CRITICAL (H14, trust boundary; review round 2). The SIXTH
+    // publisher of `__body_axiom_<f>` is this proc-macro lane, and it knew only
+    // `opaque` and `inline`. A `#[trust_vc::spec] #[trust_vc::external_body] fn
+    // sp() -> u32 { 100 }` — the uninterpreted-spec-function idiom — therefore
+    // published `sp() == 100` HERE while the FILE lane
+    // (`spec_function_catalog::SpecFunctionDef::from_item_fn`) declined the
+    // identical source text: one program, two lanes, two answers. The braces of
+    // a trusted declaration hold a PLACEHOLDER; the symbol is still declared
+    // (`declare_helper_function_typed_with_bounds` below), so the function stays
+    // an uninterpreted UF carrying only what it declares.
+    let emit_body_axiom =
+        return_type != "()" && !suppress_recursive_body_axiom && !is_external_trusted;
 
     // Emit set_rlimit call if #[trust_vc::rlimit(N)] was present. Part of #2489.
     let rlimit_setup = rlimit_ms.map(|ms| {
@@ -103,9 +115,12 @@ fn proof_mode_block(
     // Generate TrustVcExpr cache call if builder tokens are available.
     // Placed after restore_context so lookup_var_type can access param types.
     // Wrapped in Option closure so `?` from variable lookups propagates (#2233).
-    let cache_expr = if let Some(expr_tokens) = body_axiom_expr_tokens {
-        quote! {
-            if #emit_body_axiom {
+    // The gate is applied at EXPANSION time, not as an `if false` in the emitted
+    // code: a declined axiom must leave no `__body_axiom_<f>` behind at all, so
+    // that "did this lane publish?" is answerable by reading the expansion.
+    let cache_expr = match body_axiom_expr_tokens {
+        Some(expr_tokens) if emit_body_axiom => quote! {
+            {
                 let __trust_vc_cache_name =
                     format!("{}_{}", #body_axiom_name, module_path!());
                 if let Some(__trust_vc_body_expr) =
@@ -115,6 +130,33 @@ fn proof_mode_block(
                         __trust_vc_cache_name,
                         #body_axiom_condition.to_string(),
                         __trust_vc_body_expr,
+                    );
+                }
+            }
+        },
+        _ => quote! {},
+    };
+
+    let body_axiom_push = if emit_body_axiom {
+        quote! {
+            {
+                let __trust_vc_axiom_name =
+                    format!("{}_{}", #body_axiom_name, module_path!());
+                if !__trust_vc_ctx
+                    .obligations()
+                    .iter()
+                    .any(|obligation| obligation.name() == __trust_vc_axiom_name)
+                {
+                    __trust_vc_ctx.push_obligation(
+                        #vc_path::ProofObligation::broadcast_assume(
+                            __trust_vc_axiom_name,
+                            #body_axiom_condition.to_string(),
+                        )
+                        .with_location(format!("{}:{}", file!(), line!()))
+                        .with_bound_vars(vec![#(#bound_vars),*])
+                        .with_trigger_patterns(vec![vec![#call_expr.to_string()]])
+                        .with_opaque(#is_opaque)
+                        .with_inline(#is_inline),
                     );
                 }
             }
@@ -157,27 +199,7 @@ fn proof_mode_block(
 
             #rlimit_setup
 
-            if #emit_body_axiom {
-                let __trust_vc_axiom_name =
-                    format!("{}_{}", #body_axiom_name, module_path!());
-                if !__trust_vc_ctx
-                    .obligations()
-                    .iter()
-                    .any(|obligation| obligation.name() == __trust_vc_axiom_name)
-                {
-                    __trust_vc_ctx.push_obligation(
-                        #vc_path::ProofObligation::broadcast_assume(
-                            __trust_vc_axiom_name,
-                            #body_axiom_condition.to_string(),
-                        )
-                        .with_location(format!("{}:{}", file!(), line!()))
-                        .with_bound_vars(vec![#(#bound_vars),*])
-                        .with_trigger_patterns(vec![vec![#call_expr.to_string()]])
-                        .with_opaque(#is_opaque)
-                        .with_inline(#is_inline),
-                    );
-                }
-            }
+            #body_axiom_push
 
             #verify_macro_path::restore_context(Some(__trust_vc_ctx));
 
@@ -211,6 +233,16 @@ pub fn expand_spec(input: ItemFn) -> TokenStream {
             .last()
             .is_some_and(|s| s.ident == "opaque")
     });
+
+    // SOUNDNESS-CRITICAL (H14, trust boundary; review round 2). Detect
+    // `#[trust_vc::external_body]` / `#[trust_vc::external]` — the trusted
+    // boundary — right beside the `opaque` detection that this lane already had.
+    // `has_external_trusted_attr` is the SAME predicate the file lane consults
+    // (`spec_function_catalog.rs`, E6), matched by last path segment so a foreign
+    // namespace spelling (`#[verifier::external_body]`) declines too. It
+    // suppresses the defining axiom only; the symbol is still declared.
+    let is_external_trusted =
+        crate::vc_extraction::attr_extract::has_external_trusted_attr(&input.attrs);
 
     // Detect #[trust_vc::inline] or #[inline] marker. Part of #2488.
     let is_inline = input.attrs.iter().any(|attr| {
@@ -295,6 +327,71 @@ pub fn expand_spec(input: ItemFn) -> TokenStream {
     let has_decreases = spec_fn_has_decreases_measure(&input.attrs);
     let suppress_recursive_body_axiom = is_recursive && !has_decreases;
 
+    // H10 (macro lane): the helper this expansion registers is keyed by NAME and
+    // ARGUMENTS — `declare_helper_function_typed_with_bounds` below — so a
+    // generic parameter that no value parameter carries collapses every
+    // instantiation into ONE uninterpreted application, exactly as in the file
+    // lane. MEASURED liar on the untouched expansion: `#[spec] fn rsz<T>(n: u64)
+    // -> u64 { if n == 0 { size_of::<T>() as u64 } else { rsz::<T>(n - 1) } }`
+    // (recursive, no `decreases`, so its body axiom is suppressed and its body
+    // is therefore never lowered) proved `rsz::<u8>(0) == rsz::<u64>(0)`, which
+    // Rust refutes 1 != 8.
+    //
+    // The exemption is the file lane's: a body axiom published for EVERY use is
+    // lowered in the erased environment, where an instantiation-dependent body
+    // fails to lower and fails the query (measured on this lane too — the
+    // `size_of::<T>()` body above fails `__body_axiom_*` preparation whenever
+    // the axiom is emitted), so a body that does lower is T-uniform. An OPAQUE
+    // definition is refused with the recursion-suppressed one: whether its
+    // hidden axiom is lowered before it is gated out is not a property this
+    // expansion controls.
+    //
+    // A refusal here is a compile error rather than a fail-closed verdict
+    // because the expansion IS the declaration: there is no per-query
+    // registration to decline. Verus likewise rejects a recursive spec function
+    // with no `decreases` at compile time.
+    let uncarried_generics: Vec<String> = sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Const(const_param) => Some(const_param.ident.to_string()),
+            syn::GenericParam::Type(type_param) => {
+                let name = type_param.ident.to_string();
+                // Carried exactly when a value parameter's registered type IS
+                // the parameter (`x: T` → `TrustVcType::TypeParam("T")`, whose
+                // argument the encoder wraps in the type-keyed `Box_T`). A
+                // nested (`Option<T>`) or return-only occurrence carries
+                // nothing.
+                (!params.iter().any(|param| param.ty.trim() == name)).then_some(name)
+            }
+            syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    let definition_is_unconditional =
+        !is_opaque && !suppress_recursive_body_axiom && return_type != "()";
+    if !uncarried_generics.is_empty() && !definition_is_unconditional {
+        let detail = format!(
+            "generic instantiation not carried: spec function `{fn_name_str}` declares generic \
+             parameter(s) {} that no value parameter carries into its solver term, and its body \
+             axiom is not published for every use ({}), so calls at different instantiations \
+             would collapse into one uninterpreted application; TrustVc fails closed",
+            uncarried_generics
+                .iter()
+                .map(|param| format!("`{param}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if is_opaque {
+                "it is opaque"
+            } else if suppress_recursive_body_axiom {
+                "it is recursive with no `decreases` measure, so the axiom is suppressed"
+            } else {
+                "it returns `()`"
+            }
+        );
+        return syn::Error::new_spanned(&input.sig, detail).to_compile_error();
+    }
+
     // Try to build TrustVcExpr for body axiom (Phase 5: typed pipeline, #2217).
     // Falls back to None for unsupported expressions; string path handles those.
     let body_axiom_expr_tokens =
@@ -313,6 +410,7 @@ pub fn expand_spec(input: ItemFn) -> TokenStream {
         body_axiom_expr_tokens,
         is_recursive,
         suppress_recursive_body_axiom,
+        is_external_trusted,
         is_opaque,
         is_inline,
         rlimit_ms,

@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use crate::encoder::AYEncoder;
 use crate::error::TrustVcResult;
-use crate::ir::{CompareOp, TrustVcExpr};
+use crate::ir::TrustVcExpr;
 use crate::vc::VariableDecl;
 
 /// Declare a pre-state variable for every context variable.
@@ -105,18 +105,18 @@ pub(super) fn add_unmodified_frame_conditions(
             continue;
         }
 
-        // 1. Scalar frame equality: var == var__trust_vc_pre
-        let frame_expr = TrustVcExpr::Compare {
-            op: CompareOp::Eq,
-            left: Box::new(TrustVcExpr::Var {
+        // 1. Scalar frame equality: var == var__trust_vc_pre, the same value
+        // (a float frame keeps a NaN; see `crate::float_identity`).
+        let frame_expr = crate::float_identity::identity_equation(
+            TrustVcExpr::Var {
                 name: var.name.clone(),
                 ty: var.ty.clone(),
-            }),
-            right: Box::new(TrustVcExpr::Var {
+            },
+            TrustVcExpr::Var {
                 name: format!("{}{}", var.name, super::PRE_STATE_SUFFIX),
                 ty: var.ty.clone(),
-            }),
-        };
+            },
+        );
         encoder
             .add_typed_assumption(&format!("{}_frame", var.name), &frame_expr, Some(eq_queue))
             .map_err(|err| {

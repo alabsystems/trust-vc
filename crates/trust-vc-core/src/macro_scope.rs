@@ -384,7 +384,7 @@ impl<'ast> Visit<'ast> for ScopeCollector {
     fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
         if let Some((_, rename)) = &item.rename {
             let bound = rename.to_string();
-            if WELL_KNOWN_MACRO_ROOTS.contains(&bound.as_str()) && bound != item.ident.to_string() {
+            if WELL_KNOWN_MACRO_ROOTS.contains(&bound.as_str()) && item.ident != bound {
                 self.index.rebound_roots.insert(bound);
             }
         }
@@ -453,6 +453,31 @@ impl MacroPathScopes<'_> {
                 None => !shadowed.iter().any(|(_, bound)| bound == name),
             },
         }
+    }
+}
+
+/// The macro bindings of one file, for asking whether a macro path written
+/// anywhere in it names the well-known macro it is spelled like.
+pub(crate) struct FileMacroScopes {
+    index: MacroScopeIndex,
+}
+
+impl FileMacroScopes {
+    pub(crate) fn from_file(file: &File) -> Self {
+        Self {
+            index: MacroScopeIndex::from_file(file),
+        }
+    }
+
+    /// Does `root::…::name!` name the well-known macro spelled `name`, at
+    /// whatever use site of the file it is written? A name the file binds to
+    /// something else in any module does not.
+    pub(crate) fn names_well_known(&self, root: Option<&str>, name: &str) -> bool {
+        MacroPathScopes {
+            use_site_module: None,
+            index: &self.index,
+        }
+        .resolves_to_well_known(root, name)
     }
 }
 
@@ -569,9 +594,208 @@ pub(crate) fn quarantine_shadowed_spec_macros(
     syn::parse2::<ItemFn>(rewritten).ok()
 }
 
+/// How an ITEM-position invocation of `state_machine!` /
+/// `tokenized_state_machine!` resolves (D1a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemMacroResolution {
+    /// `trust_vc::NAME!` / `::trust_vc::NAME!` with the `trust_vc` root not
+    /// rebound anywhere in the file.
+    TrustVc,
+    /// A bare `NAME!` bound by a file-local `macro_rules!` that is textually in
+    /// scope (declared earlier in this item list or an enclosing one, or
+    /// `#[macro_export]`/`#[macro_use]`-escaped), with no `use` in the same
+    /// item list binding the name. HEAD behaviour: left untouched.
+    LocalMacroRules,
+    /// Everything else: a bare name bound by an import or by nothing, a
+    /// foreign qualifier, a rebound `trust_vc` root.
+    Other,
+}
+
+fn item_list_binds_by_use(items: &[syn::Item], name: &str) -> bool {
+    fn tree_binds(tree: &syn::UseTree, name: &str) -> bool {
+        match tree {
+            syn::UseTree::Path(p) => tree_binds(&p.tree, name),
+            syn::UseTree::Name(n) => n.ident == name,
+            syn::UseTree::Rename(r) => r.rename == name,
+            syn::UseTree::Group(g) => g.items.iter().any(|t| tree_binds(t, name)),
+            syn::UseTree::Glob(_) => false,
+        }
+    }
+    items.iter().any(|item| match item {
+        syn::Item::Use(u) => tree_binds(&u.tree, name),
+        _ => false,
+    })
+}
+
+fn is_macro_rules_named(item: &syn::Item, name: &str) -> bool {
+    matches!(item, syn::Item::Macro(m)
+        if m.mac.path.is_ident("macro_rules")
+            && m.ident.as_ref().is_some_and(|ident| ident == name))
+}
+
+fn file_exports_macro(items: &[syn::Item], name: &str, in_macro_use: bool) -> bool {
+    items.iter().any(|item| match item {
+        syn::Item::Macro(m) if is_macro_rules_named(item, name) => {
+            in_macro_use || has_attr(&m.attrs, "macro_export")
+        }
+        syn::Item::Mod(module) => module.content.as_ref().is_some_and(|(_, inner)| {
+            file_exports_macro(
+                inner,
+                name,
+                in_macro_use || has_attr(&module.attrs, "macro_use"),
+            )
+        }),
+        _ => false,
+    })
+}
+
+/// Resolve the item-macro invocation at `path_to_item` (indices through
+/// nested inline modules, the last one naming the macro item itself).
+pub(crate) fn resolve_item_macro(file: &File, path_to_item: &[usize]) -> ItemMacroResolution {
+    let mut items: &[syn::Item] = &file.items;
+    let mut textual_in_scope = false;
+    let (last, mods) = match path_to_item.split_last() {
+        Some(split) => split,
+        None => return ItemMacroResolution::Other,
+    };
+    let Some(syn::Item::Macro(target)) = ({
+        let mut cursor = items;
+        let mut ok = true;
+        for &index in mods {
+            match cursor.get(index) {
+                Some(syn::Item::Mod(module)) => match &module.content {
+                    Some((_, inner)) => cursor = inner,
+                    None => ok = false,
+                },
+                _ => ok = false,
+            }
+        }
+        if ok {
+            cursor.get(*last)
+        } else {
+            None
+        }
+    }) else {
+        return ItemMacroResolution::Other;
+    };
+    let path = &target.mac.path;
+    let Some(name_seg) = path.segments.last() else {
+        return ItemMacroResolution::Other;
+    };
+    let name = name_seg.ident.to_string();
+    if path.segments.len() == 2 {
+        let index = MacroScopeIndex::from_file(file);
+        let root = path.segments[0].ident.to_string();
+        if root == "trust_vc"
+            && !index.rebound_roots.contains("trust_vc")
+            && path.segments.iter().all(|s| s.arguments.is_empty())
+        {
+            return ItemMacroResolution::TrustVc;
+        }
+        return ItemMacroResolution::Other;
+    }
+    if path.segments.len() != 1 || path.leading_colon.is_some() {
+        return ItemMacroResolution::Other;
+    }
+    // Bare: textual macro_rules scope.
+    for (depth, &index) in path_to_item.iter().enumerate() {
+        let before = &items[..index];
+        if before.iter().any(|item| is_macro_rules_named(item, &name)) {
+            textual_in_scope = true;
+        }
+        if depth + 1 < path_to_item.len() {
+            match &items[index] {
+                syn::Item::Mod(module) => match &module.content {
+                    Some((_, inner)) => items = inner,
+                    None => return ItemMacroResolution::Other,
+                },
+                _ => return ItemMacroResolution::Other,
+            }
+        }
+    }
+    let exported = file_exports_macro(&file.items, &name, false);
+    if (textual_in_scope || exported) && !item_list_binds_by_use(items, &name) {
+        ItemMacroResolution::LocalMacroRules
+    } else {
+        ItemMacroResolution::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item_resolution(src: &str, path: &[usize]) -> ItemMacroResolution {
+        let file: File = syn::parse_file(src).unwrap();
+        resolve_item_macro(&file, path)
+    }
+
+    #[test]
+    fn item_macro_resolution_covers_trust_vc_local_and_foreign() {
+        use ItemMacroResolution::*;
+        assert_eq!(
+            item_resolution("trust_vc::state_machine!{ X {} }", &[0]),
+            TrustVc
+        );
+        assert_eq!(
+            item_resolution("::trust_vc::state_machine!{ X {} }", &[0]),
+            TrustVc
+        );
+        assert_eq!(
+            item_resolution("mod trust_vc {} trust_vc::state_machine!{ X {} }", &[1]),
+            Other
+        );
+        assert_eq!(
+            item_resolution("use x as trust_vc; trust_vc::state_machine!{ X {} }", &[1]),
+            Other
+        );
+        assert_eq!(item_resolution("m::state_machine!{ X {} }", &[0]), Other);
+        assert_eq!(item_resolution("state_machine!{ X {} }", &[0]), Other);
+        assert_eq!(
+            item_resolution(
+                "macro_rules! state_machine { ($($t:tt)*) => {} } state_machine!{ X {} }",
+                &[1]
+            ),
+            LocalMacroRules
+        );
+        // Declared AFTER the invocation: not textually in scope.
+        assert_eq!(
+            item_resolution(
+                "state_machine!{ X {} } macro_rules! state_machine { ($($t:tt)*) => {} }",
+                &[0]
+            ),
+            Other
+        );
+        assert_eq!(
+            item_resolution(
+                "use verus_state_machines_macros::state_machine; state_machine!{ X {} }",
+                &[1]
+            ),
+            Other
+        );
+        assert_eq!(
+            item_resolution(
+                "mod m { macro_rules! state_machine { ($($t:tt)*) => {} } state_machine!{ X {} } }",
+                &[0, 1]
+            ),
+            LocalMacroRules
+        );
+        // A module-local macro_rules does not reach the parent.
+        assert_eq!(
+            item_resolution(
+                "mod m { macro_rules! state_machine { ($($t:tt)*) => {} } } state_machine!{ X {} }",
+                &[1]
+            ),
+            Other
+        );
+        assert_eq!(
+            item_resolution(
+                "mod m { #[macro_export] macro_rules! state_machine { ($($t:tt)*) => {} } } state_machine!{ X {} }",
+                &[1]
+            ),
+            LocalMacroRules
+        );
+    }
 
     /// The literal list `is_supported_body_macro_name` carried before it was
     /// derived from [`SPEC_MACRO_NAMES`]. Pins the derivation as

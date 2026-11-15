@@ -114,6 +114,12 @@ fn optimum_upgrade_guard_scalar_drop_floor_refuted() {
 /// The REAL `verify_all_constraints` discharge's UNSAT proof is re-checked by the
 /// independent `trust-vc-kernel`: the FORALL-over-slice verdict carries a
 /// kernel-verified proof certificate, not merely a trusted ay result.
+///
+/// The body's `.iter().all(..)` lowers to the same bounded `forall` term as the
+/// ensures, so `result == forall ..` is `t == t` and the negated goal trust-vc
+/// asserts is the constant `false`. The certificate refutes that posed query
+/// and discloses the collapse: its evidence for `verify_all_constraints` is
+/// AY's term-builder rewrite.
 #[cfg(feature = "proof-certificates")]
 #[test]
 fn verify_all_constraints_real_body_kernel_rechecked() {
@@ -144,6 +150,10 @@ fn verify_all_constraints_real_body_kernel_rechecked() {
         .expect("verified verify_all_constraints carries a proof certificate");
     assert!(
         proof.kernel_verified(),
-        "verify_all_constraints UNSAT cert must be re-checked by trust-vc-kernel"
+        "verify_all_constraints UNSAT cert must be re-checked by trust-vc-kernel: {proof:?}"
+    );
+    assert!(
+        proof.query_collapsed(),
+        "fixture drift: the goal no longer folds to `false`; update the doc above: {proof:?}"
     );
 }

@@ -115,12 +115,11 @@ fn at_most_one_contradictory_goal_verifies() {
 #[test]
 fn control_without_the_lemma_refutes_all_three() {
     for function in ["fv_forty_two", "fv_forty_three", "fv_zero"] {
-        match verify_in(CONTROL, function) {
-            VerifyResult::Verified => panic!(
+        if verify_in(CONTROL, function) == VerifyResult::Verified {
+            panic!(
                 "CONTROL BROKEN: `{function}` verified with NO lemma in scope — the repro no \
-                 longer isolates the broadcast lemma"
-            ),
-            _ => {}
+             longer isolates the broadcast lemma"
+            )
         }
     }
 }

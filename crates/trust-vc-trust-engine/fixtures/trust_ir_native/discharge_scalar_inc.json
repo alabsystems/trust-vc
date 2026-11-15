@@ -1,0 +1,792 @@
+{
+  "schema_version": 8,
+  "producer": "Trust",
+  "input": {
+    "RustMir": {
+      "body_digest": {
+        "algorithm": "Sha256",
+        "bytes": [
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49,
+          49
+        ]
+      }
+    }
+  },
+  "provenance": {
+    "producer_version": "trust-native-bundle@1",
+    "source_language": "Rust",
+    "source_languages": [
+      "Rust"
+    ],
+    "source_artifact": "probe/inc.rs",
+    "source_digest": {
+      "algorithm": "Sha256",
+      "bytes": [
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49,
+        49
+      ]
+    },
+    "toolchain": [
+      {
+        "name": "rustc",
+        "version": "1.92.0-nightly",
+        "revision": "rustc-2026-04-29"
+      },
+      {
+        "name": "tRust",
+        "version": "native-request-schema-v1",
+        "revision": "eac751770e436657fa6ee3cef0d3e3c0f37bb76c"
+      }
+    ]
+  },
+  "serialization": {
+    "schema_version": 8,
+    "canonical_order": true,
+    "sort_unordered_sets": true,
+    "messagepack_named_fields": true,
+    "unknown_fields": "Reject"
+  },
+  "diagnostics": {
+    "level": "Trace",
+    "include_source_spans": true,
+    "include_lineage": true,
+    "emit_counterexamples": true,
+    "emit_unsat_cores": true,
+    "emit_proof_traces": true,
+    "max_counterexamples": 2
+  },
+  "trust_ir_module_digest": {
+    "algorithm": "Sha256",
+    "bytes": [
+      153,
+      9,
+      143,
+      216,
+      77,
+      80,
+      134,
+      170,
+      218,
+      119,
+      136,
+      183,
+      201,
+      93,
+      172,
+      87,
+      248,
+      225,
+      5,
+      0,
+      84,
+      110,
+      162,
+      12,
+      231,
+      16,
+      83,
+      78,
+      110,
+      157,
+      181,
+      127
+    ]
+  },
+  "compiler_facts": {
+    "monomorphizations": [
+      {
+        "id": 0,
+        "source_item": "rust:probe/inc.rs::inc",
+        "symbol": "_RNvCs_probe_inc",
+        "generic_args": [],
+        "function": 0,
+        "stable_digest": {
+          "algorithm": "Sha256",
+          "bytes": [
+            208,
+            26,
+            44,
+            80,
+            231,
+            35,
+            163,
+            64,
+            112,
+            114,
+            40,
+            170,
+            189,
+            54,
+            159,
+            185,
+            80,
+            4,
+            163,
+            88,
+            170,
+            78,
+            194,
+            205,
+            224,
+            133,
+            114,
+            254,
+            231,
+            116,
+            106,
+            148
+          ]
+        }
+      }
+    ],
+    "obligation_sources": [
+      {
+        "obligation": 0,
+        "public_obligation_id": "vc:inc:precondition:0",
+        "function": 0,
+        "span": {
+          "file": 0,
+          "line": 3,
+          "col": 5
+        },
+        "assertion_id": 0,
+        "cause": "Precondition",
+        "monomorphization": 0,
+        "facts": [
+          {
+            "Monomorphization": 0
+          }
+        ]
+      },
+      {
+        "obligation": 1,
+        "public_obligation_id": "vc:inc:postcondition:0",
+        "function": 0,
+        "span": {
+          "file": 0,
+          "line": 4,
+          "col": 5
+        },
+        "assertion_id": 1,
+        "cause": "Postcondition",
+        "monomorphization": 0,
+        "facts": [
+          {
+            "Monomorphization": 0
+          }
+        ]
+      }
+    ]
+  },
+  "module": {
+    "name": "trust_discharge_scalar_inc",
+    "functions": [
+      {
+        "id": 0,
+        "name": "inc",
+        "ty": 0,
+        "entry": 0,
+        "blocks": [
+          {
+            "id": 0,
+            "params": [
+              [
+                0,
+                "U32"
+              ]
+            ],
+            "body": [
+              {
+                "inst": {
+                  "Const": {
+                    "ty": "U32",
+                    "value": {
+                      "Int": 1
+                    }
+                  }
+                },
+                "results": [
+                  1
+                ],
+                "proofs": [],
+                "span": null,
+                "proof_context": null
+              },
+              {
+                "inst": {
+                  "BinOp": {
+                    "op": "Add",
+                    "ty": "U32",
+                    "lhs": 0,
+                    "rhs": 1
+                  }
+                },
+                "results": [
+                  2
+                ],
+                "proofs": [],
+                "span": null,
+                "proof_context": null
+              },
+              {
+                "inst": {
+                  "Return": {
+                    "values": [
+                      2
+                    ]
+                  }
+                },
+                "results": [],
+                "proofs": [],
+                "span": null,
+                "proof_context": null
+              }
+            ]
+          }
+        ],
+        "proofs": [],
+        "calling_conv": "C",
+        "linkage": "External",
+        "attrs": {
+          "readonly": false,
+          "readnone": false,
+          "inlinehint": false,
+          "cold": false,
+          "params": [],
+          "naked": false,
+          "target_features": []
+        },
+        "summary": null,
+        "producer": "Trust",
+        "value_names": [
+          [
+            0,
+            "x"
+          ]
+        ],
+        "scopes": null,
+        "source_provenance": null,
+        "body_gate": null,
+        "display_path": null,
+        "section": null,
+        "visibility": "Default"
+      }
+    ],
+    "structs": [],
+    "enums": [],
+    "records": [],
+    "closure_types": [],
+    "globals": [],
+    "func_types": [
+      {
+        "params": [
+          "U32"
+        ],
+        "returns": [
+          "U32"
+        ],
+        "is_vararg": false
+      }
+    ],
+    "types": [],
+    "proof_obligations": [
+      {
+        "id": 0,
+        "kind": "Precondition",
+        "status": "Pending",
+        "description": "inc requires x < u32::MAX",
+        "formula": {
+          "schema": "trust-types.Formula@1",
+          "payload": "{\"formula\":{\"Lt\":[{\"Var\":[\"x\",\"Int\"]},{\"Int\":4294967295}]},\"source\":{\"source_id\":\"rust:probe/inc.rs::inc\",\"assertion_id\":\"rust-assertion:0\",\"native_assertion_id\":0,\"span\":{\"file\":0,\"line_start\":3,\"col_start\":5,\"line_end\":3,\"col_end\":30}}}",
+          "smtlib": null,
+          "sort": "Bool"
+        },
+        "function": 0,
+        "source": {
+          "source_id": "rust:probe/inc.rs::inc",
+          "assertion_id": "rust-assertion:0",
+          "range": {
+            "file": 0,
+            "start_line": 3,
+            "start_col": 5,
+            "end_line": 3,
+            "end_col": 30
+          },
+          "public": {
+            "obligation_id": "vc:inc:precondition:0",
+            "semantic_digest": {
+              "algorithm": "Sha256",
+              "bytes": [
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90,
+                90
+              ]
+            }
+          }
+        },
+        "site": null
+      },
+      {
+        "id": 1,
+        "kind": "Postcondition",
+        "status": "Pending",
+        "description": "inc ensures the incremented result",
+        "formula": {
+          "schema": "trust-types.Formula@1",
+          "payload": "{\"formula\":{\"Eq\":[{\"Var\":[\"_0\",\"Int\"]},{\"Add\":[{\"Var\":[\"x\",\"Int\"]},{\"Int\":1}]}]},\"source\":{\"source_id\":\"rust:probe/inc.rs::inc\",\"assertion_id\":\"rust-assertion:1\",\"native_assertion_id\":1,\"span\":{\"file\":0,\"line_start\":4,\"col_start\":5,\"line_end\":4,\"col_end\":30}}}",
+          "smtlib": null,
+          "sort": "Bool"
+        },
+        "function": 0,
+        "source": {
+          "source_id": "rust:probe/inc.rs::inc",
+          "assertion_id": "rust-assertion:1",
+          "range": {
+            "file": 0,
+            "start_line": 4,
+            "start_col": 5,
+            "end_line": 4,
+            "end_col": 30
+          },
+          "public": {
+            "obligation_id": "vc:inc:postcondition:0",
+            "semantic_digest": {
+              "algorithm": "Sha256",
+              "bytes": [
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91,
+                91
+              ]
+            }
+          }
+        },
+        "site": {
+          "function": 0,
+          "block": 0,
+          "inst_index": 2
+        }
+      }
+    ],
+    "proof_certificates": [],
+    "target_info": {
+      "triple": "x86_64-unknown-linux-gnu",
+      "pointer_size": 8,
+      "endianness": "Little",
+      "abi": null,
+      "struct_passing": "NativeC"
+    },
+    "files": [
+      "probe/inc.rs"
+    ],
+    "obligation_diagnostics": [],
+    "spec_modules": [],
+    "universes": [],
+    "predicates": [],
+    "global_asm": [],
+    "imports": [],
+    "tuple_layouts": [],
+    "completeness": null,
+    "drop_glue": [],
+    "closure_layouts": []
+  },
+  "lineage": {
+    "schema_version": 2,
+    "nodes": [
+      {
+        "id": 0,
+        "transform": {
+          "stage": "Frontend",
+          "name": "rustc-mir-to-trust_ir",
+          "producer": "tRust",
+          "version": "native-request-schema-v1"
+        },
+        "source_module": {
+          "algorithm": "Sha256",
+          "bytes": [
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49,
+            49
+          ]
+        },
+        "target_module": {
+          "algorithm": "Sha256",
+          "bytes": [
+            153,
+            9,
+            143,
+            216,
+            77,
+            80,
+            134,
+            170,
+            218,
+            119,
+            136,
+            183,
+            201,
+            93,
+            172,
+            87,
+            248,
+            225,
+            5,
+            0,
+            84,
+            110,
+            162,
+            12,
+            231,
+            16,
+            83,
+            78,
+            110,
+            157,
+            181,
+            127
+          ]
+        },
+        "obligations": [
+          0,
+          1
+        ],
+        "certificates": [],
+        "replay": {
+          "engine": "trust-full-verify",
+          "invocation": "trust verify --emit-trust_ir-bundle",
+          "transcript_digest": {
+            "algorithm": "Sha256",
+            "bytes": [
+              139,
+              119,
+              176,
+              96,
+              91,
+              88,
+              181,
+              107,
+              48,
+              61,
+              117,
+              66,
+              111,
+              130,
+              228,
+              220,
+              253,
+              239,
+              222,
+              142,
+              210,
+              242,
+              118,
+              208,
+              71,
+              158,
+              254,
+              213,
+              74,
+              10,
+              188,
+              59
+            ]
+          }
+        }
+      }
+    ],
+    "roots": [
+      0
+    ]
+  },
+  "requests": [
+    {
+      "TrustVc": {
+        "id": 0,
+        "mode": "DischargeProofObligations",
+        "obligations": [
+          1
+        ],
+        "certificates": [],
+        "lineage_roots": [
+          0
+        ],
+        "options": {
+          "memory_semantics": "StackedBorrows",
+          "trusted_evidence": "Reject",
+          "merge_strategy": "RequireSameObligation",
+          "require_replay_identity": true
+        },
+        "diagnostics": {
+          "level": "Info",
+          "include_source_spans": true,
+          "include_lineage": true,
+          "emit_counterexamples": true,
+          "emit_unsat_cores": true,
+          "emit_proof_traces": true,
+          "max_counterexamples": 1
+        },
+        "provenance": {
+          "verifier_suite": "TrustVc",
+          "expected_verifier": {
+            "name": "trust_vc",
+            "version": "semantics-v1",
+            "revision": "trust_vc-2026-04-29"
+          },
+          "solvers": [
+            {
+              "name": "lean4",
+              "version": "4.18.0",
+              "revision": "trust_vc-proof-kernel"
+            }
+          ],
+          "replay": {
+            "engine": "trust_vc",
+            "invocation": "trust_vc import --native-bundle native_request_trust_bundle",
+            "transcript_digest": {
+              "algorithm": "Sha256",
+              "bytes": [
+                244,
+                106,
+                219,
+                120,
+                38,
+                239,
+                191,
+                87,
+                71,
+                76,
+                142,
+                39,
+                227,
+                84,
+                36,
+                62,
+                233,
+                103,
+                94,
+                136,
+                168,
+                202,
+                27,
+                151,
+                63,
+                194,
+                113,
+                195,
+                96,
+                13,
+                24,
+                125
+              ]
+            }
+          },
+          "replay_context": {
+            "atoms": [
+              {
+                "id": 0,
+                "kind": "Assertion",
+                "formula": {
+                  "schema": "trust-types.Formula@1",
+                  "payload": "{\"formula\":{\"Eq\":[{\"Var\":[\"_0\",\"Int\"]},{\"Add\":[{\"Var\":[\"x\",\"Int\"]},{\"Int\":1}]}]},\"source\":{\"source_id\":\"rust:probe/inc.rs::inc\",\"assertion_id\":\"rust-assertion:1\",\"native_assertion_id\":1,\"span\":{\"file\":0,\"line_start\":4,\"col_start\":5,\"line_end\":4,\"col_end\":30}}}",
+                  "smtlib": null,
+                  "sort": "Bool"
+                },
+                "payload_digest": {
+                  "algorithm": "Sha256",
+                  "bytes": [
+                    204,
+                    34,
+                    223,
+                    62,
+                    130,
+                    157,
+                    80,
+                    9,
+                    241,
+                    39,
+                    240,
+                    5,
+                    63,
+                    85,
+                    21,
+                    100,
+                    127,
+                    201,
+                    50,
+                    17,
+                    74,
+                    60,
+                    175,
+                    219,
+                    22,
+                    106,
+                    237,
+                    223,
+                    247,
+                    49,
+                    123,
+                    32
+                  ]
+                },
+                "obligation": 1,
+                "assertion_id": 1,
+                "span": {
+                  "file": 0,
+                  "line": 4,
+                  "col": 5
+                }
+              }
+            ]
+          }
+        },
+        "function": 0
+      }
+    }
+  ]
+}

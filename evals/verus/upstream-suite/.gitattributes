@@ -1,0 +1,4 @@
+# Python's csv module ends every row with CRLF (RFC 4180). The CSV files here are
+# byte for byte what scripts/verus_suite/ writes, so git must neither convert the
+# CR nor report it as trailing whitespace.
+*.csv -text whitespace=cr-at-eol

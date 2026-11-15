@@ -28,9 +28,54 @@ use crate::verification_report;
 /// `try_check_sat()` then separately pulled statistics and unknown reason.
 /// The atomic API ensures all metadata is captured from the same solve call.
 /// Part of #2242.
-pub(super) fn try_check_sat_with_details(solver: &mut Solver) -> Result<SolveDetails, SolverError> {
-    std::panic::catch_unwind(AssertUnwindSafe(|| solver.check_sat_with_details()))
-        .map_err(|e| SolverError::SolverPanic(extract_panic_reason(&*e)))
+///
+/// `solver_panic` is the owning encoder's `VerificationState::solver_panic`:
+/// a solve that unwinds poisons the solver, and a poisoned solver is never
+/// asked again (see [`poisoned_solver_error`]).
+pub(super) fn try_check_sat_with_details(
+    solver: &mut Solver,
+    solver_panic: &mut Option<String>,
+) -> Result<SolveDetails, SolverError> {
+    if let Some(first) = solver_panic.as_deref() {
+        return Err(poisoned_solver_error(first));
+    }
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if super::test_hooks::take_forced_solve_panic() {
+            panic!("simulated ay solve panic");
+        }
+        solver.check_sat_with_details()
+    }))
+    .map_err(|e| {
+        let reason = extract_panic_reason(&*e);
+        *solver_panic = Some(reason.clone());
+        SolverError::SolverPanic(reason)
+    })
+}
+
+/// The answer for a solve on a solver whose earlier solve unwound.
+///
+/// ay does not promise that a `Solver` is usable after a panic inside
+/// `check_sat` (its own panic-safe wrappers call it "the poisoned solver"),
+/// so the solver is not reused: nothing is solved, and the refusal reads as a
+/// solver panic, which no caller turns into a verdict.
+pub(super) fn poisoned_solver_error(first_panic: &str) -> SolverError {
+    SolverError::SolverPanic(format!(
+        "solver not reused: an earlier solve on it panicked ({first_panic})"
+    ))
+}
+
+/// Record a panic reported by one of ay's own panic-safe `try_check_sat*`
+/// wrappers, so the solver it came from is not asked again.
+pub(super) fn note_solver_panic<T>(
+    result: &Result<T, SolverError>,
+    solver_panic: &mut Option<String>,
+) {
+    if let Err(SolverError::SolverPanic(reason)) = result {
+        if solver_panic.is_none() {
+            *solver_panic = Some(reason.clone());
+        }
+    }
 }
 
 /// Render an ay `UnknownReason` for a user-facing message.
@@ -85,15 +130,143 @@ pub(super) fn classify_unknown_reason(
         .unwrap_or_else(|| UnknownCategory::classify(fallback_reason))
 }
 
+/// ay's own attribution, on the solve envelope, for "the independent
+/// model-check gate refuted the model I had just produced".
+///
+/// `unknown.phase` is the broad attribution set by
+/// `Executor::downgrade_sat_after_gate`; `model_check_gate.result` is the
+/// narrow verdict set by `apply_independent_model_gate` /
+/// `apply_strict_model_gate` immediately before it. Either alone is sufficient
+/// evidence, and the pair is what ay sets together on the `ModelViolates`
+/// path. (`SolveDetails::unknown_diagnostic.phase` is the same
+/// `unknown.phase` string, typed — `ay-dpll/src/api/solving/controls.rs`
+/// `build_unknown_diagnostic` reads it from exactly this statistic — so it is
+/// consulted first and the raw statistic is the fallback.)
+///
+/// `confirmed-sat` and `cannot-confirm` are deliberately NOT matched: the first
+/// is a model the gate ACCEPTED, the second a coverage gap where the gate could
+/// not decide. Only `model-violates` means the gate ground-falsified an
+/// assertion under ay's own published model.
+pub(super) const AY_MODEL_GATE_PHASE: &str = "independent-model-check-gate";
+pub(super) const AY_MODEL_GATE_VIOLATES: &str = "model-violates";
+
+/// Evidence that ay caught its own invalid model on this solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ModelGateRejection {
+    /// The assertion ay's gate ground-falsified under ay's own model, when ay
+    /// named it (`model_check_gate.violated_assertion`).
+    pub(super) violated_assertion: Option<String>,
+}
+
+/// Read ay's gate attribution off a solve envelope.
+///
+/// MEASURED CAVEAT, 2026-09-17 (`docs/ay-defect-2026-09-17-quantified-axiom-family.md`
+/// section 12): for the *quantified definitional axiom* trigger these keys do
+/// NOT survive to `check_sat_with_details` at the measured ay revision — the
+/// gate fires on an ay-INTERNAL sub-solve whose statistics are restored away
+/// before the outer envelope is built. `model_check_gate.result` reaches
+/// trust-vc there only with the value `confirmed-sat`. This reader is
+/// nevertheless the correct consumer half, is exercised directly by
+/// `unknown_category_tests`, and becomes live the moment ay preserves the
+/// attribution. It is deliberately NOT a heuristic on the banner text: the
+/// banner goes to ay's stderr and is not part of any API.
+pub(super) fn model_gate_rejection(details: &SolveDetails) -> Option<ModelGateRejection> {
+    model_gate_rejection_from_stats(
+        &details.statistics,
+        details
+            .unknown_diagnostic
+            .as_ref()
+            .and_then(|d| d.phase.as_deref()),
+    )
+}
+
+/// The decision itself, split out from [`SolveDetails`] because that type is
+/// `#[non_exhaustive]` in ay and therefore cannot be constructed in a trust-vc
+/// test. `Statistics` can (it is `Default` with a public `set_string`), so this
+/// seam is pinned against a REAL `Statistics` carrying ay's real key names —
+/// not against a hand-rolled parts tuple that could drift from them.
+pub(super) fn model_gate_rejection_from_stats(
+    statistics: &ay_dpll::Statistics,
+    typed_phase: Option<&str>,
+) -> Option<ModelGateRejection> {
+    let by_phase =
+        typed_phase.or_else(|| statistics.get_string("unknown.phase")) == Some(AY_MODEL_GATE_PHASE);
+    let by_gate = statistics.get_string("model_check_gate.result") == Some(AY_MODEL_GATE_VIOLATES);
+    if !(by_phase || by_gate) {
+        return None;
+    }
+    Some(ModelGateRejection {
+        violated_assertion: statistics
+            .get_string("model_check_gate.violated_assertion")
+            .map(ToOwned::to_owned),
+    })
+}
+
+/// Relabel an already-classified unknown as [`UnknownCategory::ModelGateRejected`]
+/// when — and ONLY when — that relabel cannot move a verdict.
+///
+/// # Why this is a guard and not an unconditional override
+///
+/// ay sets `last_unknown_reason = UnknownReason::Incomplete` on the gate
+/// downgrade, which the reason-code mapping calls `Incompleteness` — "the
+/// decision procedure cannot decide this", which is not what happened. The gate
+/// attribution is the more specific fact and should win.
+///
+/// But ay's gate keys and a RESOURCE reason can in principle arrive on the same
+/// envelope (a gate rejection followed by a timeout on the same solve). An
+/// UNCONDITIONAL override would then turn a resource `Unknown` — a non-failure,
+/// because a timeout does not mean the fact is false — into a `NotProved`
+/// FAILURE. That is precisely the soundness boundary of
+/// `design-unknown-as-failure.md`, crossed in the wrong direction, by a change
+/// that was supposed to move no verdicts at all.
+///
+/// So the relabel is confined to the incompleteness class. Both the input and
+/// the output category are then `is_incompleteness()`, `VerifyResult::unknown`
+/// routes on exactly that predicate, and the verdict is therefore identical by
+/// construction — not by inspection. A resource unknown keeps its own category
+/// and stays a soft `Unknown` even when the gate fired.
+pub(super) fn gate_relabelled_category(
+    base: UnknownCategory,
+    gate_rejected: bool,
+) -> UnknownCategory {
+    if gate_rejected && base.is_incompleteness() {
+        UnknownCategory::ModelGateRejected
+    } else {
+        base
+    }
+}
+
+/// The user-facing explanation appended when ay caught its own invalid model.
+///
+/// It must NOT read as "your proof is wrong". The obligation is undecided, and
+/// the thing that was shown false is ay's own candidate witness.
+pub(super) fn render_model_gate_rejection(rejection: &ModelGateRejection) -> String {
+    let mut out = String::from(
+        " — NOT a refutation: ay's independent model-check gate refuted the model ay \
+         itself produced and fail-closed Sat -> Unknown (ay behaving correctly; an \
+         ay-side defect, not a defect in this proof)",
+    );
+    if let Some(term) = &rejection.violated_assertion {
+        let term: String = term.chars().take(300).collect();
+        out.push_str(&format!(
+            ". Assertion falsified under ay's own model: {term}"
+        ));
+    }
+    out
+}
+
 pub(super) fn solver_unknown_outcome(
     assertion_name: &str,
     location: Option<&str>,
     reason: Option<UnknownReason>,
+    gate: Option<&ModelGateRejection>,
 ) -> AssertionOutcome {
     let loc_suffix = location.map(|loc| format!(" at {loc}")).unwrap_or_default();
     let reason_str = format_unknown_reason(reason);
-    let rendered_reason =
-        format!("Solver returned unknown ({reason_str}) for '{assertion_name}'{loc_suffix}");
+    let gate_suffix = gate.map(render_model_gate_rejection).unwrap_or_default();
+    let rendered_reason = format!(
+        "Solver returned unknown ({reason_str}) for '{assertion_name}'{loc_suffix}{gate_suffix}"
+    );
     let detail = SolverUnknownDetail::from_unknown_reason(reason);
     if let Some(detail) = detail {
         let retry_class = detail.adaptive_quantifier_retry_class();
@@ -113,11 +286,11 @@ pub(super) fn solver_unknown_outcome(
             AdaptiveQuantifierRetryClass::Other => {}
         }
     }
-    AssertionOutcome::unknown_with_detail(
-        rendered_reason.clone(),
-        Some(classify_unknown_reason(reason, &rendered_reason)),
-        detail,
-    )
+    let category = gate_relabelled_category(
+        classify_unknown_reason(reason, &rendered_reason),
+        gate.is_some(),
+    );
+    AssertionOutcome::unknown_with_detail(rendered_reason.clone(), Some(category), detail)
 }
 
 pub(super) fn format_solver_observation_error(
@@ -243,19 +416,25 @@ impl AYEncoder {
         });
 
         let ctx_width = self.infer_int_width();
-        match Self::try_const_eval_typed(&assertion.expr, ctx_width) {
+        // The constant evaluator reads declared types as the encoder does: a
+        // goal the one typing validator refuses is not evaluated (§5b rule
+        // 13) but left to the encoding, which refuses it: unvalidated, `Cast {
+        // 3132225413u32, from_ty: char, to_ty: u64 } != -12` was decided
+        // `Verified` here.
+        let const_eval = if self.validate_ir_typing(&assertion.expr, None).is_ok() {
+            Self::try_const_eval_typed(&assertion.expr, ctx_width)
+        } else {
+            None
+        };
+        match const_eval {
             Some(true) => return Ok(AssertionOutcome::Verified),
             Some(false)
                 if self.state.assumption_count == 0
                     && self.state.unpruned_proof_fact_count == 0 =>
             {
-                let display = assertion.display_name();
-                let obligation_name = match &assertion.location {
-                    Some(loc) => format!("{} (at {})", display, loc),
-                    None => display.to_string(),
-                };
                 return Ok(AssertionOutcome::Counterexample {
-                    obligation_name,
+                    obligation_name: assertion.display_name().to_string(),
+                    location: assertion.location.clone(),
                     model: None,
                     bindings: Vec::new(),
                 });
@@ -280,14 +459,53 @@ impl AYEncoder {
             assertion.solver_mode,
             {
                 (|| {
+                    // The predicates assumed below, for the certificate: terms
+                    // trust-vc posed, proved by the separate check, which records
+                    // no certificate of its own.
+                    #[cfg(feature = "proof-certificates")]
+                    let mut assumed_lemmas: Vec<ay_core::TermId> = Vec::new();
+
                     // Assert+Assume pattern (Verus OverflowBehavior): overflow predicates
                     // were already verified in a separate encoder. Re-encode here to get
                     // the predicates in this solver's term universe and assume them so
                     // downstream reasoning can rely on the absence of overflow. Part of #2516.
-                    if self.state.overflow_behavior.should_check() {
+                    //
+                    // ASSUME ONLY WHAT WAS CHECKED. The overflow CHECK that
+                    // justifies this block is gated per OBLIGATION, and this
+                    // block reads the same gate:
+                    //
+                    // * a `by(nonlinear_arith)` goal skips the check outright
+                    //   (`verify_single_assertion_typed_inner`), and the shared
+                    //   BV lane refuses it, so NOTHING is assumed for it — not
+                    //   even the `Div`/`Rem` or collection predicates the Int
+                    //   lane still emits;
+                    // * for every other goal the check runs with
+                    //   `exec_arith_overflow_in_scope` as its arithmetic flag,
+                    //   and the re-encode below passes the same flag, so the
+                    //   assumed predicate set is the checked one. A
+                    //   `by(bit_vector)` goal or a spec-arithmetic obligation
+                    //   (`ensures`, `requires`, a calc step, a call-site
+                    //   precondition) therefore assumes its collection
+                    //   preconditions, which were checked, and no arithmetic
+                    //   no-overflow predicate, which was not.
+                    //
+                    // Assuming an unchecked predicate makes a goal pinned where
+                    // the arithmetic really overflows vacuous:
+                    // `requires x == 3, y == 86; ensures x - y == 0` (u8, exec)
+                    // came back `Verified` (tests/operand_signedness_proptest.rs).
+                    //
+                    // Nothing is assumed in a demand-inline retry
+                    // (`demand_inlined_bodies`): the separate pass checked the
+                    // assertion without those bodies expanded.
+                    if self.state.overflow_behavior.should_check()
+                        && !super::assertion::is_nonlinear_arith_mode(assertion.solver_mode)
+                        && !self.state.demand_inlined_bodies
+                    {
                         let saved_lengths = self.collection_lengths.clone();
-                        let overflow_result =
-                            self.resolve_condition_with_overflow_typed(&assertion.expr, true);
+                        let overflow_result = self.resolve_condition_with_overflow_typed(
+                            &assertion.expr,
+                            super::assertion::exec_arith_overflow_in_scope(true, assertion),
+                        );
                         self.collection_lengths = saved_lengths;
                         let (_, overflow_preds) = match overflow_result {
                             Ok(result) => result,
@@ -308,6 +526,8 @@ impl AYEncoder {
                                     error.to_string(),
                                 ));
                             }
+                            #[cfg(feature = "proof-certificates")]
+                            assumed_lemmas.push(pred.id());
                         }
                     }
 
@@ -409,7 +629,10 @@ impl AYEncoder {
                         }
                     }
 
-                    let mut details = match try_check_sat_with_details(&mut self.solver) {
+                    let mut details = match try_check_sat_with_details(
+                        &mut self.solver,
+                        &mut self.state.solver_panic,
+                    ) {
                         Ok(details) => details,
                         Err(error) => {
                             return Ok(AssertionOutcome::unknown(
@@ -479,8 +702,9 @@ impl AYEncoder {
                     // model-validated SAT); a still-Unknown / unvalidated-SAT
                     // fallback leaves the original fail-closed Unknown in place.
                     if details.result.result().is_unknown() {
-                        if let Ok(fb) = self.solver.try_check_sat_assuming_with_details(&[negated])
-                        {
+                        let fallback = self.solver.try_check_sat_assuming_with_details(&[negated]);
+                        note_solver_panic(&fallback, &mut self.state.solver_panic);
+                        if let Ok(fb) = fallback {
                             let fb_result = fb.solve.result.result();
                             if fb_result.is_unsat()
                                 || (fb_result.is_sat() && fb.solve.verification.sat_model_validated)
@@ -506,8 +730,33 @@ impl AYEncoder {
                         );
                         #[cfg(feature = "proof-certificates")]
                         if let Some(artifact) = self.solver.export_last_unsat_artifact() {
-                            let ay_proof = self.solver.last_proof();
-                            verification_report::record_proof_artifact(&artifact, ay_proof);
+                            // #2654: bind the refutation to the obligation whose
+                            // negation was asserted into THIS scope. `assertion`
+                            // is that obligation — it is the same value whose
+                            // `negated` goal was pushed above — so the identity is
+                            // read off the query, never inferred from which report
+                            // step happens to be open. Sub-queries (conjunct
+                            // splits) carry their own derived names and are
+                            // therefore refused attachment to the parent step.
+                            //
+                            // The certificate's premises are bound to the query
+                            // trust-vc posed, whose negated goal is `negated`,
+                            // and the kernel runs on it; only then may it claim
+                            // to be checked evidence for `assertion`. Premises
+                            // among the assumed predicates are counted.
+                            let solver = &self.solver;
+                            let assumed_lemmas = &assumed_lemmas;
+                            verification_report::record_proof_artifact(
+                                &artifact,
+                                || {
+                                    verification_report::kernel_bridge::certify_last_refutation(
+                                        solver,
+                                        negated,
+                                        assumed_lemmas,
+                                    )
+                                },
+                                &assertion.name,
+                            );
                         }
                         Ok(AssertionOutcome::Verified)
                     } else if solve_result.is_sat() {
@@ -551,6 +800,11 @@ impl AYEncoder {
                                 ));
                             }
                         };
+                        // Capture the SAME published model before any disposable
+                        // broadcast replay changes the solver's current query.
+                        // Function bodies are display DATA, never evidence for
+                        // changing the verdict or relaxing the witness guards.
+                        let published_model = self.solver.try_get_model_str();
                         if condition_has_quantifier
                             && !statically_refuted_exists
                             && (force_empty_model_enabled()
@@ -654,14 +908,14 @@ impl AYEncoder {
                                 }
                             }
 
-                            let model_str = model.as_ref().map(|m| {
+                            let mut model_str = model.as_ref().map(|m| {
                                 super::model_render::format_counterexample_model(
                                     m,
                                     &self.var_types,
                                     &self.counterexample_var_meta,
                                 )
                             });
-                            let bindings = model
+                            let mut bindings = model
                                 .as_ref()
                                 .map(|m| {
                                     super::model_render::collect_counterexample_bindings(
@@ -671,22 +925,54 @@ impl AYEncoder {
                                     )
                                 })
                                 .unwrap_or_default();
-                            let display = assertion.display_name();
-                            let obligation_name = match &assertion.location {
-                                Some(loc) => format!("{} (at {})", display, loc),
-                                None => display.to_string(),
+                            let functions = match published_model {
+                                Ok(document) => super::model_render::published_function_bindings(
+                                    &document,
+                                    &self.counterexample_var_meta,
+                                )
+                                .map_err(str::to_string),
+                                Err(error) => Err(error.to_string()),
                             };
+                            match functions {
+                                Ok(functions) if !functions.is_empty() => {
+                                    let rendered = functions
+                                        .iter()
+                                        .map(|binding| {
+                                            format!("{} = {}", binding.display_name, binding.value)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    model_str = Some(
+                                        if model.as_ref().is_some_and(|m| m.model().is_empty()) {
+                                            rendered
+                                        } else {
+                                            format!("{}\n{rendered}", model_str.unwrap_or_default())
+                                        },
+                                    );
+                                    bindings.extend(functions);
+                                }
+                                Err(reason) => {
+                                    model_str = Some(format!(
+                                        "{}\nFunction interpretations unavailable: {reason}",
+                                        model_str.unwrap_or_default()
+                                    ));
+                                }
+                                _ => {}
+                            }
                             Ok(AssertionOutcome::Counterexample {
-                                obligation_name,
+                                obligation_name: assertion.display_name().to_string(),
+                                location: assertion.location.clone(),
                                 model: model_str,
                                 bindings,
                             })
                         }
                     } else {
+                        let gate = model_gate_rejection(&details);
                         Ok(solver_unknown_outcome(
                             &assertion.name,
                             assertion.location.as_deref(),
                             details.unknown_reason,
+                            gate.as_ref(),
                         ))
                     }
                 })()

@@ -4,7 +4,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 //!
-//! Run with: cargo run --example ay_demo
+//! Run with: targo --unverified run -p trust-vc-core --example ay_demo
 //!
 //! This example demonstrates that trust_vc DOES generate actual SMT queries
 //! and verify them through ay, addressing issue #47.

@@ -55,6 +55,21 @@ pub const ADTS_GENERICS_RS_EXPECTED_CASES: &[AdtsGenericsRsExpectedCase] = &[
         "verified",
         3,
     ),
+    // Upstream `test_generic_adt_eq` / `test_generic_adt_u8` verbatim: the
+    // engine refutes each with a model (re-pinned 2026-09-13; the former
+    // `*_currently_unknown` twins below are the same refutations).
+    (
+        "test_generic_adt_eq_counterexample",
+        "test_generic_adt_eq",
+        "counterexample",
+        3,
+    ),
+    (
+        "test_generic_adt_u8_counterexample",
+        "test_generic_adt_u8",
+        "counterexample",
+        2,
+    ),
 ];
 
 // The generic tuple-struct destructure gap has since closed (monomorphized
@@ -118,7 +133,7 @@ fn generic_struct_projection_preserves_equal_payloads(value: u64) {
 }
 
 #[trust_vc::ensures(true)]
-fn generic_struct_projection_wrong_inequality_currently_unknown(value: u64) {
+fn generic_struct_projection_wrong_inequality_counterexample(value: u64) {
     let t1 = Thing::<u64> { a: value };
     let t2 = Thing::<u64> { a: value };
     let a1: u64 = t1.a;
@@ -127,13 +142,33 @@ fn generic_struct_projection_wrong_inequality_currently_unknown(value: u64) {
     trust_vc::assert!(a1 != a2);
 }
 
+// Upstream `test_generic_adt_eq::one`, verbatim on the native surface: the
+// equal-payload assertion holds and the inequality on the same projections is
+// the single upstream failure (`assert(a1 != a2); // FAILS`).
+#[trust_vc::ensures(true)]
+fn test_generic_adt_eq_counterexample(v: u64) {
+    let t1 = Thing::<u64> { a: v };
+    let t2 = Thing::<u64> { a: v };
+    let a1: u64 = t1.a;
+    let a2: u64 = t2.a;
+    trust_vc::assert!(a1 == a2);
+    trust_vc::assert!(a1 != a2); // FAILS
+}
+
+// Upstream `test_generic_adt_u8::two`, verbatim: a `Thing<u8>` payload has no
+// lower bound of 1 (`assert(v.a >= 1); // FAILS`).
+#[trust_vc::ensures(true)]
+fn test_generic_adt_u8_counterexample(v: Thing<u8>) {
+    trust_vc::assert!(v.a >= 1u8); // FAILS
+}
+
 #[trust_vc::ensures(true)]
 fn generic_struct_u8_field_nonnegative(value: Thing<u8>) {
     trust_vc::assert!(value.a >= 0u8);
 }
 
 #[trust_vc::ensures(true)]
-fn generic_struct_u8_field_at_least_one_currently_unknown(value: Thing<u8>) {
+fn generic_struct_u8_field_at_least_one_counterexample(value: Thing<u8>) {
     trust_vc::assert!(value.a >= 1u8);
 }
 

@@ -115,7 +115,11 @@ use crate::prepared_context::PreparedVerificationContext;
 // qualified-helper and abstract `self.<field>` conformance semantics. A pre-v17
 // `Verified` entry may have skipped an unlowerable trait
 // default/generic-struct body, so it must not bypass the new addressed check.
-pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 17;
+// v18 reads a trait-impl method's own `ensures` in the IMPL's parameter scope
+// (positional `__trust_vc_conf_arg_{i}` placeholders) in both the caller axiom
+// and the conformance extension, and publishes none from an external impl. A
+// pre-v18 `Verified` entry may rest on that clause read in the trait's names.
+pub(in crate::encoder::verification) const VC_CACHE_SCHEMA_VERSION: u32 = 18;
 
 /// Attempt cached verification. Returns `Some(VerifyResult::Verified)` on
 /// cache hit, `None` on miss or any I/O error.
@@ -462,7 +466,7 @@ fn authenticated_build_source_identity() -> Option<String> {
         {
             return overridden.filter(|identity| is_full_git_revision(identity));
         }
-        return Some(TEST_BUILD_SOURCE_IDENTITY.to_string());
+        Some(TEST_BUILD_SOURCE_IDENTITY.to_string())
     }
 
     #[cfg(not(test))]

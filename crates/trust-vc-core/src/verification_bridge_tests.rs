@@ -74,6 +74,7 @@ fn test_protocol_obligation(name: &str) -> ProtocolObligation {
         name: name.to_string(),
         spec: format!("---- MODULE {name} ----\n===="),
         config: String::new(),
+        shape: None,
     }
 }
 

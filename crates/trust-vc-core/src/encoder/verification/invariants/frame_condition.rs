@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use super::AssertionOutcome;
 use crate::encoder::{diagnostics::EncodingApproximation, AYEncoder};
 use crate::error::{TrustVcError, TrustVcResult};
-use crate::ir::{CompareOp, TrustVcExpr, TrustVcType};
+use crate::ir::{TrustVcExpr, TrustVcType};
 use crate::ir_lowering::{lower_syn_expr, TypeEnv};
 use crate::prepared_context::{PreparedObligation, PreparedVerificationContext};
 use crate::vc::ObligationKind;
@@ -21,7 +21,7 @@ const FRAME_SETUP_CONTEXT: &str = "build frame-condition inductive-step encoder"
 /// rewrites. Quantifier-bound names are over-approximated as referenced — that
 /// only makes the unmodified-precondition gate MORE conservative (it would skip a
 /// precondition, never wrongly assume one), preserving soundness.
-fn collect_referenced_var_names(expr: &TrustVcExpr) -> HashSet<String> {
+pub(in crate::encoder) fn collect_referenced_var_names(expr: &TrustVcExpr) -> HashSet<String> {
     use crate::ir_expr_traversal::{walk_expr, TrustVcExprVisitor};
 
     #[derive(Default)]
@@ -71,6 +71,7 @@ pub(super) fn verify_inductive_step_frame_condition_typed(
     modified_vars: &[String],
     loop_guard: Option<&String>,
     verified_invariants: &[&PreparedObligation],
+    assume_goal_at_pre: bool,
 ) -> TrustVcResult<AssertionOutcome> {
     let pre_state_targets = super::super::rewrite::collect_pre_state_target_names(&ctx.variables);
 
@@ -119,15 +120,16 @@ pub(super) fn verify_inductive_step_frame_condition_typed(
         };
 
     super::run_inductive_verification(ctx, invariant, || {
-        setup_frame_condition_encoder(
+        setup_frame_condition_encoder(FrameConditionEncoderInputs {
             ctx,
             invariant,
             modified_vars,
-            pre_guard_expr.as_ref(),
-            &pre_transition_exprs,
-            &pre_state_targets,
+            pre_guard_expr: pre_guard_expr.as_ref(),
+            pre_transition_exprs: &pre_transition_exprs,
+            pre_state_targets: &pre_state_targets,
             verified_invariants,
-        )
+            assume_goal_at_pre,
+        })
     })
 }
 
@@ -152,6 +154,22 @@ fn build_pre_state_env(ctx: &PreparedVerificationContext) -> TypeEnv {
     env
 }
 
+/// The inputs of [`setup_frame_condition_encoder`], grouped.
+///
+/// They travel together and are built together by the one caller; passing them
+/// as a record keeps the seam readable (and keeps `clippy::too_many_arguments`
+/// honest) without changing what any of them mean.
+struct FrameConditionEncoderInputs<'a> {
+    ctx: &'a PreparedVerificationContext,
+    invariant: &'a PreparedObligation,
+    modified_vars: &'a [String],
+    pre_guard_expr: Option<&'a TrustVcExpr>,
+    pre_transition_exprs: &'a [(String, TrustVcType, TrustVcExpr)],
+    pre_state_targets: &'a HashSet<&'a str>,
+    verified_invariants: &'a [&'a PreparedObligation],
+    assume_goal_at_pre: bool,
+}
+
 /// Build a configured encoder for frame-condition inductive step.
 ///
 /// Extracted so it can be called multiple times: once for overflow checking
@@ -162,14 +180,18 @@ fn build_pre_state_env(ctx: &PreparedVerificationContext) -> TypeEnv {
 /// TrustVcExpr, computed once by the caller to avoid repeated syn::parse_str
 /// + lower_syn_expr. Part of #1786.
 fn setup_frame_condition_encoder(
-    ctx: &PreparedVerificationContext,
-    invariant: &PreparedObligation,
-    modified_vars: &[String],
-    pre_guard_expr: Option<&TrustVcExpr>,
-    pre_transition_exprs: &[(String, TrustVcType, TrustVcExpr)],
-    pre_state_targets: &HashSet<&str>,
-    verified_invariants: &[&PreparedObligation],
+    inputs: FrameConditionEncoderInputs<'_>,
 ) -> TrustVcResult<AYEncoder> {
+    let FrameConditionEncoderInputs {
+        ctx,
+        invariant,
+        modified_vars,
+        pre_guard_expr,
+        pre_transition_exprs,
+        pre_state_targets,
+        verified_invariants,
+        assume_goal_at_pre,
+    } = inputs;
     // The deterministic budget must reach EVERY solve trust-vc issues, not
     // just the top-level one; the frame-condition encoder is a second solver
     // instance and was previously bounded by a hardcoded wall alone.
@@ -231,24 +253,34 @@ fn setup_frame_condition_encoder(
 
     let mut eq_queue: Vec<TrustVcExpr> = Vec::new();
 
-    let pre_typed = super::super::rewrite::replace_vars_with_pre_typed_with_targets(
-        &invariant.expr,
-        pre_state_targets,
-    );
-    encoder
-        .add_typed_assumption(
-            &format!("{}_pre", invariant.name),
-            &pre_typed,
-            Some(&mut eq_queue),
-        )
-        .map_err(|err| {
-            super::wrap_setup_error(err, FRAME_SETUP_CONTEXT, |detail| {
-                format!(
-                    "Failed to assume pre-state invariant in inductive step: {}",
-                    detail
-                )
-            })
-        })?;
+    // The INDUCTIVE HYPOTHESIS: the goal itself at the pre-state. Correct for a
+    // loop invariant (and a `loop_decreases!` step), whose goal is by definition
+    // true at every loop head. NOT assumed for a break-site EXIT CHECK (audit
+    // rows 430/431): its goal — a regular invariant or a loop `ensures` read at
+    // the exit — need not hold at the head, and assuming it there made the
+    // hypotheses inconsistent for any goal false at the head (`ensures i >= 11`
+    // under the exit guard `i_pre + 1 == 10`), so the step verified VACUOUSLY
+    // (measured: a false `loop_ensures` at a `break` came back Verified).
+    if assume_goal_at_pre {
+        let pre_typed = super::super::rewrite::replace_vars_with_pre_typed_with_targets(
+            &invariant.expr,
+            pre_state_targets,
+        );
+        encoder
+            .add_typed_assumption(
+                &format!("{}_pre", invariant.name),
+                &pre_typed,
+                Some(&mut eq_queue),
+            )
+            .map_err(|err| {
+                super::wrap_setup_error(err, FRAME_SETUP_CONTEXT, |detail| {
+                    format!(
+                        "Failed to assume pre-state invariant in inductive step: {}",
+                        detail
+                    )
+                })
+            })?;
+    }
 
     for prior in verified_invariants {
         let prior_pre = super::super::rewrite::replace_vars_with_pre_typed_with_targets(
@@ -357,14 +389,13 @@ fn setup_frame_condition_encoder(
         if !modified_set.contains(var.as_str()) {
             continue;
         }
-        let transition_eq = TrustVcExpr::Compare {
-            op: CompareOp::Eq,
-            left: Box::new(TrustVcExpr::Var {
+        let transition_eq = crate::float_identity::identity_equation(
+            TrustVcExpr::Var {
                 name: var.clone(),
                 ty: ty.clone(),
-            }),
-            right: Box::new(rhs_pre.clone()),
-        };
+            },
+            rhs_pre.clone(),
+        );
         encoder
             .add_typed_assumption(
                 &format!("{}_body_transition", var),

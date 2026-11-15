@@ -88,6 +88,32 @@ fn test_classify_confirmation_disagree_inductive() {
     );
 }
 
+/// A confirmation failure that QUOTES the re-solve's own timeout reason is
+/// still a `ConfirmationDisagree`, never a `Timeout`.
+///
+/// Both confirmation sites now print what the re-solve actually returned, so
+/// this recovery classifier sees reason strings that contain another
+/// category's trigger phrase. The generated marker has to win: `Timeout` is
+/// the retriable category, and a confirmation failure that is re-read as a
+/// retriable timeout would be re-attempted instead of reported.
+#[test]
+fn confirmation_marker_beats_a_quoted_timeout_reason() {
+    let reason = "Confirmation check disagreed for 'assertion_2': the re-solve returned \
+                  Unknown/Timeout (Solver returned unknown (timeout) for 'assertion_2') \
+                  — fail-closed";
+    assert_eq!(
+        UnknownCategory::classify(reason),
+        UnknownCategory::ConfirmationDisagree
+    );
+    let inductive = "Confirmation check disagreed for 'inv' (inductive step): the re-solve \
+                     returned Unknown { reason: \"Solver returned unknown (timeout) for \
+                     'inv'\", category: Some(Timeout), detail: None } — fail-closed";
+    assert_eq!(
+        UnknownCategory::classify(inductive),
+        UnknownCategory::ConfirmationDisagree
+    );
+}
+
 #[test]
 fn test_classify_confirmation_encoder_error() {
     let reason = "Confirmation check encoder error for 'inv' (inductive step): parse error — re-verification setup failed";
@@ -453,6 +479,7 @@ fn test_unknown_category_on_verified() {
 fn test_unknown_category_on_counterexample() {
     let result = VerifyResult::Counterexample {
         obligation_name: "test".to_string(),
+        location: None,
         model: None,
         bindings: Vec::new(),
     };
@@ -579,6 +606,7 @@ fn genuine_counterexample_still_carries_its_model_and_bindings() {
     // The mapping must not disturb real, model-bearing refutations.
     let result = VerifyResult::Counterexample {
         obligation_name: "ensures".to_string(),
+        location: None,
         model: Some("x = -1".to_string()),
         bindings: vec![crate::verify_result::CounterexampleBinding::new(
             "x", "x", "i32", "-1",
@@ -607,6 +635,7 @@ fn not_proved_and_counterexample_are_distinguishable_failures() {
     let not_proved = VerifyResult::unknown("gap", Some(UnknownCategory::Incompleteness));
     let counterexample = VerifyResult::Counterexample {
         obligation_name: "ensures".to_string(),
+        location: None,
         model: Some("x = 0".to_string()),
         bindings: Vec::new(),
     };
@@ -614,4 +643,358 @@ fn not_proved_and_counterexample_are_distinguishable_failures() {
     assert!(not_proved.is_failure() && counterexample.is_failure());
     assert!(not_proved.is_not_proved() && !counterexample.is_not_proved());
     assert!(counterexample.is_counterexample() && !not_proved.is_counterexample());
+}
+
+// ───────────────────── THE THIRD CATEGORY: ModelGateRejected ─────────────────
+//
+// ay's independent model-check gate refuting ay's OWN model is neither a
+// refutation of the user's proof nor a resource limit. Pinned here at the seam
+// that decides it, against a REAL `ay_dpll::Statistics` carrying ay's real key
+// names — `SolveDetails` is `#[non_exhaustive]` and cannot be built here, but
+// `Statistics` is `Default` with a public `set_string`, so the key strings
+// under test are the ones ay actually writes.
+//
+// Source of the key names: `ay-dpll/src/executor/model/independent_gate.rs`
+// (`downgrade_sat_after_gate` sets `unknown.phase`; the `ModelViolates` arm
+// sets `model_check_gate.result`/`.violated_assertion`). Measured at ay
+// `0dc8f8f0b` (the SIBLING working tree the `[patch]` binds, not the
+// `4cadc2bf` manifest pin). See
+// `docs/ay-defect-2026-09-17-quantified-axiom-family.md`.
+
+use crate::encoder::verification::solve::{
+    model_gate_rejection_from_stats, render_model_gate_rejection, solver_unknown_outcome,
+    AY_MODEL_GATE_PHASE, AY_MODEL_GATE_VIOLATES,
+};
+use ay_dpll::{Statistics, UnknownReason};
+
+/// The statistics ay writes on the `ModelViolates` downgrade.
+fn gate_violated_stats() -> Statistics {
+    let mut s = Statistics::default();
+    s.set_string("unknown.reason", "incomplete");
+    s.set_string("unknown.phase", AY_MODEL_GATE_PHASE);
+    s.set_string(
+        "unknown.detail",
+        "model-not-independently-confirmed: an assertion is falsified by the model",
+    );
+    s.set_string("model_check_gate.result", AY_MODEL_GATE_VIOLATES);
+    s.set_string(
+        "model_check_gate.violated_assertion",
+        "(forall ((__trust_vc_spec_g_i Int)) (= (g __trust_vc_spec_g_i) (<= 5 __trust_vc_spec_g_i)))",
+    );
+    s
+}
+
+#[test]
+fn gate_rejection_is_detected_and_names_the_violated_assertion() {
+    let stats = gate_violated_stats();
+    let gate = model_gate_rejection_from_stats(&stats, None)
+        .expect("ay's ModelViolates statistics must be recognized as a gate rejection");
+    assert!(
+        gate.violated_assertion
+            .as_deref()
+            .is_some_and(|t| t.contains("__trust_vc_spec_g_i")),
+        "the gate rejection must carry ay's own violated assertion, got {:?}",
+        gate.violated_assertion
+    );
+}
+
+#[test]
+fn gate_rejection_is_detected_from_the_typed_phase_alone() {
+    // `SolveDetails::unknown_diagnostic.phase` is the same `unknown.phase`
+    // string, typed (ay `api/solving/controls.rs::build_unknown_diagnostic`).
+    // Either channel alone is sufficient evidence.
+    let empty = Statistics::default();
+    assert!(
+        model_gate_rejection_from_stats(&empty, Some(AY_MODEL_GATE_PHASE)).is_some(),
+        "the typed phase alone must be sufficient evidence"
+    );
+}
+
+// ── LIAR TWINS: every near-miss must be REFUTED, not absorbed ──
+
+#[test]
+fn liar_twin_plain_incompleteness_is_not_a_gate_rejection() {
+    // THE TWIN THAT MATTERS. This is the exact envelope trust-vc sees today on
+    // the `m_ge5` probe (measured 2026-09-17): `UnknownReason` is a quantifier
+    // incompleteness and `unknown.phase` is "quantifier-instantiation", with NO
+    // gate keys. It must stay `Incompleteness` — if this seam ever promoted a
+    // plain incompleteness to the third category, the fix would be laundering
+    // real incompleteness as an ay defect.
+    let mut s = Statistics::default();
+    s.set_string("unknown.phase", "quantifier-instantiation");
+    s.set_string(
+        "unknown.detail",
+        "E-matching touched existential quantifiers in an incomplete mode",
+    );
+    assert!(
+        model_gate_rejection_from_stats(&s, Some("quantifier-instantiation")).is_none(),
+        "a quantifier-instantiation unknown is NOT a caught invalid model"
+    );
+
+    let outcome = solver_unknown_outcome(
+        "assertion_0",
+        Some("m_ge5.rs:7:5"),
+        Some(UnknownReason::QuantifierEmatchingExistsIncomplete),
+        None,
+    );
+    let result = outcome_to_verify_result(outcome);
+    assert_eq!(
+        result.unknown_category(),
+        Some(UnknownCategory::Incompleteness),
+        "no gate evidence must leave the category at Incompleteness, got {result:?}"
+    );
+}
+
+#[test]
+fn liar_twin_confirmed_sat_is_not_a_gate_rejection() {
+    // `confirmed-sat` is the gate ACCEPTING a model — the opposite outcome. It
+    // is the only `model_check_gate.result` value measured reaching trust-vc on
+    // 2026-09-17 (14 times in one `choose.rs` run), so mistaking it for a
+    // rejection would misreport real, healthy solves.
+    let mut s = Statistics::default();
+    s.set_string("model_check_gate.result", "confirmed-sat");
+    assert!(model_gate_rejection_from_stats(&s, None).is_none());
+}
+
+#[test]
+fn liar_twin_cannot_confirm_is_not_a_gate_rejection() {
+    // `cannot-confirm` is a COVERAGE GAP — the gate could not decide — not
+    // evidence that ay's model is false. ay's own comment insists on the
+    // distinction; so does this seam.
+    let mut s = Statistics::default();
+    s.set_string("model_check_gate.result", "cannot-confirm");
+    s.set_string(
+        "model_check_gate.cannot_confirm_reason",
+        "SmtCircularSatFallback",
+    );
+    assert!(model_gate_rejection_from_stats(&s, None).is_none());
+}
+
+#[test]
+fn liar_twin_empty_statistics_is_not_a_gate_rejection() {
+    assert!(model_gate_rejection_from_stats(&Statistics::default(), None).is_none());
+}
+
+// ── the reporting change itself ──
+
+fn outcome_to_verify_result(
+    outcome: crate::encoder::verification::outcome::AssertionOutcome,
+) -> VerifyResult {
+    match outcome {
+        crate::encoder::verification::outcome::AssertionOutcome::Unknown {
+            reason,
+            category,
+            ..
+        } => VerifyResult::unknown(reason, category),
+        other => panic!("expected an Unknown outcome, got {other:?}"),
+    }
+}
+
+#[test]
+fn gate_rejection_classifies_as_the_third_category_and_not_incompleteness() {
+    let stats = gate_violated_stats();
+    let gate = model_gate_rejection_from_stats(&stats, None).expect("gate rejection");
+    // ay sets `UnknownReason::Incomplete` on this downgrade, which the
+    // reason-code mapping alone would call `Incompleteness`. The gate
+    // attribution is the more specific fact and must win.
+    let outcome = solver_unknown_outcome(
+        "assertion_0",
+        Some("m_ge5.rs:7:5"),
+        Some(UnknownReason::Incomplete),
+        Some(&gate),
+    );
+    let result = outcome_to_verify_result(outcome);
+    assert_eq!(
+        result.unknown_category(),
+        Some(UnknownCategory::ModelGateRejected),
+        "a caught invalid model must be its OWN category, got {result:?}"
+    );
+    assert_ne!(
+        result.unknown_category(),
+        Some(UnknownCategory::Incompleteness),
+        "the third category must not be absorbed by Incompleteness"
+    );
+}
+
+#[test]
+fn gate_rejection_does_not_move_the_verdict_and_still_fails_closed() {
+    // THE WHOLE POINT: this is a REPORTING fix. The obligation still is not
+    // discharged, still fails closed, and still lands on exactly the same
+    // `VerifyResult` variant a plain incompleteness lands on — so no corpus
+    // verdict can move.
+    let stats = gate_violated_stats();
+    let gate = model_gate_rejection_from_stats(&stats, None).expect("gate rejection");
+    let gated = outcome_to_verify_result(solver_unknown_outcome(
+        "assertion_0",
+        None,
+        Some(UnknownReason::Incomplete),
+        Some(&gate),
+    ));
+    let plain = outcome_to_verify_result(solver_unknown_outcome(
+        "assertion_0",
+        None,
+        Some(UnknownReason::Incomplete),
+        None,
+    ));
+    // Named oracles (house rule, pinned by
+    // `encoder::tests::result_oracles::test_targeted_verification_tests_use_named_oracles`):
+    // these also assert the routing invariant — `NotProved` must carry an
+    // incompleteness-class category — which is exactly the property that keeps
+    // this relabel verdict-preserving.
+    crate::encoder::tests::result_oracles::expect_incompleteness_modelless_failure(
+        &gated,
+        "a caught invalid model",
+    );
+    crate::encoder::tests::result_oracles::expect_incompleteness_modelless_failure(
+        &plain,
+        "a plain incompleteness",
+    );
+    assert!(!gated.is_verified(), "must never become Verified");
+    assert!(gated.is_failure(), "must still fail closed");
+    assert!(
+        !gated.is_counterexample(),
+        "no model may be attached: nothing refuted the obligation"
+    );
+    assert!(
+        UnknownCategory::ModelGateRejected.is_incompleteness(),
+        "the shared routing predicate is what keeps the verdict identical"
+    );
+}
+
+#[test]
+fn gate_rejection_message_does_not_say_the_proof_is_wrong() {
+    let stats = gate_violated_stats();
+    let gate = model_gate_rejection_from_stats(&stats, None).expect("gate rejection");
+    let rendered = render_model_gate_rejection(&gate);
+    assert!(
+        rendered.contains("NOT a refutation"),
+        "the message must deny that this refutes the proof, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("could not independently confirm")
+            || rendered.contains("refuted the model ay"),
+        "the message must say what actually happened, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("__trust_vc_spec_g_i"),
+        "the message must name the assertion ay falsified, got: {rendered}"
+    );
+    let suggestion = UnknownCategory::ModelGateRejected.actionable_suggestion();
+    assert!(
+        suggestion.contains("Not a refutation of your proof"),
+        "the suggestion must not blame the proof, got: {suggestion}"
+    );
+    assert!(
+        !suggestion.contains("supply an explicit proof"),
+        "the incompleteness remedy is the WRONG advice here, got: {suggestion}"
+    );
+    assert_ne!(
+        suggestion,
+        UnknownCategory::Incompleteness.actionable_suggestion(),
+        "the two categories must not read alike"
+    );
+}
+
+#[test]
+fn gate_rejection_is_soundness_relevant_and_not_retriable() {
+    let c = UnknownCategory::ModelGateRejected;
+    assert!(
+        c.is_soundness_relevant(),
+        "a solver that refuted its own model has a defect worth counting"
+    );
+    assert!(
+        c.is_solver_limitation(),
+        "the defect is ay-side, not a trust-vc bug"
+    );
+    assert!(
+        !c.is_retriable(),
+        "deterministic in 15/15 runs measured 2026-09-17: a retry buys nothing"
+    );
+}
+
+#[test]
+fn gate_evidence_can_never_promote_a_resource_unknown_into_a_failure() {
+    // THE SOUNDNESS-BOUNDARY CONTROL for this change. A resource/timeout
+    // `Unknown` must stay a NON-failure `Unknown` even when ay's gate keys are
+    // present on the same envelope — otherwise a "reporting fix" would have
+    // moved a verdict across the exact boundary
+    // `design-unknown-as-failure.md` draws.
+    let stats = gate_violated_stats();
+    let gate = model_gate_rejection_from_stats(&stats, None).expect("gate rejection");
+    for reason in [
+        UnknownReason::Timeout,
+        UnknownReason::ResourceLimit,
+        UnknownReason::MemoryLimit,
+        UnknownReason::Interrupted,
+        UnknownReason::QuantifierRoundLimit,
+        UnknownReason::QuantifierDeferred,
+        UnknownReason::SplitLimit,
+    ] {
+        let with_gate = outcome_to_verify_result(solver_unknown_outcome(
+            "assertion_0",
+            None,
+            Some(reason),
+            Some(&gate),
+        ));
+        let without_gate = outcome_to_verify_result(solver_unknown_outcome(
+            "assertion_0",
+            None,
+            Some(reason),
+            None,
+        ));
+        crate::encoder::tests::result_oracles::expect_resource_unknown_not_failure(
+            &with_gate,
+            &format!("{reason:?} with gate evidence"),
+        );
+        assert!(
+            !with_gate.is_failure(),
+            "{reason:?} must never become a failure, got {with_gate:?}"
+        );
+        assert_eq!(
+            with_gate.unknown_category(),
+            without_gate.unknown_category(),
+            "{reason:?}: gate evidence must not change a RESOURCE category"
+        );
+        assert_ne!(
+            with_gate.unknown_category(),
+            Some(UnknownCategory::ModelGateRejected),
+            "{reason:?} must not be relabelled into the third category"
+        );
+    }
+}
+
+#[test]
+fn the_relabel_is_verdict_preserving_over_every_category() {
+    // Exhaustive proof-by-construction of "no verdict moves": for EVERY
+    // category, relabelling with gate evidence leaves `is_incompleteness()` —
+    // the single predicate `VerifyResult::unknown` routes on — unchanged.
+    use crate::encoder::verification::solve::gate_relabelled_category;
+    for base in [
+        UnknownCategory::Timeout,
+        UnknownCategory::SolverPanic,
+        UnknownCategory::ThreadPanic,
+        UnknownCategory::ConfirmationDisagree,
+        UnknownCategory::ModelNotValidated,
+        UnknownCategory::EmptyModel,
+        UnknownCategory::SolverUnknown,
+        UnknownCategory::Incompleteness,
+        UnknownCategory::ModelGateRejected,
+        UnknownCategory::EncodingDemotion,
+        UnknownCategory::OpaqueTypes,
+        UnknownCategory::VacuousTruth,
+        UnknownCategory::UnsupportedMode,
+        UnknownCategory::Other,
+    ] {
+        let relabelled = gate_relabelled_category(base, true);
+        assert_eq!(
+            relabelled.is_incompleteness(),
+            base.is_incompleteness(),
+            "relabelling {base:?} changed the verdict-routing predicate"
+        );
+        assert_eq!(
+            gate_relabelled_category(base, false),
+            base,
+            "with no gate evidence {base:?} must pass through untouched"
+        );
+    }
 }

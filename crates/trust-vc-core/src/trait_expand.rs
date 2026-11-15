@@ -98,7 +98,7 @@ pub fn expand_trait_impl(input: ItemImpl) -> TokenStream {
 
 pub(crate) fn parse_trait_decl(input: &ItemTrait) -> TrustVcResult<TraitDecl> {
     let trait_type_params = collect_type_params(&input.generics);
-    let methods = input
+    let mut methods = input
         .items
         .iter()
         .filter_map(|item| match item {
@@ -106,6 +106,16 @@ pub(crate) fn parse_trait_decl(input: &ItemTrait) -> TrustVcResult<TraitDecl> {
             _ => None,
         })
         .collect::<TrustVcResult<Vec<_>>>()?;
+
+    // The marker is legal on the TRAIT, where it covers every method the trait
+    // declares — exactly as it does on an `impl` block and on a `mod`. The
+    // per-method check above sees only `method.attrs`, so the trait-level
+    // spelling is withdrawn here. (H14/E11.) The enclosing-MODULE spelling is
+    // handled by the file-lane caller, `collect_source_trait_declarations`,
+    // which is the only walk that carries the module chain.
+    if crate::vc_extraction::attr_extract::has_external_trusted_attr(&input.attrs) {
+        withdraw_trusted_boundary_default_bodies(&mut methods);
+    }
 
     // Parse the trait's supertrait bounds (`trait T: Super`). Mirror
     // `append_trait_bounds`: keep only plain `Trait` bounds with the default
@@ -144,6 +154,21 @@ pub(crate) fn parse_trait_decl(input: &ItemTrait) -> TrustVcResult<TraitDecl> {
         supertraits,
         generics,
     })
+}
+
+/// Withdraw every DEFAULT BODY from a trait's methods, leaving the declared
+/// contracts intact.
+///
+/// SOUNDNESS-CRITICAL (H14/E11). Used wherever a trusted-boundary marker is
+/// found on an enclosure that the per-method parse cannot see — the TRAIT
+/// itself, or an enclosing `mod`. The contract (`requires`/`ensures`) is
+/// deliberately untouched: withdrawing the body axiom must not withdraw what a
+/// trusted declaration actually promises (`e11_contracted_marked_default_still_
+/// publishes_its_contract`).
+pub(crate) fn withdraw_trusted_boundary_default_bodies(methods: &mut [TraitMethodDecl]) {
+    for method in methods {
+        method.default_body = None;
+    }
 }
 
 pub(crate) fn parse_trait_impl_decl(input: &ItemImpl) -> TrustVcResult<TraitImplDecl> {
@@ -193,7 +218,7 @@ pub(crate) fn parse_trait_impl_decl(input: &ItemImpl) -> TrustVcResult<TraitImpl
         })
         .unwrap_or_default();
 
-    let concrete_type = parse_trust_vc_type(&input.self_ty, &impl_type_params, false);
+    let concrete_type = impl_concrete_type(input);
     let type_name = encode_type_component(&input.self_ty);
     let method_bindings = input
         .items
@@ -298,14 +323,34 @@ fn parse_trait_method_decl(
         ReturnType::Type(_, ty) => parse_trust_vc_type(ty, &known_type_params, true),
     };
 
-    let default_body = method.default.as_ref().map(|block| {
-        // Extract the trailing expression from the block if it has exactly one.
-        // This gives cleaner body text like "true" instead of "{ true }".
-        if let [syn::Stmt::Expr(expr, None)] = block.stmts.as_slice() {
-            return quote!(#expr).to_string();
-        }
-        quote!(#block).to_string()
-    });
+    // SOUNDNESS-CRITICAL (H14, review round 3). A trait DEFAULT BODY is
+    // published to callers as the defining equation `Trait__m(self, ..) ==
+    // <default body>` (`encoder/trait_encoding.rs` ->
+    // `trait_encoding_axioms::assert_default_body_axiom`). On the trusted
+    // boundary the braces hold a PLACEHOLDER — the real implementation is
+    // foreign, or elsewhere — so that equation is not a definition of anything,
+    // and a caller proved `a.m() == 100` from a stub that never runs (E11).
+    // Withdraw the BODY here, at the single point where it is harvested, so
+    // every downstream consumer (the caller-visible axiom, the default-body
+    // conformance obligation, and the free-function helper registration that
+    // lowers its callees) declines together. `has_default` deliberately stays
+    // true: the method IS defaulted, and an impl that omits it still resolves.
+    // The declared `#[requires]`/`#[ensures]` is untouched — that contract is
+    // the whole of what a trusted declaration promises, and it is still
+    // published by `assert_trait_postconditions`.
+    let default_body =
+        if crate::vc_extraction::attr_extract::has_external_trusted_attr(&method.attrs) {
+            None
+        } else {
+            method.default.as_ref().map(|block| {
+                // Extract the trailing expression from the block if it has exactly one.
+                // This gives cleaner body text like "true" instead of "{ true }".
+                if let [syn::Stmt::Expr(expr, None)] = block.stmts.as_slice() {
+                    return quote!(#expr).to_string();
+                }
+                quote!(#block).to_string()
+            })
+        };
 
     // Harvest `default_ensures` — the extra postconditions the trait DEFAULT
     // BODY must establish. Legal ONLY on a defaulted method: a decl-only method
@@ -338,6 +383,13 @@ fn parse_trait_method_decl(
         has_default: method.default.is_some(),
         default_body,
         default_ensures,
+        // H10 (method half): the method's OWN generic parameters, in
+        // declaration order. Recorded here — the only place the method's
+        // `syn::Signature` is in hand — and consulted at the call site, which
+        // is where a collapsing instantiation becomes a solver term. The
+        // trait's own parameters are NOT included: an impl instantiates those
+        // positionally (`TraitImplDecl::trait_type_args`).
+        generic_params: crate::spec_function_catalog::declaration_generic_params(&method.sig),
     })
 }
 
@@ -738,7 +790,12 @@ fn parse_trust_vc_type(
     }
 }
 
-fn encode_type_component(ty: &Type) -> String {
+/// The (erased) concrete self type `parse_trait_impl_decl` records for an impl.
+pub(crate) fn impl_concrete_type(input: &ItemImpl) -> TrustVcType {
+    parse_trust_vc_type(&input.self_ty, &collect_type_params(&input.generics), false)
+}
+
+pub(crate) fn encode_type_component(ty: &Type) -> String {
     encode_ident_component(&extract_type_string(ty))
 }
 
@@ -901,6 +958,9 @@ fn trust_vc_type_tokens(ty: &TrustVcType) -> TokenStream {
         }
         TrustVcType::RecursiveRef(name) => {
             quote!(#ir_path::TrustVcType::RecursiveRef(#name.to_string()))
+        }
+        TrustVcType::NamedCarrier(name) => {
+            quote!(#ir_path::TrustVcType::NamedCarrier(#name.to_string()))
         }
         TrustVcType::Poly => quote!(#ir_path::TrustVcType::Poly),
         TrustVcType::Opaque(name) => {

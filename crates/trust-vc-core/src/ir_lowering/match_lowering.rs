@@ -108,10 +108,17 @@ pub(super) fn lower_match(
     if let Some(test) = normalize_variant_test_match(&scrutinee, &scrutinee_ty, &arms) {
         return Ok(test);
     }
+    // The match is DECLARED at the type its arms derive (§5b rule 6, the
+    // conditional rule over every arm): `match x { 1 => small_u8, _ =>
+    // big_u32 }` is the `int` join, not the first arm's `u8` — the encoder
+    // derived it already, and the one IR typing validator refuses a node
+    // whose declared type disagrees with its arms.
+    let bodies = arms.iter().map(|arm| &arm.body).collect::<Vec<_>>();
+    let ty = super::derive_arms_int_type(&bodies, &target_ty).1;
     Ok(TrustVcExpr::Match {
         scrutinee,
         arms,
-        ty: target_ty,
+        ty,
     })
 }
 
@@ -226,7 +233,7 @@ fn rewrite_value_subpatterns(
                     let binder =
                         value_subpattern_binder(&mut next_binder_index, env, occupied_names);
                     refinements.push(syn::parse_quote!(#binder == #lit));
-                    field.pat = Box::new(value_binder_pattern(binder));
+                    *field.pat = value_binder_pattern(binder);
                 }
             }
             (syn::Pat::Struct(rewritten), refinements)

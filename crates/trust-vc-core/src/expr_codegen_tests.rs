@@ -35,6 +35,16 @@ fn test_unsupported_returns_none() {
     assert!(expr_to_builder_tokens(&parse_expr("Foo { x: 1 }")).is_none());
 }
 
+/// H10: the builder lane emits a bare `fn_call(name, args)` term, which cannot
+/// carry a turbofish instantiation. A generic-instantiated call must decline so
+/// it reaches the checked string lowering; the plain spelling still lowers.
+#[test]
+fn test_turbofish_call_declines_builder_lane() {
+    assert!(expr_to_builder_tokens(&parse_expr("f::<u8>(x)")).is_none());
+    assert!(expr_to_builder_tokens(&parse_expr("f::<u8>(x) == f::<u64>(x)")).is_none());
+    assert!(lower("f(x)").contains("fn_call"));
+}
+
 #[test]
 fn test_extensional_macros_lower_to_builder_helpers() {
     let eq = lower("ext_eq!(s, t)");

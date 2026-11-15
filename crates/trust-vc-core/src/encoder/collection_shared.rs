@@ -7,6 +7,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
+use super::width_coercion::OwnSign;
 use ay_dpll::api::{Sort, Term};
 use num_bigint::BigInt;
 
@@ -375,38 +376,23 @@ impl<'a> AstExpressionParser<'a> {
             return Ok(value);
         }
 
-        // BV width coercion — handles mismatches in both int_mode and BV mode.
-        // Needed for BV-sorted Skolemized forall where bound vars stay in BV
-        // mode but collection element widths may differ (#2187).
-        if let Some((value_width, value_signed)) = self.term_widths.get(&value).copied() {
+        // A bit-vector value must ARRIVE at the element's width: this is where
+        // a value meets a collection it was bound to, and nothing here knows
+        // the value's own type. It used to be widened by its `term_widths`
+        // entry (which answers for whichever occurrence of a hash-consed
+        // constant registered last, not for this value) or TRUNCATED to the
+        // element width — a value re-read at a type that cannot hold it.
+        // Both are refused; the element binding is the IR's (a `seq!`
+        // literal, `push`, typed element coercions).
+        if let Some(value_width) = self.bv_term_width(value) {
             if value_width == expected_width {
                 return Ok(value);
             }
-            if value_width < expected_width {
-                let extended = self
-                    .extend_term(value, expected_width - value_width, value_signed)
-                    .map_err(|e| {
-                        format!(
-                            "Failed to widen BV{} to BV{} for store: {}",
-                            value_width, expected_width, e
-                        )
-                    })?;
-                self.term_widths
-                    .insert(extended, (expected_width, value_signed));
-                return Ok(extended);
-            }
-            let truncated = self
-                .solver
-                .try_bvextract(value, expected_width - 1, 0)
-                .map_err(|e| {
-                    format!(
-                        "Failed to narrow BV{} to BV{} for store: {}",
-                        value_width, expected_width, e
-                    )
-                })?;
-            self.term_widths
-                .insert(truncated, (expected_width, value_signed));
-            return Ok(truncated);
+            return Err(format!(
+                "a {value_width}-bit value cannot be stored as a {expected_width}-bit collection \
+                 element: its own type is not known here, so it is neither widened nor narrowed"
+            )
+            .into());
         }
 
         // Sort::Int → BV conversion — only in int_mode (quantifier bodies
@@ -444,37 +430,17 @@ impl<'a> AstExpressionParser<'a> {
             return Ok(key);
         };
 
-        // BV width coercion — handles mismatches in both int_mode and BV mode.
-        // Needed for BV-sorted Skolemized forall (#2187).
-        if let Some((key_width, key_signed)) = self.term_widths.get(&key).copied() {
+        // As for values: a bit-vector key must arrive at the key width (it
+        // used to be widened by a `term_widths` sign or truncated).
+        if let Some(key_width) = self.bv_term_width(key) {
             if key_width == expected_width {
                 return Ok(key);
             }
-            if key_width < expected_width {
-                let extended = self
-                    .extend_term(key, expected_width - key_width, key_signed)
-                    .map_err(|e| {
-                        format!(
-                            "Failed to widen BV{} to BV{} for key: {}",
-                            key_width, expected_width, e
-                        )
-                    })?;
-                self.term_widths
-                    .insert(extended, (expected_width, key_signed));
-                return Ok(extended);
-            }
-            let truncated = self
-                .solver
-                .try_bvextract(key, expected_width - 1, 0)
-                .map_err(|e| {
-                    format!(
-                        "Failed to narrow BV{} to BV{} for key: {}",
-                        key_width, expected_width, e
-                    )
-                })?;
-            self.term_widths
-                .insert(truncated, (expected_width, key_signed));
-            return Ok(truncated);
+            return Err(format!(
+                "a {key_width}-bit key cannot be used as a {expected_width}-bit collection key: \
+                 its own type is not known here, so it is neither widened nor narrowed"
+            )
+            .into());
         }
 
         // Sort::Int → BV conversion — only in int_mode.
@@ -503,9 +469,15 @@ impl<'a> AstExpressionParser<'a> {
     /// Target width is `pointer_width()` (matches collection length encoding).
     /// Fixes #1745: previously targeted 32-bit, causing sort mismatches with
     /// pointer-width collection lengths.
-    pub(super) fn coerce_to_len_width(&mut self, term: Term) -> TrustVcResult<Term> {
+    ///
+    /// `own` is the sign of the term's OWN IR type (a length, or an index the
+    /// encoder already brought to pointer width, is unsigned by
+    /// construction; a `subrange`/`take`/`skip` argument's comes from its
+    /// expression). It used to be the term's `term_widths` entry, which for a
+    /// hash-consed constant answers for whichever occurrence registered last.
+    pub(super) fn coerce_to_len_width(&mut self, term: Term, own: OwnSign) -> TrustVcResult<Term> {
         let pw = crate::ir::pointer_width();
-        if let Some(&(width, signed)) = self.term_widths.get(&term) {
+        if let Some(width) = self.bv_term_width(term) {
             if width == pw {
                 return Ok(term);
             }
@@ -518,8 +490,8 @@ impl<'a> AstExpressionParser<'a> {
                 self.term_widths.insert(result, (pw, false));
                 return Ok(result);
             }
-            // width < pw: widen via sign/zero extension
-            let result = self.extend_term(term, pw - width, signed)?;
+            // width < pw: widen by the term's own sign
+            let result = self.extend_term(term, pw - width, own)?;
             self.term_widths.insert(result, (pw, false));
             return Ok(result);
         }
@@ -868,12 +840,13 @@ impl<'a> AstExpressionParser<'a> {
     /// ([`Self::retract_index_representability_check`]).
     ///
     /// SOUNDNESS BOUNDARY — the gate is index IDENTITY, never a shape heuristic:
-    ///   * different-index select `j != i`  → `int2bv(j) != store_index` ⇒ no fire.
-    ///   * plain-Seq `s.index(s.len() - 2)`  → receiver not a push result ⇒ no fire
-    ///     (representability obligation stays; NC4 fail-closed preserved).
-    ///   * push-then-`index(0)` at huge len  → `int2bv(0) != int2bv(old_len)` for a
-    ///     symbolic/huge `old_len` ⇒ no fire (the store obligation stays; the read
-    ///     of the possibly-clobbered low cell is NOT rescued).
+    /// * different-index select `j != i`  → `int2bv(j) != store_index` ⇒ no fire.
+    /// * plain-Seq `s.index(s.len() - 2)`  → receiver not a push result ⇒ no fire
+    ///   (representability obligation stays; NC4 fail-closed preserved).
+    /// * push-then-`index(0)` at huge len  → `int2bv(0) != int2bv(old_len)` for a
+    ///   symbolic/huge `old_len` ⇒ no fire (the store obligation stays; the read
+    ///   of the possibly-clobbered low cell is NOT rescued).
+    ///
     /// The genuine `0 <= idx < len` bounds precondition is KEPT (it discharges as
     /// `old_len < old_len + 1`); only the spurious carrier-representability
     /// obligation is suppressed.
@@ -1038,7 +1011,7 @@ impl<'a> AstExpressionParser<'a> {
                 return true;
             }
             name.strip_prefix("__trust_vc_len_")
-                .is_some_and(|rest| AstExpressionParser::is_empty_collection_constructor_name(rest))
+                .is_some_and(AstExpressionParser::is_empty_collection_constructor_name)
         }
         /// Static interval for a finite constructor-chain length witness.
         /// A `__seq_len_push*` node is the length AFTER a push: its axiom
@@ -1338,7 +1311,7 @@ impl<'a> AstExpressionParser<'a> {
                 self.term_widths.insert(bv, (pw, false));
                 Ok(bv)
             }
-            Sort::BitVec(_) => self.coerce_to_len_width(len),
+            Sort::BitVec(_) => self.coerce_to_len_width(len, OwnSign::of_constructed(false)),
             other => {
                 Err(format!("length->index bridge requires numeric sort, got {other:?}").into())
             }
@@ -1507,7 +1480,7 @@ impl<'a> AstExpressionParser<'a> {
     fn len_index_companion_inner(&mut self, len: Term, guard_nonneg: bool) -> TrustVcResult<Term> {
         let pw = crate::ir::pointer_width();
         match self.solver.term_sort(len) {
-            Sort::BitVec(_) => self.coerce_to_len_width(len),
+            Sort::BitVec(_) => self.coerce_to_len_width(len, OwnSign::of_constructed(false)),
             Sort::Int => {
                 // F3 point-interval fold: a concrete in-carrier length gets the
                 // BV LITERAL as its companion (with the bridge collapsed to a

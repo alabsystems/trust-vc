@@ -1,0 +1,7 @@
+exit: 1
+outcome: "verus-rejected"
+diagnostics:
+  error - mismatched types; types must be compatible to use == or != @[12:this is `u64`, 12:this is `core::option::Option<u64>`, 12]
+functions:
+  test rejected -
+vcir:

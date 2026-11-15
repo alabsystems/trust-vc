@@ -4,6 +4,8 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
+use std::collections::HashSet;
+
 use crate::encoder::diagnostics::EncodingDiagnostics;
 use crate::encoder::types::VerifyResult;
 use crate::encoder::AYEncoder;
@@ -36,10 +38,30 @@ fn run_vacuous_precheck(
     assumptions: &[&PreparedObligation],
     broadcast_assumptions: &[&PreparedObligation],
     use_int_for_measures: bool,
+    loop_modified_vars: Option<&HashSet<String>>,
 ) -> Result<VacuousCheckOutput, crate::error::TrustVcError> {
     let slices = VerificationSlices::new(ctx, assumptions, broadcast_assumptions, &[], &[], &[]);
-    let mut sat_encoder = AYEncoder::setup_from_prepared(&slices, use_int_for_measures, None)?;
-    let details = super::solve::try_check_sat_with_details(&mut sat_encoder.solver);
+    // POST-LOOP framing for the precheck (2026-09-10). A function's entry facts
+    // (`requires(i == 0)`) and a loop's auto-generated normal-exit fact
+    // (`PostLoopAssume`: `!(i < 10)`) speak of DIFFERENT states of a
+    // loop-modified var. Every real proof lane already separates them — in
+    // post-loop mode entry assumptions are rewritten to the pre-state while
+    // `PostLoopAssume` stays current and a modified var is left unconstrained
+    // — but this precheck encoded both over the same bare symbol, so the most
+    // ordinary counter loop over a `mut` PARAM (`requires(i == 0) while i < 10
+    // { invariant!(i <= 10); i += 1 }`) reported "assumptions are contradictory"
+    // and every such function came back Unknown (the `let mut i = 0` twin
+    // verified, because a let-local's entry value is scoped to the base case).
+    // Framing the precheck the same way keeps every genuine contradiction:
+    // conflicting `requires` are rewritten to the pre-state TOGETHER, and a
+    // loop that can never exit (`requires(c) while c {}`) still contradicts its
+    // exit fact through the unmodified var's frame condition.
+    let mut sat_encoder =
+        AYEncoder::setup_from_prepared(&slices, use_int_for_measures, loop_modified_vars)?;
+    let details = super::solve::try_check_sat_with_details(
+        &mut sat_encoder.solver,
+        &mut sat_encoder.state.solver_panic,
+    );
     let term_bytes = sat_encoder.solver.instance_term_bytes();
     let used_assumptions = match &details {
         Ok(details) if details.result.result().is_unsat() => {
@@ -87,6 +109,7 @@ pub(super) fn check_vacuous_truth(
     ctx: &PreparedVerificationContext,
     assumptions: &[&PreparedObligation],
     broadcast_assumptions: &[&PreparedObligation],
+    loop_modified_vars: Option<&HashSet<String>>,
     vacuous_precheck_diagnostics: &mut EncodingDiagnostics,
 ) -> Option<VerifyResult> {
     // If assumptions are contradictory, every assertion is trivially proved
@@ -114,6 +137,7 @@ pub(super) fn check_vacuous_truth(
                 assumptions,
                 broadcast_assumptions,
                 use_int_for_measures,
+                loop_modified_vars,
             )
         }));
 

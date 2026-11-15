@@ -16,9 +16,8 @@ mod constructors;
 mod typing;
 
 pub(super) use constructors::{coerce_literal_to_receiver_type, lower_collection_constructor};
-pub(super) use typing::{
-    infer_collection_op_type, invalid_collection_receiver_error, unsupported_collection_op_error,
-};
+pub(in crate::ir_lowering) use typing::infer_collection_op_type;
+pub(super) use typing::{invalid_collection_receiver_error, unsupported_collection_op_error};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CollectionSurface {

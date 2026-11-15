@@ -588,10 +588,13 @@ fn test_try_reduce_to_int_fails_closed_on_typed_arithmetic_overflow() {
         None,
         "i8::MIN / -1 must fail closed even though it fits in i128"
     );
+    // A difference of two `nat`s is an `int` (§5b rule 6: Verus types `nat -
+    // nat` as `int`), so `0 - 1` is exactly -1; it is binding it at `nat`
+    // that is refused (tests/integer_typing_nat_bindings.rs).
     assert_eq!(
         AYEncoder::try_reduce_to_int(&nat_underflow),
-        None,
-        "nat arithmetic must fail closed when the computed result is negative"
+        Some(-1),
+        "a nat difference is the int it denotes"
     );
 }
 
@@ -651,6 +654,71 @@ fn test_try_compute_eval_structural_equality_for_unreduced_pure_exprs() {
         )),
         Some(false),
         "identical unreduced pure calls should compute as not unequal"
+    );
+}
+
+#[test]
+fn test_try_compute_eval_structural_equality_skips_floats() {
+    let f64_ty = TrustVcType::Float { width: 64 };
+    let float_var = TrustVcExpr::Var {
+        name: "x".to_string(),
+        ty: f64_ty.clone(),
+    };
+    let point_ty = TrustVcType::Datatype {
+        name: "P".to_string(),
+        variants: vec![DatatypeVariant::new(
+            "P",
+            vec![("f".to_string(), f64_ty.clone())],
+        )],
+    };
+    let field_read = TrustVcExpr::FnCall {
+        name: "P_f".to_string(),
+        args: vec![TrustVcExpr::Var {
+            name: "p".to_string(),
+            ty: point_ty.clone(),
+        }],
+        return_ty: f64_ty,
+    };
+    let point_var = TrustVcExpr::Var {
+        name: "p".to_string(),
+        ty: point_ty,
+    };
+    let cast_of_var = TrustVcExpr::Cast {
+        expr: Box::new(float_var.clone()),
+        from_ty: TrustVcType::Float { width: 64 },
+        to_ty: TrustVcType::Float { width: 32 },
+    };
+    for operand in [float_var, field_read, point_var, cast_of_var] {
+        for op in [CompareOp::Eq, CompareOp::Ne] {
+            assert_eq!(
+                AYEncoder::try_compute_eval(&compare(op, operand.clone(), operand.clone())),
+                None,
+                "`{operand:?}` compared with itself holds a float: IEEE `NaN == NaN` is \
+                 false, so reflexivity must not decide it"
+            );
+        }
+    }
+
+    // `0.0f32` lowers to a conversion of an integer, which is never NaN.
+    let zero = TrustVcExpr::Cast {
+        expr: Box::new(i32_lit(0)),
+        from_ty: i32_ty(),
+        to_ty: TrustVcType::Float { width: 32 },
+    };
+    assert_eq!(
+        AYEncoder::try_compute_eval(&compare(CompareOp::Eq, zero.clone(), zero.clone())),
+        Some(true),
+        "a float converted from an integer is never NaN, so it equals itself"
+    );
+    let widened = TrustVcExpr::Cast {
+        expr: Box::new(zero),
+        from_ty: TrustVcType::Float { width: 32 },
+        to_ty: TrustVcType::Float { width: 64 },
+    };
+    assert_eq!(
+        AYEncoder::try_compute_eval(&compare(CompareOp::Ne, widened.clone(), widened)),
+        Some(false),
+        "widening a value that is never NaN keeps it off NaN"
     );
 }
 

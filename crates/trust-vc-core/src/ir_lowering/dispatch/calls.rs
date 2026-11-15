@@ -7,9 +7,9 @@
 //! Part of #2526.
 
 use super::super::{
-    expr_path_to_string, infer_expr_type, lower_syn_expr_with_depth,
-    operators::coerce_unsuffixed_literal, trust_vc_type_from_syn_type_with_env, LoweringError,
-    TypeEnv, SOURCE_CATALOG_MATH_INT_MARKER,
+    expr_path_to_string, infer_expr_type, integer_positions_agree, lower_syn_expr_with_depth,
+    operators::coerce_unsuffixed_literal, trust_vc_type_from_syn_type_with_env,
+    type_holds_an_integer, LoweringError, TypeEnv, SOURCE_CATALOG_MATH_INT_MARKER,
 };
 use super::collections::lower_collection_constructor;
 use super::macros::{lower_choose, lower_quantifier};
@@ -43,6 +43,17 @@ pub(in crate::ir_lowering) fn lower_call(
     depth: usize,
 ) -> Result<TrustVcExpr, LoweringError> {
     if let syn::Expr::Path(path) = &*call.func {
+        if path.path.segments.len() == 1
+            && matches!(
+                path.path.segments[0].ident.to_string().as_str(),
+                "Some" | "Ok" | "Err"
+            )
+        {
+            crate::ir_lowering::entry::refuse_unsuffixed_float_elements(
+                call.args.iter(),
+                "an `Option` or `Result` payload",
+            )?;
+        }
         if path_matches_suffix(&path.path, &["SpecFn", "new"]) {
             return lower_spec_fn_new(call, env, depth);
         }
@@ -79,6 +90,13 @@ pub(in crate::ir_lowering) fn lower_call(
                 || path_matches_suffix(&path.path, &["Rc", "new"])
                 || path_matches_suffix(&path.path, &["Arc", "new"]))
         {
+            // The payload's type is the wrapper's type parameter: an
+            // unsuffixed float literal there is the untyped float, never the
+            // exact `real` (`*Box::new(0.1) + 0.2 == 0.3` was `Verified`).
+            crate::ir_lowering::entry::refuse_unsuffixed_float_elements(
+                call.args.iter(),
+                "a `Box`, `Rc` or `Arc` payload",
+            )?;
             return lower_syn_expr_with_depth(&call.args[0], env, depth);
         }
         if call.args.is_empty() {
@@ -91,7 +109,34 @@ pub(in crate::ir_lowering) fn lower_call(
                 return Ok(singleton_expr);
             }
         }
+        if let Some(bound) = lower_let_bound_marker(path, call, env, depth)? {
+            return Ok(bound);
+        }
+        if let Some(bound) = lower_bind_like_marker(path, call, env, depth)? {
+            return Ok(bound);
+        }
+        if let Some(value) = lower_self_typed_marker(path, call, env, depth)? {
+            return Ok(value);
+        }
+        if let Some(value) =
+            super::super::untyped_site::lower_untyped_site_marker(path, call, env, depth)?
+        {
+            return Ok(value);
+        }
+        if let Some(value) =
+            super::super::untyped_site::lower_untyped_binding_marker(path, call, env, depth)?
+        {
+            return Ok(value);
+        }
+        if let Some(value) =
+            super::super::untyped_site::lower_slot_typed_marker(path, call, env, depth)?
+        {
+            return Ok(value);
+        }
         let name = expr_path_to_string(path);
+        if let Some(refusal) = mut_ref_vocabulary_refusal(&name) {
+            return Err(LoweringError::UnsupportedExpr(refusal));
+        }
         if name == SOURCE_CATALOG_MATH_INT_MARKER {
             if !env.allows_source_catalog_math_int_marker() {
                 return Err(LoweringError::UnsupportedExpr(
@@ -126,7 +171,7 @@ pub(in crate::ir_lowering) fn lower_call(
         {
             return Ok(constructor);
         }
-        if let Some(default_value) = lower_default_constructor_call(path, call, env)? {
+        if let Some(default_value) = lower_default_constructor_call(path, call, env, depth)? {
             return Ok(default_value);
         }
         if let Some(projection) = lower_result_projection_shim_call(&name, call, env, depth)? {
@@ -228,11 +273,14 @@ pub(in crate::ir_lowering) fn lower_call(
         // is opaque and says NOTHING by itself; its value is pinned ONLY by that
         // seam's assume, whose ensures is exactly the independently def-side-CHECKED
         // written clause — a lying closure's def-side Counterexample poisons the whole
-        // function, so a call-site assume can never rescue an unchecked ensures. For a
-        // `SpecFn` parameter (never registered by the seam) the term stays
-        // unconstrained, so any read of it fails closed. An ARITY MISMATCH (the arg
-        // count does not match the bound's parameter count) stays a fail-closed
-        // deferred error.
+        // function, so a call-site assume can never rescue an unchecked ensures. For an
+        // `F: Fn(..)` parameter the seam PROVES `f.requires((args,))` and assumes
+        // `f.ensures((args,), result)` only under it (opaque reflection UFs); a ghost
+        // `SpecFn` parameter's term stays unconstrained. The precondition is never
+        // left to this lowering: an unused result is never lowered (H6), so the seam
+        // proves the requires, or rejects the application, at EXTRACTION. An ARITY
+        // MISMATCH is rejected there too; the error below is only a backstop for a
+        // lowering reached without that seam.
         if let Some(TrustVcType::SpecFn(arg_tys, ret_ty)) = env.lookup(&name) {
             if arg_tys.len() == call.args.len() {
                 let receiver = lower_syn_expr_with_depth(&call.func, env, depth)?;
@@ -270,20 +318,32 @@ pub(in crate::ir_lowering) fn lower_call(
         if let Some(wrapping) = lower_wrapping_free_function_call(&name, args.clone(), env) {
             return Ok(wrapping);
         }
+        // Every argument is BOUND at its parameter's type, where that type
+        // holds it, and the call is refused otherwise
+        // (`ir_lowering::bind_call_argument`, §5b rule 6). Only an untyped
+        // literal used to be retyped (and only when it fit); every other
+        // argument met the callee's parameter unbound, so `inc32(255u8)` with
+        // `x: i32` computed `x + 1` at 8 bits.
         let args = if let Some(param_types) = env.lookup_fn_params(&name) {
             args.into_iter()
                 .enumerate()
-                .map(|(index, arg)| {
-                    if let Some(param_ty) = param_types.get(index) {
-                        coerce_unsuffixed_literal(arg, param_ty)
-                    } else {
-                        arg
-                    }
+                .map(|(index, arg)| match param_types.get(index) {
+                    Some(param_ty) => crate::ir_lowering::bind_call_argument(&arg, param_ty)
+                        .map_err(|arg_ty| {
+                            LoweringError::TypeInference(format!(
+                                "call to `{name}` passes a value of type `{}` for parameter {index} \
+                                 of type `{}`, which cannot hold it",
+                                arg_ty.to_type_string(),
+                                param_ty.to_type_string()
+                            ))
+                        }),
+                    None => Ok(arg),
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?
         } else {
             args
         };
+        let args = enforce_generic_instantiation_carrier(&name, path, args, env)?;
         let return_ty = if name == "__trust_vc_dt_size" {
             TrustVcType::MathInt
         } else {
@@ -310,6 +370,283 @@ pub(in crate::ir_lowering) fn lower_call(
     ))
 }
 
+/// NAMED refusals for the `&mut` contract vocabulary, so a spelling this engine
+/// cannot give sound semantics never degrades into a silent acceptance (and
+/// never into the anonymous "unknown return type for function" either).
+///
+/// Two groups, for two different reasons:
+///
+/// 1. **`final` / `mut_ref_future` / `mut_ref_current` reaching lowering at
+///    all.** These are RESOLVED, with context, by the two-state resolver in
+///    `vc_extraction` — ensures-only (entry ops also in `requires`), supported
+///    scalar `&mut` parameters only. Reaching lowering means the resolver did
+///    not claim it: a body `assert!`, a spec-function body, a function with no
+///    supported `&mut` parameter. In a body position these name the endpoints
+///    of a borrow the live path does not track (that is the prophecy substrate,
+///    ruled DO NOT WIRE), so the only sound answer is a refusal.
+///
+/// 2. **`has_resolved` / `has_resolved_unsized` / `after_borrow` anywhere.**
+///    `has_resolved` is a predicate over a REFERENCE (Verus axiomatizes
+///    `has_resolved(t) ==> mut_ref_current(t) == mut_ref_future(t)`), and the
+///    live path has no term for a reference — only for its scalar VALUE. Lowering
+///    `has_resolved(a)` onto that value would identify two distinct references
+///    whose values happen to coincide, so a resolution fact assumed for one would
+///    transfer to the other: `#[requires(has_resolved(a))] #[ensures(has_resolved(b))]`
+///    would VERIFY where Verus refutes it. `after_borrow` names a place's value
+///    after a LOCAL borrow of it ends, an endpoint the live path likewise does not
+///    track. Both are refused rather than approximated.
+fn mut_ref_vocabulary_refusal(name: &str) -> Option<String> {
+    let last = name.rsplit("::").next().unwrap_or(name);
+    let two_state = match last {
+        "__trust_vc_mut_ref_final" => Some("final"),
+        "mut_ref_future" => Some("mut_ref_future"),
+        "mut_ref_current" => Some("mut_ref_current"),
+        _ => None,
+    };
+    if let Some(spelling) = two_state {
+        return Some(format!(
+            "`{spelling}()` is a `&mut` two-state contract op: it is supported in a \
+             function contract clause over a supported scalar `&mut` PARAMETER \
+             (`final`/`mut_ref_future` in `ensures`; `mut_ref_current`/`old` in either), \
+             and is refused here. Outside that position it would name an endpoint of a \
+             borrow this engine does not track, so accepting it would be a silent wrong \
+             answer rather than a refusal"
+        ));
+    }
+    match last {
+        "has_resolved" | "has_resolved_unsized" => Some(
+            "`has_resolved()` is refused: it is a predicate over a mutable REFERENCE, and \
+             this engine models a `&mut` parameter only by the scalar VALUE behind it. \
+             Lowering it onto that value would identify two distinct references whose \
+             values coincide and let a resolution fact assumed for one transfer to the \
+             other — a false `Verified`. Resolution tracking is not implemented"
+                .to_string(),
+        ),
+        "after_borrow" => Some(
+            "`after_borrow()` is refused: it names a place's value after a LOCAL borrow of \
+             it ends, and this engine tracks borrow endpoints only for `&mut` PARAMETERS \
+             (whose borrow spans the whole function). Use `final`/`mut_ref_future` on a \
+             `&mut` parameter in an `ensures`"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Lower `__trust_vc_let_bound::<T>(value)` — the value of a body `let v: T =
+/// value;` as the extractor substitutes it for `v` — as `value` BOUND at `T`
+/// (`ir_lowering::int_binding`, design-trust-proof-backend.md §5b rule 6): a
+/// value of type `T` as is, an untyped literal form typed at `T`, a
+/// fixed-width value at `int`/`nat` lifted to the integer it denotes, and any
+/// other integer value refused. `None` for any other call.
+///
+/// A body `let` is modelled by SUBSTITUTION, and the substituted text used to
+/// carry the initializer's own type: `let v: int = x_u8; v + 1 == 256` read
+/// `x + 1` in `u8`, and `let v: u8 = y_i16` was accepted (and `v` read as the
+/// `i16`) where Rust and Verus reject it.
+fn lower_let_bound_marker(
+    path: &syn::ExprPath,
+    call: &syn::ExprCall,
+    env: &TypeEnv,
+    depth: usize,
+) -> Result<Option<TrustVcExpr>, LoweringError> {
+    let Some(segment) = path.path.segments.last() else {
+        return Ok(None);
+    };
+    if segment.ident != crate::ir_lowering::LET_BOUND_MARKER {
+        return Ok(None);
+    }
+    let one_type = || LoweringError::TypeInference("let-binding marker takes one type".into());
+    let ty = match &segment.arguments {
+        syn::PathArguments::AngleBracketed(args) if args.args.len() == 1 => match args.args.first()
+        {
+            Some(syn::GenericArgument::Type(ty)) => ty,
+            _ => return Err(one_type()),
+        },
+        _ => return Err(one_type()),
+    };
+    let target = trust_vc_type_from_syn_type_with_env(ty, env)?;
+    let (Some(value), 1) = (call.args.first(), call.args.len()) else {
+        return Err(LoweringError::TypeInference(
+            "let-binding marker takes one value".into(),
+        ));
+    };
+    let value = lower_syn_expr_with_depth(value, env, depth)?;
+    // An ascription the lowering cannot RESOLVE (a module-qualified alias
+    // `m::MyInt`, `self::MyInt`, a generic alias `Id<int>`, a generic
+    // struct `Wrap<int>` over a `Wrap<u8>`) binds only a value that holds
+    // no integer, or one whose own type is spelled exactly as the
+    // ascription (`let g: GOpt<u64> = GOpt::<u64>::None`): which integer
+    // type it denotes is not known here, and a value substituted bare kept
+    // its own (`let v: self::MyInt = x_u8; v + 1 == 0` was `Verified`).
+    let spelled_alike = |value_ty: &TrustVcType| {
+        let squash = |text: String| {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        };
+        squash(value_ty.to_type_string()) == squash(target.to_type_string())
+    };
+    let value_ty = infer_expr_type(&value);
+    if target.contains_opaque() && type_holds_an_integer(&value_ty) && !spelled_alike(&value_ty) {
+        return Err(LoweringError::TypeInference(format!(
+            "a `let` ascribed `{}`, which does not resolve to a type here, cannot bind a value \
+             of type `{}`",
+            quote::ToTokens::to_token_stream(ty),
+            value_ty.to_type_string()
+        )));
+    }
+    bind_at_type(value, target, "a `let`").map(Some)
+}
+
+/// `value` stored in a slot of type `target` — a `let`, an assignment, a
+/// field — by rule 6's `int_binding`: a value of the slot's type as is, an
+/// untyped literal form the type holds at it, a fixed-width value lifted to
+/// `int`/`nat`, and a COMPOSITE only where its type agrees with the slot's at
+/// every integer position (`let t: (int, int) = p`, `p: (u8, u8)`, read
+/// `t.0` in `u8`, and `let v: Seq<int> = s`, `s: Seq<u8>`, read `v[0]` in
+/// `u8`). Anything else is refused: unlike a call argument, a slot is never
+/// WIDENED (`let v: i32 = x_i8` is a type error).
+fn bind_at_type(
+    value: TrustVcExpr,
+    target: TrustVcType,
+    slot: &str,
+) -> Result<TrustVcExpr, LoweringError> {
+    use crate::ir_lowering::IntBinding;
+    let refuse = |found: &TrustVcType, target: &TrustVcType| {
+        LoweringError::TypeInference(format!(
+            "{slot} of type `{}` cannot hold a value of type `{}` (Rust and Verus reject the \
+             program)",
+            target.to_type_string(),
+            found.to_type_string()
+        ))
+    };
+    // A float slot holds a value of its own float type. An exact real (an
+    // unsuffixed float literal, which the lowering reads as the `real` it is
+    // next to a `real` peer) or an integer is refused: `let f: f64 = 300.0;`
+    // held the real 300, so `f as u8` floored and wrapped (`== 44`
+    // `Verified`, Rust gives 255) and `let a: f64 = 0.1; let b: f64 = 0.2;`
+    // summed exactly (`a + b == 0.3` `Verified`, false in `f64`).
+    if let TrustVcType::Float { .. } = target {
+        let value_ty = infer_expr_type(&value);
+        if matches!(value_ty, TrustVcType::Real) || crate::ir_lowering::is_integer_type(&value_ty) {
+            return Err(LoweringError::TypeInference(format!(
+                "{slot} of type `{}` cannot hold a value of type `{}`: an exact value is not \
+                 the rounded float Rust stores",
+                target.to_type_string(),
+                value_ty.to_type_string()
+            )));
+        }
+        return Ok(value);
+    }
+    Ok(match crate::ir_lowering::int_binding(&value, &target) {
+        IntBinding::NotInteger
+            if type_holds_an_integer(&target)
+                && !integer_positions_agree(&infer_expr_type(&value), &target) =>
+        {
+            return Err(refuse(&infer_expr_type(&value), &target))
+        }
+        IntBinding::Same | IntBinding::NotInteger => value,
+        // A slot of type `i32` holds a value of that type, not an untyped form
+        // a later peer retypes: the form is pinned as a literal the source
+        // types `i32` is (§5b rule 7).
+        IntBinding::Literal(typed) => crate::ir_lowering::pin_untyped_at_i32(*typed),
+        IntBinding::LiftToInt => TrustVcExpr::Cast {
+            from_ty: infer_expr_type(&value),
+            expr: Box::new(value),
+            to_ty: target,
+        },
+        IntBinding::Mismatch(value_ty) => return Err(refuse(&value_ty, &target)),
+    })
+}
+
+/// `__trust_vc_self_typed(value)` (`SELF_TYPED_MARKER`): an argument
+/// substituted for a closure parameter whose type nothing here reads. Rust
+/// types that parameter from EVERY call of the closure and every use in its
+/// body (`let f = |a| a + 100; f(y_u8); f(200)` makes `a` a `u8`), so an
+/// argument whose type only its context fixes — an untyped literal form, or
+/// a name the extractor substitutes with one (`let k = 200; f(k)`) — would
+/// otherwise keep its own `i32` placeholder (or exact `real`) and the body
+/// would be read in the wrong type. Such a value is refused; any other value
+/// carries its own type, which Rust unifies with the parameter's, and is
+/// returned unchanged.
+fn lower_self_typed_marker(
+    path: &syn::ExprPath,
+    call: &syn::ExprCall,
+    env: &TypeEnv,
+    depth: usize,
+) -> Result<Option<TrustVcExpr>, LoweringError> {
+    if path.qself.is_some()
+        || path.path.segments.len() != 1
+        || path.path.segments[0].ident != crate::ir_lowering::SELF_TYPED_MARKER
+    {
+        return Ok(None);
+    }
+    let (Some(value), 1) = (call.args.first(), call.args.len()) else {
+        return Err(LoweringError::TypeInference(
+            "closure-argument marker takes one value".into(),
+        ));
+    };
+    let refuse = || {
+        LoweringError::UnsupportedExpr(format!(
+            "`{}` is an untyped literal passed to a closure parameter whose type is not \
+             written or declared: Rust types it from the closure's other calls and uses, \
+             which are not read here",
+            quote::ToTokens::to_token_stream(value)
+        ))
+    };
+    if crate::ir_lowering::operators::is_unsuffixed_float_literal_tree(value) {
+        return Err(refuse());
+    }
+    let lowered = lower_syn_expr_with_depth(value, env, depth)?;
+    if crate::ir_lowering::is_untyped_literal(&lowered) {
+        return Err(refuse());
+    }
+    Ok(Some(lowered))
+}
+
+/// `__trust_vc_bind_like(witness, value)` (`BIND_LIKE_MARKER`): `value`
+/// written into a slot whose type is the type `witness` derives — the value
+/// an unascribed binding held when first written, or a projection of it
+/// (§5b rule 12). The value is bound there by the one slot rule
+/// (`bind_at_type`, the `let` marker's): a value of the slot's type as is, a
+/// literal the type holds at it, a fixed-width value under `int`/`nat`
+/// lifted, a composite only at the same integer type at every integer
+/// position — and anything else is refused (a slot is never widened: `v = x`
+/// of an `i8` into an `i32` binding is a type error). A witness that is an
+/// UNTYPED literal form (`let
+/// mut i = 0`, a tuple or sequence of such literals) fixes no type: Rust
+/// infers the binding's type from what it holds, so the value is its own. A
+/// witness the lowering cannot type refuses the write.
+fn lower_bind_like_marker(
+    path: &syn::ExprPath,
+    call: &syn::ExprCall,
+    env: &TypeEnv,
+    depth: usize,
+) -> Result<Option<TrustVcExpr>, LoweringError> {
+    let Some(segment) = path.path.segments.last() else {
+        return Ok(None);
+    };
+    if segment.ident != crate::ir_lowering::BIND_LIKE_MARKER || path.path.segments.len() != 1 {
+        return Ok(None);
+    }
+    let (Some(witness), Some(value), 2) = (call.args.first(), call.args.get(1), call.args.len())
+    else {
+        return Err(LoweringError::TypeInference(
+            "slot-binding marker takes a witness and a value".into(),
+        ));
+    };
+    let witness = lower_syn_expr_with_depth(witness, env, depth)?;
+    let value = lower_syn_expr_with_depth(value, env, depth)?;
+    // A witness that is itself an untyped literal form fixes no type: the
+    // value is its own (`let mut i = 0; i = x`), untouched by the binder.
+    if crate::ir_lowering::witness_fixes_no_type(&witness) {
+        return Ok(Some(value));
+    }
+    let slot = crate::ir_lowering::slot_type_like(&witness, &infer_expr_type(&value));
+    bind_at_type(value, slot, "a write into a slot").map(Some)
+}
+
 /// Apply the expected `int` result type of a source spec function to its body.
 ///
 /// Plain arithmetic is promoted recursively so an expression such as
@@ -317,6 +654,13 @@ pub(in crate::ir_lowering) fn lower_call(
 /// throughout. Explicit finite-width boundaries (`as u16`, `wrapping_add`,
 /// bitwise/shift operations, and finite-returning calls) keep their own
 /// semantics and are converted only after they produce a value.
+///
+/// "Throughout" includes arithmetic whose derived type is already `int` — an
+/// operation over operands of two fixed-width types (`(x + 1) * 2i64`, `x:
+/// i32`). Its operands are promoted like any other: descending only through
+/// FIXED-WIDTH nodes (`TrustVcType::is_integer`) left the `i32` sum `x + 1`
+/// wrapping under an `int` product, so `fn w(x: i32) -> int { (x + 1) * 2i64 }`
+/// read `x + 1` in `i32` while `fn d(x: i32) -> int { x + 1 }` read it exactly.
 fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, LoweringError> {
     fn cast_finite(expr: TrustVcExpr, from_ty: TrustVcType) -> TrustVcExpr {
         TrustVcExpr::Cast {
@@ -327,16 +671,19 @@ fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, Low
     }
 
     let original_ty = infer_expr_type(&expr);
+    // Integer-valued nodes whose plain arithmetic is promoted: fixed-width,
+    // or already exact (`int`/`nat`, incl. a mixed-type operation).
+    let integer_valued = crate::ir_lowering::is_integer_type(&original_ty);
     let promoted = match expr {
         TrustVcExpr::Arith {
             op, left, right, ..
-        } if original_ty.is_integer() => TrustVcExpr::Arith {
+        } if integer_valued => TrustVcExpr::Arith {
             op,
             left: Box::new(promote_result_expr_to_math_int(*left)?),
             right: Box::new(promote_result_expr_to_math_int(*right)?),
             ty: TrustVcType::MathInt,
         },
-        TrustVcExpr::Neg(inner) if original_ty.is_integer() => {
+        TrustVcExpr::Neg(inner) if integer_valued => {
             TrustVcExpr::Neg(Box::new(promote_result_expr_to_math_int(*inner)?))
         }
         TrustVcExpr::Ite {
@@ -344,7 +691,7 @@ fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, Low
             then_branch,
             else_branch,
             ..
-        } if original_ty.is_integer() => TrustVcExpr::Ite {
+        } if integer_valued => TrustVcExpr::Ite {
             cond,
             then_branch: Box::new(promote_result_expr_to_math_int(*then_branch)?),
             else_branch: Box::new(promote_result_expr_to_math_int(*else_branch)?),
@@ -352,7 +699,7 @@ fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, Low
         },
         TrustVcExpr::Match {
             scrutinee, arms, ..
-        } if original_ty.is_integer() => TrustVcExpr::Match {
+        } if integer_valued => TrustVcExpr::Match {
             scrutinee,
             arms: arms
                 .into_iter()
@@ -368,7 +715,7 @@ fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, Low
             ty,
             value,
             body,
-        } if original_ty.is_integer() => TrustVcExpr::Let {
+        } if integer_valued => TrustVcExpr::Let {
             name,
             ty,
             // A local initializer keeps the type it inferred at the `let`;
@@ -399,12 +746,12 @@ fn promote_result_expr_to_math_int(expr: TrustVcExpr) -> Result<TrustVcExpr, Low
 /// measure UF — to the spec surface as `height(x)` and `is_smaller_than(a, b)`
 /// (the value side of Verus's `decreases_to!` predicate & height intrinsic):
 ///
-///   * `height(x)`             → `__trust_vc_dt_size(x)`, the value's structural
-///                               size. The datatype well-foundedness axioms give
-///                               `size(x) >= 0` and `size(child) < size(parent)`.
-///   * `is_smaller_than(a, b)` → `dt_size(a) < dt_size(b)` for datatype arguments;
-///                               `0 <= a && a < b` when BOTH arguments are integer
-///                               (Verus's nat-bounded integer decreases order).
+/// * `height(x)`             → `__trust_vc_dt_size(x)`, the value's structural
+///   size. The datatype well-foundedness axioms give `size(x) >= 0` and
+///   `size(child) < size(parent)`.
+/// * `is_smaller_than(a, b)` → `dt_size(a) < dt_size(b)` for datatype arguments;
+///   `0 <= a && a < b` when BOTH arguments are integer (Verus's nat-bounded
+///   integer decreases order).
 ///
 /// Both are backed by the trusted `dt_size` recurrence, so a genuine substructure
 /// relation (`is_smaller_than(t, Cons(h, t))`) is PROVABLE while an unrelated pair
@@ -629,7 +976,18 @@ fn lower_concrete_trait_path_call(
     for (index, arg) in call.args.iter().skip(1).enumerate() {
         let lowered = lower_syn_expr_with_depth(arg, env, depth)?;
         if let Some(param_ty) = param_types.get(index) {
-            args.push(coerce_unsuffixed_literal(lowered, param_ty));
+            // Bound at the parameter's type, as every call argument is
+            // (`ir_lowering::bind_call_argument`).
+            let bound =
+                crate::ir_lowering::bind_call_argument(&lowered, param_ty).map_err(|arg_ty| {
+                    LoweringError::TypeInference(format!(
+                        "call to `{method_name}` passes a value of type `{}` for parameter \
+                         {index} of type `{}`, which cannot hold it",
+                        arg_ty.to_type_string(),
+                        param_ty.to_type_string()
+                    ))
+                })?;
+            args.push(bound);
         } else {
             args.push(lowered);
         }
@@ -790,6 +1148,150 @@ fn substitute_generic_fn_return_ty(
     Ok(substitute_type_params(declared_return, &bindings))
 }
 
+/// H10, call-site half: the argument at a CARRYING position must be the
+/// instantiation the turbofish names.
+///
+/// A generic source function call lowers to `name(args)`; the encoder keeps
+/// instantiations apart only through the type-keyed `Box_P` it wraps around the
+/// argument at a parameter registered as exactly `TypeParam(P)`, keyed on that
+/// argument's LOWERED type. Declaration-time registration refuses generics no
+/// position carries (`spec_function_catalog::check_generic_declaration`), so
+/// here only the carrier's faithfulness is left to check:
+///
+/// * no turbofish, or no `TypeParam` position: nothing to check — the argument's
+///   own type is Rust's inference (the `i32` literal default included), and a
+///   declaration with no carrying position survives registration only when its
+///   value is instantiation-uniform or datatype-monomorphized;
+/// * a turbofish over a declaration whose carriage-checked registration
+///   recorded its generic parameter ORDER: each explicit argument `G` is mapped
+///   onto its declared parameter `P`, and at every position carrying `P` an
+///   unsuffixed literal is coerced to `G` (`bare::<u8>(0)` used to box both
+///   `bare::<u8>(0)` and `bare::<u16>(0)` as `Box_i32(0)`) and an argument of any
+///   other lowered type fails closed; `_` defers to inference. An argument
+///   count that differs from the declaration fails closed;
+/// * no recorded order: one explicit type argument over one carried parameter
+///   is checked the same way; anything else (two or more explicit arguments,
+///   more than one carried parameter, a const argument) cannot be mapped onto
+///   positions and fails closed.
+fn enforce_generic_instantiation_carrier(
+    name: &str,
+    path: &syn::ExprPath,
+    mut args: Vec<TrustVcExpr>,
+    env: &TypeEnv,
+) -> Result<Vec<TrustVcExpr>, LoweringError> {
+    let Some(syn::PathArguments::AngleBracketed(generic_args)) =
+        path.path.segments.last().map(|segment| &segment.arguments)
+    else {
+        return Ok(args);
+    };
+    let explicit = generic_args
+        .args
+        .iter()
+        .filter(|arg| {
+            matches!(
+                arg,
+                syn::GenericArgument::Type(_) | syn::GenericArgument::Const(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    if explicit.is_empty() {
+        return Ok(args);
+    }
+    let Some(param_types) = env.lookup_fn_params(name) else {
+        return Ok(args);
+    };
+    let mut carried: Vec<&str> = Vec::new();
+    for param_ty in param_types {
+        if let TrustVcType::TypeParam(param) = param_ty {
+            if !carried.contains(&param.as_str()) {
+                carried.push(param.as_str());
+            }
+        }
+    }
+    if carried.is_empty() {
+        return Ok(args);
+    }
+    let refuse = |why: String| {
+        LoweringError::UnsupportedExpr(format!(
+            "generic instantiation not carried: call `{name}` {why}; TrustVc fails closed \
+             instead of guessing which solver term carries the instantiation"
+        ))
+    };
+
+    // Pair each explicit argument with the declared parameter it instantiates.
+    let pairs: Vec<(String, &syn::GenericArgument)> =
+        if let Some(declared) = env.lookup_fn_generic_params(name) {
+            if declared.len() != explicit.len() {
+                return Err(refuse(format!(
+                    "supplies {} explicit generic argument(s) to a declaration with {} type/const \
+                     generic parameter(s)",
+                    explicit.len(),
+                    declared.len()
+                )));
+            }
+            declared
+                .iter()
+                .cloned()
+                .zip(explicit.iter().copied())
+                .collect()
+        } else if let ([arg], [carried_param]) = (explicit.as_slice(), carried.as_slice()) {
+            vec![((*carried_param).to_string(), *arg)]
+        } else {
+            return Err(refuse(format!(
+                "supplies {} explicit generic argument(s) over {} carried type parameter(s), and \
+                 its registration recorded no generic declaration order, so the turbofish \
+                 cannot be mapped onto the carrying positions",
+                explicit.len(),
+                carried.len()
+            )));
+        };
+
+    for (param, arg) in pairs {
+        let carried_ty = TrustVcType::TypeParam(param.clone());
+        if !param_types.contains(&carried_ty) {
+            // Not a carrying position: the declaration gate already decided
+            // whether this parameter may stay uncarried.
+            continue;
+        }
+        let instantiation = match arg {
+            syn::GenericArgument::Type(syn::Type::Infer(_)) => continue,
+            syn::GenericArgument::Type(ty) => env.resolve_syn_type(ty)?,
+            _ => {
+                return Err(refuse(format!(
+                    "supplies a const generic argument for the carried type parameter `{param}`"
+                )))
+            }
+        };
+        for (index, param_ty) in param_types.iter().enumerate() {
+            if *param_ty != carried_ty {
+                continue;
+            }
+            let Some(arg) = args.get_mut(index) else {
+                continue;
+            };
+            let lowered = std::mem::replace(arg, TrustVcExpr::BoolLit(false));
+            // An untyped literal form (a lone literal, or the value of a
+            // binding whose type is not determined elsewhere) takes the
+            // instantiation it is passed at, literal by literal.
+            let coerced =
+                match crate::ir_lowering::untyped_literal_at_peer(&lowered, &instantiation) {
+                    Some(typed) => typed,
+                    None => coerce_unsuffixed_literal(lowered, &instantiation),
+                };
+            let actual = infer_expr_type(&coerced);
+            if actual.to_type_string() != instantiation.to_type_string() {
+                return Err(refuse(format!(
+                    "passes an argument of type `{}` at the position carrying `{param}` = `{}`",
+                    actual.to_type_string(),
+                    instantiation.to_type_string()
+                )));
+            }
+            *arg = coerced;
+        }
+    }
+    Ok(args)
+}
+
 /// Resolve the sole explicit turbofish type argument on a function-call path
 /// (e.g. the `Pair<u64, u8>` in `generic_id::<Pair<u64, u8>>(..)`), if exactly
 /// one is present. Returns `None` when the path carries no angle-bracketed type
@@ -799,14 +1301,10 @@ fn sole_turbofish_type_arg(
     path: &syn::ExprPath,
     env: &TypeEnv,
 ) -> Result<Option<TrustVcType>, LoweringError> {
-    let Some(args) = path
-        .path
-        .segments
-        .iter()
-        .find_map(|segment| match &segment.arguments {
-            syn::PathArguments::AngleBracketed(args) => Some(args),
-            _ => None,
-        })
+    // A function's own generic arguments live on the LAST segment; a turbofish
+    // on an earlier segment (`Type::<X>::f`) names the owning type instead.
+    let Some(syn::PathArguments::AngleBracketed(args)) =
+        path.path.segments.last().map(|segment| &segment.arguments)
     else {
         return Ok(None);
     };
@@ -1637,9 +2135,9 @@ fn decode_projection_field(encoded: &str) -> Result<String, LoweringError> {
         )));
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
-        let high = decode_hex_nibble(pair[0]);
-        let low = decode_hex_nibble(pair[1]);
+    for &[high_byte, low_byte] in hex.as_bytes().as_chunks::<2>().0 {
+        let high = decode_hex_nibble(high_byte);
+        let low = decode_hex_nibble(low_byte);
         let (Some(high), Some(low)) = (high, low) else {
             return Err(LoweringError::UnsupportedExpr(format!(
                 "malformed internal field-projection marker `{encoded}`"
@@ -1812,9 +2310,22 @@ fn lower_default_constructor_call(
     path: &syn::ExprPath,
     call: &syn::ExprCall,
     env: &TypeEnv,
+    depth: usize,
 ) -> Result<Option<TrustVcExpr>, LoweringError> {
     if !call.args.is_empty() || !path_matches_suffix(&path.path, &["default"]) {
         return Ok(None);
+    }
+    // A QUALIFIED spelling that still reaches the lowering (`<Ty>::default()`
+    // / `<Ty as Default>::default()`; the extraction normally renders these
+    // away) names its type in the qself: read it from there.
+    if path.qself.is_some() {
+        if !crate::default_constructor::qself_call_is_default_constructor(path) {
+            return Ok(None);
+        }
+        let Some(qself) = path.qself.as_ref() else {
+            return Ok(None);
+        };
+        return lower_default_of_syn_type(&qself.ty, env, depth);
     }
     let Some(receiver_segment) = path.path.segments.iter().rev().nth(1) else {
         return Ok(None);
@@ -1861,8 +2372,50 @@ fn lower_default_constructor_call(
             let option_ty = option_type(inner_ty);
             Ok(Some(datatype_constructor_expr(&option_ty, "None", vec![])?))
         }
-        _ => Ok(None),
+        // Every other receiver spelling — `f32::default()`, `char::default()`,
+        // `String::default()`, `<&str>` (rendered `str::default()` by the
+        // extraction), `Vec::<T>::default()`, `VecDeque::<T>::default()`,
+        // `HashMap::<K, V>::default()` / `HashSet::<T>::default()`,
+        // `Box::<T>::default()` / `Rc` / `Arc`, `PhantomData::<T>::default()` —
+        // is read as a TYPE (the turbofish becomes the type's arguments) and
+        // lowered as the source the shared `default_constructor` model spells
+        // for it. A user type or a type parameter spells as its own
+        // `Ty::default()` and is declined here, so it resolves ONLY through a
+        // registered symbol (an `impl Default` body axiom, a
+        // `#[derive(Default)]`-synthesized body, the per-type-parameter
+        // constant) and otherwise keeps the "unknown return type" refusal.
+        _ => {
+            let Some(receiver_ty) =
+                crate::default_constructor::default_receiver_syn_type(&path.path)
+            else {
+                return Ok(None);
+            };
+            lower_default_of_syn_type(&receiver_ty, env, depth)
+        }
     }
+}
+
+/// Lower the default value of `ty` through its source-level model, or
+/// `Ok(None)` when the model spells nothing for it (or spells a user-type /
+/// type-parameter receiver call, which the registered-symbol path owns).
+fn lower_default_of_syn_type(
+    ty: &syn::Type,
+    env: &TypeEnv,
+    depth: usize,
+) -> Result<Option<TrustVcExpr>, LoweringError> {
+    let Some(source) = crate::default_constructor::default_value_source_for_type(ty) else {
+        return Ok(None);
+    };
+    if crate::default_constructor::source_is_receiver_default_call(&source) {
+        return Ok(None);
+    }
+    let expr: syn::Expr = syn::parse_str(&source).map_err(|err| {
+        LoweringError::TypeInference(format!(
+            "default constructor model for '{}' did not parse: {err}",
+            quote::quote!(#ty).to_string().replace(' ', "")
+        ))
+    })?;
+    lower_syn_expr_with_depth(&expr, env, depth).map(Some)
 }
 
 fn lower_cow_constructor_call(
@@ -2117,7 +2670,7 @@ fn path_matches_suffix(path: &syn::Path, suffix: &[&str]) -> bool {
         .map(|segment| segment.ident.to_string())
         .collect();
     let suffix: Vec<_> = suffix.iter().map(|segment| segment.to_string()).collect();
-    segments.as_slice().ends_with(&suffix)
+    segments.ends_with(&suffix)
 }
 
 fn lower_prophecy_new_call(

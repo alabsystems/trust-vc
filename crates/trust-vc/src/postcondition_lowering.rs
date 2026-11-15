@@ -39,7 +39,7 @@ pub(crate) enum OldCaptureKind {
 /// Distinguishes `final!(x)` (value copy) from `final!(*x)` (dereference copy).
 ///
 /// The exact symmetric twin of [`OldCaptureKind`] for the new-mut-ref
-/// (prophecy) core (design `design-new-mut-ref.md`, Phase 0). `final(x)`
+/// (prophecy) core (design `docs/archive/design-new-mut-ref.md`, Phase 0). `final(x)`
 /// names the prophesied final value of a binding; `final(*x)` names the
 /// prophesied final value behind a `&mut` place. This is pure plumbing: Phase 0
 /// captures the surface syntax but introduces no verification behavior.
@@ -93,7 +93,19 @@ fn canonical_expr_ast_string(expr: &TokenStream) -> String {
 }
 
 fn normalize_expr_tokens(expr: TokenStream) -> syn::Result<TokenStream> {
-    parse_expr_tokens_with_chains(expr).map(|parsed| quote!(#parsed))
+    let parsed = parse_expr_tokens_with_chains(expr.clone())?;
+    let tokens = quote!(#parsed);
+    // `final(..)` now SURVIVES the parse: `trust_vc_core` rewrites the reserved
+    // keyword to a marker callee so the clause is parseable at all (landed
+    // 2026-09-20; see `chained_comparisons::MUT_REF_FINAL_MARKER`). That marker
+    // is resolved, with context, by the file-check path's two-state resolver —
+    // there is no runtime function behind it. Emitting it into a runtime
+    // `assert!` would compile to a call to an undefined symbol, so refuse HERE
+    // with a named macro diagnostic instead of handing rustc a dangling name.
+    // The same refusal guards every OTHER runtime surface from the shared token
+    // path; both call the one helper so the diagnostic cannot drift apart.
+    crate::macro_expand::reject_mut_ref_final_marker(&expr, &tokens)?;
+    Ok(tokens)
 }
 
 /// Analyzes and lowers postcondition expressions into a plan.
@@ -314,20 +326,26 @@ impl LoweredPostconditions {
     /// Emits runtime `assert!()` checks using the rewritten expressions.
     ///
     /// The assert message uses the *original* expression for readability,
-    /// while the checked expression uses `__trust_vc_old_*` bindings.
+    /// while the checked expression uses `__trust_vc_old_*` bindings. A clause
+    /// whose run-time value can differ from the ghost reading is only
+    /// type-checked (`trust_vc_core::runtime_check_or_typecheck`).
     pub(crate) fn emit_runtime_asserts(&self) -> Vec<TokenStream> {
         self.clauses
             .iter()
             .map(|clause| {
                 let original = &clause.original_expr;
                 let rewritten = &clause.rewritten_expr;
-                quote! {
-                    assert!(
-                        #rewritten,
-                        "trust_vc postcondition failed: {}",
-                        stringify!(#original)
-                    );
-                }
+                trust_vc_core::runtime_check_or_typecheck(
+                    rewritten,
+                    trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+                    quote! {
+                        assert!(
+                            #rewritten,
+                            "trust_vc postcondition failed: {}",
+                            stringify!(#original)
+                        );
+                    },
+                )
             })
             .collect()
     }
@@ -444,14 +462,20 @@ fn collect_old_captures(
 
 // --- final(...) capture analysis (symmetric twin of old!() above) ---
 //
-// New-mut-ref/prophecy core Phase 0 (`design-new-mut-ref.md`). The
+// New-mut-ref/prophecy core Phase 0 (`docs/archive/design-new-mut-ref.md`). The
 // symmetric twin of the `old!()` machinery: `final(x)` -> Value, `final(*x)` ->
 // Deref, with mixed-use validation and both bare and `trust_vc::`-qualified
 // forms. The surface differs from `old` in one way: `final` is a reserved Rust
 // keyword, so the spec op is spelled as a call `final(...)` (no `!`), matching
 // the `final(value)` / `*final(x)` boundary syntax in the mut-refs regressions.
-// Capture is pure token scanning; rewriting `final(...)` out of the normalized
-// expression (so syn does not choke on the keyword) is Phase 1's job.
+// Capture is pure token scanning. The rewrite that makes `final(...)` PARSE —
+// which is what this table was waiting on — landed 2026-09-20, but NOT here: it
+// lives in `trust_vc_core::chained_comparisons` (`MUT_REF_FINAL_MARKER`), on the
+// shared token path every contract surface funnels through, and the MEANING is
+// assigned with clause context by `trust_vc_core::vc_extraction`'s two-state
+// resolver. So this table is still unconsumed, and `final(..)` is refused on the
+// runtime proc-macro surface by `normalize_expr_tokens` above (there is no
+// runtime function behind the marker). Do not re-implement the rewrite here.
 
 fn parse_final_capture_group(group: &proc_macro2::Group) -> Option<(String, FinalCaptureKind)> {
     let tokens: Vec<proc_macro2::TokenTree> = group.stream().into_iter().collect();

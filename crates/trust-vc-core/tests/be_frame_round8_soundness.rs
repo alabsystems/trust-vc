@@ -36,10 +36,21 @@ fn run(src: &str, func: &str) -> VerifyResult {
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(src.as_bytes()).unwrap();
     drop(f);
-    verify_function_from_file(path.to_str().unwrap(), func).unwrap_or_else(|e| {
-        VerifyResult::Error {
-            message: e.to_string(),
-        }
+    // CACHE DISCIPLINE (mandatory, round-4 correction): the on-disk verification
+    // cache stores only `Verified` results and survives `cargo clean`, and this
+    // helper called `verify_function_from_file` directly — so whether an
+    // `assert_verified` pin here was recomputed depended on the CALLER's
+    // environment, which is exactly what the sibling suite
+    // `closure_escape_body_soundness.rs` mandates against. MEASURED: it costs
+    // this suite nothing — 20 tests in 0.33-0.56 s with the cache off — so the
+    // suite's SPEED was never evidence of cache-serving; these fixtures are
+    // simply cheap.
+    trust_vc_core::env::with_serialized_env_vars(&[("TRUST_VC_DISABLE_VC_CACHE", "1")], || {
+        verify_function_from_file(path.to_str().unwrap(), func).unwrap_or_else(|e| {
+            VerifyResult::Error {
+                message: e.to_string(),
+            }
+        })
     })
 }
 

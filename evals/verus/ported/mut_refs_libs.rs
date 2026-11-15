@@ -17,19 +17,38 @@
 //   Vec-held mutable-reference update behavior;
 // - TrustVc-verified Option Some/None and Option::as_mut(None) observation
 //   prefixes shared by the upstream cases;
+// - TrustVc-verified Option::as_slice views of a known None / Some(scalar)
+//   receiver (2026-09-16: `test_as_slice_none` / `test_as_slice_some` verify,
+//   `fail_as_slice_none` / `fail_as_slice_some` refute on the trailing
+//   `false`; the case names keep their historical `_currently_blocked`
+//   suffix because the suite and manifest key on them; `Option<i32>`
+//   receivers fail closed wholesale because a declared `Option<uN>` with an
+//   unsuffixed payload is recorded as `Option<i32>`);
+// - TrustVc-verified Option::insert / Option::get_or_insert `&mut` payload
+//   aliases (2026-09-17: the four `test_*` bodies and their pre-mutation
+//   result observations verify, and the four `fail_*` bodies refute on the
+//   trailing `false`; the case names keep their historical
+//   `_currently_blocked` suffix because the suite and manifest key on them;
+//   admission is the straight-line shape pinned by
+//   `crates/trust-vc-core/tests/option_payload_alias_capability.rs` — a
+//   top-level `let r = x.insert(<typed literal>)` on a KNOWN `None` /
+//   `Some(<typed literal>)` local, `*r` reads, statement-level typed-literal
+//   writes, and no use of `x` until `r`'s last use);
 // - TrustVc-verified Vec::new/push and direct `vec![...]` scalar indexed-update
 //   subsets adjacent to upstream Vec index assignment;
 // - stable counterexamples on those prefixes and a Vec::new/push tuple-field
 //   assignment false tail;
 // - current fail-closed boundaries for library-returned mutable-reference
-//   mutation, mutable slice writes, broader direct upstream `vec!` shapes, Vec
+//   mutation, mutable slice views and writes, broader direct upstream `vec!` shapes, Vec
 //   field/nested index mutation, index-out-of-bounds diagnostics,
 //   Vec-held mutable references, and Verus-only `has_resolved`.
 //
 // Full parity still needs verification support for Option::as_mut(Some)
 // mutable-reference mutation, Option::as_mut(None) source-Option preservation
-// after the library call, Option::as_slice/as_mut_slice, Option::insert/
-// get_or_insert, broader direct `vec!` literal modeling beyond scalar indexed
+// after the library call, Option::as_mut_slice, Option::insert/
+// get_or_insert beyond the admitted straight-line shape (parameter or
+// unknown-state receivers, non-literal payloads, writes in branches or loops,
+// escaping aliases), broader direct `vec!` literal modeling beyond scalar indexed
 // assignment, tuple-field and nested Vec index assignment, Vec index mutable
 // references, vectors of mutable references, Verus `has_resolved`, and
 // index-out-of-bounds diagnostics.
@@ -109,14 +128,14 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_option_as_slice_none_observation_currently_blocked",
         "test_options_as_mut_slice::test_as_slice_none",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_libs_option_as_slice_some_observation_currently_blocked",
         "test_options_as_mut_slice::test_as_slice_some",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_libs_option_as_mut_slice_none_observation_currently_blocked",
@@ -133,14 +152,14 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_option_as_slice_none_false_tail_currently_blocked",
         "test_options_as_mut_slice::fail_as_slice_none",
-        "error",
-        0,
+        "counterexample",
+        3,
     ),
     (
         "mut_refs_libs_option_as_slice_some_false_tail_currently_blocked",
         "test_options_as_mut_slice::fail_as_slice_some",
-        "error",
-        0,
+        "counterexample",
+        4,
     ),
     (
         "mut_refs_libs_option_as_mut_slice_none_false_tail_currently_blocked",
@@ -157,74 +176,74 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_option_insert_mut_ref_currently_blocked",
         "test_option_insert_and_get_or_insert::test_insert_none",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_libs_option_insert_some_mut_ref_currently_blocked",
         "test_option_insert_and_get_or_insert::test_insert_some",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_libs_option_get_or_insert_none_mut_ref_currently_blocked",
         "test_option_insert_and_get_or_insert::test_get_or_insert_none",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_libs_option_get_or_insert_some_mut_ref_currently_blocked",
         "test_option_insert_and_get_or_insert::test_get_or_insert_some",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_libs_option_insert_none_result_observation_currently_blocked",
         "test_option_insert_and_get_or_insert::test_insert_none pre-mutation result observation",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_libs_option_insert_some_result_observation_currently_blocked",
         "test_option_insert_and_get_or_insert::test_insert_some pre-mutation result observation",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_libs_option_get_or_insert_none_result_observation_currently_blocked",
         "test_option_insert_and_get_or_insert::test_get_or_insert_none pre-mutation result observation",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_libs_option_get_or_insert_some_result_observation_currently_blocked",
         "test_option_insert_and_get_or_insert::test_get_or_insert_some pre-mutation result observation",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_libs_option_insert_none_false_tail_currently_blocked",
         "test_option_insert_and_get_or_insert::fail_insert_none",
-        "error",
-        0,
+        "counterexample",
+        4,
     ),
     (
         "mut_refs_libs_option_insert_some_false_tail_currently_blocked",
         "test_option_insert_and_get_or_insert::fail_insert_some",
-        "error",
-        0,
+        "counterexample",
+        4,
     ),
     (
         "mut_refs_libs_option_get_or_insert_none_false_tail_currently_blocked",
         "test_option_insert_and_get_or_insert::fail_get_or_insert_none",
-        "error",
-        0,
+        "counterexample",
+        4,
     ),
     (
         "mut_refs_libs_option_get_or_insert_some_false_tail_currently_blocked",
         "test_option_insert_and_get_or_insert::fail_get_or_insert_some",
-        "error",
-        0,
+        "counterexample",
+        4,
     ),
     (
         "mut_refs_libs_vec_index_assign_currently_blocked",
@@ -241,7 +260,7 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_vec_index_assign_fields_currently_blocked",
         "test_vec_index_assign::test_fields",
-        "counterexample",
+        "verified",
         1,
     ),
     (
@@ -253,20 +272,20 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_vec_index_assign_nested_currently_blocked",
         "test_vec_index_assign::test_nested",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
         "mut_refs_libs_vec_index_assign_nested_false_tail_currently_blocked",
         "test_vec_index_assign::fails_nested",
-        "error",
-        0,
+        "counterexample",
+        1,
     ),
     (
         "mut_refs_libs_vec_push_nested_index_assign_currently_blocked",
         "test_vec_index_assign::test_nested Vec::new/push nested assignment boundary",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
         "mut_refs_libs_vec_push_tuple_field_index_assign_false_tail_counterexample",
@@ -277,14 +296,14 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_vec_index_mut_ref_currently_blocked",
         "test_vec_index_mut_ref::test_mut_ref",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
         "mut_refs_libs_vec_index_mut_ref_false_tail_currently_blocked",
         "test_vec_index_mut_ref::fails_mut_ref",
-        "error",
-        0,
+        "counterexample",
+        1,
     ),
     (
         "mut_refs_libs_vec_index_mut_ref_fields_currently_blocked",
@@ -313,8 +332,8 @@ pub const MUT_REFS_LIBS_RS_EXPECTED_CASES: &[MutRefsLibsExpectedCase] = &[
     (
         "mut_refs_libs_vec_push_index_mut_ref_currently_blocked",
         "test_vec_index_mut_ref::test_mut_ref Vec::new/push mutable index reference boundary",
-        "error",
-        0,
+        "verified",
+        1,
     ),
     (
         "mut_refs_libs_vec_index_out_of_bounds_assign_currently_blocked",

@@ -92,27 +92,46 @@ pub const UNIONS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     ),
 ];
 
+// WHAT THESE PATTERNS MEASURE, and what they no longer can. Every native-union
+// case is now refused at EXTRACTION ENTRY (the union taint closure in
+// `vc_extraction::reject_union_use`), which PREEMPTS the four later boundaries
+// these cases used to land on — the `get_union_field` builtin, `is_variant`, the
+// native destructuring pattern, and the unsafe-block/unknown-type path. Those
+// downstream messages are unreachable for a union-declaring file and cannot be
+// asserted here any more; asserting them would be asserting a diagnostic the
+// engine no longer emits. `expected_error_patterns` is an AND-conjunction over
+// the case's own joined diagnostic context, so each case instead pins the
+// blanket boundary AND its own SUBJECT line, which keeps the eight assertions
+// distinguishable: a case passes only when the refusal named THAT function and
+// the union it reached, not merely when some union refusal appeared somewhere.
 pub const UNIONS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     (
         "unions_native_field_read_currently_blocked",
-        &["unsafe block", "unknown type", "unsupported"],
+        &[
+            "does not model Rust unions",
+            "`unions_native_field_read_currently_blocked` names the union `UnionsNative`",
+        ],
     ),
     (
         "unions_native_pattern_currently_blocked",
         &[
-            "unsafe block",
-            "using a union",
-            "unsupported",
-            "unresolved variable `x`",
+            "does not model Rust unions",
+            "`unions_native_pattern_currently_blocked` names the union `UnionsNative`",
         ],
     ),
     (
         "unions_get_union_field_currently_blocked",
-        &["string literals are not yet supported", "get_union_field"],
+        &[
+            "does not model Rust unions",
+            "`unions_get_union_field_currently_blocked` names the union `UnionsNative`",
+        ],
     ),
     (
         "unions_is_variant_currently_blocked",
-        &["string literals are not yet supported", "is_variant"],
+        &[
+            "does not model Rust unions",
+            "`unions_is_variant_currently_blocked` names the union `UnionsNative`",
+        ],
     ),
 ];
 

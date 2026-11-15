@@ -360,6 +360,18 @@ fn assert_recommends_verified(case: &str) {
     }
 }
 
+/// Strips the dual-width arch tag (`_32bit`, `_64bit`, `_32bit_64bit`) that
+/// `verify_function_from_file` appends to a failing obligation's name when the
+/// unit is verified at both pointer widths.
+fn strip_arch_tag(name: &str) -> &str {
+    for tag in ["_32bit_64bit", "_32bit", "_64bit"] {
+        if let Some(base) = name.strip_suffix(tag) {
+            return base;
+        }
+    }
+    name
+}
+
 fn assert_recommends_counterexample(case: &str, expected_obligation: &str) {
     let path = recommends_port_path();
     let path = path.to_str().expect("recommends.rs path should be UTF-8");
@@ -372,8 +384,14 @@ fn assert_recommends_counterexample(case: &str, expected_obligation: &str) {
             obligation_name, ..
         } => {
             if !expected_obligation.is_empty() {
+                // The ported file is width-polymorphic as a WHOLE (its own
+                // `RECOMMENDS_RS_EXPECTED_CASES` table is typed with `usize`),
+                // so every non-Verified verdict carries the dual-arch tag
+                // (`postcondition_32bit_64bit`); compare the obligation's base
+                // name.
                 assert_eq!(
-                    obligation_name, expected_obligation,
+                    strip_arch_tag(&obligation_name),
+                    expected_obligation,
                     "{case} should fail on the propagated callee recommends obligation"
                 );
             }

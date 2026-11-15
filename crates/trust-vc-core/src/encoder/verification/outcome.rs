@@ -76,8 +76,12 @@ pub(crate) enum AssertionOutcome {
     Verified,
     /// A counterexample was found — the assertion is violable.
     Counterexample {
-        /// Formatted obligation name with location context.
+        /// The obligation's NAME. Never carries a source position — the
+        /// position is `location`, beside it.
         obligation_name: String,
+        /// The refuted obligation's rendered `file:line:column`, when the lane
+        /// recorded one.
+        location: Option<String>,
         /// Variable assignments that violate the obligation (if available).
         model: Option<String>,
         /// Structured variable bindings from the counterexample model.
@@ -136,10 +140,12 @@ impl From<AssertionOutcome> for VerifyResult {
             AssertionOutcome::Verified => VerifyResult::Verified,
             AssertionOutcome::Counterexample {
                 obligation_name,
+                location,
                 model,
                 bindings,
             } => VerifyResult::Counterexample {
                 obligation_name,
+                location,
                 model,
                 bindings,
             },

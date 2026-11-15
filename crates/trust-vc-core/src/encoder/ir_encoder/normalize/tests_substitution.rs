@@ -91,6 +91,22 @@ fn test_extract_equality_var_var_skipped() {
     assert_eq!(extract_equality_binding(&assumption), None);
 }
 
+/// No extraction for a float variable: `x == 0.0` holds for `x = -0.0`.
+#[test]
+fn test_extract_equality_float_var_skipped() {
+    let x = TrustVcExpr::Var {
+        name: "x".to_string(),
+        ty: TrustVcType::Float { width: 64 },
+    };
+    let zero = TrustVcExpr::Cast {
+        expr: Box::new(int_lit(0)),
+        from_ty: TrustVcType::MathInt,
+        to_ty: TrustVcType::Float { width: 64 },
+    };
+    assert_eq!(extract_equality_binding(&eq(x.clone(), zero.clone())), None);
+    assert_eq!(extract_equality_binding(&eq(zero, x)), None);
+}
+
 /// No extraction for non-equality comparisons.
 #[test]
 fn test_extract_equality_non_eq_skipped() {

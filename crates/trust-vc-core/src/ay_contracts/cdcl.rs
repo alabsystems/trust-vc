@@ -116,11 +116,7 @@ pub(crate) fn validate_conflict_analysis(
             neg_vars.insert(lit.variable());
         }
     }
-    if pos_vars.intersection(&neg_vars).next().is_some() {
-        return false;
-    }
-
-    true
+    pos_vars.intersection(&neg_vars).next().is_none()
 }
 
 /// Snapshot of solver state before and after a backtrack operation.
@@ -241,9 +237,5 @@ pub(crate) fn validate_learned_clause_quality(clause: &[ContractLiteral]) -> boo
             neg_vars.insert(lit.variable());
         }
     }
-    if pos_vars.intersection(&neg_vars).next().is_some() {
-        return false;
-    }
-
-    true
+    pos_vars.intersection(&neg_vars).next().is_none()
 }

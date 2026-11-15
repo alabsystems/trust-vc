@@ -253,6 +253,14 @@ pub fn certificate_to_trust_ir(
             "trust-vc/ay".to_string()
         },
         evidence: trust_ir::ProofEvidence::SmtProof(cert.alethe.clone().into_bytes()),
+        // Coverage NOT RECORDED (trust-ir v41), which is what a producer
+        // should mint: the in-module row is NON-AUTHORITATIVE. A consumer
+        // derives coverage from evidence it re-checks (trust-vc's release
+        // admission: trust-ir-build's basis K, the kernel replay of the very
+        // certificate), and refuses a `Some` row that over-states that. An
+        // SMT certificate like this one is not kernel-replayed, so its
+        // coverage is undetermined whatever row it carries.
+        assurance: None,
     }
 }
 
@@ -286,6 +294,10 @@ mod tests {
         let pc = certificate_to_trust_ir(&cert, 42);
         assert_eq!(pc.obligation, trust_ir::ProofId::new(42));
         assert!(pc.prover.contains("trust-vc/ay"));
+        assert_eq!(
+            pc.assurance, None,
+            "the driver holds no evidence bundle, so it records no coverage"
+        );
         match pc.evidence {
             trust_ir::ProofEvidence::SmtProof(bytes) => {
                 assert!(

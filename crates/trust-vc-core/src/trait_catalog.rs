@@ -189,7 +189,19 @@ fn collect_traits(
                 )? {
                     decl.trait_name = resolved;
                 }
-                catalog.trait_impl_decls.push(decl);
+                // Same source census as the file lane
+                // (`trait_contracts::collect_source_trait_declarations`), taken
+                // after resolution; the dedup unions it, so a scope that sees a
+                // sibling the other producer missed still fails closed.
+                let impl_group = crate::trait_impl_groups::impl_group_census(
+                    root_file,
+                    scope_index,
+                    &decl,
+                    item_impl,
+                );
+                catalog
+                    .trait_impl_decls
+                    .push(decl.with_impl_group(impl_group));
             }
             Item::Mod(item_mod) => {
                 if let Some((_, nested_items)) = &item_mod.content {

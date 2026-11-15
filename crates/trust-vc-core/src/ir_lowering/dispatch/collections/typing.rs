@@ -10,7 +10,7 @@ use crate::ir::TrustVcType;
 use crate::ir_expr::{CollectionOp, TrustVcExpr};
 use crate::ir_lowering::{infer_expr_type, LoweringError};
 
-pub(in crate::ir_lowering::dispatch) fn infer_collection_op_type(
+pub(in crate::ir_lowering) fn infer_collection_op_type(
     op: &CollectionOp,
     receiver_ty: &TrustVcType,
     args: &[TrustVcExpr],

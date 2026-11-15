@@ -31,6 +31,7 @@ pub(super) fn valued_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -40,6 +41,7 @@ pub(super) fn valued_trait_decl() -> TraitDecl {
 pub(super) fn valued_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6Valued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), concrete_fn_name.to_string())],
@@ -61,6 +63,7 @@ fn gated_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -70,6 +73,7 @@ fn gated_trait_decl() -> TraitDecl {
 fn gated_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6Gate".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("grant".to_string(), concrete_fn_name.to_string())],
@@ -309,12 +313,14 @@ fn test_trait_conformance_skips_default_methods_without_binding() {
             has_default: true,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6DefaultOnly".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -357,6 +363,7 @@ fn bad_default_trait_decl() -> TraitDecl {
             has_default: true,
             default_body: Some("5u8".to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -373,6 +380,7 @@ fn test_trait_conformance_rejects_bad_nonoverridden_default() {
     ctx.register_trait_decl(bad_default_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -449,12 +457,14 @@ fn test_trait_conformance_accepts_correct_nonoverridden_default_no_over_rejectio
             has_default: true,
             default_body: Some("15u8".to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3Good".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -497,12 +507,14 @@ fn test_trait_conformance_accepts_default_using_requires_to_establish_ensures() 
             has_default: true,
             default_body: Some("x".to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3Req".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -537,12 +549,14 @@ fn test_trait_conformance_rejects_default_when_requires_dropped() {
             has_default: true,
             default_body: Some("x".to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3NoReq".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -588,6 +602,7 @@ fn bad_default_bool_trait_decl() -> TraitDecl {
             has_default: true,
             default_body: Some("false".to_string()),
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -606,6 +621,7 @@ fn test_trait_conformance_good_override_of_default_still_verifies() {
     ctx.register_trait_decl(bad_default_bool_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3B".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("m".to_string(), "TR3BBoolImpl__m_good".to_string())],
@@ -641,6 +657,7 @@ fn test_trait_conformance_bad_override_of_default_fails() {
     ctx.register_trait_decl(bad_default_bool_trait_decl());
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3B".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("m".to_string(), "TR3BBoolImpl__m_bad".to_string())],
@@ -690,12 +707,14 @@ fn test_trait_conformance_skips_default_without_body_text() {
             has_default: true,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TR3NoBody".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -743,6 +762,7 @@ fn test_trait_conformance_rejects_bad_sibling_call_default() {
                 has_default: true,
                 default_body: Some("5u8".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -753,6 +773,7 @@ fn test_trait_conformance_rejects_bad_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.g()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -760,6 +781,7 @@ fn test_trait_conformance_rejects_bad_sibling_call_default() {
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -814,6 +836,7 @@ fn test_trait_conformance_accepts_good_sibling_call_default() {
                 has_default: true,
                 default_body: Some("20u8".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -824,6 +847,7 @@ fn test_trait_conformance_accepts_good_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.g()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -831,6 +855,7 @@ fn test_trait_conformance_accepts_good_sibling_call_default() {
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibGood".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -872,6 +897,7 @@ fn test_trait_conformance_accepts_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("20u8".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "g".to_string(),
@@ -882,6 +908,7 @@ fn test_trait_conformance_accepts_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.h()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -892,6 +919,7 @@ fn test_trait_conformance_accepts_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.g()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -899,6 +927,7 @@ fn test_trait_conformance_accepts_nested_sibling_call_default() {
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibNest".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -933,6 +962,7 @@ fn test_trait_conformance_rejects_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("5u8".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "g".to_string(),
@@ -943,6 +973,7 @@ fn test_trait_conformance_rejects_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.h()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -953,6 +984,7 @@ fn test_trait_conformance_rejects_nested_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.g()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -960,6 +992,7 @@ fn test_trait_conformance_rejects_nested_sibling_call_default() {
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibNestBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1001,6 +1034,7 @@ fn test_trait_conformance_accepts_param_sibling_call_default() {
                 has_default: true,
                 default_body: Some("x".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -1011,6 +1045,7 @@ fn test_trait_conformance_accepts_param_sibling_call_default() {
                 has_default: true,
                 default_body: Some("self.pick(y)".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -1018,6 +1053,7 @@ fn test_trait_conformance_accepts_param_sibling_call_default() {
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibParam".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1054,6 +1090,7 @@ fn test_trait_conformance_rejects_param_sibling_call_default_without_requires() 
                 has_default: true,
                 default_body: Some("x".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "f".to_string(),
@@ -1064,6 +1101,7 @@ fn test_trait_conformance_rejects_param_sibling_call_default_without_requires() 
                 has_default: true,
                 default_body: Some("self.pick(y)".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -1071,6 +1109,7 @@ fn test_trait_conformance_rejects_param_sibling_call_default_without_requires() 
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "TRSibParamBad".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![],
@@ -1108,12 +1147,14 @@ fn test_trait_conformance_specializes_poly_params_and_return() {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6PolyMirror".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("mirror".to_string(), "Slice6BoolImpl__mirror".to_string())],
@@ -1181,12 +1222,14 @@ fn test_trait_conformance_accepts_unit_receiver_and_return() {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6UnitApply".to_string(),
         concrete_type: TrustVcType::Unit,
         method_bindings: vec![("apply".to_string(), "Slice6UnitImpl__apply".to_string())],
@@ -1233,12 +1276,14 @@ fn test_trait_conformance_enforces_all_postconditions() {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6MultiEnsures".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("grant".to_string(), "Slice6BoolImpl__grant_all".to_string())],
@@ -1418,6 +1463,7 @@ fn assoc_view_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),

@@ -66,8 +66,10 @@ impl<'a> AstExpressionParser<'a> {
             let (source, base_offset, base_len) = self.encode_seq_view(receiver)?;
             let start = self.encode_subexpr(&args[0])?;
             let end = self.encode_subexpr(&args[1])?;
-            let start_pw = self.coerce_to_len_width(start)?;
-            let end_pw = self.coerce_to_len_width(end)?;
+            let start_own = self.own_sign(&args[0], None);
+            let end_own = self.own_sign(&args[1], None);
+            let start_pw = self.coerce_to_len_width(start, start_own)?;
+            let end_pw = self.coerce_to_len_width(end, end_own)?;
             // `start <= end` across possibly-mixed BV/Int sorts: a
             // length-derived bound (`(v).len()`, `(v).len() - 1`) stays
             // Sort::Int under Route A (#2779) and `coerce_to_len_width`

@@ -319,6 +319,16 @@ pub fn scan_file_full(path: &Path) -> FileScan {
     };
     let mut scan = extract_annotated_functions(path, &ast);
     extract_conformance_obligations(path, &ast, &mut scan.analyzed);
+    // A refused or poisoned `state_machine!` (or a reference to one) leaves a
+    // marker; each is a file-level failure, so a file whose machine was never
+    // verified cannot report clean. The file keeps its analyzed functions.
+    for (line, reason) in trust_vc_core::state_machine_dsl::refusals(&ast) {
+        scan.unscannable.push(UnscannableFile {
+            file_path: path.to_path_buf(),
+            line,
+            reason,
+        });
+    }
     scan
 }
 

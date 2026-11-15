@@ -49,7 +49,8 @@ pub(crate) struct PreparedVerificationContext {
         HashMap<crate::ir::ImplMethodKey, crate::ir::ConformanceMethodBody>,
     /// Impl methods' OWN declared `ensures` postconditions, keyed by concrete UF
     /// name. Threaded from `VerificationContext`; populated only for non-exempt
-    /// impl methods with a captured body. The conformance pass VERIFIES
+    /// methods of a non-external impl with a captured body, in POSITIONAL
+    /// canonical form (`__trust_vc_conf_arg_{i}`). The conformance pass VERIFIES
     /// `body ⊨ impl_ensures`; the encoder propagates it to callers only after.
     pub trait_impl_method_ensures: HashMap<crate::ir::ImplMethodKey, Vec<String>>,
     /// Concrete UF names of trait-impl methods the conformance pass must SKIP
@@ -68,6 +69,11 @@ pub(crate) struct PreparedVerificationContext {
     /// values), prepared. Passed as the base-case scoped slice so they reach only
     /// the invariant's entry check. Keyed by invariant name.
     pub loop_entry_scopes: HashMap<String, Vec<PreparedObligation>>,
+    /// Invariants of a loop nested in another loop's body: their base case
+    /// drops the plan assumptions that mention the loop's modified vars (those
+    /// speak of the function entry, not the nested entry). See
+    /// `VerificationContext::loop_nested_entry_invariants`.
+    pub loop_nested_entry_invariants: HashSet<String>,
     /// Functions revealed by a `reveal!(f)` INSIDE an `assert … by { .. }` proof
     /// block, keyed by the assert_by obligation name. Only entries with a
     /// non-empty set are present.
@@ -87,6 +93,9 @@ pub(crate) struct PreparedVerificationContext {
     pub forall_bound_vars: HashMap<String, Vec<VariableDecl>>,
     pub loop_guards: HashMap<String, String>,
     pub loop_modified_vars: HashMap<String, Vec<String>>,
+    /// Loop group of every loop-lane obligation, keyed by name. See
+    /// `VerificationContext::loop_invariant_groups`.
+    pub loop_invariant_groups: HashMap<String, usize>,
     /// Straight-line loop-body state transitions keyed by invariant name. Each
     /// value maps a loop-modified variable to the scoped-value string for its
     /// post-body value over loop-head variables. Consumed by the
@@ -780,10 +789,12 @@ pub(crate) fn prepare_context(
         broadcast_use_groups: ctx.broadcast_use_groups.iter().cloned().collect(),
         assert_by_scopes,
         loop_entry_scopes,
+        loop_nested_entry_invariants: ctx.loop_nested_entry_invariants.clone(),
         assert_by_scope_revealed_fns,
         forall_bound_vars: ctx.forall_bound_vars.clone(),
         loop_guards: ctx.loop_guards.clone(),
         loop_modified_vars: ctx.loop_modified_vars.clone(),
+        loop_invariant_groups: ctx.loop_invariant_groups.clone(),
         loop_body_transitions: ctx.loop_body_transitions.clone(),
         struct_types: ctx.struct_types.clone(),
         type_invariants: ctx.type_invariants.clone(),

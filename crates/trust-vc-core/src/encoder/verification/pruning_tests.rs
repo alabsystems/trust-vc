@@ -361,6 +361,7 @@ fn test_prune_plan_seeds_from_trait_impl_bindings() {
     ctx.obligations = vec![assertion];
     ctx.trait_impl_decls = vec![TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "MyTrait".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), "BoolImpl__get_value".to_string())],
@@ -388,6 +389,7 @@ fn test_prune_plan_skips_opaque_trait_impl_bindings() {
     ctx.obligations = vec![assertion];
     ctx.trait_impl_decls = vec![TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "MyTrait".to_string(),
         concrete_type: TrustVcType::Opaque("Widget".to_string()),
         method_bindings: vec![("get_value".to_string(), "WidgetImpl__get_value".to_string())],

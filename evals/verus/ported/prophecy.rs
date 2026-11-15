@@ -549,9 +549,9 @@ pub const PROPHECY_RS_FAIL_CLOSED_ERROR_PATTERNS: &[ProphecyRsFailClosedErrorPat
     (
         "prophecy_fn_spec_value_currently_blocked",
         &[
-            "Failed to lower obligation 'assertion_0'",
-            "unknown return type for function 'g'",
-            "register it in TypeEnv via prepare_context",
+            "application of a function value whose precondition is not modelled",
+            "`g` is a local bound to `prophetic_rank`",
+            "rejected rather than trusted",
         ],
     ),
     (

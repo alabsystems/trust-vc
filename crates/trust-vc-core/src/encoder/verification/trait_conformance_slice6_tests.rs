@@ -34,6 +34,7 @@ fn struct_valued_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -49,6 +50,7 @@ fn struct_valued_trait_decl() -> TraitDecl {
 fn struct_valued_opaque_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6StructValued".to_string(),
         concrete_type: TrustVcType::Opaque("Counter".to_string()),
         method_bindings: vec![("get".to_string(), concrete_fn_name.to_string())],
@@ -188,6 +190,7 @@ fn test_trait_conformance_rejects_nonconforming_user_struct_impl() {
 fn valued_u64_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6Valued".to_string(),
         concrete_type: TrustVcType::Uint { width: 64 },
         method_bindings: vec![("get_value".to_string(), concrete_fn_name.to_string())],
@@ -209,6 +212,7 @@ fn helper_delegation_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -218,6 +222,7 @@ fn helper_delegation_trait_decl() -> TraitDecl {
 fn helper_delegation_impl_decl(concrete_fn_name: &str) -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Slice6HelperDelegation".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("check".to_string(), concrete_fn_name.to_string())],

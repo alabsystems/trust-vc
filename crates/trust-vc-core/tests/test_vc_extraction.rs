@@ -86,8 +86,10 @@ fn test_extract_increment() {
     assert_eq!(vc.variables()[0].name, "x");
     assert_eq!(vc.variables()[1].name, "result");
 
-    // Three obligations: requires, ensures, return_value assumption
-    assert_eq!(vc.obligations().len(), 3);
+    // Four obligations: requires, ensures, the exec overflow check for `x + 1`
+    // (emitted since exec arithmetic safety landed — re-pinned 2026-09-11), and
+    // the return_value assumption.
+    assert_eq!(vc.obligations().len(), 4);
     assert_eq!(
         vc.obligations()
             .first()
@@ -102,9 +104,18 @@ fn test_extract_increment() {
             .condition(),
         "result > x"
     );
+    let overflow = vc
+        .obligations()
+        .get(2)
+        .expect("Should have the exec overflow check for `x + 1`");
+    assert!(
+        overflow.name().starts_with("overflow_check"),
+        "third obligation should be the exec overflow check, got {}",
+        overflow.name()
+    );
     assert_eq!(
         vc.obligations()
-            .get(2)
+            .get(3)
             .expect("Should have return_value obligation")
             .condition(),
         "result == x + 1"

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 //
-// Run with: cargo test -p trust-vc-driver --features collections
+// Run with: targo --unverified test -p trust-vc-driver --features collections
 //
 // These tests drive Set / Seq / Map / Multiset properties through trust-vc-core's
 // REAL encoder + ay solver via the `collections` front-end seam. They prove the

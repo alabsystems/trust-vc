@@ -69,34 +69,50 @@ def latest_source_mtime(root: Path) -> float:
 
 
 def resolve_targo() -> str:
-    """Absolute path to the PINNED toolchain's targo.
+    """Absolute path to the Trust toolchain's targo, proven to BE targo.
 
-    A bare "targo" is not enough: it is absent from PATH on an ordinary host
-    (the sysroot's bin/ is not added by rustup's shims), and subprocess then
-    raises an uncaught FileNotFoundError that surfaces as `kind=engine_error`
-    on every fixture -- a gate failure that looks like an engine disagreement.
-    `rustc --print sysroot` honours rust-toolchain.toml, so this follows the PIN
-    rather than whatever happens to be on PATH, and falls back to PATH only if
-    the sysroot copy is missing.
+    Resolution order: `$CARGO` (targo exports itself to the processes it runs),
+    then `targo` on PATH, then `$(trustc --print sysroot)/bin/targo`. A bare
+    "targo" is not enough on its own: subprocess would raise an uncaught
+    FileNotFoundError that surfaces as `kind=engine_error` on every fixture -- a
+    gate failure that looks like an engine disagreement.
+
+    Every candidate must pass `<targo> --unverified --version`: targo accepts
+    the lane flag, upstream cargo (even one installed under the name `targo`)
+    rejects it. Owner directive 2026-09-28: no stock fallback -- refuse instead.
     """
+    candidates: list[str] = []
+    env_cargo = os.environ.get("CARGO", "")
+    if env_cargo:
+        candidates.append(env_cargo)
+    found = shutil.which("targo")
+    if found:
+        candidates.append(found)
     try:
         sysroot = subprocess.run(
-            ["rustc", "--print", "sysroot"],
+            ["trustc", "--print", "sysroot"],
             capture_output=True, text=True, check=False,
         ).stdout.strip()
     except OSError:
         sysroot = ""
     if sysroot:
-        candidate = Path(sysroot) / "bin" / "targo"
-        if candidate.is_file():
-            return str(candidate)
-    found = shutil.which("targo")
-    if found:
-        return found
+        candidates.append(str(Path(sysroot) / "bin" / "targo"))
+    rejected: list[str] = []
+    for candidate in candidates:
+        try:
+            probe = subprocess.run(
+                [candidate, "--unverified", "--version"],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            rejected.append(f"{candidate}: {error}")
+            continue
+        if probe.returncode == 0:
+            return candidate
+        rejected.append(f"{candidate}: `--unverified --version` exited {probe.returncode}")
     sys.stderr.write(
-        "run_merge_bundle: cannot locate the pinned Trust `targo`.\n"
-        "  rust-toolchain.toml pins channel = \"trust\"; that sysroot must supply bin/targo.\n"
-        f"  resolved sysroot: {sysroot or '<none>'}\n"
+        "run_merge_bundle: cannot locate the Trust toolchain's `targo`.\n"
+        f"  candidates tried: {'; '.join(rejected) or '<none>'}\n"
         "  refusing to continue -- a missing toolchain must not read as an engine disagreement.\n"
     )
     raise SystemExit(2)

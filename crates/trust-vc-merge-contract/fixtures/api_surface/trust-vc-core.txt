@@ -131,8 +131,10 @@ const fn trust_vc_core::verification_report::VerificationReportOptions::verbose(
 const fn trust_vc_core::verification_report::VerificationReportOptions::with_verbose(self: Self, verbose: bool) -> Self
 const trust_vc_core::contract_attr_alias::ALIASABLE_ATTRS: &[&str]
 const trust_vc_core::contract_attr_alias::NON_ALIASABLE_TRUSTED_ATTRS: &[&str]
+const trust_vc_core::ir::integer_surface::EXPR_VARIANTS: &[(&str, &[IntegerRole])]
 const trust_vc_core::proof_note::AT_MOST_ONE_PROOF_NOTE: &str
 const trust_vc_core::solver_budget::RLIMIT_UNIT_CONFLICTS: u64
+const trust_vc_core::state_machine_dsl::GENERATED_MARKER: &str
 enum trust_vc_core::FunctionResolution<'a>
 enum trust_vc_core::HarnessOutcome
 enum trust_vc_core::SolverStatValue
@@ -162,6 +164,7 @@ enum trust_vc_core::ir::TrustVcExpr
 enum trust_vc_core::ir::TrustVcType
 enum trust_vc_core::ir::TrustVcTypeParseError
 enum trust_vc_core::ir::WrappingMode
+enum trust_vc_core::ir::integer_surface::IntegerRole
 enum trust_vc_core::mode::FunctionMode
 enum trust_vc_core::mode::VarMode
 enum trust_vc_core::proven_facts::OptimizationHintKind
@@ -170,6 +173,7 @@ enum trust_vc_core::proven_facts::ProvenFactKind
 enum trust_vc_core::proven_facts::extraction::ProofStatus
 enum trust_vc_core::proven_facts::hints::OptimizationHintKind
 enum trust_vc_core::solver_budget::ConflictBudget
+enum trust_vc_core::state_machine_dsl::LemmaStrategy
 enum trust_vc_core::vc::BitshiftBehavior
 enum trust_vc_core::vc::ConditionOrigin
 enum trust_vc_core::vc::Div0Behavior
@@ -522,6 +526,8 @@ fn trust_vc_core::ir::TrustVcType::try_from_str(ty: &str) -> Result<TrustVcType,
 fn trust_vc_core::ir::TrustVcType::try_validate_well_foundedness(self: &Self) -> Result<(), DatatypeWellFoundednessError>
 fn trust_vc_core::ir::TrustVcType::validate_well_foundedness(self: &Self) -> Result<(), String>
 fn trust_vc_core::ir::TrustVcType::view_collection_type(self: &Self) -> Option<TrustVcType>
+fn trust_vc_core::ir::integer_surface::expr_variant(expr: &TrustVcExpr) -> &'static str
+fn trust_vc_core::ir::integer_surface::expr_variants_in(expr: &crate::ir::TrustVcExpr) -> Vec<&'static str>
 fn trust_vc_core::ir::parse_global_size_of_usize(line: &str) -> Option<Result<u32, String>>
 fn trust_vc_core::ir::pinned_width_from_guard(guard: Option<PointerWidthGuard>) -> Option<u32>
 fn trust_vc_core::ir::pointer_width() -> u32
@@ -607,6 +613,12 @@ fn trust_vc_core::resolve_function_in_file<'a>(file: &'a syn::File, name: &str) 
 fn trust_vc_core::solver_budget::ConflictBudget::bounded(conflicts: u64) -> Self
 fn trust_vc_core::solver_budget::ConflictBudget::conflicts(self: Self) -> Option<u64>
 fn trust_vc_core::solver_budget::ConflictBudget::option_value(self: Self) -> Option<String>
+fn trust_vc_core::state_machine_dsl::expand_file(file: &mut syn::File)
+fn trust_vc_core::state_machine_dsl::expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream
+fn trust_vc_core::state_machine_dsl::has_item_position_invocation(file: &syn::File) -> bool
+fn trust_vc_core::state_machine_dsl::machine_lemmas(file: &syn::File) -> Vec<(String, String, &'static str)>
+fn trust_vc_core::state_machine_dsl::poison_message(file: &syn::File, ident: &proc_macro2::Ident) -> Option<String>
+fn trust_vc_core::state_machine_dsl::refusals(file: &syn::File) -> Vec<(usize, String)>
 fn trust_vc_core::vc::BitshiftBehavior::from_mode(mode: crate::mode::FunctionMode) -> Self
 fn trust_vc_core::vc::BitshiftBehavior::should_check(self: &Self) -> bool
 fn trust_vc_core::vc::Div0Behavior::from_mode(mode: crate::mode::FunctionMode) -> Self
@@ -722,9 +734,12 @@ fn trust_vc_core::vc::VerificationContext::is_erased_shared_ref_var(self: &Self,
 fn trust_vc_core::vc::VerificationContext::loop_body_transitions(self: &Self) -> &HashMap<String, Vec<(String, String)>>
 fn trust_vc_core::vc::VerificationContext::loop_entry_scopes(self: &Self) -> &HashMap<String, Vec<ProofObligation>>
 fn trust_vc_core::vc::VerificationContext::loop_guards(self: &Self) -> &HashMap<String, String>
+fn trust_vc_core::vc::VerificationContext::loop_invariant_groups(self: &Self) -> &HashMap<String, usize>
 fn trust_vc_core::vc::VerificationContext::loop_modified_vars(self: &Self) -> &HashMap<String, Vec<String>>
+fn trust_vc_core::vc::VerificationContext::loop_nested_entry_invariants(self: &Self) -> &HashSet<String>
 fn trust_vc_core::vc::VerificationContext::mark_erased_ghost_var(self: &mut Self, name: &str)
 fn trust_vc_core::vc::VerificationContext::mark_erased_shared_ref_var(self: &mut Self, name: &str)
+fn trust_vc_core::vc::VerificationContext::mark_loop_nested_entry(self: &mut Self, invariant_name: &str)
 fn trust_vc_core::vc::VerificationContext::new() -> Self
 fn trust_vc_core::vc::VerificationContext::obligations(self: &Self) -> &[ProofObligation]
 fn trust_vc_core::vc::VerificationContext::overflow_behavior(self: &Self) -> OverflowBehavior
@@ -752,6 +767,7 @@ fn trust_vc_core::vc::VerificationContext::set_function_context(self: &mut Self,
 fn trust_vc_core::vc::VerificationContext::set_invariant_mask(self: &mut Self, mask: InvariantMask)
 fn trust_vc_core::vc::VerificationContext::set_loop_body_transition(self: &mut Self, invariant_name: &str, transitions: Vec<(String, String)>)
 fn trust_vc_core::vc::VerificationContext::set_loop_entry_scope(self: &mut Self, invariant_name: &str, entry_obligations: Vec<ProofObligation>)
+fn trust_vc_core::vc::VerificationContext::set_loop_group(self: &mut Self, obligation_name: &str, group: usize)
 fn trust_vc_core::vc::VerificationContext::set_loop_modified_vars(self: &mut Self, invariant_name: &str, vars: Vec<String>)
 fn trust_vc_core::vc::VerificationContext::set_overflow_behavior(self: &mut Self, behavior: OverflowBehavior)
 fn trust_vc_core::vc::VerificationContext::set_rlimit(self: &mut Self, ms: u64)
@@ -819,6 +835,7 @@ module trust_vc_core::env
 module trust_vc_core::full_verification
 module trust_vc_core::harness
 module trust_vc_core::ir
+module trust_vc_core::ir::integer_surface
 module trust_vc_core::loop_metadata
 module trust_vc_core::mode
 module trust_vc_core::proof_note
@@ -827,6 +844,7 @@ module trust_vc_core::proven_facts::extraction
 module trust_vc_core::proven_facts::hints
 module trust_vc_core::proven_facts::report
 module trust_vc_core::solver_budget
+module trust_vc_core::state_machine_dsl
 module trust_vc_core::vc
 module trust_vc_core::verification_bridge
 module trust_vc_core::verification_report
@@ -1153,6 +1171,12 @@ variant trust_vc_core::ir::TrustVcTypeParseError::UnknownType
 variant trust_vc_core::ir::WrappingMode::Checked
 variant trust_vc_core::ir::WrappingMode::Saturating
 variant trust_vc_core::ir::WrappingMode::Wrapping
+variant trust_vc_core::ir::integer_surface::IntegerRole::Binds
+variant trust_vc_core::ir::integer_surface::IntegerRole::Compares
+variant trust_vc_core::ir::integer_surface::IntegerRole::Joins
+variant trust_vc_core::ir::integer_surface::IntegerRole::None
+variant trust_vc_core::ir::integer_surface::IntegerRole::Opaque
+variant trust_vc_core::ir::integer_surface::IntegerRole::Produces
 variant trust_vc_core::mode::FunctionMode::Exec
 variant trust_vc_core::mode::FunctionMode::Proof
 variant trust_vc_core::mode::FunctionMode::Spec
@@ -1182,6 +1206,7 @@ variant trust_vc_core::proven_facts::hints::OptimizationHintKind::NullCheckElimi
 variant trust_vc_core::proven_facts::hints::OptimizationHintKind::UnreachableBranch
 variant trust_vc_core::solver_budget::ConflictBudget::AyDefault
 variant trust_vc_core::solver_budget::ConflictBudget::Bounded
+variant trust_vc_core::state_machine_dsl::LemmaStrategy::UserBody
 variant trust_vc_core::vc::BitshiftBehavior::Allow
 variant trust_vc_core::vc::BitshiftBehavior::Error
 variant trust_vc_core::vc::ConditionOrigin::LegacyTranslatedString

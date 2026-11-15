@@ -128,8 +128,39 @@ pub(crate) fn walk_expr<V: TrustVcExprVisitor + ?Sized>(v: &mut V, expr: &TrustV
             v.visit_expr(body);
         }
 
-        TrustVcExpr::Choose { condition, .. } => {
+        // BOTH children, and `also_assert` is the load-bearing one. Lowering
+        // `choose|i: T| p(i)` MOVES the predicate out of `condition` (which
+        // becomes `BoolLit(true)`) and into the combined Hilbert axiom carried
+        // by `also_assert` — so a lowered `choose` used to report NO function
+        // calls, no variables and no quantifier to every visitor built on this
+        // walker, while the FOLDER (`folder.rs`, which
+        // `substitute_inline_calls` rides on) descended into it all along.
+        // That asymmetry cost two things, measured on `evals/verus/ported/
+        // choose.rs`:
+        //
+        //  * `pruning::FunctionCollector` dropped the spec fn whose only call
+        //    sits in the choose predicate, so the assertion-focused lane never
+        //    DECLARED it and the scoped overflow re-encode died with
+        //    `Undefined function: f`;
+        //  * `body_support::referenced_function_names` found no demand-inline
+        //    candidate, so the retry that removes a `forall x. f(x) == body(x)`
+        //    definitional axiom never ran — leaving ay's fail-closed
+        //    `(incomplete quantifier-ematching-exists)` (its quantified model
+        //    gate cannot certify that axiom) as the published non-decision,
+        //    which the corpus gate rejects as UNDECIDED. The same function
+        //    backs `demand_inline_counterexample_retry_is_exact`'s residual
+        //    check, so a surviving call inside `also_assert` was invisible to
+        //    the guard that decides whether a retry model may be adopted;
+        //    seeing it makes that guard strictly stricter.
+        TrustVcExpr::Choose {
+            condition,
+            also_assert,
+            ..
+        } => {
             v.visit_expr(condition);
+            if let Some(extra) = also_assert {
+                v.visit_expr(extra);
+            }
         }
 
         TrustVcExpr::ReadPlace { place, .. } => {

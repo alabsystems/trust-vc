@@ -181,6 +181,11 @@ fn eval_terms_saturating_distinguishable_bare_refuted() {
 /// The REAL `eval_constraint` discharge's UNSAT proof is re-checked by the
 /// independent `trust-vc-kernel` (not merely trusted from ay): the whole-body
 /// verification report carries a kernel-verified proof certificate.
+///
+/// The body and the ensures build the same match term, so `result == match ..`
+/// is `t == t` and the negated goal trust-vc asserts is the constant `false`.
+/// The certificate refutes that posed query and discloses the collapse: its
+/// evidence for `eval_constraint` is AY's term-builder rewrite.
 #[cfg(feature = "proof-certificates")]
 #[test]
 fn eval_constraint_real_body_kernel_rechecked() {
@@ -211,6 +216,10 @@ fn eval_constraint_real_body_kernel_rechecked() {
         .expect("verified eval_constraint carries a proof certificate");
     assert!(
         proof.kernel_verified(),
-        "eval_constraint UNSAT cert must be re-checked by trust-vc-kernel"
+        "eval_constraint UNSAT cert must be re-checked by trust-vc-kernel: {proof:?}"
+    );
+    assert!(
+        proof.query_collapsed(),
+        "fixture drift: the goal no longer folds to `false`; update the doc above: {proof:?}"
     );
 }

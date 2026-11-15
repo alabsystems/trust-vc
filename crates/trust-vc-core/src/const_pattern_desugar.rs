@@ -125,10 +125,36 @@
 //! Four container shapes, four false verifies (impl method body, trait default
 //! body, nested block, nested block inside an impl method). Adding three match
 //! arms would have closed those four and left the fifth shape open, so
-//! [`ScopeScan`] walks the WHOLE file with `syn::visit::Visit` instead: every
+//! [`ScopeScan`] walks a whole SUBTREE with `syn::visit::Visit` instead: every
 //! scope that can hold a `const`, a `static` or a `use` is covered by
 //! construction, and associated consts stay excluded because they are different
 //! syn nodes rather than because a match arm omits them.
+//!
+//! ## …and the scan that closed them was aimed at the WHOLE FILE
+//!
+//! All four of those declare the `const` inside the very function whose arm
+//! names it, so what they need is the target function's own body. The scan was
+//! pointed at the whole file instead, which also collected a `const` declared in
+//! a DIFFERENT function's body — a name Rust does not have in scope there at
+//! all, so the bare arm pattern is a BINDER. Measured triple, minimal files,
+//! cache off, `#[ensures(result == n)] fn probe(n: u64) -> u64 { match n { cv =>
+//! cv, _ => 0 } }`: alone it VERIFIES; adding an unrelated
+//! `fn other(z: u64) { const cv: u64 = 5; }` makes it STOP verifying; renaming
+//! that `const` to `qqq` makes it verify again. A `const` in a function the
+//! probe never calls decided the probe's verdict.
+//!
+//! Over-collection is fail-closed for ARM REACHABILITY and not fail-closed
+//! everywhere: in the ghost-closure lane the same spurious marker lets an arm
+//! body's name resolve to a ghost parameter, the closure is skipped, and a body
+//! that always divides by zero comes back `Verified`
+//! (`tests/const_scope_contamination_residual.rs`).
+//!
+//! [`InScopeDecls`] fixes the AIM, not the scan: the same whole-subtree walk is
+//! now run over the scopes that CONTAIN the target function — the module chain's
+//! direct items plus the function's own body — so all four cardinal shapes stay
+//! closed while a sibling's body no longer speaks for this one. The fold veto
+//! stays whole-file, because it can only ever demote an in-scope entry to the
+//! fail-closed marker.
 //!
 //! Residual, deliberately not blanket-rejected: an unresolvable GLOB
 //! (`use other_crate::prelude::*;`) names nothing, so a const it brings in is
@@ -207,10 +233,10 @@ fn foldable_literal(expr: &Expr) -> Option<Lit> {
     }
 }
 
-/// Every `const`/`static` declaration and every `use` alias in the file,
-/// gathered from EVERY syntactic scope that can hold one.
+/// Every `const`/`static` declaration and every `use` alias in ONE SUBTREE,
+/// gathered from EVERY syntactic scope inside it that can hold one.
 ///
-/// Deliberately a whole-tree [`syn::visit::Visit`] rather than a hand-rolled
+/// Deliberately a whole-subtree [`syn::visit::Visit`] rather than a hand-rolled
 /// item walk. The hand-rolled predecessor descended only into `Item::Mod`
 /// content and the TOP-LEVEL statement items of an `Item::Fn` block, so a
 /// `const` (or a `use`) declared in an `impl` method body, a trait DEFAULT
@@ -219,7 +245,13 @@ fn foldable_literal(expr: &Expr) -> Option<Lit> {
 /// sibling arm's prior-negation `!(true)` — FALSE — vacuously discharged it:
 /// four cardinal false verifies, one per container shape. Enumerating container
 /// shapes is how that hole got dug in the first place, so this walks the whole
-/// tree instead and the next shape needs no fourth patch.
+/// subtree instead and the next shape needs no fourth patch.
+///
+/// WHICH subtree is [`InScopeDecls`]'s question, and it is a different one:
+/// pointed at the whole FILE this scan also collects a `const` from a sibling
+/// function's body, which Rust does not have in scope. It is run over the target
+/// function's own body, and over the whole file only for the fold VETO and for a
+/// function this pass cannot place.
 ///
 /// ASSOCIATED consts stay excluded for free, and that is not an accident of
 /// this encoding: `ImplItem::Const` and `TraitItem::Const` are distinct syn
@@ -252,17 +284,271 @@ impl<'ast> syn::visit::Visit<'ast> for ScopeScan {
     }
 }
 
-/// Collect every declared name a bare pattern identifier could resolve to.
+/// What a bare pattern identifier inside ONE target function can resolve to:
+/// the declarations of the scopes that actually CONTAIN that function.
+///
+/// # The hole this closes
+///
+/// [`ScopeScan`] over the WHOLE file answers "is this name declared anywhere in
+/// the file", which is not the question Rust asks. A `const` declared inside
+/// ONE function's body is not in scope in another function, so a bare arm
+/// pattern of that name in an unrelated function is a BINDER. Collecting it
+/// made this pass call it a const-pattern marker instead, and a `const` in a
+/// function the probe never calls decided the probe's verdict. Measured in
+/// minimal files, cache off, over
+///
+/// ```ignore
+/// #[trust_vc::requires(n < 100)]
+/// #[trust_vc::ensures(result == n)]
+/// pub fn probe(n: u64) -> u64 { match n { cv => cv, _ => 0 } }
+/// ```
+///
+/// the probe alone VERIFIES (an ordinary binder is irrefutable, so `result == n`
+/// holds); adding `pub fn other(z: u64) { const cv: u64 = 5; }` — a function the
+/// probe never calls — makes it STOP verifying; renaming that `const` to `qqq`
+/// makes it verify again.
+///
+/// That direction is fail-closed for arm reachability, which is why the
+/// whole-tree scan was chosen. But a spurious marker is NOT fail-closed
+/// everywhere: in the ghost-closure lane the same over-broad marker buys a
+/// false `Verified` (`tests/const_scope_contamination_residual.rs`).
+///
+/// # The model
+///
+/// A `const`/`static`/`use` is in scope for the item that CONTAINS it and its
+/// descendants, never for its siblings:
+///
+/// * a module scope — the file root, or an inline `mod` — contributes the items
+///   declared DIRECTLY in it. A sibling module's items are not in scope, and
+///   Rust items do not nest lexically, so an inline `mod` does NOT inherit the
+///   file root;
+/// * an `impl` or `trait` block is TRANSPARENT: it contributes nothing (a bare
+///   `K` cannot name an associated const — `S::K` is required) and its methods
+///   see the enclosing module scope;
+/// * a function body contributes everything declared anywhere inside it — to
+///   that function, and to functions nested in it, which do see the enclosing
+///   body's items even though they cannot see its locals.
+///
+/// Inside the target's OWN body the collection stays deliberately over-broad: a
+/// `const` in one nested block is reported to the whole body. That over-collection
+/// is confined to the function's own text, it can only produce the fail-closed
+/// marker, and it keeps this pass from having to model block-level scoping —
+/// the axis the four cardinal false verifies came from.
+#[derive(Clone, Default)]
+struct InScopeDecls {
+    /// `const`/`static` names introduced by a scope on the target's chain.
+    names: BTreeSet<String>,
+    /// `use` items at FILE-ROOT scope. Only these carry the fold permission.
+    top_uses: Vec<(String, Vec<String>)>,
+    /// `use` items from every other scope on the chain.
+    nested_uses: Vec<(String, Vec<String>)>,
+}
+
+impl InScopeDecls {
+    /// The `const`/`static`/`use` items declared DIRECTLY in one module-level
+    /// item list. Deliberately not a descent: a nested function's body items and
+    /// a submodule's items are separate scopes.
+    fn absorb_module_items(&mut self, items: &[Item], is_file_root: bool) {
+        for item in items {
+            match item {
+                Item::Const(item_const) => {
+                    self.names.insert(item_const.ident.to_string());
+                }
+                Item::Static(item_static) => {
+                    self.names.insert(item_static.ident.to_string());
+                }
+                Item::Use(item_use) => {
+                    let out = if is_file_root {
+                        &mut self.top_uses
+                    } else {
+                        &mut self.nested_uses
+                    };
+                    flatten_use_tree(&item_use.tree, &mut Vec::new(), out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// EVERY declaration anywhere under one function body — the whole-tree scan,
+    /// scoped to a single body. This is the half of the old behaviour that was
+    /// load-bearing: all four cardinal false verifies declared their `const`
+    /// inside the very function whose arm named it.
+    fn absorb_body(&mut self, block: &syn::Block) {
+        let mut scan = ScopeScan::default();
+        syn::visit::Visit::visit_block(&mut scan, block);
+        self.names.extend(scan.all_names.into_keys());
+        self.nested_uses.extend(scan.uses);
+    }
+
+    /// Merge another chain in. Used only to answer an AMBIGUOUS placement with
+    /// the union of every candidate's scope, which is a superset of the true one
+    /// and therefore fail-closed.
+    fn absorb(&mut self, other: &InScopeDecls) {
+        self.names.extend(other.names.iter().cloned());
+        self.top_uses.extend(other.top_uses.iter().cloned());
+        self.nested_uses.extend(other.nested_uses.iter().cloned());
+    }
+}
+
+/// The signature key a function is located by.
+///
+/// The body is NOT part of the key: `desugar_const_patterns` runs after the
+/// macro-quarantine and `matches!` desugars, which hand it a function whose
+/// BODY has already been rewritten. Only the signature is guaranteed to still
+/// match the file on disk.
+fn sig_key(sig: &syn::Signature) -> String {
+    sig.to_token_stream().to_string()
+}
+
+/// Every fn-like item lexically inside one block, plus the inline modules it
+/// holds. Deliberately does NOT descend into a `mod`: a module does not inherit
+/// the block's items, so it is searched separately with an empty chain.
+#[derive(Default)]
+struct NestedItemScan<'ast> {
+    fn_sigs: Vec<String>,
+    mods: Vec<&'ast syn::ItemMod>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for NestedItemScan<'ast> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.fn_sigs.push(sig_key(&node.sig));
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.fn_sigs.push(sig_key(&node.sig));
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if node.default.is_some() {
+            self.fn_sigs.push(sig_key(&node.sig));
+        }
+        syn::visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.mods.push(node);
+    }
+}
+
+/// Locate `func` in `file` and answer what is in scope there.
+///
+/// `None` means the signature is nowhere in this file — a synthesized body, or a
+/// caller that handed over a function from elsewhere. The caller then falls back
+/// to the whole-file registry, i.e. exactly the pre-fix behaviour, rather than
+/// to an empty one: an unplaceable function must fail closed, not open.
+fn in_scope_decls_for_fn(file: &File, func: &syn::ItemFn) -> Option<InScopeDecls> {
+    let wanted = sig_key(&func.sig);
+    let mut hits: Vec<InScopeDecls> = Vec::new();
+    search_module_scope(
+        &file.items,
+        &wanted,
+        &InScopeDecls::default(),
+        true,
+        &mut hits,
+    );
+    let mut found = hits.into_iter();
+    let first = found.next()?;
+    // Several candidates: the union, so no candidate's scope is lost.
+    Some(found.fold(first, |mut acc, next| {
+        acc.absorb(&next);
+        acc
+    }))
+}
+
+fn search_module_scope(
+    items: &[Item],
+    wanted: &str,
+    inherited: &InScopeDecls,
+    is_file_root: bool,
+    hits: &mut Vec<InScopeDecls>,
+) {
+    let mut here = inherited.clone();
+    here.absorb_module_items(items, is_file_root);
+
+    for item in items {
+        match item {
+            Item::Fn(item_fn) => search_fn_scope(&item_fn.sig, &item_fn.block, wanted, &here, hits),
+            // TRANSPARENT: an `impl`/`trait` block declares no bare-nameable
+            // value, and its methods see the module that holds the block.
+            Item::Impl(item_impl) => {
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        search_fn_scope(&method.sig, &method.block, wanted, &here, hits);
+                    }
+                }
+            }
+            Item::Trait(item_trait) => {
+                for trait_item in &item_trait.items {
+                    if let syn::TraitItem::Fn(method) = trait_item {
+                        if let Some(block) = &method.default {
+                            search_fn_scope(&method.sig, block, wanted, &here, hits);
+                        }
+                    }
+                }
+            }
+            // An inline `mod` starts a FRESH chain: Rust items do not nest
+            // lexically, so nothing from the enclosing module is in scope in it.
+            Item::Mod(item_mod) => {
+                if let Some((_, inner)) = &item_mod.content {
+                    search_module_scope(inner, wanted, &InScopeDecls::default(), false, hits);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn search_fn_scope(
+    sig: &syn::Signature,
+    block: &syn::Block,
+    wanted: &str,
+    outer: &InScopeDecls,
+    hits: &mut Vec<InScopeDecls>,
+) {
+    let mut body = outer.clone();
+    body.absorb_body(block);
+
+    if sig_key(sig) == wanted {
+        hits.push(body.clone());
+    }
+
+    let mut nested = NestedItemScan::default();
+    syn::visit::Visit::visit_block(&mut nested, block);
+    // A function nested in this body sees this body's items. `body` already
+    // holds the WHOLE subtree, so it is a superset of any nested function's own
+    // chain and no second descent is needed.
+    if nested.fn_sigs.iter().any(|found| found == wanted) {
+        hits.push(body.clone());
+    }
+    for item_mod in nested.mods {
+        if let Some((_, inner)) = &item_mod.content {
+            search_module_scope(inner, wanted, &InScopeDecls::default(), false, hits);
+        }
+    }
+}
+
+/// Collect the names a bare pattern identifier IN `func` could resolve to.
 ///
 /// `top_level` records file-scope `const` items (the only ones whose value is
-/// folded); the scan's `all_names` records EVERY const/static declaration found
-/// anywhere the bare name could be in scope, so a duplicate demotes the folded
-/// entry to `Unmodeled`.
+/// folded). Membership comes from [`in_scope_decls_for_fn`] — the scopes that
+/// contain `func` — and never from the whole file.
+///
+/// The FOLD VETO stays whole-file and deliberately over-broad: a name introduced
+/// more than once ANYWHERE in the file (a second declaration, a `use` of the
+/// same local name, a nested-`mod` shadow) is never folded, even when only one
+/// of the introductions is in scope. Vetoing is a demotion of an IN-SCOPE entry
+/// from a value to the fail-closed marker; it can never put an out-of-scope name
+/// into the registry, so it cannot reopen the contamination this scoping closes.
+/// It is what keeps a slightly-wrong placement from folding a value taken from
+/// the wrong scope, which is the false-verify direction.
 ///
 /// Associated consts are excluded: see the module soundness note.
-fn collect_declared_consts(file: &File) -> BTreeMap<String, ConstPatternValue> {
+fn collect_declared_consts(file: &File, func: &syn::ItemFn) -> BTreeMap<String, ConstPatternValue> {
     let mut top_level: BTreeMap<String, Lit> = BTreeMap::new();
-    let mut top_uses: Vec<(String, Vec<String>)> = Vec::new();
+    let mut root_uses: Vec<(String, Vec<String>)> = Vec::new();
     let mut scan = ScopeScan::default();
 
     for item in &file.items {
@@ -277,7 +563,7 @@ fn collect_declared_consts(file: &File) -> BTreeMap<String, ConstPatternValue> {
             // alias twice would make `enter_alias` demote it to `Unmodeled` and
             // silently retire the alias-fold capability.
             Item::Use(item_use) => {
-                flatten_use_tree(&item_use.tree, &mut Vec::new(), &mut top_uses);
+                flatten_use_tree(&item_use.tree, &mut Vec::new(), &mut root_uses);
                 continue;
             }
             _ => {}
@@ -285,19 +571,40 @@ fn collect_declared_consts(file: &File) -> BTreeMap<String, ConstPatternValue> {
         syn::visit::Visit::visit_item(&mut scan, item);
     }
 
-    let mut declared: BTreeMap<String, ConstPatternValue> = scan
-        .all_names
-        .into_iter()
-        .map(|(name, count)| {
-            let value = match top_level.get(&name) {
-                Some(lit) if count == 1 => ConstPatternValue::Literal(lit.clone()),
+    // How many times each NAME is introduced anywhere in the file, declaration
+    // or alias. The fold veto, and nothing else.
+    let mut introductions: BTreeMap<String, usize> = scan.all_names.clone();
+    for (local, _) in root_uses.iter().chain(scan.uses.iter()) {
+        *introductions.entry(local.clone()).or_insert(0) += 1;
+    }
+
+    let scope = in_scope_decls_for_fn(file, func).unwrap_or_else(|| InScopeDecls {
+        names: scan.all_names.keys().cloned().collect(),
+        top_uses: root_uses.clone(),
+        nested_uses: scan.uses.clone(),
+    });
+
+    let mut declared: BTreeMap<String, ConstPatternValue> = scope
+        .names
+        .iter()
+        .map(|name| {
+            let value = match top_level.get(name) {
+                Some(lit) if introductions.get(name).copied() == Some(1) => {
+                    ConstPatternValue::Literal(lit.clone())
+                }
                 _ => ConstPatternValue::Unmodeled,
             };
-            (name, value)
+            (name.clone(), value)
         })
         .collect();
 
-    merge_use_aliases(file, top_uses, scan.uses, &mut declared);
+    merge_use_aliases(
+        file,
+        scope.top_uses,
+        scope.nested_uses,
+        &introductions,
+        &mut declared,
+    );
     declared
 }
 
@@ -325,6 +632,7 @@ fn merge_use_aliases(
     file: &File,
     top_uses: Vec<(String, Vec<String>)>,
     nested_uses: Vec<(String, Vec<String>)>,
+    introductions: &BTreeMap<String, usize>,
     declared: &mut BTreeMap<String, ConstPatternValue>,
 ) {
     let imports = top_uses
@@ -347,10 +655,17 @@ fn merge_use_aliases(
             continue;
         }
         let target = resolve_import(file, &path);
+        let uniquely_introduced = introductions.get(&local).copied() == Some(1);
         let value = match target {
             // The pin: a fn/type/mod import leaves an ordinary binder alone.
             UseTarget::Binder => continue,
-            UseTarget::Literal(lit) if top => ConstPatternValue::Literal(lit),
+            // The FOLD VETO applies to an alias exactly as to a declaration: a
+            // local name this file introduces more than once (a same-named
+            // declaration elsewhere, a second alias) is two spellings this pass
+            // cannot tell apart, so neither is folded.
+            UseTarget::Literal(lit) if top && uniquely_introduced => {
+                ConstPatternValue::Literal(lit)
+            }
             UseTarget::Literal(_) | UseTarget::Unmodeled => ConstPatternValue::Unmodeled,
         };
         enter_alias(declared, local, value);
@@ -1144,7 +1459,7 @@ pub(crate) fn desugar_const_patterns(
     file: Option<&File>,
 ) -> Option<syn::ItemFn> {
     let file = file?;
-    let mut consts = collect_declared_consts(file);
+    let mut consts = collect_declared_consts(file, func);
     if consts.is_empty() {
         return None;
     }
@@ -1161,10 +1476,18 @@ pub(crate) fn desugar_const_patterns(
     //
     // Nested functions ARE verified, so the answer is to demote rather than
     // skip: for a function this pass cannot place at file scope, no value is
-    // vouched for and every declared name goes to the fail-closed marker. A
+    // vouched for and every IN-SCOPE name goes to the fail-closed marker. A
     // nested function reaching the const legitimately (`use super::K`) loses the
     // fold and fails closed — the sound direction, and the direction this lane
     // already took before any const was folded at all.
+    //
+    // KEPT AS-IS across the scope-model fix, and the two are doing different
+    // jobs. [`InScopeDecls`] decides MEMBERSHIP: under it the bare `K` in the
+    // example above is not in `inner::f`'s registry at all, so it is left the
+    // binder it actually is, and only the `use super::K` route still reaches it.
+    // This gate decides the FOLD, and it stays exactly as strict as it was — a
+    // value is vouched for only for a file-top-level free `fn`. Narrowing
+    // membership must not be allowed to widen folding by a side effect.
     if !is_file_top_level_fn(file, func) {
         for value in consts.values_mut() {
             *value = ConstPatternValue::Unmodeled;
@@ -1503,12 +1826,37 @@ mod tests {
     }
 
     /// A file-top-level const is not in scope inside a `mod`, so its name is an
-    /// ordinary BINDER there and must not be folded.
+    /// ordinary BINDER there — and under the scope model it is left ALONE, not
+    /// folded and not marked.
+    ///
+    /// RE-KEYED with the scope model. The whole-file registry could not tell
+    /// "in scope" from "declared somewhere", so it demoted every name to the
+    /// marker for any function it could not place at file scope; the assertion
+    /// here used to be that marker. Both answers refuse the FOLD — which is the
+    /// soundness content, and it is asserted below — but only one of them tells
+    /// the truth about `K`, and the marker costs a genuine binder.
     #[test]
     fn nested_fn_does_not_inherit_a_file_top_level_const() {
         let file = parse(
             "const K: u64 = 5; \
              mod inner { pub fn f(n: u64) -> u64 { match n { K => n } } }",
+        );
+        let inner_fn = fn_in_mod(&file, "inner", "f");
+        assert!(
+            desugar_const_patterns(&inner_fn, Some(&file)).is_none(),
+            "`K` is not in scope inside `mod inner`, so the arm is a BINDER"
+        );
+    }
+
+    /// THE SOUNDNESS TWIN of the test above, and the one that must never move:
+    /// a nested function that reaches the const LEGITIMATELY, by importing it,
+    /// still fails closed. Leaving a bare `K` alone is only correct because a
+    /// bare `K` genuinely does not name it.
+    #[test]
+    fn nested_fn_that_imports_the_const_still_fails_closed() {
+        let file = parse(
+            "const K: u64 = 5; \
+             mod inner { use crate::K; pub fn f(n: u64) -> u64 { match n { K => n } } }",
         );
         let inner_fn = fn_in_mod(&file, "inner", "f");
         let out = desugar_const_patterns(&inner_fn, Some(&file)).expect("rewrite");
@@ -1564,24 +1912,45 @@ mod tests {
 
     // ---- SCOPE: every container that can hold a declaration ---------------
     //
-    // The registry is only as good as the scopes it walks. Each case here
-    // declares the const in a container the first collector never descended
-    // into and asserts the name reached the registry — the marker in the
-    // rewritten output is the evidence, since an uncollected name is left
-    // untouched and `desugar_const_patterns` returns `None`.
+    // The registry is only as good as the scopes it walks, AND as good as the
+    // scopes it stops at. Each `*_is_collected` case declares the const in a
+    // container the first collector never descended into, INSIDE the probe's own
+    // body — which is where all four cardinal false verifies put it — and
+    // asserts the name reached the registry; the marker in the rewritten output
+    // is the evidence, since an uncollected name is left untouched and
+    // `desugar_const_patterns` returns `None`.
+    //
+    // Each is paired with a `*_in_a_sibling_is_not_collected` twin that moves
+    // the SAME declaration into a DIFFERENT function's body, where Rust does not
+    // have it in scope. The twin is what distinguishes a correct scope model
+    // from the whole-file scan: before the model both answered "collected", so
+    // the four cardinal cases were being closed by a scan that also let a
+    // sibling's body decide this function's verdict.
 
-    /// Assert that `src` puts `name` in the registry: the pattern naming it is
-    /// rewritten to the fail-closed marker rather than left as a binder.
-    fn assert_collected(src: &str, label: &str) {
+    /// Assert that `src` puts the buried name in the registry FOR `probe`: the
+    /// pattern naming it is rewritten to the fail-closed marker.
+    fn assert_collected(src: &str, probe: &str, label: &str) {
         let file = parse(src);
-        // BY NAME, never `only_fn`: several of these sources declare the const
-        // inside a top-level `fn g`, which is the FIRST `Item::Fn` in the file.
-        let probe = top_fn(&file, "f");
-        let out = desugar_const_patterns(&probe, Some(&file)).unwrap_or_else(|| {
+        let func = any_fn(&file, probe);
+        let out = desugar_const_patterns(&func, Some(&file)).unwrap_or_else(|| {
             panic!("{label}: nothing rewritten — the declaration was invisible")
         });
         let text = out.to_token_stream().to_string();
         assert!(text.contains(UNMODELED_CONST_PAT_PREFIX), "{label}: {text}");
+    }
+
+    /// Assert that `src` does NOT put the buried name in `probe`'s registry: the
+    /// declaration is in a scope `probe` cannot see, so the arm stays a BINDER.
+    fn assert_not_collected(src: &str, probe: &str, label: &str) {
+        let file = parse(src);
+        let func = any_fn(&file, probe);
+        let out = desugar_const_patterns(&func, Some(&file));
+        assert!(
+            out.is_none(),
+            "{label}: a declaration in another function's body is NOT in scope \
+             here, so the arm must stay a binder; got {}",
+            out.expect("checked").to_token_stream()
+        );
     }
 
     /// The named FILE-TOP-LEVEL fn.
@@ -1595,16 +1964,99 @@ mod tests {
             .unwrap_or_else(|| panic!("top-level fn `{name}`"))
     }
 
-    const PROBE_FN: &str = "fn f(n: u64) { match n { buried => {} _ => {} } }";
+    /// The named fn ANYWHERE in the file — free, inherent method, or trait
+    /// default — lifted to an `ItemFn` the way `function_discovery` lifts one.
+    /// The scope model is asked about methods, so the tests must be able to ask
+    /// about a method.
+    fn any_fn(file: &File, name: &str) -> syn::ItemFn {
+        fn lift(sig: &syn::Signature, block: &syn::Block, attrs: &[Attribute]) -> syn::ItemFn {
+            syn::ItemFn {
+                attrs: attrs.to_vec(),
+                vis: syn::Visibility::Inherited,
+                sig: sig.clone(),
+                block: Box::new(block.clone()),
+            }
+        }
+        fn search(items: &[Item], name: &str) -> Option<syn::ItemFn> {
+            for item in items {
+                match item {
+                    Item::Fn(f) if f.sig.ident == name => return Some(f.clone()),
+                    Item::Impl(b) => {
+                        for impl_item in &b.items {
+                            if let syn::ImplItem::Fn(m) = impl_item {
+                                if m.sig.ident == name {
+                                    return Some(lift(&m.sig, &m.block, &m.attrs));
+                                }
+                            }
+                        }
+                    }
+                    Item::Trait(b) => {
+                        for trait_item in &b.items {
+                            if let syn::TraitItem::Fn(m) = trait_item {
+                                if m.sig.ident == name {
+                                    if let Some(block) = &m.default {
+                                        return Some(lift(&m.sig, block, &m.attrs));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Item::Mod(m) => {
+                        if let Some((_, inner)) = &m.content {
+                            if let Some(found) = search(inner, name) {
+                                return Some(found);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                // A fn NESTED in another fn's body is a legal probe too.
+                if let Item::Fn(f) = item {
+                    let nested: Vec<Item> = f
+                        .block
+                        .stmts
+                        .iter()
+                        .filter_map(|stmt| match stmt {
+                            Stmt::Item(inner) => Some(inner.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(found) = search(&nested, name) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        search(&file.items, name).unwrap_or_else(|| panic!("fn `{name}`"))
+    }
+
+    /// The arm that names the buried const. Spelled once so the probe and its
+    /// sibling twin are the SAME body in a different place.
+    const PROBE_ARM: &str = "match n { buried => {} _ => {} }";
+    const SIBLING_PROBE: &str = "fn f(n: u64) { match n { buried => {} _ => {} } }";
 
     #[test]
     fn const_in_an_impl_method_body_is_collected() {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] struct S; \
-                 impl S {{ fn g() -> u64 {{ const buried: u64 = 5; buried }} }} {PROBE_FN}"
+                 impl S {{ fn f(n: u64) {{ const buried: u64 = 5; {PROBE_ARM} }} }}"
             ),
+            "f",
             "impl method body",
+        );
+    }
+
+    #[test]
+    fn const_in_an_impl_method_body_of_a_sibling_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] struct S; \
+                 impl S {{ fn g() -> u64 {{ const buried: u64 = 5; buried }} }} {SIBLING_PROBE}"
+            ),
+            "f",
+            "impl method body (sibling)",
         );
     }
 
@@ -1613,9 +2065,22 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] \
-                 trait T {{ fn g() -> u64 {{ const buried: u64 = 5; buried }} }} {PROBE_FN}"
+                 trait T {{ fn f(n: u64) {{ const buried: u64 = 5; {PROBE_ARM} }} }}"
             ),
+            "f",
             "trait default body",
+        );
+    }
+
+    #[test]
+    fn const_in_a_trait_default_method_body_of_a_sibling_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] \
+                 trait T {{ fn g() -> u64 {{ const buried: u64 = 5; buried }} }} {SIBLING_PROBE}"
+            ),
+            "f",
+            "trait default body (sibling)",
         );
     }
 
@@ -1624,9 +2089,38 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] \
-                 fn g() -> u64 {{ {{ const buried: u64 = 5; buried }} }} {PROBE_FN}"
+                 fn f(n: u64) {{ {{ const buried: u64 = 5; {PROBE_ARM} }} }}"
             ),
+            "f",
             "nested block",
+        );
+    }
+
+    /// The over-broad half kept ON PURPOSE: a `const` in one nested block of
+    /// THIS body is reported to the whole body. It is confined to the function's
+    /// own text and can only produce the fail-closed marker, and it is what
+    /// spares this pass from modelling block-level scoping.
+    #[test]
+    fn const_in_a_disjoint_block_of_the_same_body_is_still_collected() {
+        assert_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] \
+                 fn f(n: u64) {{ {{ const buried: u64 = 5; }} {PROBE_ARM} }}"
+            ),
+            "f",
+            "disjoint block of the same body",
+        );
+    }
+
+    #[test]
+    fn const_in_a_nested_block_of_a_sibling_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] \
+                 fn g() -> u64 {{ {{ const buried: u64 = 5; buried }} }} {SIBLING_PROBE}"
+            ),
+            "f",
+            "nested block (sibling)",
         );
     }
 
@@ -1636,19 +2130,37 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] struct S; \
-                 impl S {{ fn g() -> u64 {{ {{ const buried: u64 = 5; buried }} }} }} {PROBE_FN}"
+                 impl S {{ fn f(n: u64) {{ {{ const buried: u64 = 5; {PROBE_ARM} }} }} }}"
             ),
+            "f",
             "nested block inside an impl method",
         );
     }
 
     #[test]
-    fn const_in_a_const_initializer_block_is_collected() {
-        assert_collected(
+    fn const_in_a_nested_block_inside_a_sibling_impl_method_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] struct S; \
+                 impl S {{ fn g() -> u64 {{ {{ const buried: u64 = 5; buried }} }} }} \
+                 {SIBLING_PROBE}"
+            ),
+            "f",
+            "nested block inside an impl method (sibling)",
+        );
+    }
+
+    /// A `const` declared in ANOTHER const's initializer block is scoped to that
+    /// block. RE-KEYED: the whole-file scan collected it and turned an unrelated
+    /// binder into a marker.
+    #[test]
+    fn const_in_a_const_initializer_block_is_not_collected() {
+        assert_not_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] \
-                 const OUTER: u64 = {{ const buried: u64 = 5; buried }}; {PROBE_FN}"
+                 const OUTER: u64 = {{ const buried: u64 = 5; buried }}; {SIBLING_PROBE}"
             ),
+            "f",
             "const initializer block",
         );
     }
@@ -1658,9 +2170,22 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] struct S; \
-                 impl S {{ fn g() -> u64 {{ static buried: u64 = 5; buried }} }} {PROBE_FN}"
+                 impl S {{ fn f(n: u64) {{ static buried: u64 = 5; {PROBE_ARM} }} }}"
             ),
+            "f",
             "impl method body (static)",
+        );
+    }
+
+    #[test]
+    fn static_in_a_sibling_impl_method_body_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] struct S; \
+                 impl S {{ fn g() -> u64 {{ static buried: u64 = 5; buried }} }} {SIBLING_PROBE}"
+            ),
+            "f",
+            "impl method body (static, sibling)",
         );
     }
 
@@ -1669,9 +2194,23 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] const src: u64 = 5; struct S; \
-                 impl S {{ fn g() -> u64 {{ use crate::src as buried; buried }} }} {PROBE_FN}"
+                 impl S {{ fn f(n: u64) {{ use crate::src as buried; {PROBE_ARM} }} }}"
             ),
+            "f",
             "impl method body (use alias)",
+        );
+    }
+
+    #[test]
+    fn use_alias_in_a_sibling_impl_method_body_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] const src: u64 = 5; struct S; \
+                 impl S {{ fn g() -> u64 {{ use crate::src as buried; buried }} }} \
+                 {SIBLING_PROBE}"
+            ),
+            "f",
+            "impl method body (use alias, sibling)",
         );
     }
 
@@ -1680,9 +2219,22 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] const src: u64 = 5; \
-                 fn g() -> u64 {{ {{ use crate::src as buried; buried }} }} {PROBE_FN}"
+                 fn f(n: u64) {{ {{ use crate::src as buried; {PROBE_ARM} }} }}"
             ),
+            "f",
             "nested block (use alias)",
+        );
+    }
+
+    #[test]
+    fn use_alias_in_a_sibling_nested_block_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] const src: u64 = 5; \
+                 fn g() -> u64 {{ {{ use crate::src as buried; buried }} }} {SIBLING_PROBE}"
+            ),
+            "f",
+            "nested block (use alias, sibling)",
         );
     }
 
@@ -1691,10 +2243,160 @@ mod tests {
         assert_collected(
             &format!(
                 "#![allow(non_upper_case_globals)] const src: u64 = 5; \
-                 trait T {{ fn g() -> u64 {{ use crate::src as buried; buried }} }} {PROBE_FN}"
+                 trait T {{ fn f(n: u64) {{ use crate::src as buried; {PROBE_ARM} }} }}"
             ),
+            "f",
             "trait default body (use alias)",
         );
+    }
+
+    #[test]
+    fn use_alias_in_a_sibling_trait_default_method_body_is_not_collected() {
+        assert_not_collected(
+            &format!(
+                "#![allow(non_upper_case_globals)] const src: u64 = 5; \
+                 trait T {{ fn g() -> u64 {{ use crate::src as buried; buried }} }} \
+                 {SIBLING_PROBE}"
+            ),
+            "f",
+            "trait default body (use alias, sibling)",
+        );
+    }
+
+    /// A `const` at MODULE scope is in scope in every function of that module,
+    /// so the sibling twins above must not be read as "a declaration outside
+    /// this body is never collected". This is the third leg of the triple, and
+    /// it lands on the FOLD rather than on the marker: a unique file-scope const
+    /// with a literal initializer is exactly what this pass is allowed to fold.
+    #[test]
+    fn module_scope_const_is_collected_for_every_fn_in_that_module() {
+        let file = parse(&format!(
+            "#![allow(non_upper_case_globals)] const buried: u64 = 5; \
+             fn g() -> u64 {{ 0 }} {SIBLING_PROBE}"
+        ));
+        let probe = top_fn(&file, "f");
+        let out = desugar_const_patterns(&probe, Some(&file)).expect("rewrite");
+        let text = out.to_token_stream().to_string();
+        assert!(text.contains("5 =>"), "{text}");
+        assert!(!text.contains("buried =>"), "{text}");
+    }
+
+    /// The same, one module in: an inline `mod`'s own const reaches its own
+    /// functions, and the marker is the evidence the name was collected.
+    #[test]
+    fn inline_module_const_is_collected_for_a_fn_in_that_module() {
+        let file = parse(
+            "#![allow(non_upper_case_globals)] \
+             mod inner { pub const buried: u64 = 5; \
+                         pub fn f(n: u64) { match n { buried => {} _ => {} } } }",
+        );
+        let probe = fn_in_mod(&file, "inner", "f");
+        let out = desugar_const_patterns(&probe, Some(&file)).expect("rewrite");
+        let text = out.to_token_stream().to_string();
+        assert!(text.contains(UNMODELED_CONST_PAT_PREFIX), "{text}");
+    }
+
+    /// AND ITS SIBLING-MODULE TWIN: a const in a DIFFERENT inline module is not
+    /// in scope, so the same arm stays a binder.
+    #[test]
+    fn a_sibling_modules_const_is_not_collected() {
+        let file = parse(
+            "#![allow(non_upper_case_globals)] \
+             mod other { pub const buried: u64 = 5; } \
+             mod inner { pub fn f(n: u64) { match n { buried => {} _ => {} } } }",
+        );
+        let probe = fn_in_mod(&file, "inner", "f");
+        assert!(
+            desugar_const_patterns(&probe, Some(&file)).is_none(),
+            "`other::buried` is not in scope in `inner`"
+        );
+    }
+
+    /// THE RATCHET ON THE WHOLE-TREE SCAN, spelled as the exact shape a reviewer
+    /// measured. If `collect_declared_consts` is ever pointed back at the whole
+    /// file, `v` re-enters `a`'s registry, the arm becomes a fail-closed marker,
+    /// and this fires.
+    ///
+    /// The verdict-level twin is `tests/const_scope_triple_soundness.rs` leg 2,
+    /// which is RED at `0bd75360`.
+    #[test]
+    fn a_const_in_an_unrelated_fn_body_never_enters_this_fns_registry() {
+        let file = parse(
+            "#![allow(non_upper_case_globals)] \
+             fn a(x: u64) -> u64 { match x { v => v } } \
+             fn b(z: u64) { const v: [u64; 3] = [1u64, 2u64, 3u64]; }",
+        );
+        let probe = top_fn(&file, "a");
+        let out = desugar_const_patterns(&probe, Some(&file));
+        assert!(
+            out.is_none(),
+            "WHOLE-TREE SCAN RESTORED: `const v` is scoped to `b`'s body and `a` \
+             never calls `b`, so `a`'s arm is a BINDER; got {}",
+            out.expect("checked").to_token_stream()
+        );
+    }
+
+    /// Its IN-SCOPE twin, the third leg: the same name at MODULE scope really is
+    /// in scope in `a`, so it must NOT be left as a binder.
+    #[test]
+    fn the_same_const_at_module_scope_does_enter_this_fns_registry() {
+        let file = parse(
+            "#![allow(non_upper_case_globals)] \
+             const v: [u64; 3] = [1u64, 2u64, 3u64]; \
+             fn a(x: u64) -> u64 { match x { v => v } }",
+        );
+        let probe = top_fn(&file, "a");
+        let out = desugar_const_patterns(&probe, Some(&file)).expect(
+            "a module-scope const IS in scope here — leaving it a binder is the \
+             false-verify direction",
+        );
+        let text = out.to_token_stream().to_string();
+        assert!(text.contains(UNMODELED_CONST_PAT_PREFIX), "{text}");
+    }
+
+    /// An `impl` / `trait` block is TRANSPARENT: it introduces no bare-nameable
+    /// value of its own, and its methods DO see the module that holds the block.
+    /// If the chain stopped at the block, a module-scope const would go missing
+    /// inside every method — the false-verify direction — so both shapes are
+    /// pinned, not just the free-fn one.
+    #[test]
+    fn a_module_scope_const_reaches_impl_and_trait_method_bodies() {
+        for (decl, probe) in [
+            (
+                "struct S; impl S { fn f(n: u64) { match n { buried => {} _ => {} } } }",
+                "f",
+            ),
+            (
+                "trait T { fn f(n: u64) { match n { buried => {} _ => {} } } }",
+                "f",
+            ),
+        ] {
+            let src = format!(
+                "#![allow(non_upper_case_globals)] \
+                 const buried: [u64; 3] = [1u64, 2u64, 3u64]; {decl}"
+            );
+            let file = parse(&src);
+            let func = any_fn(&file, probe);
+            let out = desugar_const_patterns(&func, Some(&file))
+                .unwrap_or_else(|| panic!("{decl}: the module-scope const went missing"));
+            let text = out.to_token_stream().to_string();
+            assert!(text.contains(UNMODELED_CONST_PAT_PREFIX), "{decl}: {text}");
+        }
+    }
+
+    /// A function NESTED in another function's body DOES see that body's items —
+    /// block items are in scope for nested items, unlike locals.
+    #[test]
+    fn a_nested_fn_sees_the_enclosing_bodys_const() {
+        let file = parse(
+            "#![allow(non_upper_case_globals)] \
+             fn outer() { const buried: u64 = 5; \
+                          fn f(n: u64) { match n { buried => {} _ => {} } } }",
+        );
+        let probe = any_fn(&file, "f");
+        let out = desugar_const_patterns(&probe, Some(&file)).expect("rewrite");
+        let text = out.to_token_stream().to_string();
+        assert!(text.contains(UNMODELED_CONST_PAT_PREFIX), "{text}");
     }
 
     /// THE NARROWNESS PIN for the whole-tree walk. Descending into `impl` and

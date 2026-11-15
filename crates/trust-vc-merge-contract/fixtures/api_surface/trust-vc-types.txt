@@ -27,12 +27,12 @@ field trust_vc_types::Tree::Branch::1: Box<Tree<T>>
 field trust_vc_types::Tree::Leaf::0: T
 fn trust_vc_types::Ghost::new(value: T) -> Self
 fn trust_vc_types::InvariantPredicate::inv(k: K, v: V) -> bool
-fn trust_vc_types::List::head(self: &Self) -> &T
+fn trust_vc_types::List::head(self: &Self) -> Option<&T>
 fn trust_vc_types::List::is_cons(self: &Self) -> bool
 fn trust_vc_types::List::is_empty(self: &Self) -> bool
 fn trust_vc_types::List::is_nil(self: &Self) -> bool
 fn trust_vc_types::List::len(self: &Self) -> usize
-fn trust_vc_types::List::tail(self: &Self) -> &List<T>
+fn trust_vc_types::List::tail(self: &Self) -> Option<&List<T>>
 fn trust_vc_types::LocalInvariant::constant(self: &Self) -> K
 fn trust_vc_types::LocalInvariant::namespace(self: &Self) -> i64
 fn trust_vc_types::LocalInvariant::new(_k: K, _v: V) -> Self
@@ -117,9 +117,9 @@ fn trust_vc_types::Tracked::new(value: T) -> Self
 fn trust_vc_types::Tree::depth(self: &Self) -> usize
 fn trust_vc_types::Tree::is_branch(self: &Self) -> bool
 fn trust_vc_types::Tree::is_leaf(self: &Self) -> bool
-fn trust_vc_types::Tree::left(self: &Self) -> &Tree<T>
-fn trust_vc_types::Tree::right(self: &Self) -> &Tree<T>
-fn trust_vc_types::Tree::value(self: &Self) -> &T
+fn trust_vc_types::Tree::left(self: &Self) -> Option<&Tree<T>>
+fn trust_vc_types::Tree::right(self: &Self) -> Option<&Tree<T>>
+fn trust_vc_types::Tree::value(self: &Self) -> Option<&T>
 fn trust_vc_types::View::view(self: &Self) -> Self::ViewTy
 fn trust_vc_types::compat::trust_wp::Ghost::new(value: T) -> Self
 fn trust_vc_types::compat::trust_wp::Seq::add(self: Self, _other: Self) -> Self

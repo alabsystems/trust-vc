@@ -42,7 +42,7 @@ pub(crate) fn extract_impl_type_name(ty: &syn::Type) -> Option<String> {
 }
 
 /// Shared attribute classification logic.
-fn classify_attrs(attrs: &[syn::Attribute]) -> FunctionMode {
+pub(crate) fn classify_attrs(attrs: &[syn::Attribute]) -> FunctionMode {
     for attr in attrs {
         let path = attr.path();
         let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();

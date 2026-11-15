@@ -63,7 +63,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn rustc_command() -> PathBuf {
@@ -78,7 +80,8 @@ fn rustc_command() -> PathBuf {
             }
         }
     }
-    PathBuf::from(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+    // Never a bare `rustc` from PATH: targo exports only `$CARGO` to tests.
+    PathBuf::from(format!("trustc{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn write_package(
@@ -355,7 +358,7 @@ fn package_env_id(package_root: &Path, name: &str) -> String {
 fn run_build(root: &Path, args: &[&str]) -> Value {
     let fake_cargo = build_fake_cargo_recorder(root);
     let record_path = root.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(root)
@@ -402,7 +405,7 @@ fn lib_with_example_imports_own_lib() {
 
     let record = run_build(&project_dir, &[]);
 
-    assert_eq!(record_args(&record), vec!["build"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "build"]);
     assert_cargo_verus_env_contract(&record);
 
     let package_id = package_env_id(&project_dir, package_name);
@@ -435,7 +438,7 @@ fn bin_only_no_own_lib_import() {
 
     let record = run_build(&project_dir, &[]);
 
-    assert_eq!(record_args(&record), vec!["build"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "build"]);
     assert_cargo_verus_env_contract(&record);
 
     let package_id = package_env_id(&project_dir, package_name);
@@ -491,7 +494,10 @@ fn workspace_workdir() {
         &["--release", "--", "--expand-errors", "--rlimit=100"],
     );
 
-    assert_eq!(record_args(&record), vec!["build", "--release"]);
+    assert_eq!(
+        record_args(&record),
+        vec!["--unverified", "build", "--release"]
+    );
 
     let driver_args = packed_args(env_value(&record, VERUS_DRIVER_ARGS));
     assert!(

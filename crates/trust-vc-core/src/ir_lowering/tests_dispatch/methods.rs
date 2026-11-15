@@ -874,10 +874,44 @@ fn lower_integer_max_rejects_mismatched_argument_type() {
     );
 }
 
+/// `env` where the source imports `std::ops::{Add, Shl, Shr}` at every call of
+/// their methods, as the extractor records it.
+fn with_std_operators(mut env: TypeEnv) -> TypeEnv {
+    for method in ["add", "shl", "shr"] {
+        env.register_std_operator_method(method);
+    }
+    env
+}
+
+#[test]
+fn lower_primitive_integer_operator_method_needs_the_std_trait_in_scope() {
+    // Without the std trait in scope the call resolves to another trait's
+    // method of that name, so the lowering refuses it.
+    for (src, vars) in [
+        ("x.add(y)", [("x", "u64"), ("y", "u64")]),
+        ("x.shl(y)", [("x", "u64"), ("y", "u32")]),
+        ("x.shr(y)", [("x", "i8"), ("y", "u32")]),
+    ] {
+        let expr: syn::Expr = syn::parse_str(src).unwrap();
+        let err = lower_syn_expr(&expr, &env_with(&vars)).expect_err(src);
+        assert!(matches!(err, LoweringError::UnsupportedMethod(_)), "{src}");
+        assert!(err.to_string().contains("std::ops::"), "{src}: {err}");
+    }
+    // One method in scope does not bring in another.
+    let mut env = env_with(&[("x", "u64"), ("y", "u32")]);
+    env.register_std_operator_method("add");
+    let expr: syn::Expr = syn::parse_str("x.shl(y)").unwrap();
+    assert!(lower_syn_expr(&expr, &env).is_err());
+    // A non-integer receiver keeps its own `add` (a `Seq` append).
+    let expr: syn::Expr = syn::parse_str("s.add(t)").unwrap();
+    let env = env_with(&[("s", "Seq<i32>"), ("t", "Seq<i32>")]);
+    assert!(lower_syn_expr(&expr, &env).is_ok());
+}
+
 #[test]
 fn lower_primitive_integer_add_trait_method_to_arithmetic() {
     let expr: syn::Expr = syn::parse_str("x.add(y)").unwrap();
-    let env = env_with(&[("x", "usize"), ("y", "usize")]);
+    let env = with_std_operators(env_with(&[("x", "usize"), ("y", "usize")]));
     let lowered = lower_syn_expr(&expr, &env).expect("usize add method should lower");
     let usize_ty = TrustVcType::Uint { width: usize::BITS };
     match lowered {
@@ -911,7 +945,7 @@ fn lower_primitive_integer_add_trait_method_to_arithmetic() {
 #[test]
 fn lower_primitive_integer_add_trait_method_coerces_unsuffixed_literal() {
     let expr: syn::Expr = syn::parse_str("x.add(1)").unwrap();
-    let env = env_with(&[("x", "u8")]);
+    let env = with_std_operators(env_with(&[("x", "u8")]));
     let lowered = lower_syn_expr(&expr, &env).expect("u8 add literal method should lower");
     match lowered {
         TrustVcExpr::Arith { op, right, ty, .. } => {
@@ -932,7 +966,7 @@ fn lower_primitive_integer_add_trait_method_coerces_unsuffixed_literal() {
 #[test]
 fn lower_primitive_integer_add_trait_method_rejects_mismatched_argument_type() {
     let expr: syn::Expr = syn::parse_str("x.add(flag)").unwrap();
-    let env = env_with(&[("x", "u32"), ("flag", "bool")]);
+    let env = with_std_operators(env_with(&[("x", "u32"), ("flag", "bool")]));
     let err = lower_syn_expr(&expr, &env).expect_err("wrong argument type must fail");
     assert!(matches!(err, LoweringError::UnsupportedMethod(_)));
     assert!(
@@ -947,7 +981,7 @@ fn lower_primitive_integer_shl_trait_method_to_special_arith() {
     // `core::ops::Shl::shl` method-call form lowers to the same
     // `SpecialArith { op: Shl, .. }` IR as the binary `<<` operator (#2779).
     let expr: syn::Expr = syn::parse_str("u.shl(amt)").unwrap();
-    let env = env_with(&[("u", "u16"), ("amt", "u16")]);
+    let env = with_std_operators(env_with(&[("u", "u16"), ("amt", "u16")]));
     let lowered = lower_syn_expr(&expr, &env).expect("u16 shl method should lower");
     let u16_ty = TrustVcType::Uint { width: 16 };
     match lowered {
@@ -982,7 +1016,7 @@ fn lower_primitive_integer_shl_trait_method_to_special_arith() {
 fn lower_primitive_integer_shr_trait_method_to_special_arith() {
     // `core::ops::Shr::shr` method-call form lowers to `SpecialArith { op: Shr }`.
     let expr: syn::Expr = syn::parse_str("u.shr(amt)").unwrap();
-    let env = env_with(&[("u", "i16"), ("amt", "i16")]);
+    let env = with_std_operators(env_with(&[("u", "i16"), ("amt", "i16")]));
     let lowered = lower_syn_expr(&expr, &env).expect("i16 shr method should lower");
     let i16_ty = TrustVcType::Int { width: 16 };
     match lowered {
@@ -1006,7 +1040,7 @@ fn lower_primitive_integer_shl_trait_method_coerces_unsuffixed_literal() {
     // An unsuffixed literal shift amount is coerced to the receiver's integer
     // type so it carries a known width (mirrors the binary `<<` literal path).
     let expr: syn::Expr = syn::parse_str("u.shl(15)").unwrap();
-    let env = env_with(&[("u", "u16")]);
+    let env = with_std_operators(env_with(&[("u", "u16")]));
     let lowered = lower_syn_expr(&expr, &env).expect("u16 shl literal method should lower");
     let u16_ty = TrustVcType::Uint { width: 16 };
     match lowered {
@@ -1030,7 +1064,7 @@ fn lower_primitive_integer_shl_trait_method_rejects_non_integer_amount() {
     // A non-integer shift amount must fail closed (more-or-equally conservative
     // than Verus, which type-checks the `Shl` impl's RHS).
     let expr: syn::Expr = syn::parse_str("u.shl(flag)").unwrap();
-    let env = env_with(&[("u", "u16"), ("flag", "bool")]);
+    let env = with_std_operators(env_with(&[("u", "u16"), ("flag", "bool")]));
     let err = lower_syn_expr(&expr, &env).expect_err("non-integer shift amount must fail");
     assert!(matches!(err, LoweringError::UnsupportedMethod(_)));
     assert!(

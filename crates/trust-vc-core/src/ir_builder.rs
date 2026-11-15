@@ -163,6 +163,9 @@ fn closure_uf_type_key(ty: &TrustVcType) -> String {
         TrustVcType::RecursiveRef(name) => {
             framed_type_key("recursive_ref", std::slice::from_ref(name))
         }
+        TrustVcType::NamedCarrier(name) => {
+            framed_type_key("named_carrier", std::slice::from_ref(name))
+        }
         TrustVcType::TypeParam(name) => framed_type_key("type_param", std::slice::from_ref(name)),
         TrustVcType::Poly => "poly".to_string(),
         TrustVcType::Opaque(name) => framed_type_key("opaque", std::slice::from_ref(name)),

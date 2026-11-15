@@ -123,7 +123,7 @@ pub(super) fn instantiate_referenced_body_axioms(
                 ),
                 ObligationKind::Assume,
                 condition,
-                expr,
+                crate::float_identity::read_equations_as_identity(expr),
             );
             enqueue_ground_fn_calls(&grounded.expr, &mut pending, &mut seen_calls);
             instantiated.push(grounded);
@@ -201,7 +201,7 @@ pub(super) fn instantiate_current_body_axioms(
             format!("{obligation_name} body axiom #{index}"),
             ObligationKind::Assume,
             condition,
-            expr,
+            crate::float_identity::read_equations_as_identity(expr),
         ));
     }
 
@@ -385,12 +385,12 @@ pub(super) fn build_contract_obligations(
         format!("{obligation_name} result"),
         ObligationKind::Assume,
         result_binding_condition.clone(),
-        lower_expression(
+        crate::float_identity::read_equations_as_identity(lower_expression(
             &result_binding_condition,
             env,
             &HashMap::new(),
             "result binding",
-        )?,
+        )?),
     ));
 
     for (index, require) in method.requires.iter().enumerate() {
@@ -444,14 +444,43 @@ pub(super) fn build_contract_obligations(
 /// `ensures` makes one of these asserts Counterexample, sinking the whole file —
 /// exactly the required behavior. This is the sole justification that makes the
 /// impl-postcondition PROPAGATION axiom (emitted by the encoder) sound to assert.
+///
+/// PARAMETER SCOPE: the clauses were written in the IMPL's parameter names and
+/// registered in positional canonical form (`__trust_vc_conf_arg_{i}`, the same
+/// numbering as the captured body — see `canonicalize_impl_method_ensures`). So
+/// they rename by POSITION onto `bindings.params[i].lowered_name`, exactly as
+/// [`build_impl_body_definition_obligation`] renames the body, and through a map
+/// that carries NO trait source name (which would read the clause in the
+/// trait's scope — a permuted impl then checked a clause other than the one it
+/// wrote). A missing captured body or an arity disagreement is an `Err`: the
+/// obligation is unbuildable, which fails closed.
 pub(super) fn build_impl_ensures_assert_obligations(
     impl_ensures: &[String],
+    body: Option<&crate::ir::ConformanceMethodBody>,
     obligation_name: &str,
     bindings: &ContractBindings,
     env: &TypeEnv,
     obligation_template: &PreparedObligation,
 ) -> Result<Vec<PreparedObligation>, TrustVcError> {
-    let renames = bindings.rename_map();
+    let Some(body) = body.filter(|body| body.param_count == bindings.params.len()) else {
+        return Err(encoding_error(
+            CONFORMANCE_CONTEXT,
+            format!(
+                "{obligation_name}: impl ensures cannot be bound positionally \
+                 (no captured body with {} parameter(s))",
+                bindings.params.len()
+            ),
+        ));
+    };
+    let mut renames = HashMap::with_capacity(body.param_count + 2);
+    renames.insert("self".to_string(), bindings.receiver_name.clone());
+    renames.insert("result".to_string(), bindings.result_name.clone());
+    for (index, param) in bindings.params.iter().enumerate() {
+        renames.insert(
+            format!("__trust_vc_conf_arg_{index}"),
+            param.lowered_name.clone(),
+        );
+    }
     let mut obligations = Vec::with_capacity(impl_ensures.len());
     for (index, ensure) in impl_ensures.iter().enumerate() {
         let (condition, expr) = lower_contract_expression(
@@ -535,7 +564,7 @@ pub(super) fn build_impl_body_definition_obligation(
         format!("{obligation_name} impl body definition"),
         ObligationKind::Assume,
         condition,
-        expr,
+        crate::float_identity::read_equations_as_identity(expr),
     ))
 }
 
@@ -584,7 +613,7 @@ pub(super) fn build_default_contract_obligations(
         format!("{obligation_name} result"),
         ObligationKind::Assume,
         binding_condition,
-        binding_expr,
+        crate::float_identity::read_equations_as_identity(binding_expr),
     ));
 
     for (index, require) in method.requires.iter().enumerate() {
@@ -748,10 +777,37 @@ pub(super) fn conformance_obligation_name(
 ) -> String {
     format!(
         "trait impl conformance {}::{} for {}",
-        trait_decl.name,
+        conformance_trait_display(trait_decl, impl_decl),
         method.name,
         impl_decl.concrete_type.to_type_string()
     )
+}
+
+/// The trait as the impl header instantiates it: `Wc<u32>` for
+/// `impl Wc<u32> for S`, bare `Wc` when the header writes no type arguments.
+///
+/// ATTRIBUTION, not identity. Without the arguments, `impl Wc<bool> for S` and
+/// `impl Wc<u32> for S` listed under ONE obligation name (twice), so neither
+/// impl had a row of its own and a verdict could not be attributed to either.
+/// Soundness does not rest on the names being distinct — the
+/// walk refuses every impl whose (trait, concrete symbol) key is shared (see
+/// `trait_conformance::shared_impl_method_symbols`), and a name that still
+/// collides (the same-named argument type from two modules) reaches that refusal
+/// on its first selected match. Names of traits without arguments are
+/// byte-identical to the previous rendering.
+pub(super) fn conformance_trait_display(
+    trait_decl: &TraitDecl,
+    impl_decl: &TraitImplDecl,
+) -> String {
+    if impl_decl.trait_type_args.is_empty() {
+        return trait_decl.name.clone();
+    }
+    let args: Vec<String> = impl_decl
+        .trait_type_args
+        .iter()
+        .map(crate::ir::TrustVcType::to_type_string)
+        .collect();
+    format!("{}<{}>", trait_decl.name, args.join(", "))
 }
 
 pub(super) fn normalize_conformance_result(
@@ -761,9 +817,13 @@ pub(super) fn normalize_conformance_result(
     match result {
         VerifyResult::Verified => VerifyResult::Verified,
         VerifyResult::Counterexample {
-            model, bindings, ..
+            model,
+            bindings,
+            location,
+            ..
         } => VerifyResult::Counterexample {
             obligation_name: obligation_name.to_string(),
+            location,
             model,
             bindings,
         },

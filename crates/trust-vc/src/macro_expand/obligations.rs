@@ -130,6 +130,13 @@ pub(crate) fn expand_assert(
     // Detect ext_eq!/ext_ne! and use the specialized collection path.
     if let Some(ext_eq_collection) = try_expand_ext_eq_collection(parsed_expr) {
         let normalized_expr = quote!(#parsed_expr);
+        let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+            &normalized_expr,
+            trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+            quote! {
+                assert!(#normalized_expr, "trust_vc assertion failed: {}", stringify!(#expr));
+            },
+        );
         return quote! {
             #[cfg(test)]
             {
@@ -137,7 +144,7 @@ pub(crate) fn expand_assert(
             }
             #[cfg(not(test))]
             {
-                assert!(#normalized_expr, "trust_vc assertion failed: {}", stringify!(#expr));
+                #runtime_check
             }
         };
     }
@@ -151,6 +158,13 @@ pub(crate) fn expand_assert(
         quote! { #support_root::vc::ObligationKind::Assert },
         "assert_line_",
     );
+    let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+        &normalized_expr,
+        trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+        quote! {
+            assert!(#normalized_expr, "trust_vc assertion failed: {}", stringify!(#expr));
+        },
+    );
 
     quote! {
         #[cfg(test)]
@@ -159,7 +173,7 @@ pub(crate) fn expand_assert(
         }
         #[cfg(not(test))]
         {
-            assert!(#normalized_expr, "trust_vc assertion failed: {}", stringify!(#expr));
+            #runtime_check
         }
     }
 }
@@ -172,6 +186,17 @@ pub(crate) fn expand_assert_seqs_equal(
     let rhs = &input.rhs;
     let normalized_expr = quote!(#lhs == #rhs);
     let ext_eq_collection = expand_ext_eq_collection(lhs, rhs, true);
+    let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+        &normalized_expr,
+        trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+        quote! {
+            assert!(
+                #normalized_expr,
+                "trust_vc assertion failed: assert_seqs_equal!({})",
+                stringify!(#normalized_expr)
+            );
+        },
+    );
 
     quote! {
         #[cfg(test)]
@@ -180,11 +205,7 @@ pub(crate) fn expand_assert_seqs_equal(
         }
         #[cfg(not(test))]
         {
-            assert!(
-                #normalized_expr,
-                "trust_vc assertion failed: assert_seqs_equal!({})",
-                stringify!(#normalized_expr)
-            );
+            #runtime_check
         }
     }
 }
@@ -254,6 +275,13 @@ pub(crate) fn expand_requires(expr: proc_macro2::TokenStream) -> proc_macro2::To
         quote! { #support_root::vc::ObligationKind::Requires },
         "requires_line_",
     );
+    let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+        &normalized_expr,
+        trust_vc_core::ClauseArithmetic::Integer,
+        quote! {
+            assert!(#normalized_expr, "trust_vc precondition failed: {}", stringify!(#expr));
+        },
+    );
 
     quote! {
         #[cfg(test)]
@@ -262,7 +290,7 @@ pub(crate) fn expand_requires(expr: proc_macro2::TokenStream) -> proc_macro2::To
         }
         #[cfg(all(not(test), not(trust_vc_driver)))]
         {
-            assert!(#normalized_expr, "trust_vc precondition failed: {}", stringify!(#expr));
+            #runtime_check
         }
         // Surface bridge: under `--cfg trust_vc_driver` emit a BARE marker call
         // (statement level, not block-wrapped) so the rustc-driver front end sees
@@ -294,14 +322,13 @@ pub(crate) fn expand_recommends(expr: proc_macro2::TokenStream) -> proc_macro2::
         {
             #collection
         }
+        // Recommends is advisory: the lane only warns about a caller that
+        // breaks it, so it is type-checked and never evaluated at run time.
         #[cfg(not(test))]
         {
-            // Recommends is advisory — no runtime assert. Debug-only check.
-            debug_assert!(
-                #normalized_expr,
-                "trust_vc recommends condition failed: {}",
-                stringify!(#expr)
-            );
+            if false {
+                let _ = { #normalized_expr };
+            }
         }
     }
 }

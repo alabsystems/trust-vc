@@ -58,7 +58,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn write_package(package_root: &Path, name: &str, verify: Option<bool>, deps: &[&str]) {
@@ -166,7 +168,9 @@ fn main() {
     )
     .expect("fake cargo source should be writable");
 
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    // targo exports only `$CARGO` to test processes: `$RUSTC` when set, else the
+    // Trust compiler, never a bare `rustc` from PATH.
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "trustc".to_string());
     let output = Command::new(rustc)
         .arg("-Ztrust-verify=off")
         .arg(&source)
@@ -268,7 +272,7 @@ fn package_env_id(package_root: &Path, name: &str) -> String {
 fn run_focus(root: &Path, args: &[&str]) -> Value {
     let fake_cargo = build_fake_cargo_recorder(root);
     let record_path = root.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(root)
@@ -313,6 +317,7 @@ fn crate_optin_manifest() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--manifest-path",
             manifest_arg,
@@ -379,6 +384,7 @@ fn workspace_manifest() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--manifest-path",
             manifest_arg,
@@ -453,6 +459,7 @@ fn workspace_package_hasdeps() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--target-dir",
             target_dir

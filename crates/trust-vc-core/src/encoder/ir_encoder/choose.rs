@@ -191,13 +191,11 @@ impl<'a> AstExpressionParser<'a> {
                             .solver
                             .try_forall(&[witness_var], guarded_axiom)
                             .map_err(|e| {
-                                format!("choose: failed to quantify guarded Skolem axiom: {}", e)
-                            })?;
-                        self.solver
-                            .try_assert_term(guarded_axiom)
-                            .map_err(|e| {
-                                format!("choose: failed to assert guarded Skolem axiom: {}", e)
-                            })?;
+                            format!("choose: failed to quantify guarded Skolem axiom: {}", e)
+                        })?;
+                        self.solver.try_assert_term(guarded_axiom).map_err(|e| {
+                            format!("choose: failed to assert guarded Skolem axiom: {}", e)
+                        })?;
                     }
                 }
             }
@@ -216,7 +214,36 @@ impl<'a> AstExpressionParser<'a> {
                 // arithmetic combined axiom mentions no fn call and stays
                 // unmarked so it verifies via normal instantiation. This mirrors
                 // exactly the `trigger_gated` split in `lower_multi_binder_choose_closure`.
-                if crate::ir_expr_traversal::expr_mentions_fncall(extra) {
+                //
+                // READ THE LOWERED SHAPE, NOT ONLY THE AXIOM TEXT. `extra` reaches
+                // this point AFTER `substitute_inline_calls` (`encode_condition_typed`
+                // substitutes the whole obligation, and the folder descends into
+                // `also_assert`), so an `#[inline]` — or a DEMAND-INLINED — spec fn
+                // has already been replaced by its body and `expr_mentions_fncall`
+                // now answers `false` for a predicate that WAS a spec-fn application
+                // in the program. Recomputing the gate from that text silently
+                // repeals the decision the LOWERING made: measured on
+                // `evals/verus/ported/choose.rs`, `test1_fails1_tuple` flipped from
+                // upstream's `counterexample` to `Verified` because the unmarked
+                // axiom let MBQI fabricate the witness the case exists to withhold.
+                // BOTH lowering paths encode their gate decision in the SHAPE —
+                // a gated choose carries a TRIVIAL `condition` (`BoolLit(true)`)
+                // beside the combined axiom, while a decidable-arithmetic one keeps
+                // its real predicate there — and `BoolLit(true)` is invariant under
+                // substitution, so the shape survives inlining and the text does not.
+                //
+                // ONLY FOR A DEMAND-INLINE OVERRIDE. An explicit
+                // `#[trust_vc::inline]` predicate SHOULD lose the gate — Verus
+                // substitutes such a body too and loses the trigger itself, and
+                // measured here that shape yields a model-validated refutation
+                // that keeping the mark would demote to a model-less
+                // `quantifier-unhandled`. A demand-inline override is trust-vc's
+                // OWN retry, invisible to the program, and may not change which
+                // facts are derivable — so it keeps the gate.
+                let lowered_as_trigger_gated = self.demand_inline_overrides_active
+                    && matches!(condition, TrustVcExpr::BoolLit(true));
+                if crate::ir_expr_traversal::expr_mentions_fncall(extra) || lowered_as_trigger_gated
+                {
                     self.solver.mark_no_mbqi(extra_term);
                 }
                 self.solver

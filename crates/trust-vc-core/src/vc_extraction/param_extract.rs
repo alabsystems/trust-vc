@@ -449,6 +449,159 @@ pub(super) fn syn_type_string_is_bounded_len_collection(type_str: &str) -> bool 
     last_segment == "Vec"
 }
 
+/// The head PATH SEGMENT of an origin syn type string: references peeled, type
+/// arguments dropped, module path dropped. `&'a std::collections::BTreeSet<u64>`
+/// -> `BTreeSet`. A slice/array (`[T]`, `[T; N]`) has no path head and renders
+/// as the empty string, which matches nothing in either positive table below.
+pub(super) fn syn_type_string_head_segment(type_str: &str) -> &str {
+    let peeled = strip_leading_references(type_str.trim());
+    let head = peeled.split('<').next().unwrap_or(peeled).trim();
+    head.rsplit("::").next().unwrap_or(head).trim()
+}
+
+/// POSITIVE table: origin spellings of EXEC std containers that model to a
+/// collection sort (`TrustVcType::Seq`/`Set`/`Map`).
+///
+/// SOUNDNESS BOUNDARY. `Vec<u64>` -> `Seq`, `BTreeSet<u64>`/`HashSet<u64>` ->
+/// `Set`, `BTreeMap<K,V>`/`HashMap<K,V>` -> `Map` (see
+/// `ir_type_parse::strip_std_set_type_args` / `strip_std_map_type_args`), so
+/// after parsing NOTHING tells them apart from the spec `Seq`/`Set`/`Map` a
+/// closure over them may legitimately be skipped for. This table is the reading
+/// that does, and it must never match a spec collection: it is a fixed list of
+/// std container NAMES, all of which are absent from
+/// [`syn_type_string_is_spec_collection`]. `VecDeque`/`BinaryHeap`/`LinkedList`
+/// are listed for completeness even though they currently parse to `Opaque`,
+/// which classifies UNRESOLVED (also fail-closed) rather than ghost.
+pub(super) fn syn_type_string_is_exec_std_container(type_str: &str) -> bool {
+    if strip_leading_references(type_str.trim()).starts_with('[') {
+        return true;
+    }
+    matches!(
+        syn_type_string_head_segment(type_str),
+        "Vec"
+            | "VecDeque"
+            | "BTreeSet"
+            | "HashSet"
+            | "BTreeMap"
+            | "HashMap"
+            | "BinaryHeap"
+            | "LinkedList"
+    )
+}
+
+/// POSITIVE table: origin spellings of SPEC collections. The complement of
+/// [`syn_type_string_is_exec_std_container`] and, like it, positive-only — a
+/// spelling in NEITHER table is unknown provenance, never silently spec.
+///
+/// DISCLOSED ASSUMPTION: a user type NAMED `Seq`/`Set`/`Map`/`Multiset` that is
+/// not the spec collection would be read as spec here. That assumption is not
+/// new and not this table's — `pure_ghost_collection_combinator`,
+/// `ghost_collection_constructor_path` and the whole ghost-collection layer
+/// already key on exactly these four names.
+///
+/// ROUND-9 SOUNDNESS, AND THE ASSUMPTION ABOVE WAS REACHABLE: every genuine
+/// spec collection is written WITH its element arguments (`Seq<T>`, `Set<T>`,
+/// `Map<K, V>`, `Multiset<T>`), and a bare `Seq` is not a spec type at all — it
+/// is a user TYPE ALIAS, and `register_type_aliases` resolves a monomorphic one
+/// to whatever it names. Measured at `16240019`, cache off, all `Verified` on a
+/// body that ALWAYS divides by zero, each against the same body written at the
+/// std spelling, which is a non-verify: `type Seq = Vec<u64>;`,
+/// `type Set = BTreeSet<u64>;`, `type Map = BTreeMap<u64, u64>;` as a parameter,
+/// and a struct FIELD spelled with such an alias. The head segment is taken
+/// after the module path is stripped, so the alias only had to share the NAME.
+///
+/// Requiring the argument list costs the spec surface NOTHING (a spec spelling
+/// always has one) and turns those four into `Unknown`, which fails closed.
+/// The EXEC table deliberately keeps no such requirement: reading an exec
+/// container is what CHECKS a body, so over-matching there cannot buy a skip.
+/// A user GENERIC type named `Seq`/`Set`/`Map`/`Multiset` is NOT closed by this
+/// and stays the disclosed assumption above.
+pub(super) fn syn_type_string_is_spec_collection(type_str: &str) -> bool {
+    let peeled = strip_leading_references(type_str.trim());
+    if !peeled.contains('<') {
+        return false;
+    }
+    matches!(
+        syn_type_string_head_segment(type_str),
+        "Seq" | "Set" | "Map" | "Multiset"
+    )
+}
+
+/// The tri-state provenance of an origin syn type string. `Unknown` whenever the
+/// spelling matches neither positive table (a type alias, a generic parameter, a
+/// struct field's own spelling that never reached this seam, …).
+pub(super) fn syn_type_string_collection_origin(type_str: &str) -> crate::vc::CollectionOrigin {
+    use crate::vc::CollectionOrigin;
+    if syn_type_string_is_exec_std_container(type_str) {
+        CollectionOrigin::Exec
+    } else if syn_type_string_is_spec_collection(type_str) {
+        CollectionOrigin::Spec
+    } else {
+        CollectionOrigin::Unknown
+    }
+}
+
+/// The per-COMPONENT provenance of a TUPLE origin spelling, as
+/// `(component index, origin)` pairs — `"(Seq<int>,u64)"` yields
+/// `[("0", Spec), ("1", Unknown)]`. EMPTY for a spelling that is not a tuple.
+///
+/// ROUND 7, and the reason it has to exist at all: a tuple's carrier name is
+/// built from its MODELED element types, so `(Vec<int>, u64)` and
+/// `(Seq<int>, u64)` collapse to the SAME carrier and the component spelling
+/// survives NOWHERE except the binding's own parameter type string. Splitting is
+/// at DEPTH ZERO only, so a `Map<int, int>` component is one component and not
+/// two.
+/// ROUND 10 — this returns the component SPELLINGS, not their verdicts. The
+/// parameter seam must read each component's origin through the FILE's own
+/// shadowing (`vc_extraction::scoped_collection_origin`), which needs the
+/// spelling; composing the two is what the unit test below pins.
+pub(super) fn syn_type_string_tuple_components(type_str: &str) -> Vec<(String, String)> {
+    let rest = strip_leading_references(type_str).trim();
+    let Some(inner) = rest.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return Vec::new();
+    };
+    let mut components: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut current = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '<' | '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' | ')' | ']' => {
+                depth -= 1;
+                current.push(ch);
+                if depth < 0 {
+                    // Unbalanced: not a spelling this splitter understands.
+                    return Vec::new();
+                }
+            }
+            ',' if depth == 0 => {
+                components.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if depth != 0 {
+        return Vec::new();
+    }
+    let trailing = current.trim().is_empty();
+    if !trailing {
+        components.push(current);
+    }
+    // A parenthesised NON-tuple (`(u64)`) has one component and no top-level
+    // comma; it is not a tuple and gets no entries.
+    if components.len() < 2 && !trailing {
+        return Vec::new();
+    }
+    components
+        .into_iter()
+        .enumerate()
+        .map(|(index, component)| (index.to_string(), component.trim().to_owned()))
+        .collect()
+}
+
 /// Peels leading reference decorations (`&`, `&mut`, `&'a`, `&'a mut`, `&&`, …)
 /// from an origin syn type string, mirroring how `parse_or_opaque` strips
 /// references before classifying the referent.
@@ -490,6 +643,147 @@ pub(super) fn extract_type_name(ty: &Type) -> String {
     // TrustVcType::from_str plus the encoder's internal sort translation keeps
     // backend sorts aligned with the original Rust bit widths.
     type_str.replace(' ', "")
+}
+
+#[cfg(test)]
+mod collection_origin_classifier_tests {
+    use super::syn_type_string_collection_origin as origin;
+    use crate::vc::CollectionOrigin;
+
+    /// THE SOUNDNESS BOUNDARY of round 6, exhaustively pinned. Both tables are
+    /// POSITIVE, and a spelling in neither is `Unknown` — never silently `Spec`.
+    /// Reading a missing exec reading as spec is precisely what let an exec
+    /// `BTreeSet`/`HashSet`/`BTreeMap` buy the ghost-closure skip.
+    #[test]
+    fn exec_std_containers_and_spec_collections_are_both_positive() {
+        for s in [
+            "Vec<u64>",
+            "std::vec::Vec<u64>",
+            "&Vec<u64>",
+            "&mut Vec<u64>",
+            "[u8]",
+            "&[u8]",
+            "[u8; 4]",
+            "BTreeSet<u64>",
+            "std::collections::BTreeSet<u64>",
+            "HashSet<u64>",
+            "&HashSet<u64>",
+            "BTreeMap<u64, u64>",
+            "HashMap<u64, u64>",
+            "VecDeque<u64>",
+            "BinaryHeap<u64>",
+            "LinkedList<u64>",
+        ] {
+            assert_eq!(origin(s), CollectionOrigin::Exec, "`{s}` must read Exec");
+        }
+        for s in [
+            "Seq<int>",
+            "Seq<u64>",
+            "trust_vc_types::Seq<int>",
+            "&Seq<int>",
+            "&'a mut Seq<int>",
+            "Set<int>",
+            "Map<int, int>",
+            "Multiset<int>",
+            "& Seq < int >",
+        ] {
+            assert_eq!(origin(s), CollectionOrigin::Spec, "`{s}` must read Spec");
+        }
+        // NEITHER table. A type alias, a generic parameter, a user struct, a
+        // scalar — all fail closed, and a consumer must treat them as such.
+        for s in [
+            "Ints",
+            "T",
+            "u64",
+            "MyHolder",
+            "Ghost<Seq<int>>",
+            "(Seq<int>, u64)",
+            "Option<Vec<u64>>",
+        ] {
+            assert_eq!(
+                origin(s),
+                CollectionOrigin::Unknown,
+                "`{s}` must fail closed"
+            );
+        }
+    }
+
+    /// The two tables are DISJOINT: no spelling may read as both, which is what
+    /// makes the tri-state total.
+    #[test]
+    fn the_two_positive_tables_are_disjoint() {
+        for s in [
+            "Vec<u64>",
+            "BTreeSet<u64>",
+            "HashMap<u64, u64>",
+            "Seq<int>",
+            "Set<int>",
+            "Map<int, int>",
+            "Multiset<int>",
+            "[u8]",
+            "Widget",
+            "u8",
+        ] {
+            let exec = super::syn_type_string_is_exec_std_container(s);
+            let spec = super::syn_type_string_is_spec_collection(s);
+            assert!(!(exec && spec), "`{s}` read as BOTH exec and spec");
+        }
+    }
+
+    /// ROUND 7, the TUPLE half. Components split at DEPTH ZERO, each read
+    /// through the same tri-state tables, and a non-tuple spelling yields NO
+    /// entries (so no site can read a provenance out of a shape that has none).
+    #[test]
+    fn tuple_components_split_at_depth_zero_and_read_the_same_tables() {
+        fn components(type_str: &str) -> Vec<(String, CollectionOrigin)> {
+            super::syn_type_string_tuple_components(type_str)
+                .into_iter()
+                .map(|(index, component)| {
+                    (index, super::syn_type_string_collection_origin(&component))
+                })
+                .collect()
+        }
+        assert_eq!(
+            components("(Seq<int>,u64)"),
+            vec![
+                ("0".to_string(), CollectionOrigin::Spec),
+                ("1".to_string(), CollectionOrigin::Unknown),
+            ]
+        );
+        // THE PAIR THIS TABLE EXISTS FOR: the two spellings collapse to the same
+        // carrier name and MUST read differently here.
+        assert_eq!(
+            components("(Vec<int>,u64)"),
+            vec![
+                ("0".to_string(), CollectionOrigin::Exec),
+                ("1".to_string(), CollectionOrigin::Unknown),
+            ]
+        );
+        // A comma INSIDE a generic argument list is not a component boundary.
+        assert_eq!(
+            components("(Map<int,int>,Vec<u64>)"),
+            vec![
+                ("0".to_string(), CollectionOrigin::Spec),
+                ("1".to_string(), CollectionOrigin::Exec),
+            ]
+        );
+        // References peel, and a one-tuple keeps its single component.
+        assert_eq!(
+            components("&(Seq<int>,u64)"),
+            vec![
+                ("0".to_string(), CollectionOrigin::Spec),
+                ("1".to_string(), CollectionOrigin::Unknown),
+            ]
+        );
+        assert_eq!(
+            components("(Vec<u64>,)"),
+            vec![("0".to_string(), CollectionOrigin::Exec)]
+        );
+        // NOT tuples: no entries at all.
+        for s in ["Vec<u64>", "(u64)", "Seq<int>", "u64", "(Vec<u64>"] {
+            assert!(components(s).is_empty(), "`{s}` must yield no components");
+        }
+    }
 }
 
 #[cfg(test)]

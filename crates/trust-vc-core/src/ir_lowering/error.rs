@@ -18,7 +18,12 @@ pub enum LoweringError {
         "unsupported unary operator `{0}` — trust_vc supports negation (-) and logical not (!)"
     )]
     UnsupportedUnOp(String),
-    #[error("unresolved variable `{0}` — ensure the variable is declared as a function parameter, let-binding, or quantifier-bound variable in the current scope")]
+    /// A body-extraction INVALIDATION POISON (`<name>__invalidated_<k>`, minted
+    /// by `vc_extraction::body_extract` when a binding went through an effect
+    /// it does not model) or UNMODELED SHADOW (`<name>__unmodeled_shadow_<k>`,
+    /// a new binding of a name that already denotes a value, whose own value
+    /// it does not model) is reported under its SOURCE name, with a note.
+    #[error("unresolved variable `{}` — ensure the variable is declared as a function parameter, let-binding, or quantifier-bound variable in the current scope{}", unresolved_var_source_name(.0), unresolved_var_invalidation_note(.0))]
     UnresolvedVar(String),
     #[error("type inference failed: {0}")]
     TypeInference(String),
@@ -73,4 +78,77 @@ pub enum LoweringError {
     InvalidCast(String),
     #[error("expression depth exceeds internal limit of {limit} during {stage}")]
     ExpressionTooDeep { limit: usize, stage: &'static str },
+}
+
+/// Marker infix of a body-extraction invalidation poison symbol.
+const INVALIDATION_POISON_INFIX: &str = "__invalidated_";
+
+/// Marker infix of a body-extraction unmodeled shadow symbol.
+pub(crate) const UNMODELED_SHADOW_INFIX: &str = "__unmodeled_shadow_";
+
+/// Which kind of never-declared body-extraction symbol a name is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnresolvedKind {
+    Plain,
+    InvalidationPoison,
+    UnmodeledShadow,
+}
+
+/// `(source name, kind)` for an unresolved variable name: a symbol
+/// `<name><infix><digits>` maps back to `<name>`.
+fn split_extraction_symbol(name: &str) -> (&str, UnresolvedKind) {
+    for (infix, kind) in [
+        (
+            INVALIDATION_POISON_INFIX,
+            UnresolvedKind::InvalidationPoison,
+        ),
+        (UNMODELED_SHADOW_INFIX, UnresolvedKind::UnmodeledShadow),
+    ] {
+        if let Some(index) = name.rfind(infix) {
+            let suffix = &name[index + infix.len()..];
+            if index > 0 && !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                return (&name[..index], kind);
+            }
+        }
+    }
+    (name, UnresolvedKind::Plain)
+}
+
+fn unresolved_var_source_name(name: &str) -> &str {
+    split_extraction_symbol(name).0
+}
+
+fn unresolved_var_invalidation_note(name: &str) -> &'static str {
+    match split_extraction_symbol(name).1 {
+        UnresolvedKind::Plain => "",
+        UnresolvedKind::InvalidationPoison => {
+            " (its value after an assignment, method call or borrow that vc_extraction does not track is unknown, so this read fails closed)"
+        }
+        UnresolvedKind::UnmodeledShadow => {
+            " (a pattern, closure parameter or `let` binds this name again with a value vc_extraction does not model, so this read fails closed instead of reading the outer binding of the same name)"
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoweringError;
+
+    #[test]
+    fn extraction_symbols_report_their_source_name() {
+        let shadow = LoweringError::UnresolvedVar("v__unmodeled_shadow_3".into()).to_string();
+        assert!(shadow.contains("unresolved variable `v`"), "{shadow}");
+        assert!(shadow.contains("binds this name again"), "{shadow}");
+
+        let poison = LoweringError::UnresolvedVar("x__invalidated_0".into()).to_string();
+        assert!(poison.contains("unresolved variable `x`"), "{poison}");
+        assert!(poison.contains("does not track"), "{poison}");
+
+        let plain = LoweringError::UnresolvedVar("y__unmodeled_shadow_".into()).to_string();
+        assert!(
+            plain.contains("unresolved variable `y__unmodeled_shadow_`"),
+            "{plain}"
+        );
+        assert!(!plain.contains("binds this name again"), "{plain}");
+    }
 }

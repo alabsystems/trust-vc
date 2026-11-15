@@ -12,7 +12,7 @@ use crate::ir::{DatatypeVariant, StructDef, TrustVcType};
 use crate::ir_lowering::expr_path_to_string;
 use crate::vc::{ObligationKind, ProofObligation, VerificationContext};
 use crate::{TrustVcError, TrustVcResult};
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -24,14 +24,28 @@ use syn::{Block, Expr, File, FnArg, ItemFn, Pat, Path, Token, Type};
 
 type AssociatedHelperSignature = (TrustVcType, Vec<(String, TrustVcType)>);
 type AssociatedHelperSignatures = BTreeMap<String, AssociatedHelperSignature>;
+type ScopedReturnExpression = (String, Vec<(String, TrustVcType)>, usize);
 
-mod attr_extract;
+pub(crate) mod attr_extract;
+mod bodiless_call_repeat;
 mod body_extract;
+pub(crate) mod declared_width;
+mod drop_glue;
 pub(crate) mod function_discovery;
+mod generic_values;
+mod ghost_call_in_exec;
+mod identifier_spelling;
 mod mut_ref_prophecy;
 mod param_extract;
 mod return_extract;
+mod runtime_checked_clauses;
+mod std_operator_scope;
 pub(crate) mod trait_contracts;
+mod trait_method_resolution;
+mod type_name_rebinding;
+pub use type_name_rebinding::{crate_sibling_view, CrateSiblingView};
+mod unread_items;
+mod untyped_binding_type;
 
 #[cfg(test)]
 #[path = "vc_extraction/tests.rs"]
@@ -273,10 +287,12 @@ fn verify_conformance_at_width(
     let ctx = prepare_file_conformance_context(file_path, pinned_width, ast)?;
     let _guard = pinned_width.map(crate::ir::PointerWidthGuard::install);
     let prepared = crate::prepared_context::prepare_context(&ctx)?;
-    Ok(crate::encoder::AYEncoder::verify_conformance_obligation(
-        &prepared,
-        obligation_name,
-    ))
+    Ok(
+        ctx.apply_verified_refusal(crate::encoder::AYEncoder::verify_conformance_obligation(
+            &prepared,
+            obligation_name,
+        )),
+    )
 }
 
 /// The name of the synthetic function used to carry a file's conformance
@@ -347,12 +363,17 @@ fn prepare_file_conformance_context(
     let mut ctx = extract_verification_conditions_from_parts_inner(
         Some(ast),
         Some(std::path::Path::new(file_path)),
+        // The probe is SYNTHETIC (`fn __conformance_probe() {}`), so its tokens
+        // carry no source position at all; locating its obligations would name
+        // a line of `file_path` that has nothing to do with them.
+        None,
         &probe,
         // The probe is not itself an item of the file, so the narrow
         // "function is named in the file" gate would skip source-trait
         // registration and leave the context with ZERO impls — every
         // conformance obligation would silently vanish from the listing.
         true,
+        &mut None,
     )?;
     // The conformance machinery derives every sub-query from an obligation
     // TEMPLATE (`base.obligations.first()`), so the context must carry at least
@@ -361,6 +382,29 @@ fn prepare_file_conformance_context(
     // conformance check derived from it.
     if ctx.obligations.is_empty() {
         ctx.push_obligation(ProofObligation::assert(CONFORMANCE_PROBE_FN, "true"));
+    }
+    if let Some(message) = type_name_rebinding::verified_refusal(Some(ast), &probe) {
+        ctx.refuse_verified(message);
+    }
+    if let Some(message) = identifier_spelling::verified_refusal(Some(ast), &probe) {
+        ctx.refuse_verified(message);
+    }
+    if let Some(message) = trait_method_resolution::file_refusal(ast, &probe) {
+        ctx.refuse_verified(message);
+    }
+    if let Some(message) = unread_items::verified_refusal(Some(ast), &probe) {
+        ctx.refuse_verified(message);
+    }
+    if let Some(message) = drop_glue::file_refusal(ast) {
+        ctx.refuse_verified(message);
+    }
+    if let Some(name) = crate::tracked_syntax::first_cfg_gated_precondition_or_mode(ast) {
+        ctx.refuse_verified(format!(
+            "a `#[cfg_attr(..)]` gates a precondition or a mode of `{name}` in this file, and \
+             vc_extraction does not evaluate `cfg`, so a trait impl body may be read against a \
+             function the build does not have. A `Verified` answer is refused; a refutation \
+             would be kept"
+        ));
     }
     Ok(ctx)
 }
@@ -405,7 +449,11 @@ fn verify_function_from_file_inner(
     // The directive is a unit-level pragma, not a Rust item, so remove it before
     // parsing. The width(s) it declared are re-installed per verification pass.
     let content = crate::ir::strip_pointer_width_directives(&content);
+    // Counted BEFORE and AFTER the `spec fn` normalization: the rewrite inserts
+    // a line per occurrence, and `diagnostic_file` below is withheld when it did.
+    let raw_line_count = content.lines().count();
     let content = crate::spec_function_catalog::normalize_open_spec_source(&content);
+    let normalized_line_count = content.lines().count();
 
     // Parse the file once — parsing is pointer-width independent. Only extraction
     // (which bakes usize/isize widths into the IR) and verification depend on the
@@ -430,22 +478,35 @@ fn verify_function_from_file_inner(
     // spec functions from sibling modules of the SAME crate (cross-file). Cross-
     // crate imports are not resolved here (they stay uninterpreted — fail closed).
     let source_path = std::path::Path::new(file_path);
+    // `normalize_open_spec_source` REWRITES `spec fn` into `#[trust_vc::spec]`
+    // plus a NEWLINE plus `fn`, inserting a line per occurrence, so on a
+    // Verus-surface source the parsed spans no longer correspond to the file on
+    // disk. A shifted line is worse than no line — the evidence gate
+    // cross-checks the reported line against upstream's own `FAILS` marker — so
+    // this lane locates obligations only when the normalization left the line
+    // count alone. Measured, not assumed: the two counts are taken above.
+    let diagnostic_file = (normalized_line_count == raw_line_count).then_some(file_path);
     match pinned_width {
         // A pinned `global size_of usize == N` directive fixes the target arch:
         // verify exactly once at that width (unchanged behavior).
-        Some(width) => verify_unit_at_width(&ast, func, width, Some(source_path)),
+        Some(width) => verify_unit_at_width(&ast, func, width, Some(source_path), diagnostic_file),
         // No directive. If the unit's verification depends on the pointer width
         // (mentions `usize`/`isize`/`usize::BITS`), Rust permits BOTH a 32-bit and
         // a 64-bit `usize`, so a proof is sound only if it holds at BOTH. Emit the
         // obligation set twice and require both to discharge (#2778 dual-arch).
         // Width-invariant units are verified once at the host width, as before.
         None if crate::ir::unit_is_pointer_width_polymorphic(Some(&ast), func) => {
-            verify_unit_dual_width(&ast, func, Some(source_path))
+            verify_unit_dual_width(&ast, func, Some(source_path), diagnostic_file)
         }
         None => {
             // Host width, no guard needed (pointer_width() already returns it).
-            extract_verification_conditions_with_source_file(&ast, func, Some(source_path))
-                .map(|vc| vc.verify())
+            extract_verification_conditions_with_source_file(
+                &ast,
+                func,
+                Some(source_path),
+                diagnostic_file,
+            )
+            .map(|vc| vc.verify())
         }
     }
 }
@@ -460,9 +521,11 @@ fn verify_unit_at_width(
     func: &ItemFn,
     width_bits: u32,
     source_file: Option<&std::path::Path>,
+    diagnostic_file: Option<&str>,
 ) -> TrustVcResult<VerifyResult> {
     let _guard = crate::ir::PointerWidthGuard::install(width_bits);
-    extract_verification_conditions_with_source_file(ast, func, source_file).map(|vc| vc.verify())
+    extract_verification_conditions_with_source_file(ast, func, source_file, diagnostic_file)
+        .map(|vc| vc.verify())
 }
 
 /// Verifies a pointer-width-polymorphic unit at BOTH 32-bit and 64-bit `usize`,
@@ -486,9 +549,10 @@ fn verify_unit_dual_width(
     ast: &File,
     func: &ItemFn,
     source_file: Option<&std::path::Path>,
+    diagnostic_file: Option<&str>,
 ) -> TrustVcResult<VerifyResult> {
-    let result_32 = verify_unit_at_width(ast, func, 32, source_file)?;
-    let result_64 = verify_unit_at_width(ast, func, 64, source_file)?;
+    let result_32 = verify_unit_at_width(ast, func, 32, source_file, diagnostic_file)?;
+    let result_64 = verify_unit_at_width(ast, func, 64, source_file, diagnostic_file)?;
     Ok(combine_dual_width_results(result_32, result_64))
 }
 
@@ -543,10 +607,12 @@ fn tag_result_with_arch(result: VerifyResult, suffix: &str) -> VerifyResult {
     match result {
         VerifyResult::Counterexample {
             obligation_name,
+            location,
             model,
             bindings,
         } => VerifyResult::Counterexample {
             obligation_name: format!("{obligation_name}{suffix}"),
+            location,
             model,
             bindings,
         },
@@ -579,17 +645,17 @@ fn tag_result_with_arch(result: VerifyResult, suffix: &str) -> VerifyResult {
 /// value and a call `f(x)` reaches the existing opaque, congruent `spec_fn_apply`
 /// UF arm (`ir_lowering/dispatch/calls.rs`).
 ///
-/// SOUNDNESS — `Fn`-ONLY (the deterministic case):
-/// * `Fn` captures immutably, so it is DETERMINISTIC across calls: modeling `f`
-///   with one congruent uninterpreted function (`spec_fn_apply(f, x)`) is sound —
-///   equal arguments yield the equal result (`f(3) == f(3)`), the real capability
-///   this typing unlocks. The result stays otherwise UNCONSTRAINED (`f(3) == 3` is
-///   NOT provable — the UF says nothing about its value).
-/// * `FnMut` / `FnOnce` are NOT deterministic across calls (mutable / consumed
-///   captures); a single congruent UF would UNSOUNDLY prove `f(3) == f(3)`. They
-///   are therefore left UNMODELED — the type parameter keeps its bare `TypeParam`
-///   typing, so a call through such a parameter fails closed exactly as before.
-///   Only a `Fn` bound is recognized here.
+/// SOUNDNESS — `Fn`-ONLY:
+/// * `f` is modeled by one congruent uninterpreted function
+///   (`spec_fn_apply(f, x)`), so one call is one term whose value is otherwise
+///   UNCONSTRAINED (`f(3) == 3` is NOT provable). Two calls with equal arguments
+///   are the same term, which is false for an `Fn` closure that reads shared
+///   state (an atomic, a borrowed `Cell`); `bodiless_call_repeat` refuses the
+///   `Verified` answer of a function that evaluates such a parameter more than
+///   once.
+/// * `FnMut` / `FnOnce` are left UNMODELED — the type parameter keeps its bare
+///   `TypeParam` typing, so a call through such a parameter fails closed exactly
+///   as before. Only a `Fn` bound is recognized here.
 ///
 /// The parameter is typed as a PURELY UNCONSTRAINED `SpecFn` value: this ONLY sets
 /// the variable's type. It registers NO reflection contract, so the call-site
@@ -635,7 +701,7 @@ fn fn_bound_spec_fn_param_types(
 }
 
 /// The `SpecFn(arg_tys, ret)` model of a single type parameter's `bounds`, when
-/// they carry a DETERMINISTIC `Fn(A..) -> B` parenthesized bound over fully
+/// they carry an `Fn(A..) -> B` parenthesized bound over fully
 /// concrete argument/return types. A `FnMut`/`FnOnce` bound, a non-parenthesized
 /// `Fn` mention, or any non-concrete signature yields `None` (fail closed — see
 /// [`fn_bound_spec_fn_param_types`]).
@@ -653,9 +719,9 @@ fn fn_bound_spec_fn_type(
         let Some(segment) = trait_bound.path.segments.last() else {
             continue;
         };
-        // Increment 1 is `Fn`-ONLY: `FnMut`/`FnOnce` are non-deterministic across
-        // calls, so a congruent UF would be UNSOUND for them — leave them fail
-        // closed by declining to recognize the bound.
+        // Increment 1 is `Fn`-ONLY: `FnMut`/`FnOnce` change their own state at
+        // each call, so leave them fail closed by declining to recognize the
+        // bound.
         if segment.ident != "Fn" {
             continue;
         }
@@ -700,14 +766,52 @@ pub fn extract_verification_conditions(func: &ItemFn) -> TrustVcResult<Verificat
 }
 
 fn extract_verification_conditions_inner(func: &ItemFn) -> TrustVcResult<VerificationContext> {
-    extract_verification_conditions_from_parts(None, None, func)
+    extract_verification_conditions_from_parts(None, None, None, func, None)
 }
 
 pub fn extract_verification_conditions_with_file_context(
     file: &File,
     func: &ItemFn,
 ) -> TrustVcResult<VerificationContext> {
-    extract_verification_conditions_from_parts(Some(file), None, func)
+    extract_verification_conditions_from_parts(Some(file), None, None, func, None)
+}
+
+/// Like [`extract_verification_conditions_with_file_context`], but LOCATES every
+/// obligation it raises in `diagnostic_file`.
+///
+/// `diagnostic_file` is a DIAGNOSTIC path, not a resolution path: it never
+/// changes which items are in scope (that is `source_file`'s job), only which
+/// file the `file:line:column` of a raised obligation names. Pass it ONLY when
+/// `file` was parsed from a source whose lines still correspond to that path
+/// one-for-one — the offset-preserving `strip_pointer_width_directives` is fine,
+/// a normalization that INSERTS lines is not, and a shifted line is worse than
+/// no line because the evidence gate cross-checks the reported line against
+/// upstream's own `FAILS` marker.
+pub fn extract_verification_conditions_located_in_file(
+    file: &File,
+    func: &ItemFn,
+    diagnostic_file: &str,
+) -> TrustVcResult<VerificationContext> {
+    extract_verification_conditions_from_parts(Some(file), None, Some(diagnostic_file), func, None)
+}
+
+/// Like [`extract_verification_conditions_located_in_file`], for a `file`
+/// into which the crate lane copied the type items of the crate's other files.
+/// `siblings` ([`crate_sibling_view`]) names those types, which the type-name
+/// rule leaves to it, and carries its refusal, if any.
+pub fn extract_verification_conditions_located_in_crate_file(
+    file: &File,
+    func: &ItemFn,
+    diagnostic_file: &str,
+    siblings: &CrateSiblingView,
+) -> TrustVcResult<VerificationContext> {
+    extract_verification_conditions_from_parts(
+        Some(file),
+        None,
+        Some(diagnostic_file),
+        func,
+        Some(siblings),
+    )
 }
 
 /// Like [`extract_verification_conditions_with_file_context`], but also threads
@@ -718,16 +822,644 @@ pub(crate) fn extract_verification_conditions_with_source_file(
     file: &File,
     func: &ItemFn,
     source_file: Option<&std::path::Path>,
+    diagnostic_file: Option<&str>,
 ) -> TrustVcResult<VerificationContext> {
-    extract_verification_conditions_from_parts(Some(file), source_file, func)
+    extract_verification_conditions_from_parts(Some(file), source_file, diagnostic_file, func, None)
 }
 
 fn extract_verification_conditions_from_parts(
     file: Option<&File>,
     source_file: Option<&std::path::Path>,
+    diagnostic_file: Option<&str>,
     func: &ItemFn,
+    siblings: Option<&CrateSiblingView>,
 ) -> TrustVcResult<VerificationContext> {
-    extract_verification_conditions_from_parts_inner(file, source_file, func, false)
+    // A function that mentions a refused `state_machine!` (or an `X::…` path
+    // D1a does not generate) carries a poison ident; fail closed with the
+    // recorded refusal before anything tries to resolve it.
+    if let Some(ident) = crate::state_machine_dsl::first_poison_ident(func.to_token_stream()) {
+        let detail = file
+            .and_then(|file| crate::state_machine_dsl::poison_message(file, &ident))
+            .unwrap_or_else(|| {
+                format!("state_machine! `?`: `{ident}` names a refused state machine item")
+            });
+        return Err(TrustVcError::Encoding {
+            context: "state_machine!",
+            detail,
+        });
+    }
+    let mut lowered_signature = None;
+    let mut vc = extract_verification_conditions_from_parts_inner(
+        file,
+        source_file,
+        diagnostic_file,
+        func,
+        false,
+        &mut lowered_signature,
+    )?;
+    // Runs AFTER a successful extraction so every pre-existing refusal keeps its
+    // text; it can only turn an `Ok` into a fail-closed error.
+    refuse_unevaluated_cfg(file, func, lowered_signature.as_ref())?;
+    let outside_types = siblings.map(|view| &view.outside_types);
+    let no_outside_types = BTreeSet::new();
+    if let Some(message) = type_name_rebinding::verified_refusal_with_outside_types(
+        file,
+        func,
+        outside_types.unwrap_or(&no_outside_types),
+    ) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = identifier_spelling::verified_refusal(file, func) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = siblings.and_then(|view| view.refusal.clone()) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = bodiless_call_repeat::verified_refusal(file, func) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = trait_method_resolution::verified_refusal(file, func) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = unread_items::verified_refusal(file, func) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = drop_glue::verified_refusal(file, func) {
+        vc.refuse_verified(message);
+    }
+    if let Some(message) = ghost_call_in_exec::verified_refusal(file, source_file, func) {
+        vc.refuse_verified(message);
+    }
+    Ok(vc)
+}
+
+/// Why `file` can spell one name in two ways this lane tells apart and rustc
+/// does not (an identifier outside ASCII, which rustc reads in Unicode
+/// normalization form C), or `None`. The path-dependency import refuses a
+/// file it reads for which this is `Some`.
+pub fn identifier_spelling_hazard(file: &File) -> Option<String> {
+    identifier_spelling::file_hazard(file)
+}
+
+/// The paths (`b::inc`) and method calls (`.view`) that the running code of
+/// `func` names, or `None` when `func` is not an exec function whose body is
+/// read. A spec or proof function is ghost code and panics when called at run
+/// time, so the crate lane refuses a function whose running code calls a
+/// path dependency's spec function.
+pub fn exec_running_call_paths(func: &ItemFn) -> Option<BTreeSet<String>> {
+    ghost_call_in_exec::exec_running_call_paths(func)
+}
+
+/// The UNION TAINT CLOSURE of a file: every declared `union` ident, plus every
+/// other name in the file that can hand back union storage.
+///
+/// SOUNDNESS-CRITICAL (H13, review round 1). The first cut of this gate keyed on
+/// the union's own IDENT, and a one-line `type Al = X;` defeated it outright:
+/// `let mut z = Al { a: 0 }; z.b.1 = true;` was accepted in SILENCE, with the
+/// overlapping write gone, which is the exact defect the gate exists to stop. So
+/// did a wrapper — `struct W { u: X }` and `struct T(X, u32)` — where the target
+/// never writes the union's name at all.
+///
+/// The closure is therefore a FIXPOINT over the file's own declarations:
+///
+/// * seed: every `union` ident (through inline modules and fn-body items);
+/// * a `type` alias whose right-hand side names a tainted ident is tainted
+///   (so alias chains are followed);
+/// * a `struct` / `enum` / `union` with a field whose type names a tainted ident
+///   is tainted (so a wrapper of a wrapper is too);
+/// * a `fn` — free, inherent, trait — whose SIGNATURE names a tainted ident, or
+///   that is declared in an `impl` for a tainted self type, is tainted (so
+///   `let mut u = mk();` is refused as a union, rather than fail-closed by
+///   accident on an unrelated lowering error);
+/// * a `const` / `static` of tainted type is tainted.
+///
+/// The direction matters and is one-way: a struct USED INSIDE a union is NOT
+/// tainted by it (`union U { b: Pair }` leaves `Pair` alone — reading `Pair` on
+/// its own reads no union storage), which is what keeps the ported
+/// `mut_refs_unions.rs` tagged-struct cases verifying.
+///
+/// A file that declares no `union` produces an EMPTY set and every gate below is
+/// a no-op; nothing outside a union-declaring file can be affected.
+#[derive(Default)]
+struct UnionTaint {
+    /// Every name that is, or reaches, union storage.
+    tainted: BTreeSet<String>,
+    /// The `union` declarations themselves, for the diagnostic.
+    unions: BTreeSet<String>,
+}
+
+impl UnionTaint {
+    /// True when this file declares no `union` at all, in which case the whole
+    /// gate is a no-op. `tainted` is seeded from `unions`, so it is empty
+    /// exactly when `unions` is.
+    fn is_empty(&self) -> bool {
+        self.unions.is_empty()
+    }
+
+    /// The tainted idents `tokens` names, sorted.
+    fn named_by(&self, tokens: proc_macro2::TokenStream) -> BTreeSet<String> {
+        fn walk(
+            tokens: proc_macro2::TokenStream,
+            names: &BTreeSet<String>,
+            out: &mut BTreeSet<String>,
+        ) {
+            for tree in tokens {
+                match tree {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        let ident = ident.to_string();
+                        if names.contains(&ident) {
+                            out.insert(ident);
+                        }
+                    }
+                    proc_macro2::TokenTree::Group(group) => walk(group.stream(), names, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        walk(tokens, &self.tainted, &mut out);
+        out
+    }
+
+    /// The tainted idents this function's attributes, signature or body name.
+    ///
+    /// The function's OWN ident is dropped from the answer. A `fn` is tainted by
+    /// its own signature, and `Signature::to_token_stream` carries the ident, so
+    /// keeping it would make every union-taking function report itself as a
+    /// reason it was refused — noise in the diagnostic, and, where the only
+    /// tainted mention is a same-named sibling in another module, a refusal with
+    /// no evidence behind it at all. Nothing is lost: whatever tainted its
+    /// signature is still matched directly. A function whose own name IS a
+    /// declared union's name keeps the mention (types and values are separate
+    /// Rust namespaces, so that is legal and must stay refused).
+    fn named_by_fn(
+        &self,
+        attrs: &[syn::Attribute],
+        sig: &syn::Signature,
+        block: &syn::Block,
+    ) -> BTreeSet<String> {
+        let mut named = BTreeSet::new();
+        for attr in attrs {
+            named.append(&mut self.named_by(attr.to_token_stream()));
+        }
+        named.append(&mut self.named_by(sig.to_token_stream()));
+        named.append(&mut self.named_by(block.to_token_stream()));
+        let own = sig.ident.to_string();
+        if !self.unions.contains(&own) {
+            named.remove(&own);
+        }
+        named
+    }
+}
+
+/// Every ident appearing anywhere in `tokens`, at any group depth.
+fn idents_in(tokens: proc_macro2::TokenStream) -> BTreeSet<String> {
+    fn walk(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    out.insert(ident.to_string());
+                }
+                proc_macro2::TokenTree::Group(group) => walk(group.stream(), out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(tokens, &mut out);
+    out
+}
+
+fn field_type_idents(fields: &syn::Fields) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for field in fields.iter() {
+        out.append(&mut idents_in(field.ty.to_token_stream()));
+    }
+    out
+}
+
+/// Parameter and return TYPES only — never the function's own name or its
+/// parameter binders.
+fn signature_type_idents(sig: &syn::Signature) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for input in &sig.inputs {
+        match input {
+            syn::FnArg::Typed(pat_type) => {
+                out.append(&mut idents_in(pat_type.ty.to_token_stream()));
+            }
+            syn::FnArg::Receiver(receiver) => {
+                out.append(&mut idents_in(receiver.ty.to_token_stream()));
+            }
+        }
+    }
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        out.append(&mut idents_in(ty.to_token_stream()));
+    }
+    out
+}
+
+/// Builds the [`UnionTaint`] closure for `file` (and the target's own body
+/// items, which may declare a union the file never sees on the no-file path).
+///
+/// SCOPE OF THE H13 CLAIM — read this before describing the union write as
+/// "closed". The closure's only inputs are `file.items` and the target's own
+/// block, so it is built from ONE source file. A union declared in another module
+/// FILE (`mod other;` resolved on disk, or any cross-file `use`) contributes
+/// nothing: `unions` comes back empty, `UnionTaint::is_empty` short-circuits, and
+/// a write through that union is still silently DROPPED exactly as before the
+/// fix. Measured identically at the merge base and on this branch, so it is not a
+/// regression — but it bounds what may be claimed. The honest statement is
+/// "REFUSED for unions syntactically present in the file under verification",
+/// and the cause (single-file extraction with no cross-file type resolution) is
+/// broader than unions and pre-dates this work.
+fn union_taint(file: Option<&File>, func: &ItemFn) -> UnionTaint {
+    // FAST PATH, and the reason this gate costs nothing on a file with no
+    // `union` in it: the edge collection below renders a token stream for every
+    // declaration in the file, so it runs only once a `union` is known to be
+    // there. This cheap pre-scan is the same walk, matching one variant.
+    fn declares_a_union(items: &[syn::Item]) -> bool {
+        // Every descent the full walk below makes, and no other, so the fast
+        // path can never answer "no union" where the full walk would find one.
+        items.iter().any(|item| match item {
+            syn::Item::Union(_) => true,
+            syn::Item::Mod(module) => module
+                .content
+                .as_ref()
+                .is_some_and(|(_, inner)| declares_a_union(inner)),
+            syn::Item::Fn(item_fn) => block_declares_a_union(&item_fn.block),
+            syn::Item::Impl(item_impl) => item_impl.items.iter().any(|impl_item| {
+                matches!(impl_item, syn::ImplItem::Fn(method)
+                    if block_declares_a_union(&method.block))
+            }),
+            syn::Item::Trait(item_trait) => item_trait.items.iter().any(|trait_item| {
+                matches!(trait_item, syn::TraitItem::Fn(method)
+                    if method.default.as_ref().is_some_and(block_declares_a_union))
+            }),
+            _ => false,
+        })
+    }
+
+    fn block_declares_a_union(block: &syn::Block) -> bool {
+        block.stmts.iter().any(|stmt| match stmt {
+            syn::Stmt::Item(item) => declares_a_union(std::slice::from_ref(item)),
+            _ => false,
+        })
+    }
+
+    let any_union = file.is_some_and(|file| declares_a_union(&file.items))
+        || block_declares_a_union(&func.block);
+    if !any_union {
+        return UnionTaint::default();
+    }
+
+    let mut unions = BTreeSet::new();
+    let mut edges: Vec<(String, BTreeSet<String>)> = Vec::new();
+
+    fn walk_items(
+        items: &[syn::Item],
+        unions: &mut BTreeSet<String>,
+        edges: &mut Vec<(String, BTreeSet<String>)>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Union(item_union) => {
+                    unions.insert(item_union.ident.to_string());
+                    edges.push((
+                        item_union.ident.to_string(),
+                        field_type_idents(&syn::Fields::Named(item_union.fields.clone())),
+                    ));
+                }
+                syn::Item::Struct(item_struct) => {
+                    edges.push((
+                        item_struct.ident.to_string(),
+                        field_type_idents(&item_struct.fields),
+                    ));
+                }
+                syn::Item::Enum(item_enum) => {
+                    let mut refs = BTreeSet::new();
+                    for variant in &item_enum.variants {
+                        refs.append(&mut field_type_idents(&variant.fields));
+                    }
+                    edges.push((item_enum.ident.to_string(), refs));
+                }
+                syn::Item::Type(item_type) => {
+                    edges.push((
+                        item_type.ident.to_string(),
+                        idents_in(item_type.ty.to_token_stream()),
+                    ));
+                }
+                syn::Item::Const(item_const) => {
+                    edges.push((
+                        item_const.ident.to_string(),
+                        idents_in(item_const.ty.to_token_stream()),
+                    ));
+                }
+                syn::Item::Static(item_static) => {
+                    edges.push((
+                        item_static.ident.to_string(),
+                        idents_in(item_static.ty.to_token_stream()),
+                    ));
+                }
+                syn::Item::Fn(item_fn) => {
+                    edges.push((
+                        item_fn.sig.ident.to_string(),
+                        signature_type_idents(&item_fn.sig),
+                    ));
+                    walk_block(&item_fn.block, unions, edges);
+                }
+                syn::Item::Impl(item_impl) => {
+                    let self_refs = idents_in(item_impl.self_ty.to_token_stream());
+                    for impl_item in &item_impl.items {
+                        match impl_item {
+                            syn::ImplItem::Fn(method) => {
+                                // A method of a tainted self type can hand back
+                                // that type's union storage, so it is tainted
+                                // even when its own signature is clean.
+                                let mut refs = signature_type_idents(&method.sig);
+                                refs.extend(self_refs.iter().cloned());
+                                edges.push((method.sig.ident.to_string(), refs));
+                                walk_block(&method.block, unions, edges);
+                            }
+                            syn::ImplItem::Type(assoc) => {
+                                edges.push((
+                                    assoc.ident.to_string(),
+                                    idents_in(assoc.ty.to_token_stream()),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    for trait_item in &item_trait.items {
+                        match trait_item {
+                            syn::TraitItem::Fn(method) => {
+                                edges.push((
+                                    method.sig.ident.to_string(),
+                                    signature_type_idents(&method.sig),
+                                ));
+                                if let Some(block) = &method.default {
+                                    walk_block(block, unions, edges);
+                                }
+                            }
+                            syn::TraitItem::Type(assoc) => {
+                                if let Some((_, ty)) = &assoc.default {
+                                    edges.push((
+                                        assoc.ident.to_string(),
+                                        idents_in(ty.to_token_stream()),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        walk_items(inner, unions, edges);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn walk_block(
+        block: &syn::Block,
+        unions: &mut BTreeSet<String>,
+        edges: &mut Vec<(String, BTreeSet<String>)>,
+    ) {
+        for stmt in &block.stmts {
+            if let syn::Stmt::Item(item) = stmt {
+                walk_items(std::slice::from_ref(item), unions, edges);
+            }
+        }
+    }
+
+    if let Some(file) = file {
+        walk_items(&file.items, &mut unions, &mut edges);
+    }
+    walk_block(&func.block, &mut unions, &mut edges);
+
+    if unions.is_empty() {
+        return UnionTaint::default();
+    }
+
+    // Least fixpoint. `edges` is small (one entry per declaration in the file),
+    // and each pass can only add, so this terminates in at most `edges.len()`
+    // rounds.
+    let mut tainted = unions.clone();
+    loop {
+        let mut changed = false;
+        for (name, refs) in &edges {
+            if tainted.contains(name) {
+                continue;
+            }
+            if refs.iter().any(|reference| tainted.contains(reference)) {
+                tainted.insert(name.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    UnionTaint { tainted, unions }
+}
+
+fn union_refusal(subject: &str, named: &BTreeSet<String>, taint: &UnionTaint) -> TrustVcError {
+    let list = named
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let unions = taint
+        .unions
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reach = if named == &taint.unions || named.iter().all(|name| taint.unions.contains(name)) {
+        format!("names the union {list}")
+    } else {
+        format!("names {list}, which is or reaches the Rust union {unions} declared in this file,")
+    };
+    TrustVcError::Encoding {
+        context: "extract union use",
+        detail: format!(
+            "`{subject}` {reach} and TrustVc does not model Rust unions. A union's \
+             fields share storage, so writing one field reinterprets the bytes of every \
+             other, and nothing here tracks which field is active — a write such as \
+             `x.b.1 = true` after `let mut x = X {{ a: 0 }}` would be DROPPED, and the \
+             function would report a verdict with that state change unmodelled (really \
+             `x.a == 256` on the natural little-endian layout). TrustVc refuses instead of \
+             guessing: model the variant explicitly with a tagged struct or an enum"
+        ),
+    }
+}
+
+/// SOUNDNESS-CRITICAL (H13, a SILENT ACCEPTANCE). Refuse a target that names
+/// anything in the file's [`UnionTaint`] closure.
+///
+/// `Item::Union` is recorded in the source-type index (it occupies its bare ident
+/// in the method registries exactly as a struct does) and is never lowered. A
+/// union's fields SHARE STORAGE, so a write to one reinterprets the bytes of
+/// every other, and nothing here represents which field is active. Measured on
+/// `5bd3a2cc`:
+///
+/// ```ignore
+/// union X { a: u32, b: (u8, bool) }
+/// #[trust_vc::ensures(true)]
+/// fn f() { let mut x = X { a: 0 }; x.b.1 = true; }
+/// ```
+///
+/// raised no obligation and NO refusal for the write, and `f` came back
+/// `Verified` with the state change simply gone (`trustc -Ztrust-verify=off`:
+/// `x.a` is 256 afterwards on the natural little-endian layout; Verus rejects the
+/// write). Every claim that READS union state already failed closed, so this was
+/// not yet a false `Verified` — it was a function reporting a verdict while
+/// carrying an unmodelled state change, which is the same thing one modelling
+/// improvement away.
+///
+/// SHAPE OF THE CHECK — deliberately by NAME, and therefore wide. The target is
+/// refused when its tokens (attributes, signature and body) mention a tainted
+/// name anywhere: construction, a union-typed binding, parameter or return, a
+/// pattern, a `union_field`-style builtin over it, a turbofish, an alias, a
+/// wrapper type, a union-producing call, and any write whose place root reaches
+/// one. Tracking "does this place root reach a union field" precisely would need
+/// the type inference that is exactly what is missing here, and an approximation
+/// of it that answered NO too often would restore the silence — review round 1
+/// measured three separate silent acceptances from exactly such a narrowing. The
+/// cost is over-rejection inside a file that declares a union AND reuses one of
+/// those names for something else; the cost of the alternative is a dropped
+/// write.
+///
+/// NARROW IN THE ONE WAY THAT MATTERS: a file that declares no union is untouched,
+/// and a function in a union-declaring file that reaches no union verifies
+/// exactly as before.
+fn reject_union_use(file: Option<&File>, func: &ItemFn) -> TrustVcResult<()> {
+    let taint = union_taint(file, func);
+    if taint.is_empty() {
+        return Ok(());
+    }
+    let named = taint.named_by_fn(&func.attrs, &func.sig, &func.block);
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(union_refusal(&func.sig.ident.to_string(), &named, &taint))
+}
+
+/// The same refusal for the TRAIT-CONFORMANCE lane, which reaches extraction
+/// with a SYNTHETIC target (`fn __probe() {}`, see
+/// [`prepare_file_conformance_context`]) whose attributes, signature and body
+/// name nothing at all.
+///
+/// SOUNDNESS (H13, review round 1). Because [`reject_union_use`] keys on the
+/// TARGET's tokens, it can never fire for that probe: a union write inside a
+/// trait DEFAULT body was still accepted in silence when the file was driven
+/// through `list_trait_conformance_obligations` /
+/// `verify_trait_conformance_obligation`. Here the whole FILE is the subject, so
+/// every `fn` it declares — free, inherent, trait method, trait default — is
+/// checked against the same closure.
+///
+/// Still narrow where it counts: a file that declares a union but never reaches
+/// it from any function body or signature keeps its conformance obligations, and
+/// a file with no `union` at all is untouched.
+fn reject_union_use_across_file(file: Option<&File>, func: &ItemFn) -> TrustVcResult<()> {
+    let Some(file) = file else {
+        return Ok(());
+    };
+    let taint = union_taint(Some(file), func);
+    if taint.is_empty() {
+        return Ok(());
+    }
+
+    fn scan(items: &[syn::Item], taint: &UnionTaint) -> Option<(String, BTreeSet<String>)> {
+        for item in items {
+            match item {
+                syn::Item::Fn(item_fn) => {
+                    let named = taint.named_by_fn(&item_fn.attrs, &item_fn.sig, &item_fn.block);
+                    if !named.is_empty() {
+                        return Some((item_fn.sig.ident.to_string(), named));
+                    }
+                }
+                syn::Item::Impl(item_impl) => {
+                    for impl_item in &item_impl.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            let named =
+                                taint.named_by_fn(&method.attrs, &method.sig, &method.block);
+                            if !named.is_empty() {
+                                return Some((method.sig.ident.to_string(), named));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    for trait_item in &item_trait.items {
+                        if let syn::TraitItem::Fn(method) = trait_item {
+                            let mut named = BTreeSet::new();
+                            for attr in &method.attrs {
+                                named.append(&mut taint.named_by(attr.to_token_stream()));
+                            }
+                            named.append(&mut taint.named_by(method.sig.to_token_stream()));
+                            if let Some(block) = &method.default {
+                                named.append(&mut taint.named_by(block.to_token_stream()));
+                            }
+                            if !named.is_empty() {
+                                return Some((method.sig.ident.to_string(), named));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        if let Some(found) = scan(inner, taint) {
+                            return Some(found);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    match scan(&file.items, &taint) {
+        Some((subject, named)) => Err(union_refusal(&subject, &named, &taint)),
+        None => Ok(()),
+    }
+}
+
+/// SOUNDNESS (H14, review round 1). A `trust_vc::`-namespaced attribute written
+/// on a `mod` was DISCARDED in silence, so `#[trust_vc::externl_body] mod ext`
+/// read exactly like a correct trusted boundary while every body inside stayed a
+/// fact source. Module attributes now go through the same
+/// [`attr_extract::reject_unknown_trust_vc_attribute`] gate every function
+/// attribute does.
+///
+/// NARROW: only an explicitly `trust_vc::`-namespaced path is in scope, so
+/// `#[cfg(..)]`, `#[allow(..)]`, `#[path = ".."]` and any foreign namespace keep
+/// falling through untouched.
+fn reject_unknown_trust_vc_module_attributes(file: Option<&File>) -> TrustVcResult<()> {
+    fn walk(items: &[syn::Item]) -> TrustVcResult<()> {
+        for item in items {
+            let syn::Item::Mod(module) = item else {
+                continue;
+            };
+            for attr in &module.attrs {
+                attr_extract::reject_unknown_trust_vc_attribute(attr)?;
+            }
+            if let Some((_, inner)) = &module.content {
+                walk(inner)?;
+            }
+        }
+        Ok(())
+    }
+    match file {
+        Some(file) => walk(&file.items),
+        None => Ok(()),
+    }
 }
 
 /// `force_source_trait_registration` registers the file's trait decls + impls
@@ -738,8 +1470,10 @@ fn extract_verification_conditions_from_parts(
 fn extract_verification_conditions_from_parts_inner(
     file: Option<&File>,
     source_file: Option<&std::path::Path>,
+    diagnostic_file: Option<&str>,
     func: &ItemFn,
     force_source_trait_registration: bool,
+    lowered_signature: &mut Option<syn::Signature>,
 ) -> TrustVcResult<VerificationContext> {
     // Two same-named traits in different modules is LEGAL Rust that stock
     // `rustc --edition 2021` compiles and runs, and `impl real::Tr for S` is not
@@ -752,14 +1486,64 @@ fn extract_verification_conditions_from_parts_inner(
     // map, `trait_method_declares_requires`) silently depend on. Undecidable
     // shapes still fail the file CLOSED in here.
     // (`crate::trait_path_resolution::prune_shadowed_duplicate_traits`.)
+    //
+    // The prune deletes whole trait declarations, default methods included, but
+    // callers SELECT the target from the file they passed (`cargo trust-vc
+    // check` resolves it by line in that unpruned AST, the bare-name lane walks
+    // trait default methods too), so the target may be a default method of a
+    // pruned trait, or token-identical to one. Every lookup below that locates
+    // the target by exact source identity — its inline module (spec-fn and
+    // const scope), its enclosing impl's `Self`, the A3 projection scope —
+    // reads the PRUNED file, where such a copy is simply absent: the walk then
+    // answers from whatever copy survived (a twin in another module or impl)
+    // or from no copy at all (the crate root's scope), and a `K` in a pruned
+    // `a::Q` default method was read as the root's `K`. So the target is
+    // REFUSED when the prune removed any item with its exact identity; after
+    // this check every exact-identity candidate the unpruned file holds is
+    // also in the pruned one, and those lookups see the complete set.
     let pruned_file;
     let file = match file {
         Some(file) => {
             pruned_file = crate::trait_path_resolution::prune_shadowed_duplicate_traits(file)?;
+            if let Some(pruned) = pruned_file.as_ref() {
+                let in_source = function_discovery::exact_source_identity_count(file, func);
+                let after_prune = function_discovery::exact_source_identity_count(pruned, func);
+                if in_source != after_prune {
+                    return Err(TrustVcError::Encoding {
+                        context: "resolve target through duplicate-trait prune",
+                        detail: format!(
+                            "`{}` is, or is token-identical to, a default method of a trait \
+                             that shares its name with another trait in this file and that no \
+                             `impl` header, trait bound or supertrait names; that declaration \
+                             is set aside before verification, so the method's own module, \
+                             `Self` and associated types cannot be resolved and none is \
+                             guessed — rename the trait or the method",
+                            func.sig.ident
+                        ),
+                    });
+                }
+            }
             Some(pruned_file.as_ref().unwrap_or(file))
         }
         None => None,
     };
+
+    // SOUNDNESS (H13). A Rust `union` is indexed but never lowered, and a WRITE
+    // through one was being DROPPED in silence rather than refused. Refuse the
+    // target outright when it reaches a union this file declares.
+    //
+    // The conformance lane arrives with a SYNTHETIC target that names nothing,
+    // so there the whole FILE is the subject instead — otherwise a union write
+    // in a trait DEFAULT body slips through that lane untouched.
+    if force_source_trait_registration {
+        reject_union_use_across_file(file, func)?;
+    } else {
+        reject_union_use(file, func)?;
+    }
+
+    // SOUNDNESS (H14). A misspelled `trust_vc::` marker on a MODULE was dropped
+    // in silence, which reads exactly like a correct trusted boundary.
+    reject_unknown_trust_vc_module_attributes(file)?;
 
     // Capture exact source provenance before binder inference rewrites the body.
     let source_identity_func = func;
@@ -845,35 +1629,55 @@ fn extract_verification_conditions_from_parts_inner(
 
     // A3: resolve fully-qualified associated-type projections
     // `<Concrete as Trait>::Assoc` in the SIGNATURE to the concrete type bound
-    // by the file's matching `#[trust_vc::trait_impl]` (`type Assoc = T;`). A
+    // by the matching `#[trust_vc::trait_impl]` (`type Assoc = T;`). A
     // parameter or return typed by such a projection (e.g. `x: <S as Tr>::X`
     // where `impl Tr for S { type X = u8; }`) would otherwise reach the string
     // parser as `Opaque("<S as Tr>::X")` — the `as` word boundary collapsed by
     // token re-rendering — and sink the whole file closed even though the impl
     // binds the projection to a fully concrete type. Resolving structurally at
     // the syn seam, BEFORE the string parser, sidesteps that mangling and lands
-    // the concrete type in the lifted variable's OWN sort. SOUND: it only makes
-    // a type more concrete, and only to what the impl binds; an unmatched or
-    // bare-generic (`T::X`) projection is left as-is and still fails closed
-    // downstream. Applied to the signature only — local `let`-typed projections
-    // in the body already resolve via initializer inference and stay on that
-    // path.
+    // the concrete type in the lifted variable's OWN sort.
+    //
+    // SOUND only because text equality is made identity here: resolution runs
+    // only when every source item token-identical to the target sits in ONE
+    // inline module and neither the target signature nor any such item's
+    // container brings a type/const generic or where-clause into scope (a
+    // generic `S` would shadow the key's `S`), and only over the bindings
+    // declared directly in that module. The resolver then requires the FULL
+    // trait path and self type to match exactly one admitted impl header (see
+    // `AssocProjectionResolver`). Anything else — a trait instance spelled
+    // differently, a binding in another module, a generic scope, an identity
+    // shared by items in different scopes — is left as-is and fails closed
+    // downstream. The scope is computed from the ORIGINAL source item, not the
+    // rewritten `func`: container lookup is by exact identity. The walk reads
+    // the duplicate-trait-pruned `file`, which is complete for this purpose
+    // only because a target with an exact-identity copy the prune removed was
+    // refused above — otherwise the surviving candidates could agree on a
+    // module that is not the target's. Applied to the signature only — local
+    // `let`-typed projections in the body already resolve via initializer
+    // inference and stay on that path.
     let projection_resolved;
-    let func = match file {
-        Some(file) => {
-            let bindings = function_discovery::collect_assoc_projection_bindings(file);
-            if bindings.is_empty() {
-                func
-            } else {
-                let mut owned = func.clone();
-                let mut resolver = function_discovery::AssocProjectionResolver::new(&bindings);
-                syn::visit_mut::visit_signature_mut(&mut resolver, &mut owned.sig);
-                projection_resolved = owned;
-                &projection_resolved
-            }
+    let projection_bindings = file.and_then(|file| {
+        let module_path =
+            function_discovery::signature_projection_module_scope(file, source_identity_func)?;
+        Some(function_discovery::collect_assoc_projection_bindings(
+            file,
+            &module_path,
+        ))
+    });
+    let func = match projection_bindings {
+        Some(bindings) if !bindings.is_empty() => {
+            let mut owned = func.clone();
+            let mut resolver = function_discovery::AssocProjectionResolver::new(&bindings);
+            syn::visit_mut::visit_signature_mut(&mut resolver, &mut owned.sig);
+            projection_resolved = owned;
+            &projection_resolved
         }
-        None => func,
+        _ => func,
     };
+    // The signature as every later step types it: `Self` substituted and the
+    // projections above resolved. The `#[cfg]` refusal reads names through it.
+    *lowered_signature = Some(func.sig.clone());
 
     // Desugar the `?` (Try) operator into an equivalent tail `match` BEFORE the
     // control-flow gates and extraction. `let PAT = g()?; REST` becomes
@@ -905,6 +1709,20 @@ fn extract_verification_conditions_from_parts_inner(
         Some(owned) => {
             apit_desugared = owned;
             &apit_desugared
+        }
+        None => func,
+    };
+
+    // `let ref mut r = e;` is `let r = &mut e;` (a binding-mode borrow). The
+    // extractor read the binding mode nowhere and modeled `r` as an owned COPY,
+    // so `let ref mut r = s; r.f += 1; assert!(s.f == old)` verified. Rewriting
+    // to the explicit borrow hands it to the `&mut` alias machinery (modeled or
+    // fail-closed). See ref_binding_desugar.rs.
+    let ref_bindings_desugared;
+    let func = match crate::ref_binding_desugar::desugar_ref_bindings(func) {
+        Some(owned) => {
+            ref_bindings_desugared = owned;
+            &ref_bindings_desugared
         }
         None => func,
     };
@@ -981,6 +1799,31 @@ fn extract_verification_conditions_from_parts_inner(
         None => func,
     };
 
+    // GUARD BLOCKS FIRST (2026-09-11): the rotation / hoist below must run BEFORE
+    // the diverging-`if` desugar, which turns `if { S; c } { A } else { panic!() }`
+    // into an assertion of the whole guard — with `S` still inside it, the
+    // assertion failed to lower on the side effect. Hoisted first, the diverging
+    // pass sees the plain condition `c`.
+    // Rotate a `while { S; c } { INV; B }` loop whose guard BLOCK carries flat
+    // scalar side effects into `S; while c { INV[v ↦ v__pre_guard];
+    // invariant!(v == S(v__pre_guard)); B; v__pre_guard = v; S }` (2026-09-11,
+    // audit row 430 / upstream complex_while): the user's invariants hold at
+    // the ORIGINAL head (before the guard block runs), so they are stated over a
+    // snapshot of every guard-assigned var, and the guard block's transition is
+    // an injected, always-inductive invariant. The produced `while` has a pure
+    // guard and is handled by the ordinary machinery (base + step checks, exact
+    // lane when flat, negated-guard exit fact), so the rewrite can only turn a
+    // previously fail-closed side-effect guard into a soundly verified or
+    // refuted loop. See while_guard_desugar.rs.
+    let while_guard_desugared;
+    let func = match crate::while_guard_desugar::desugar_while_guard_blocks(func) {
+        Some(owned) => {
+            while_guard_desugared = owned;
+            &while_guard_desugared
+        }
+        None => func,
+    };
+
     // Desugar `if COND { A } else { panic!() }` (a diverging FAILURE arm) into
     // `{ let fresh = COND; trust_vc::assert!(fresh); A }`. The ordinary local
     // preserves single evaluation, side effects, and exec panic obligations;
@@ -1036,6 +1879,17 @@ fn extract_verification_conditions_from_parts_inner(
     };
 
     let mut vc = VerificationContext::new();
+    // Every obligation raised below is stamped with the position the walk parks
+    // as it goes (`VerificationContext::push_obligation`). No path, no location:
+    // an obligation located `12:5` names nothing a reader or the evidence gate
+    // can open, so the path is the enable switch for the whole mechanism.
+    if let Some(diagnostic_file) = diagnostic_file {
+        vc.set_diagnostic_source_file(diagnostic_file);
+    }
+    // `x.add(e)`, `x.shl(n)` and `x.shr(n)` on a primitive integer are the std
+    // operators only where the std trait is in scope; elsewhere the call
+    // resolves to another trait's method, so the lowering refuses it.
+    vc.set_std_operator_methods(std_operator_scope::methods_read_as_std_operator(file, func));
     let function_mode = crate::mode_attrs::classify_item_fn(func);
     // Faithful to Verus: exec functions get overflow / div-by-zero / bit-shift
     // safety obligations; spec & proof functions do not. Without this wiring the
@@ -1071,6 +1925,9 @@ fn extract_verification_conditions_from_parts_inner(
     // mode) before the spec-mode parameter check — match that order. All rules
     // are reject-only (fail-closed): they can never make a program verify that
     // did not already.
+    if let Some(err) = non_exec_unsafe_signature_error(func, function_mode) {
+        return Err(err);
+    }
     if let Some(err) = mut_self_receiver_error(func) {
         return Err(err);
     }
@@ -1083,6 +1940,35 @@ fn extract_verification_conditions_from_parts_inner(
     // is unaffected. Reject-only — see `crate::proof_var_mode`.
     if let Some(file) = file {
         crate::proof_var_mode::check_by_block_proof_var_modes(file, func)?;
+    }
+    // Verus parity (upstream modes.rs `assign_proof_var_in_exec`,
+    // `assign_spec_var_in_exec`, `ghost_wrapper_assign_fail3`): the body-level
+    // variable-mode (R3) rules — exec code may not mutate a ghost/tracked
+    // local, and a `proof_block!` may not assign to an exec local. See
+    // `crate::mode_body` for the measured FALSE VERIFIED the second rule
+    // closes (a proof block is erased at runtime, yet its assignment to an
+    // exec local was believed by the solver).
+    //
+    // EXEC functions only. `check_body_var_modes` starts its walk in exec
+    // block mode, so a proof/spec function's (already ghost) locals would be
+    // misclassified as exec and over-rejected. Reject-only either way: it can
+    // never make a program verify that did not already.
+    if matches!(function_mode, crate::mode::FunctionMode::Exec) {
+        crate::mode_body::check_body_var_modes(body_mode_tokens(&func.block))?;
+        // The READ half of the same discipline. Rule 1 above covers MUTATION of
+        // a ghost local from exec code; nothing covered an exec expression that
+        // READS one, and `let ghost` did not parse at all before 2026-09-16, so
+        // that route was created by the change that taught it to parse. See
+        // `body_extract::reject_exec_reads_of_ghost_locals`.
+        //
+        // The SIGNATURE goes in with the block: a mode marker on a PARAMETER
+        // (`#[trust_vc::spec] s: u64`) is the same erased binding wearing a
+        // different declaration site, and a gate built from the block alone read
+        // it as exec. Measured false Verified, with a Counterexample liar twin.
+        // NOTE: rule 1 (`check_body_var_modes`) is still block-only, so the
+        // WRITE direction of this seam — exec code assigning a spec-mode
+        // PARAMETER — is not yet covered here.
+        body_extract::reject_exec_reads_of_ghost_locals(&func.sig, &func.block)?;
     }
     // Verus parity (upstream inline.rs `test_nonspec_fails`): `#[verifier(inline)]`
     // is only permitted on SPEC functions — an `#[inline]` proof/exec fn is
@@ -1162,7 +2048,21 @@ fn extract_verification_conditions_from_parts_inner(
     }
     let source_structs =
         file.map(|file| SourceStructRegistry::from_file(file, enclosing_inline_module.as_deref()));
+    if let Some(file) = file {
+        // ROUND-10 SOUNDNESS: the ITEM kinds the source-struct registry does not
+        // collect but which redefine a name just as completely — a `trait`, a
+        // `union`, a trait alias, and a `use ... as <spec name>` RENAME.
+        // Measured: `trait Multiset { fn new() -> u64; }` and
+        // `use rw_inner::Carrier as Seq;` each published `Verified` on a body
+        // that ALWAYS divides by zero, at BOTH the parameter seam and the
+        // constructor path, while the identical body at `Vec<u64>` in the same
+        // file was checked.
+        register_shadowed_spec_names_from_items(&file.items, &mut vc);
+    }
     if let Some(registry) = &source_structs {
+        // ROUND-10 SOUNDNESS: FIRST, because `register_struct_defs` reads the
+        // set at the field-provenance seam below.
+        registry.register_shadowed_spec_names(&mut vc);
         registry.register_struct_defs(&mut vc);
         registry.register_type_aliases(&mut vc);
     }
@@ -1191,7 +2091,7 @@ fn extract_verification_conditions_from_parts_inner(
     // datatype it decorates.
     let mut spec_eq_param_types: BTreeMap<String, (String, TrustVcType)> = BTreeMap::new();
     // INCREMENT 1: `Fn(A..) -> B`-bounded type parameters modeled as `SpecFn`
-    // (deterministic, `Fn`-only; `FnMut`/`FnOnce` stay fail-closed). A value
+    // (`Fn`-only; `FnMut`/`FnOnce` stay fail-closed). A value
     // parameter `f: F` whose type string is exactly such a type-param name is
     // typed as the mapped `SpecFn` value below. See
     // [`fn_bound_spec_fn_param_types`] for the soundness argument.
@@ -1248,7 +2148,17 @@ fn extract_verification_conditions_from_parts_inner(
             &const_array_len_resolver,
             &const_generic_len_names,
         )? {
-            let fn_bound_spec_fn_ty = fn_bound_spec_fn_params.get(var_type.trim()).cloned();
+            // SOUNDNESS-CRITICAL (H6): a `mut f: F` parameter can later hold a
+            // DIFFERENT `F` value (`f = g`, `*(&mut f) = g`, `mem::swap(&mut f,
+            // &mut g)`, a branch write the model havocs), so `f(x)` would prove
+            // and assume the ORIGINAL closure's `f.requires` / `f.ensures` for
+            // another closure. It keeps its unmodelled typing, and every
+            // application of it fails closed at extraction.
+            let fn_bound_spec_fn_ty = if fn_arg_binds_mut_ident(input) {
+                None
+            } else {
+                fn_bound_spec_fn_params.get(var_type.trim()).cloned()
+            };
             if fn_bound_spec_fn_ty.is_some() {
                 // INCREMENT 2a: record the VALUE-parameter name (`f`) so the
                 // callee-side application seam can recognize `f(a)`.
@@ -1300,7 +2210,26 @@ fn extract_verification_conditions_from_parts_inner(
             // soundness boundary. `var_type` is the per-element origin spelling,
             // so tuple params classify each binding independently.
             let bounded_len = param_extract::syn_type_string_is_bounded_len_collection(&var_type);
-            vc.declare_var_typed_bounded(&var_name, trust_vc_ty, bounded_len);
+            // ROUND 6: the SECOND provenance reading, taken at the same seam and
+            // from the same origin string. `bounded_len` answers Vec-vs-Seq only;
+            // `BTreeSet`/`HashSet` -> `Set` and `BTreeMap`/`HashMap` -> `Map`
+            // collapse onto the SPEC sorts with no bounded-length bit of their
+            // own, so an exec set/map was indistinguishable from a spec one after
+            // parsing — which is how an exec `BTreeSet` bought the ghost-closure
+            // skip. Both readings are POSITIVE-only; a spelling in neither table
+            // stays `Unknown` and every consumer fails closed on it.
+            let collection_origin = scoped_collection_origin(&vc, &var_type);
+            vc.declare_var_typed_origin(&var_name, trust_vc_ty, bounded_len, collection_origin);
+            // ROUND 7: the TUPLE half of field-level provenance. A tuple's
+            // carrier name is derived from its MODELED element types, so
+            // `(Vec<int>, u64)` and `(Seq<int>, u64)` name the SAME carrier and
+            // a carrier-keyed entry could not tell them apart. The binding's own
+            // spelling is the only surviving witness, so the components are
+            // split HERE and recorded against the binding.
+            for (index, component) in param_extract::syn_type_string_tuple_components(&var_type) {
+                let component_origin = scoped_collection_origin(&vc, &component);
+                vc.register_binding_tuple_component_origin(&var_name, &index, component_origin);
+            }
             if erased_shared_ref_vars.contains(&var_name) {
                 vc.mark_erased_shared_ref_var(&var_name);
             }
@@ -1407,6 +2336,11 @@ fn extract_verification_conditions_from_parts_inner(
 
     // Register sibling source-only spec functions referenced from contracts.
     let mut sibling_helper_contracts = BTreeMap::new();
+    // H6: function-item VALUES (`let t = llama;`) that resolve to a sibling source
+    // function, keyed by spelling, with whether that sibling carries a `requires`,
+    // plus the names of the file's `const` / `static` items (callable only as a
+    // function VALUE).
+    let mut function_item_values = body_extract::FunctionValueItems::default();
     // Exact spec aliases admitted for THIS function body's outer lexical block.
     // Kept until body extraction so `reveal!`/`hide!` metadata can be rewritten
     // to the canonical body-axiom name without exposing aliases to attributes.
@@ -1438,6 +2372,10 @@ fn extract_verification_conditions_from_parts_inner(
             source_file_is_crate_root,
         )?;
         sibling_helper_contracts = collect_referenced_sibling_helper_contracts(file, func, &vc)?;
+        function_item_values = body_extract::FunctionValueItems {
+            function_items: collect_function_item_values(file, func),
+            const_static_items: collect_const_static_item_names(file),
+        };
         mut_ref_call_args = collect_referenced_sibling_mut_ref_call_args(file, func);
         method_arg_mut_flags = collect_file_method_arg_mut_flags(file);
         mut_ref_reborrowable = mut_ref_reborrowable_bindings(func);
@@ -1452,6 +2390,7 @@ fn extract_verification_conditions_from_parts_inner(
             &mut vc,
         )?;
         apply_inherent_impl_methods(file, func, source_structs.as_ref(), &mut vc)?;
+        declare_type_param_default_constants(func, &mut vc);
         register_impl_method_self_receiver_kinds(&file.items, &mut vc);
         // UNCONDITIONAL, and deliberately not gated on `#[trust_vc::trait_spec]`:
         // `register_trait_decl_self_receiver_kinds` below keys `(trait, method)`
@@ -1514,7 +2453,7 @@ fn extract_verification_conditions_from_parts_inner(
         };
         spec_catalog.register_exact_aliases(&block_use_function_aliases(&func.block))?;
         exact_spec_aliases.extend(spec_catalog.exact_alias_targets().clone());
-        spec_catalog.apply_referenced_specs(func, &mut vc)?;
+        spec_catalog.apply_referenced_specs(func, enclosing_inline_module.as_deref(), &mut vc)?;
         // Publish file-local `#[trust_vc::broadcast]` lemmas as grouped/global
         // BroadcastAssume axioms so `broadcast_use!{ group }` can activate them on
         // the file path (the runtime path publishes these by executing lemma
@@ -1573,6 +2512,7 @@ fn extract_verification_conditions_from_parts_inner(
         function_solver_mode,
         Some(&func.sig),
     )?;
+    vc.postcondition_result_var = Some(result_var.to_string());
     if let Some(file) = file {
         trait_contracts::apply_inherited_trait_method_contracts(
             file,
@@ -1660,12 +2600,57 @@ fn extract_verification_conditions_from_parts_inner(
     // program, so they must start from the same caller state — seeding one and
     // not the other is what produced two cardinal false verifies in a row.
     // See `body_extract::CollectorLaneSeed`.
+    // Every generic type parameter name of the file: a type spelled like one
+    // is never classified as the primitive, std or file type it spells.
+    let generic_type_params = type_name_rebinding::generic_type_param_names(file, func);
+    let immutable_value_params =
+        immutable_value_params(&func.sig, &func.block, &generic_type_params);
+    // The file's own type names: the alias table, the set of names the file
+    // BINDS (so a shadowed `u8` is not read as the primitive), and the
+    // `#[cfg]`-admissibility gate. Absent when the source file is unknown, and
+    // the whole `let`-annotation width lane is then OFF — today's behaviour
+    // byte-for-byte, pinned by `no_file_context_neither_carries_nor_refuses`.
+    let declared_width_names = file.map(declared_width::FileTypeNames::from_file);
+    let single_typed_bindings = single_typed_bindings(
+        &func.sig,
+        &func.block,
+        declared_width_names.as_ref(),
+        file,
+        &generic_type_params,
+    );
+    let single_typed_int_bindings = single_typed_bindings.int;
+    let single_bound_names = single_typed_bindings.bound_once;
+    let declared_shape_bindings = single_typed_bindings.shapes;
+    let immutable_interior_mutability_free_bindings =
+        single_typed_bindings.immutable_interior_mutability_free;
+    let shadowing_mut_receiver_methods = file
+        .map(file_shadowing_mut_receiver_methods)
+        .unwrap_or_default();
+    let std_operator_methods = std_operator_scope::methods_with_std_trait_in_scope(file, func);
     let lane_seed = body_extract::CollectorLaneSeed {
         supported_mut_ref_param_targets: &supported_mut_ref_param_targets,
         mut_ref_call_args: &mut_ref_call_args,
         method_arg_mut_flags: &method_arg_mut_flags,
         mut_ref_reborrowable_bindings: &mut_ref_reborrowable,
         fn_bound_spec_fn_params: &fn_bound_spec_fn_param_names,
+        immutable_value_params: &immutable_value_params,
+        immutable_interior_mutability_free_bindings: &immutable_interior_mutability_free_bindings,
+        single_typed_int_bindings: &single_typed_int_bindings,
+        single_bound_names: &single_bound_names,
+        declared_shape_bindings: &declared_shape_bindings,
+        declared_width_names: declared_width_names.as_ref(),
+        shadowing_mut_receiver_methods: &shadowing_mut_receiver_methods,
+        std_operator_methods: &std_operator_methods,
+        definitional_render: false,
+        holder_file_admissible: file.is_some_and(|file| {
+            body_has_mut_ref_aggregate_literal(&func.block)
+                && holder_lane_file_admissible(file, func)
+        }),
+        option_payload_file_admissible: file.is_some_and(|file| {
+            body_calls_option_insert_method(&func.block)
+                && option_payload_lane_file_admissible(file, func)
+        }),
+        function_item_values: &function_item_values,
     };
 
     // Extract assertions from function body
@@ -1729,7 +2714,7 @@ fn extract_verification_conditions_from_parts_inner(
 
     // Two-state fix for scalar `&mut` parameters: a *bare* `&mut` parameter in a
     // postcondition denotes its FINAL (post-body) value (Verus semantics +
-    // `design-new-mut-ref.md`), not the entry snapshot. The string-model
+    // `docs/archive/design-new-mut-ref.md`), not the entry snapshot. The string-model
     // body extraction above already computed the final value; rewrite the
     // postcondition obligations onto it, failing closed where the final value is
     // uncertain. MUST run before the return-value binding below so a `&mut` param
@@ -1790,13 +2775,36 @@ fn extract_verification_conditions_from_parts_inner(
                 // cannot be decided) would otherwise leave `result`
                 // unconstrained or, worse, bound to a conditional whose
                 // condition was guessed.
-                let Some((return_str, havoc_deps)) = scoped_return_value_expression(
-                    &func.block,
-                    return_value,
-                    &vc.struct_types,
-                    Some(&vc),
-                    &lane_seed,
-                ) else {
+                //
+                // `fn f() -> Ty { Default::default() }`: the bare trait
+                // spelling takes its value from the RETURN type, which only
+                // this site knows. The rendered default is closed (it reads no
+                // local and no havoc symbol), so it binds `result` directly; a
+                // type the model does not spell falls through to the ordinary
+                // render and keeps failing closed at lowering as before.
+                let typed_default_return = match return_value {
+                    return_extract::ReturnValue::Expr(expr)
+                        if crate::default_constructor::is_bare_default_trait_call(expr) =>
+                    {
+                        match &func.sig.output {
+                            syn::ReturnType::Type(_, ty) => {
+                                crate::default_constructor::default_value_source_for_type(ty)
+                                    .map(|source| (source, Vec::new()))
+                            }
+                            syn::ReturnType::Default => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let Some((return_str, havoc_deps)) = typed_default_return.or_else(|| {
+                    scoped_return_value_expression(
+                        &func.block,
+                        return_value,
+                        &vc.struct_types,
+                        Some(&vc),
+                        &lane_seed,
+                    )
+                }) else {
                     return Err(TrustVcError::Internal {
                         context: "extract verification conditions",
                         detail: format!(
@@ -2011,7 +3019,7 @@ fn resolve_trait_decl_param_types(vc: &mut VerificationContext) {
 
 /// Rewrites postcondition obligations so a *bare* scalar `&mut` parameter `P`
 /// (or `*P`) denotes its FINAL (post-body) value, the two-state semantics Verus
-/// and `design-new-mut-ref.md` mandate. Without this, the string body model
+/// and `docs/archive/design-new-mut-ref.md` mandate. Without this, the string body model
 /// resolves `P` to the entry-snapshot variable, so a postcondition is checked
 /// against the PRE-call state — a catastrophic false `Verified` for any clause a
 /// body mutation falsifies.
@@ -2057,6 +3065,7 @@ fn apply_mut_ref_final_state_to_postconditions(
 
         let outcome = rewrite_mut_ref_postcondition(
             &obligation.condition,
+            TwoStateClause::Ensures,
             supported_mut_ref_params,
             &post_state.clean_finals,
         )?;
@@ -2069,6 +3078,23 @@ fn apply_mut_ref_final_state_to_postconditions(
         }
         if outcome.referenced_params.is_empty() && outcome.old_referenced_params.is_empty() {
             continue;
+        }
+        // SOUNDNESS-CRITICAL (measured 2026-09-13, a live false `Verified`):
+        // `old(P)` is rewritten to the bare ENTRY symbol `P` — but after a loop
+        // WITH invariants that modifies `P`, the encoder's post-loop state of
+        // `P` is that same bare symbol (one declared symbol per variable, with
+        // the exit fact assumed over it), so the rewrite would read the
+        // POST-loop value (`while *x != 7 { invariant!(true); *x = 7; }` with
+        // `ensures(*old(x) == 7)` verified for an arbitrary entry). Refuse
+        // until the entry value of a loop-modified `&mut` param is modeled by
+        // its own symbol.
+        for name in &outcome.old_referenced_params {
+            if post_state.invariant_loop_modified.contains(name) {
+                return Err(mut_ref_two_state_error(
+                    &obligation.condition,
+                    "`old()` of a `&mut` parameter modified by a loop with invariants is not                      yet modeled — after such a loop the parameter's bare symbol denotes its                      post-loop state, not its entry value",
+                ));
+            }
         }
         // Validate, per referenced `&mut` param, that its post-body value can be
         // resolved soundly. A param is soundly resolved to its FINAL value iff it
@@ -2147,6 +3173,15 @@ fn apply_mut_ref_final_state_to_postconditions(
 /// fail-closed downstream at encoding. A closure merely *mentioning* a `&mut`
 /// param is NOT an error here — with no substitution possible, bare `P` under
 /// a requires-binder keeps its already-live entry semantics.
+/// Identifiers whose presence makes a precondition worth re-parsing for a
+/// two-state form. Must stay in sync with [`two_state_op`].
+const TWO_STATE_PREFILTER_IDENTS: &[&str] = &[
+    "old",
+    "mut_ref_current",
+    "mut_ref_future",
+    crate::chained_comparisons::MUT_REF_FINAL_MARKER,
+];
+
 fn apply_mut_ref_old_state_to_preconditions(
     vc: &mut VerificationContext,
     supported_mut_ref_params: &BTreeSet<String>,
@@ -2167,14 +3202,20 @@ fn apply_mut_ref_old_state_to_preconditions(
             continue;
         }
         // Cheap token pre-filter: only re-parse (and possibly re-stringify)
-        // conditions that can contain an `old(..)` form, so unrelated
-        // preconditions never drift in formatting.
-        if !condition_mentions_ident(&obligation.condition, "old") {
+        // conditions that can contain a two-state form, so unrelated
+        // preconditions never drift in formatting. The FINAL-endpoint spellings
+        // are listed too: they are refused by name in a `requires`, and the
+        // refusal can only fire if the condition is re-parsed.
+        if !TWO_STATE_PREFILTER_IDENTS
+            .iter()
+            .any(|ident| condition_mentions_ident(&obligation.condition, ident))
+        {
             continue;
         }
 
         let outcome = rewrite_mut_ref_postcondition(
             &obligation.condition,
+            TwoStateClause::Requires,
             supported_mut_ref_params,
             &no_finals,
         )
@@ -2197,7 +3238,16 @@ fn apply_mut_ref_old_state_to_preconditions(
     Ok(())
 }
 
+/// Renders a condition string for a DIAGNOSTIC, restoring the source spelling
+/// `final` in place of the parse-time marker. The marker exists only because
+/// `final` is a reserved Rust keyword (`chained_comparisons::MUT_REF_FINAL_MARKER`);
+/// an error message that showed it would name a symbol the author never wrote.
+fn display_two_state_condition(condition: &str) -> String {
+    condition.replace(crate::chained_comparisons::MUT_REF_FINAL_MARKER, "final")
+}
+
 fn mut_ref_two_state_error(condition: &str, reason: &str) -> TrustVcError {
+    let condition = display_two_state_condition(condition);
     TrustVcError::Encoding {
         context: "resolve `&mut` parameter two-state postcondition",
         detail: format!(
@@ -2383,6 +3433,12 @@ fn reject_mut_ref_param_place_mutation_postconditions(
 }
 
 fn mut_ref_place_mutation_two_state_error(condition: &str, name: &str) -> TrustVcError {
+    // The parse-time rewrite of the reserved-keyword spelling `final(..)` must
+    // never reach a user diagnostic: a refusal that names
+    // `__trust_vc_mut_ref_final` tells the author to go looking for a symbol
+    // that does not exist in their source. Scrub it back, exactly as
+    // `mut_ref_two_state_error` already does.
+    let condition = display_two_state_condition(condition);
     TrustVcError::Encoding {
         context: "resolve `&mut` parameter two-state postcondition",
         detail: format!(
@@ -2400,6 +3456,12 @@ fn mut_ref_place_mutation_two_state_error(condition: &str, name: &str) -> TrustV
 }
 
 fn mut_ref_struct_two_state_error(condition: &str, name: &str) -> TrustVcError {
+    // The parse-time rewrite of the reserved-keyword spelling `final(..)` must
+    // never reach a user diagnostic: a refusal that names
+    // `__trust_vc_mut_ref_final` tells the author to go looking for a symbol
+    // that does not exist in their source. Scrub it back, exactly as
+    // `mut_ref_two_state_error` already does.
+    let condition = display_two_state_condition(condition);
     TrustVcError::Encoding {
         context: "resolve `&mut` struct parameter two-state postcondition",
         detail: format!(
@@ -2416,6 +3478,12 @@ fn mut_ref_struct_two_state_error(condition: &str, name: &str) -> TrustVcError {
 }
 
 fn mut_ref_collection_two_state_error(condition: &str, name: &str) -> TrustVcError {
+    // The parse-time rewrite of the reserved-keyword spelling `final(..)` must
+    // never reach a user diagnostic: a refusal that names
+    // `__trust_vc_mut_ref_final` tells the author to go looking for a symbol
+    // that does not exist in their source. Scrub it back, exactly as
+    // `mut_ref_two_state_error` already does.
+    let condition = display_two_state_condition(condition);
     TrustVcError::Encoding {
         context: "resolve `&mut` collection parameter two-state postcondition",
         detail: format!(
@@ -2449,6 +3517,7 @@ struct MutRefRewriteOutcome {
 
 fn rewrite_mut_ref_postcondition(
     condition: &str,
+    clause: TwoStateClause,
     mut_ref_params: &BTreeSet<String>,
     finals: &BTreeMap<String, String>,
 ) -> TrustVcResult<MutRefRewriteOutcome> {
@@ -2474,6 +3543,7 @@ fn rewrite_mut_ref_postcondition(
     };
 
     let mut substituter = FinalValueSubstituter {
+        clause,
         mut_ref_params,
         finals,
         referenced_params: BTreeSet::new(),
@@ -2516,7 +3586,17 @@ fn condition_mentions_ident(condition: &str, ident: &str) -> bool {
         .any(|tok| tok == ident)
 }
 
+/// Which contract clause the substituter is rewriting. The ENTRY endpoint is
+/// legal in both; the FINAL endpoint (`final`/`mut_ref_future`) is an
+/// `ensures`-only op and is refused BY NAME in a `requires`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwoStateClause {
+    Ensures,
+    Requires,
+}
+
 struct FinalValueSubstituter<'a> {
+    clause: TwoStateClause,
     mut_ref_params: &'a BTreeSet<String>,
     finals: &'a BTreeMap<String, String>,
     /// Every `&mut` scalar param referenced (bare `P` or `*P`) outside a closure.
@@ -2529,24 +3609,61 @@ struct FinalValueSubstituter<'a> {
     parse_error: Option<String>,
 }
 
-/// Shape of a candidate `old(..)` two-state call form (see
-/// [`classify_old_call`]).
-enum OldCallShape {
-    /// Not an `old(..)` call form at all — normal visiting applies.
-    NotOld,
-    /// An `old(..)` call whose argument is not a bare parameter path
-    /// (`old(P)` / `old(*P)`), e.g. `old(x + 1)`, `old(s.f)`, `old()`,
-    /// `old(a, b)` — fail closed.
-    BadArg,
-    /// `old(P)` / `old(*P)` (optionally under one outer deref: `*old(P)` /
-    /// `*old(*P)`) targeting the single-ident parameter `P`.
-    Param(String),
+/// Which endpoint of a scalar `&mut` parameter's borrow a two-state spec op
+/// names. The `&mut` contract vocabulary has exactly two endpoints and every
+/// supported spelling is a synonym for one of them.
+///
+/// | surface spelling                         | endpoint |
+/// |------------------------------------------|----------|
+/// | `old(P)` / `*old(P)` / `mut_ref_current(P)` | ENTRY  |
+/// | bare `P` / `*P` in an ensures, `final(P)` / `*final(P)`, `mut_ref_future(P)` | FINAL |
+///
+/// This is Verus's own table (`docs/archive/design-new-mut-ref.md` reproduces it, and
+/// upstream `mut_refs_temporaries.rs` pins it with
+/// `ensures mut_ref_future(a) == mut_ref_current(a) + 10`). The endpoints are
+/// state-INDEPENDENT: they name the value at the two ends of the borrow,
+/// whichever clause the expression appears in, which is why `mut_ref_current`
+/// is legal in a `requires` where bare `*P` already means the same thing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwoStateEndpoint {
+    Entry,
+    Final,
 }
 
-/// Classifies `expr` as a two-state `old(..)` call form. Recognizes the call
-/// itself (`old(P)`, `old(*P)`) and the outer-deref spelling (`*old(P)`,
-/// `*old(*P)` — the whole `Unary(Deref)` node is then the form). Anything
-/// whose callee is not the bare path `old` is `NotOld`.
+/// Shape of a candidate two-state call form (see [`classify_old_call`]).
+enum OldCallShape {
+    /// Not a two-state call form at all — normal visiting applies.
+    NotOld,
+    /// A two-state call whose argument is not a bare parameter path
+    /// (`old(P)` / `old(*P)`), e.g. `old(x + 1)`, `old(s.f)`, `old()`,
+    /// `old(a, b)`, or a NESTED form such as `final(final(x))` — fail closed.
+    BadArg(&'static str),
+    /// `op(P)` / `op(*P)` (optionally under one outer deref: `*op(P)` /
+    /// `*op(*P)`) targeting the single-ident parameter `P`.
+    Param(TwoStateEndpoint, &'static str, String),
+}
+
+/// The two-state spec op named by a callee ident, with the endpoint it denotes.
+///
+/// `__trust_vc_mut_ref_final` is the parse-time rewrite of the reserved-keyword
+/// spelling `final(..)` (see `chained_comparisons::MUT_REF_FINAL_MARKER`); it is
+/// reported under its SOURCE spelling so diagnostics never leak the marker.
+fn two_state_op(callee: &str) -> Option<(TwoStateEndpoint, &'static str)> {
+    match callee {
+        "old" => Some((TwoStateEndpoint::Entry, "old")),
+        "mut_ref_current" => Some((TwoStateEndpoint::Entry, "mut_ref_current")),
+        crate::chained_comparisons::MUT_REF_FINAL_MARKER => {
+            Some((TwoStateEndpoint::Final, "final"))
+        }
+        "mut_ref_future" => Some((TwoStateEndpoint::Final, "mut_ref_future")),
+        _ => None,
+    }
+}
+
+/// Classifies `expr` as a two-state call form. Recognizes the call itself
+/// (`op(P)`, `op(*P)`) and the outer-deref spelling (`*op(P)`, `*op(*P)` — the
+/// whole `Unary(Deref)` node is then the form). Anything whose callee is not one
+/// of the two-state ops is `NotOld`.
 fn classify_old_call(expr: &Expr) -> OldCallShape {
     let call = match expr {
         Expr::Call(call) => call,
@@ -2561,16 +3678,41 @@ fn classify_old_call(expr: &Expr) -> OldCallShape {
     let Expr::Path(func_path) = call.func.as_ref() else {
         return OldCallShape::NotOld;
     };
-    if expr_path_single_ident(func_path).as_deref() != Some("old") {
+    let Some(callee) = expr_path_single_ident(func_path) else {
         return OldCallShape::NotOld;
-    }
+    };
+    let Some((endpoint, spelling)) = two_state_op(&callee) else {
+        return OldCallShape::NotOld;
+    };
     if call.args.len() != 1 {
-        return OldCallShape::BadArg;
+        return OldCallShape::BadArg(spelling);
     }
     match old_call_arg_param_name(&call.args[0]) {
-        Some(name) => OldCallShape::Param(name),
-        None => OldCallShape::BadArg,
+        Some(name) => OldCallShape::Param(endpoint, spelling, name),
+        None => OldCallShape::BadArg(spelling),
     }
+}
+
+/// True iff `call` is spelled as the two-state operator `old(..)` — a bare
+/// single-ident callee `old`, whatever the argument shape.
+pub(super) fn is_old_operator_call(call: &syn::ExprCall) -> bool {
+    match call.func.as_ref() {
+        Expr::Path(func_path) => expr_path_single_ident(func_path).as_deref() == Some("old"),
+        _ => false,
+    }
+}
+
+/// The parameter name `P` when `call` is exactly the supported two-state read
+/// shape `old(P)` / `old(*P)` (one bare-ident or deref-of-ident argument);
+/// `None` for any other callee or argument shape. The body-side visitors use
+/// this to treat the operator as a READ of the entry state (no argument
+/// havoc, no reference escape, no loop write) — every other `old(..)` shape
+/// keeps the generic call treatment and fails closed at render time.
+pub(super) fn old_operator_param_name(call: &syn::ExprCall) -> Option<String> {
+    if !is_old_operator_call(call) || call.args.len() != 1 {
+        return None;
+    }
+    old_call_arg_param_name(&call.args[0])
 }
 
 /// The parameter name when an `old(..)` argument is a bare single-ident path
@@ -2612,6 +3754,44 @@ impl FinalValueSubstituter<'_> {
     }
 }
 
+impl FinalValueSubstituter<'_> {
+    /// The FINAL endpoint written EXPLICITLY (`final(P)` / `*final(P)` /
+    /// `mut_ref_future(P)`), which must denote the post-body value of `P`.
+    ///
+    /// Same seam as [`Self::substitute`] when a clean final value exists. The
+    /// difference is the NO-clean-final case: a bare `P` can be left untouched
+    /// there (it already reads as the declared entry symbol, and the caller's
+    /// per-param validation then either accepts it — `P` neither mutated nor
+    /// escaped, so entry == final — or fails closed), but leaving an explicit
+    /// `final(P)` untouched would leave the parse-time marker in the condition
+    /// and fail the whole function closed on a shape whose bare spelling
+    /// verifies. So the node is replaced by the entry symbol, under EXACTLY the
+    /// caller's validation: if `P` is mutated or escapes, the caller discards
+    /// this rewrite and errors, so the replacement can only survive on the
+    /// paths where entry == final.
+    fn substitute_final_op(&mut self, expr: &mut Expr, name: &str) {
+        self.referenced_params.insert(name.to_string());
+        if let Some(value) = self.finals.get(name) {
+            match syn::parse_str::<Expr>(value) {
+                Ok(replacement) => *expr = replacement,
+                Err(err) => {
+                    self.parse_error = Some(format!(
+                        "final value `{value}` for `&mut` parameter `{name}` did not \
+                         re-parse as an expression: {err}"
+                    ));
+                }
+            }
+            return;
+        }
+        let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+        *expr = Expr::Path(syn::ExprPath {
+            attrs: Vec::new(),
+            qself: None,
+            path: syn::Path::from(ident),
+        });
+    }
+}
+
 impl VisitMut for FinalValueSubstituter<'_> {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         // Two-state `old(..)` forms FIRST (they wrap a `Call`, which the bare
@@ -2625,33 +3805,71 @@ impl VisitMut for FinalValueSubstituter<'_> {
         // the inserted `P` would final-substitute it, silently turning the
         // entry reference into the post-state value (directionality landmine).
         match classify_old_call(expr) {
-            OldCallShape::Param(name) if self.mut_ref_params.contains(&name) => {
-                self.old_referenced_params.insert(name.clone());
-                let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-                *expr = Expr::Path(syn::ExprPath {
-                    attrs: Vec::new(),
-                    qself: None,
-                    path: syn::Path::from(ident),
-                });
+            OldCallShape::Param(endpoint, spelling, name)
+                if self.mut_ref_params.contains(&name) =>
+            {
+                // FINAL-endpoint ops (`final(P)`, `mut_ref_future(P)`) name the
+                // EXIT value. In a `requires` that value does not exist yet and
+                // the entry symbol is NOT a sound stand-in for it, so the
+                // precondition pass refuses them by name rather than letting
+                // them silently read the entry state.
+                if endpoint == TwoStateEndpoint::Final && self.clause == TwoStateClause::Requires {
+                    self.parse_error = Some(format!(
+                        "{spelling}() names the value of `&mut` parameter `{name}` at \
+                         function EXIT and is only supported in an `ensures` clause; \
+                         in a `requires` the exit value does not exist yet (use \
+                         `mut_ref_current({name})`, `old({name})` or bare `*{name}` \
+                         for the entry value)"
+                    ));
+                    return;
+                }
+                match endpoint {
+                    // ENTRY endpoint: `old(P)` / `mut_ref_current(P)` denote the
+                    // pre-state value, which in the string model is exactly the
+                    // declared param symbol. Replace the ENTIRE node (including
+                    // any outer deref) with the bare path `P`, record it in
+                    // `old_referenced_params`, then return WITHOUT recursing —
+                    // visiting the inserted `P` would final-substitute it,
+                    // silently turning the entry reference into the post-state
+                    // value (directionality landmine).
+                    TwoStateEndpoint::Entry => {
+                        self.old_referenced_params.insert(name.clone());
+                        let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+                        *expr = Expr::Path(syn::ExprPath {
+                            attrs: Vec::new(),
+                            qself: None,
+                            path: syn::Path::from(ident),
+                        });
+                    }
+                    // FINAL endpoint in an `ensures`: `final(P)` / `*final(P)` /
+                    // `mut_ref_future(P)` are EXACT SYNONYMS of bare `P` / `*P`
+                    // there — they route through the SAME `substitute` seam, so
+                    // they inherit, unchanged, the per-param resolution
+                    // validation the caller applies (clean final, no escape, no
+                    // early exit) and fail closed on exactly the same shapes.
+                    TwoStateEndpoint::Final => self.substitute_final_op(expr, &name),
+                }
                 return;
             }
-            OldCallShape::Param(name) => {
-                // `old()` over anything that is not a supported scalar `&mut`
-                // parameter is a HARD error: silently reading the current
-                // value would treat `old(y)` as `y` and over-prove.
+            OldCallShape::Param(_, spelling, name) => {
+                // A two-state op over anything that is not a supported scalar
+                // `&mut` parameter is a HARD error: silently reading the current
+                // value would treat `old(y)` as `y` and over-prove, and
+                // `final(y)` on a by-value parameter would read the ENTRY value
+                // under a name that promises the exit value.
                 self.parse_error = Some(format!(
-                    "old() is only supported on scalar &mut parameters: `{name}` \
+                    "{spelling}() is only supported on scalar &mut parameters: `{name}` \
                      is not a supported scalar `&mut` parameter (bool/integer \
                      referent)"
                 ));
                 return;
             }
-            OldCallShape::BadArg => {
-                let snippet = quote!(#expr).to_string();
+            OldCallShape::BadArg(spelling) => {
+                let snippet = display_two_state_condition(&quote!(#expr).to_string());
                 self.parse_error = Some(format!(
-                    "old() is only supported on scalar &mut parameters: the \
-                     argument must be a bare parameter (`old(P)` or `*old(P)`), \
-                     got `{snippet}`"
+                    "{spelling}() is only supported on scalar &mut parameters: the \
+                     argument must be a bare parameter (`{spelling}(P)` or \
+                     `*{spelling}(P)`), got `{snippet}`"
                 ));
                 return;
             }
@@ -2969,7 +4187,7 @@ fn scoped_return_expression(
     ctx: Option<&VerificationContext>,
     havoc_index_base: usize,
     seed: &body_extract::CollectorLaneSeed<'_>,
-) -> Option<(String, Vec<(String, TrustVcType)>, usize)> {
+) -> Option<ScopedReturnExpression> {
     let render = body_extract::extract_scoped_return_expression(
         block,
         return_expr,
@@ -3005,6 +4223,17 @@ fn scoped_return_expression(
 // `extract_tail_let_else_match_condition`), because the copy had silently
 // drifted away from the original on every axis that decides soundness. Do not
 // reintroduce a local predicate for this.
+
+/// The brace-INNER token stream of `block`, for [`crate::mode_body`].
+///
+/// Built from `block.stmts` rather than `quote!(#block)`: the latter yields a
+/// single brace `Group`, which the checker would descend into as a nested
+/// block, pushing an extra scope and hiding the body's own declarations from
+/// the statements that follow it.
+fn body_mode_tokens(block: &Block) -> TokenStream {
+    let stmts = &block.stmts;
+    quote! { #(#stmts)* }
+}
 
 fn block_contains_let_else(block: &Block) -> bool {
     #[derive(Default)]
@@ -3057,6 +4286,77 @@ fn mut_self_receiver_error(func: &ItemFn) -> Option<TrustVcError> {
         }
     }
     None
+}
+
+/// SIGNATURE-LEVEL rejections, applied before contract extraction or body
+/// checking — the point at which Verus applies them
+/// (`rust_verify/src/rust_to_vir_func.rs`, signature lowering).
+///
+/// The evidence gate's per-function lane (`cargo-trust-vc`'s
+/// `verify::verify_one_detailed`) SKIPS a function with no
+/// `requires`/`ensures`/`contract`, so a rejection that only fires inside
+/// `extract_verification_conditions` never reaches a contract-free function —
+/// e.g. `#[trust_vc::proof] unsafe fn f() {}`, upstream `unsafe.rs`
+/// `unsafe_proof_fn_fail`. This entry point gives that lane the same answer the
+/// proc-macro lane already gives, from the ENGINE, so the gate never has to
+/// write a diagnostic of its own.
+///
+/// Scope: free `fn` items, including inside inline `mod` blocks. Returns the
+/// verbatim upstream message, or `None` when the signature is acceptable.
+/// Reject-only: it can never make a function verify that did not already.
+pub fn static_signature_rejection(source: &str, fn_name: &str) -> Option<String> {
+    let ast = crate::parse_file_allow_tracked(source).ok()?;
+    fn walk(items: &[syn::Item], fn_name: &str) -> Option<String> {
+        for item in items {
+            match item {
+                syn::Item::Fn(func) if func.sig.ident == fn_name => {
+                    let mode = crate::mode_attrs::classify_item_fn(func);
+                    if let Some(TrustVcError::Encoding { detail, .. }) =
+                        non_exec_unsafe_signature_error(func, mode)
+                    {
+                        return Some(detail);
+                    }
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        if let Some(detail) = walk(inner, fn_name) {
+                            return Some(detail);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(&ast.items, fn_name)
+}
+
+/// Verus rejects `unsafe` on any non-exec function during SIGNATURE lowering
+/// (`rust_verify/src/rust_to_vir_func.rs`: `if mode != Mode::Exec && safety ==
+/// HeaderSafety::Normal(Safety::Unsafe) { err_span(.., "'unsafe' only makes
+/// sense on exec-mode functions") }`). Upstream witness:
+/// `rust_verify_test/tests/unsafe.rs` `unsafe_proof_fn_fail` (rejected) and
+/// `unsafe_fns_ok` (an `unsafe` EXEC fn, accepted).
+///
+/// trust-vc already rejected this in the proc-macro expansion lane
+/// (`crate::proof_expand::expand_proof_with_tracked`), so `cargo build` of a
+/// port catches it; the VC-extraction lane did not, which is the lane the
+/// evidence gate's `verify_one_detailed` drives. Both lanes now answer with the
+/// same verbatim message. Reject-only (fail-closed): refusing to encode a
+/// function can never make a program verify that did not already.
+fn non_exec_unsafe_signature_error(
+    func: &ItemFn,
+    function_mode: crate::mode::FunctionMode,
+) -> Option<TrustVcError> {
+    func.sig.unsafety.as_ref()?;
+    if matches!(function_mode, crate::mode::FunctionMode::Exec) {
+        return None;
+    }
+    Some(TrustVcError::Encoding {
+        context: "extract verification conditions",
+        detail: "'unsafe' only makes sense on exec-mode functions".to_string(),
+    })
 }
 
 /// Verus rejects a `mut x` binding in a SPEC function signature at lowering
@@ -3751,7 +5051,7 @@ fn spec_eq_type_mismatch_error(
             // arguments are the parameters, the last is the return. Fall back to
             // the raw rendering if the source shape is unexpected (still an
             // `error` verdict either way — this is display text only).
-            spec_fn_verus_rendering(&undecorated, args.len())
+            spec_fn_verus_rendering(undecorated, args.len())
                 .unwrap_or_else(|| undecorated.to_string())
         } else {
             undecorated.to_string()
@@ -4619,6 +5919,72 @@ fn collect_source_functions_from_items(
     }
 }
 
+/// ROUND 10 — the spec-collection / spec-function names REDEFINED by items the
+/// source-struct registry does not collect: a `trait`, a `union`, a trait alias,
+/// and a `use ... as <name>` RENAME. Nested inline modules are walked, because a
+/// type declared in one is reachable by its bare name from a `use` glob and the
+/// struct registry already keys those bare.
+///
+/// A PLAIN `use path::Seq;` IS DELIBERATELY NOT A SHADOW. The genuine spec
+/// surface is imported exactly that way (`use trust_vc_types::{Seq, Set};` in
+/// the ported corpus), and nothing in one file can tell that import from an
+/// unrelated crate's `Seq`. Only a RENAME whose source segment differs from the
+/// bound name is decidable here, and the external-import case stays a disclosed
+/// residual rather than an over-rejection of the whole spec corpus.
+fn register_shadowed_spec_names_from_items(items: &[syn::Item], vc: &mut VerificationContext) {
+    fn walk_use(tree: &syn::UseTree, vc: &mut VerificationContext) {
+        match tree {
+            syn::UseTree::Path(path) => walk_use(&path.tree, vc),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    walk_use(item, vc);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                if rename.ident != rename.rename {
+                    vc.register_shadowed_spec_name(&rename.rename.to_string());
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+    for item in items {
+        match item {
+            syn::Item::Trait(item) => vc.register_shadowed_spec_name(&item.ident.to_string()),
+            syn::Item::TraitAlias(item) => vc.register_shadowed_spec_name(&item.ident.to_string()),
+            syn::Item::Union(item) => vc.register_shadowed_spec_name(&item.ident.to_string()),
+            syn::Item::Use(item) => walk_use(&item.tree, vc),
+            syn::Item::Mod(item) => {
+                if let Some((_, inner)) = &item.content {
+                    register_shadowed_spec_names_from_items(inner, vc);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ROUND-10 SOUNDNESS: the collection-origin reading of an ORIGIN SYN SPELLING,
+/// taken THROUGH this file's own shadowing.
+///
+/// `param_extract::syn_type_string_is_spec_collection` keys on the BARE HEAD
+/// NAME. Round 9 narrowed it to spellings written WITH arguments, which closed a
+/// bare monomorphic alias (`type Seq = Vec<u64>`) and left every other shape
+/// open — measured at `5106f577`, a generic alias `type Seq<T> = Vec<T>` read
+/// `Spec` at a parameter, at a struct FIELD and at a `let`, each publishing
+/// `Verified` on a body that ALWAYS divides by zero while the identical body at
+/// the std spelling was checked. A name this file DEFINES is not the spec
+/// collection, so the reading falls through to `Unknown`, which fails closed.
+fn scoped_collection_origin(
+    vc: &VerificationContext,
+    type_str: &str,
+) -> crate::vc::CollectionOrigin {
+    if vc.spec_name_is_shadowed(param_extract::syn_type_string_head_segment(type_str)) {
+        return crate::vc::CollectionOrigin::Unknown;
+    }
+    param_extract::syn_type_string_collection_origin(type_str)
+}
+
 #[derive(Clone, Default)]
 struct SourceStructRegistry {
     structs: BTreeMap<String, SourceStructTemplate>,
@@ -4852,12 +6218,43 @@ impl SourceStructRegistry {
                 StructDef::new(template.name.clone(), fields)
                     .with_derives(template.derived_partial_eq, template.derived_clone),
             );
+            // ROUND 7: FIELD-LEVEL COLLECTION PROVENANCE. `resolve_fields`
+            // returns MODELED types, after the collapse that makes a spec
+            // `Seq<u64>` field and an exec `Vec<u64>` field the same
+            // `TrustVcType::Seq`. The field's own ORIGIN SYN SPELLING is right
+            // here in the template and nowhere downstream, so it is read now,
+            // through the SAME tri-state tables the parameter seam uses, and
+            // recorded in a positive-only side table. Without it a field-sourced
+            // receiver had no provenance at all, which is what let an exec
+            // `Vec<int>` field buy the ghost-closure skip the identical
+            // PARAMETER spelling is denied, and equally what made a genuine spec
+            // `Seq<u64>` field fail closed.
+            for (field_name, field_ty) in &template.fields {
+                let origin = scoped_collection_origin(vc, &extract_type_name(field_ty));
+                vc.register_struct_field_collection_origin(&template.name, field_name, origin);
+            }
             if template.derived_partial_eq {
                 vc.derived_partial_eq_types.insert(template.name.clone());
             }
             if template.derived_clone {
                 vc.derived_clone_types.insert(template.name.clone());
             }
+        }
+    }
+
+    /// ROUND 10 — every bare NAME this file REDEFINES that a ghost reading
+    /// keys on. `ambiguous_type_names` is included deliberately: a name two
+    /// declarations disagree about is still DECLARED here, and the ghost
+    /// readings must not speak for it either.
+    fn register_shadowed_spec_names(&self, vc: &mut VerificationContext) {
+        for name in self
+            .structs
+            .keys()
+            .chain(self.enums.keys())
+            .chain(self.type_aliases.keys())
+            .chain(self.ambiguous_type_names.iter())
+        {
+            vc.register_shadowed_spec_name(name);
         }
     }
 
@@ -5263,6 +6660,1157 @@ impl SourceEnumTemplate {
     }
 }
 
+/// Cluster rank 6 (2026-09-15): vc_extraction never evaluates `#[cfg]`.
+///
+/// A cfg-gated statement was modeled as RUNNING (`#[cfg(any())] if b { x =
+/// 5u64; }`, `#[cfg(any())] let x = 2u64;`, `#[cfg(any())] trust_vc::assume!(..)`),
+/// and the file-level registries take the FIRST same-named definition whatever
+/// its `cfg` (`#[cfg(any())] const K: u64 = 1u64; #[cfg(not(any()))] const K: u64
+/// = 2u64;` read `K == 1`). No `cfg` predicate is evaluated here either; the
+/// shape is REFUSED:
+///
+/// * a `cfg` / `cfg_attr` attribute anywhere in `func` — its own attributes,
+///   signature, body, nested items and macro tokens — fails closed;
+/// * with a file, a name `func` can reach (its tokens, then transitively the
+///   tokens of every file item whose declared name is reached; a glob `use` and
+///   an unnamed item macro are always reached) that is DECLARED by an item
+///   carrying or containing such an attribute fails closed
+///   ([`cfg_tainted_declared_names`]). An unrelated `#[cfg(test)] mod tests`
+///   taints only its own module and item names, and a function verified
+///   inside such a module does not taint its own name (a same-named sibling
+///   declaration still does).
+///
+/// A `cfg_attr` whose attributes are all lint / documentation attributes
+/// (`allow`, `doc`, `inline`, ...) cannot change what is compiled and is not a
+/// hazard. Called after extraction succeeds, so every earlier refusal keeps its
+/// text.
+///
+/// The names `func` reaches are read from its tokens with the signature
+/// replaced by `lowered_signature`, the one extraction typed (see
+/// [`cfg_reach_seed`]).
+fn refuse_unevaluated_cfg(
+    file: Option<&File>,
+    func: &ItemFn,
+    lowered_signature: Option<&syn::Signature>,
+) -> TrustVcResult<()> {
+    if tokens_carry_unevaluated_cfg(func.to_token_stream()) {
+        return Err(TrustVcError::Encoding {
+            context: "extract verification conditions",
+            detail: format!(
+                "a `#[cfg]` / `#[cfg_attr]` attribute in `{}` is not evaluated by vc_extraction, \
+                 so a statement, item or definition it compiles out would be modeled as \
+                 present; this is unsupported in vc_extraction",
+                func.sig.ident
+            ),
+        });
+    }
+    let Some(file) = file else {
+        return Ok(());
+    };
+    if !tokens_carry_unevaluated_cfg(file.to_token_stream()) {
+        return Ok(());
+    }
+    let mut tainted = BTreeSet::new();
+    let target_tokens = func.to_token_stream().to_string();
+    cfg_tainted_declared_names(&file.items, false, false, &target_tokens, &mut tainted);
+    if tainted.is_empty() {
+        return Ok(());
+    }
+    let refusal = |name: &str| TrustVcError::Encoding {
+        context: "extract verification conditions",
+        detail: format!(
+            "`{name}` reaches a declaration in this file that carries a `#[cfg]` / \
+             `#[cfg_attr]` attribute; vc_extraction does not evaluate `cfg`, so it may read a \
+             compiled-out definition; this is unsupported in vc_extraction"
+        ),
+    };
+    if tainted.contains("*") {
+        return Err(refusal("*"));
+    }
+    let mut reached = BTreeSet::new();
+    token_idents(cfg_reach_seed(func, lowered_signature), &mut reached);
+    if let function_discovery::EnclosingImplResolution::Unique(self_ty) =
+        function_discovery::enclosing_impl_self_ty(file, func)
+    {
+        token_idents(self_ty.to_token_stream(), &mut reached);
+    }
+    let mut flat = Vec::new();
+    flatten_file_items(&file.items, &mut flat);
+    let keys: Vec<BTreeSet<String>> = flat.iter().map(|item| reach_keys_of_item(item)).collect();
+    // When exactly one source item has the target's identity, a file item
+    // token-identical to it is the target, and the seed already stands for it.
+    let target_is_unique = function_discovery::exact_source_identity_count(file, func) == 1;
+    let mut included = vec![false; flat.len()];
+    loop {
+        let mut grew = false;
+        for (index, item) in flat.iter().enumerate() {
+            if included[index] {
+                continue;
+            }
+            if keys[index]
+                .iter()
+                .any(|key| key == "*" || reached.contains(key))
+            {
+                included[index] = true;
+                grew = true;
+                match item {
+                    // A module's items are flattened and reached one by one.
+                    syn::Item::Mod(_) => {}
+                    syn::Item::Fn(item_fn)
+                        if target_is_unique
+                            && item_fn.to_token_stream().to_string() == target_tokens => {}
+                    _ => token_idents(item.to_token_stream(), &mut reached),
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    match reached.intersection(&tainted).next() {
+        Some(name) => Err(refusal(name)),
+        None => Ok(()),
+    }
+}
+
+/// The tokens through which [`refuse_unevaluated_cfg`] starts its reach:
+/// `func` with its signature replaced by `lowered_signature`, minus every
+/// parameter or return type that is still a qualified projection `<Q as P>::A`.
+///
+/// In a signature with no type or const parameter and no where-clause, a
+/// projection has exactly one reader, the projection resolver
+/// (`function_discovery::AssocProjectionResolver`). When it resolves one, the
+/// lowered signature carries the bound type in its place, so the bound's names
+/// are reached. When it does not, the parameter or result lowers to an opaque
+/// type, and a context holding a variable of unrecognized type is not verified
+/// (an `OpaqueTypes` `Unknown`), so no declaration the projection's names
+/// denote is read. The resolver itself is `cfg`-sound: it binds only in the
+/// target's own module, only when exactly one inline module has that path, and
+/// never through an impl or a `type` item that carries a `cfg` / `cfg_attr`
+/// attribute. An enclosing `cfg` on the target's module gates the binding impl
+/// and the target together.
+///
+/// Only a projection that is the whole type of a parameter or of the return is
+/// dropped, and only in such a signature. A projection nested in another type,
+/// and every projection of a generic signature, keeps its names. Without a
+/// lowered signature (extraction did not reach the resolver) the source tokens
+/// are used unchanged.
+fn cfg_reach_seed(func: &ItemFn, lowered_signature: Option<&syn::Signature>) -> TokenStream {
+    fn is_qualified_projection(ty: &Type) -> bool {
+        match ty {
+            Type::Paren(paren) => is_qualified_projection(&paren.elem),
+            Type::Group(group) => is_qualified_projection(&group.elem),
+            Type::Path(type_path) => type_path
+                .qself
+                .as_ref()
+                .is_some_and(|qself| qself.position > 0),
+            _ => false,
+        }
+    }
+    let Some(lowered) = lowered_signature else {
+        return func.to_token_stream();
+    };
+    let mut seed = func.clone();
+    seed.sig = lowered.clone();
+    let generic_free = seed.sig.generics.where_clause.is_none()
+        && seed
+            .sig
+            .generics
+            .params
+            .iter()
+            .all(|param| matches!(param, syn::GenericParam::Lifetime(_)));
+    if !generic_free {
+        return seed.to_token_stream();
+    }
+    for input in seed.sig.inputs.iter_mut() {
+        if let FnArg::Typed(pat_type) = input {
+            if is_qualified_projection(&pat_type.ty) {
+                *pat_type.ty = syn::parse_quote!(());
+            }
+        }
+    }
+    if let syn::ReturnType::Type(_, ty) = &mut seed.sig.output {
+        if is_qualified_projection(ty) {
+            **ty = syn::parse_quote!(());
+        }
+    }
+    seed.to_token_stream()
+}
+
+/// True when `tokens` contain a `#[cfg(..)]` / `#![cfg(..)]` or a `cfg_attr`
+/// whose attributes are not all lint / documentation attributes, at any group
+/// depth (macro arguments included).
+fn tokens_carry_unevaluated_cfg(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::{Delimiter, TokenTree};
+    /// An attribute path segment's name with any RAW-IDENTIFIER prefix removed.
+    ///
+    /// SOUNDNESS (review finding: `#[r#cfg(..)]`): rustc honours `r#cfg` and
+    /// `r#cfg_attr` exactly like the plain spellings, but `proc_macro2`'s
+    /// `Ident: PartialEq<str>` compares the raw flag too, so `ident == "cfg"`
+    /// is FALSE for `r#cfg` and both the body refusal and the file taint below
+    /// missed a `#[r#cfg(any())]`-gated statement, `let` shadow or `const`.
+    fn ident_name(ident: &proc_macro2::Ident) -> String {
+        let text = ident.to_string();
+        text.strip_prefix("r#").unwrap_or(&text).to_string()
+    }
+    fn attribute_is_hazard(content: proc_macro2::TokenStream) -> bool {
+        let mut iter = content.into_iter();
+        let Some(TokenTree::Ident(name)) = iter.next() else {
+            return false;
+        };
+        let name = ident_name(&name);
+        if name == "cfg" {
+            return true;
+        }
+        if name != "cfg_attr" {
+            return false;
+        }
+        let Some(TokenTree::Group(args)) = iter.next() else {
+            return true;
+        };
+        // `cfg_attr(PREDICATE, ATTR, ATTR, ..)`: split at top-level commas.
+        let mut segments: Vec<Vec<TokenTree>> = vec![Vec::new()];
+        for tree in args.stream() {
+            match &tree {
+                TokenTree::Punct(punct) if punct.as_char() == ',' => segments.push(Vec::new()),
+                _ => segments.last_mut().expect("non-empty").push(tree),
+            }
+        }
+        const INERT: &[&str] = &[
+            "allow",
+            "warn",
+            "deny",
+            "forbid",
+            "expect",
+            "doc",
+            "must_use",
+            "inline",
+            "cold",
+            "deprecated",
+            "rustfmt",
+            "clippy",
+        ];
+        segments
+            .iter()
+            .skip(1)
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| {
+                !matches!(segment.first(), Some(TokenTree::Ident(ident))
+                if INERT.contains(&ident_name(ident).as_str()))
+            })
+    }
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                let mut next = index + 1;
+                if matches!(trees.get(next), Some(TokenTree::Punct(bang)) if bang.as_char() == '!')
+                {
+                    next += 1;
+                }
+                if let Some(TokenTree::Group(group)) = trees.get(next) {
+                    if group.delimiter() == Delimiter::Bracket
+                        && attribute_is_hazard(group.stream())
+                    {
+                        return true;
+                    }
+                }
+            }
+            TokenTree::Group(group) if tokens_carry_unevaluated_cfg(group.stream()) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn token_idents(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => {
+                out.insert(ident.to_string());
+            }
+            proc_macro2::TokenTree::Group(group) => token_idents(group.stream(), out),
+            _ => {}
+        }
+    }
+}
+
+fn use_tree_leaves(tree: &syn::UseTree, out: &mut BTreeSet<String>) {
+    match tree {
+        syn::UseTree::Path(path) => use_tree_leaves(&path.tree, out),
+        syn::UseTree::Name(name) => {
+            out.insert(name.ident.to_string());
+        }
+        syn::UseTree::Rename(rename) => {
+            out.insert(rename.rename.to_string());
+        }
+        syn::UseTree::Glob(_) => {
+            out.insert("*".to_string());
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                use_tree_leaves(tree, out);
+            }
+        }
+    }
+}
+
+fn impl_item_ident(item: &syn::ImplItem) -> Option<String> {
+    match item {
+        syn::ImplItem::Fn(item) => Some(item.sig.ident.to_string()),
+        syn::ImplItem::Const(item) => Some(item.ident.to_string()),
+        syn::ImplItem::Type(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn trait_item_ident(item: &syn::TraitItem) -> Option<String> {
+    match item {
+        syn::TraitItem::Fn(item) => Some(item.sig.ident.to_string()),
+        syn::TraitItem::Const(item) => Some(item.ident.to_string()),
+        syn::TraitItem::Type(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn foreign_item_ident(item: &syn::ForeignItem) -> Option<String> {
+    match item {
+        syn::ForeignItem::Fn(item) => Some(item.sig.ident.to_string()),
+        syn::ForeignItem::Static(item) => Some(item.ident.to_string()),
+        syn::ForeignItem::Type(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// Every item of `items`, modules' items included (a module item is kept too).
+fn flatten_file_items<'a>(items: &'a [syn::Item], out: &mut Vec<&'a syn::Item>) {
+    for item in items {
+        out.push(item);
+        if let syn::Item::Mod(module) = item {
+            if let Some((_, inner)) = &module.content {
+                flatten_file_items(inner, out);
+            }
+        }
+    }
+}
+
+/// The names through which a reference reaches `item` (`"*"`: always reached).
+fn reach_keys_of_item(item: &syn::Item) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    match item {
+        syn::Item::Impl(item) => {
+            token_idents(item.self_ty.to_token_stream(), &mut keys);
+            if let Some((_, trait_path, _)) = &item.trait_ {
+                token_idents(trait_path.to_token_stream(), &mut keys);
+            }
+            keys.extend(item.items.iter().filter_map(impl_item_ident));
+        }
+        syn::Item::Trait(item) => {
+            keys.insert(item.ident.to_string());
+            keys.extend(item.items.iter().filter_map(trait_item_ident));
+        }
+        syn::Item::ForeignMod(item) => {
+            keys.extend(item.items.iter().filter_map(foreign_item_ident));
+        }
+        syn::Item::Macro(item) => match &item.ident {
+            Some(ident) => {
+                keys.insert(ident.to_string());
+            }
+            None => {
+                keys.insert("*".to_string());
+            }
+        },
+        syn::Item::Use(item) => use_tree_leaves(&item.tree, &mut keys),
+        syn::Item::Verbatim(_) => {
+            keys.insert("*".to_string());
+        }
+        other => {
+            if let Some(ident) = plain_item_ident(other) {
+                keys.insert(ident);
+            }
+        }
+    }
+    keys
+}
+
+fn plain_item_ident(item: &syn::Item) -> Option<String> {
+    match item {
+        syn::Item::Const(item) => Some(item.ident.to_string()),
+        syn::Item::Static(item) => Some(item.ident.to_string()),
+        syn::Item::Fn(item) => Some(item.sig.ident.to_string()),
+        syn::Item::Struct(item) => Some(item.ident.to_string()),
+        syn::Item::Enum(item) => Some(item.ident.to_string()),
+        syn::Item::Union(item) => Some(item.ident.to_string()),
+        syn::Item::Type(item) => Some(item.ident.to_string()),
+        syn::Item::Trait(item) => Some(item.ident.to_string()),
+        syn::Item::TraitAlias(item) => Some(item.ident.to_string()),
+        syn::Item::Mod(item) => Some(item.ident.to_string()),
+        syn::Item::ExternCrate(item) => Some(
+            item.rename
+                .as_ref()
+                .map_or_else(|| item.ident.to_string(), |(_, rename)| rename.to_string()),
+        ),
+        _ => None,
+    }
+}
+
+/// The names DECLARED by an item that carries or contains an unevaluated `cfg`
+/// (see [`refuse_unevaluated_cfg`]). `gated`: an enclosing module carries one,
+/// so every declaration inside it is tainted. `nested`: inside a module, where a
+/// `use` binds only module-locally and an unnamed item macro is ignored (a
+/// top-level cfg-carrying glob `use` / unnamed macro taints `"*"`).
+/// `target_tokens`: the function being verified, whose own declaration (when it
+/// is a free function inside a gated module) is the definition asked for and is
+/// not counted; a body `cfg` in it is refused separately.
+fn cfg_tainted_declared_names(
+    items: &[syn::Item],
+    nested: bool,
+    gated: bool,
+    target_tokens: &str,
+    out: &mut BTreeSet<String>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(item_fn)
+                if gated && item_fn.to_token_stream().to_string() == target_tokens => {}
+            syn::Item::Mod(module) => {
+                let module_gated = gated
+                    || module
+                        .attrs
+                        .iter()
+                        .any(|attr| tokens_carry_unevaluated_cfg(attr.to_token_stream()));
+                if module_gated {
+                    out.insert(module.ident.to_string());
+                }
+                if let Some((_, inner)) = &module.content {
+                    cfg_tainted_declared_names(inner, true, module_gated, target_tokens, out);
+                }
+            }
+            syn::Item::Impl(imp) => {
+                let head_carries = gated
+                    || imp
+                        .attrs
+                        .iter()
+                        .any(|attr| tokens_carry_unevaluated_cfg(attr.to_token_stream()))
+                    || tokens_carry_unevaluated_cfg(imp.generics.to_token_stream())
+                    || tokens_carry_unevaluated_cfg(imp.self_ty.to_token_stream());
+                if head_carries {
+                    out.extend(reach_keys_of_item(item));
+                } else {
+                    for impl_item in &imp.items {
+                        if tokens_carry_unevaluated_cfg(impl_item.to_token_stream()) {
+                            match impl_item_ident(impl_item) {
+                                Some(ident) => {
+                                    out.insert(ident);
+                                }
+                                None => out.extend(reach_keys_of_item(item)),
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Use(item_use) => {
+                if nested {
+                    continue;
+                }
+                if gated || tokens_carry_unevaluated_cfg(item_use.to_token_stream()) {
+                    use_tree_leaves(&item_use.tree, out);
+                }
+            }
+            syn::Item::Macro(_) | syn::Item::Verbatim(_) => {
+                if nested && !matches!(item, syn::Item::Macro(m) if m.ident.is_some()) {
+                    continue;
+                }
+                if gated || tokens_carry_unevaluated_cfg(item.to_token_stream()) {
+                    out.extend(reach_keys_of_item(item));
+                }
+            }
+            _ => {
+                if gated || tokens_carry_unevaluated_cfg(item.to_token_stream()) {
+                    out.extend(reach_keys_of_item(item));
+                }
+            }
+        }
+    }
+}
+
+/// True when `file` carries a `#[cfg(..)]` / `#[cfg_attr(..)]` attribute (inner
+/// or outer) anywhere OUTSIDE function bodies and expressions: on an item, a
+/// field, a variant, an impl / trait / foreign item, a parameter, a generic.
+/// Function bodies are not searched (the holder lane's body scan owns those).
+/// Gates the `&mut` holder lane only (`CollectorLaneSeed::holder_file_admissible`):
+/// the source registries here do not evaluate `cfg`, so a compiled-out item can
+/// be the definition a body name resolves to.
+fn file_items_carry_cfg_attr(file: &File) -> bool {
+    struct CfgFinder(bool);
+    impl<'ast> syn::visit::Visit<'ast> for CfgFinder {
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            // Raw spellings (`#[r#cfg(..)]`) are honoured by rustc and must
+            // count here too; `Ident: PartialEq<str>` compares the raw flag.
+            let name = attr
+                .path()
+                .get_ident()
+                .map(|ident| ident.to_string())
+                .unwrap_or_default();
+            let name = name.strip_prefix("r#").unwrap_or(&name);
+            if name == "cfg" || name == "cfg_attr" {
+                self.0 = true;
+            }
+        }
+        fn visit_block(&mut self, _block: &'ast syn::Block) {}
+        fn visit_expr(&mut self, _expr: &'ast Expr) {}
+    }
+    let mut finder = CfgFinder(false);
+    syn::visit::Visit::visit_file(&mut finder, file);
+    finder.0
+}
+
+/// The FILE / SIGNATURE half of the `&mut` holder lane's admission
+/// (`CollectorLaneSeed::holder_file_admissible`; the body half is
+/// `body_extract::mut_ref_holder_candidates`). HEAD refuses every body that
+/// writes through a holder, so every HEAD modelling gap in such a body was
+/// unreachable; the holder lane admits a holder only where none of the gaps
+/// below can be reached (review of the holder-only split, round 2, 2026-09-15).
+/// No holder is admitted in `func` when:
+///
+/// * the file carries a `cfg` / `cfg_attr` attribute outside function bodies
+///   ([`file_items_carry_cfg_attr`]);
+/// * the file carries a `mod` item anywhere: the source registries key consts
+///   by bare name, so a function inside `mod ma { const K: u64 = 7u64; .. }`
+///   read the crate-root `K` (hand2 q10 / q13 / r01 / r06 / r09 / r10 / dd08);
+/// * the file carries a `const` generic parameter anywhere: a `<const K: u64>`
+///   shadowing a file `const K` resolved to the file const (o09 / o11 / r17-r20);
+/// * the file mentions `Drop` anywhere (an `impl Drop for ..` may sit in any
+///   function body or macro): the model never runs drop glue, so a panicking
+///   destructor at a block end, the body end, or an early `return` was unseen
+///   (k02 / k13 / s16);
+/// * the file carries an item-position macro outside function bodies (it can
+///   expand to a `Drop` impl or a shadowing item);
+/// * `func` mixes integer types ([`holder_function_mixes_integer_widths`]).
+///
+/// Cheap syntactic pre-check for the holder lane: true when `block` contains a
+/// tuple or struct literal with a `&mut` element — the only shape
+/// `mut_ref_holder_candidates` can admit. The file-level walk of
+/// [`holder_lane_file_admissible`] is O(file) per function, so it runs only for
+/// bodies that could hold a holder at all; for every other body the answer
+/// (`false`, no holder) is the same either way.
+fn body_has_mut_ref_aggregate_literal(block: &Block) -> bool {
+    struct Finder {
+        found: bool,
+    }
+    fn is_mut_ref(expr: &Expr) -> bool {
+        match expr {
+            Expr::Reference(reference) => reference.mutability.is_some(),
+            Expr::Paren(paren) => is_mut_ref(&paren.expr),
+            Expr::Group(group) => is_mut_ref(&group.expr),
+            _ => false,
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_expr_tuple(&mut self, tuple: &'ast syn::ExprTuple) {
+            if tuple.elems.iter().any(is_mut_ref) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_tuple(self, tuple);
+        }
+        fn visit_expr_struct(&mut self, expr: &'ast syn::ExprStruct) {
+            if expr.fields.iter().any(|field| is_mut_ref(&field.expr)) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_struct(self, expr);
+        }
+    }
+    let mut finder = Finder { found: false };
+    syn::visit::Visit::visit_block(&mut finder, block);
+    finder.found
+}
+
+/// Cheap syntactic pre-check for the Option payload `&mut` alias lane
+/// (`CollectorLaneSeed::option_payload_file_admissible`): true when `block`
+/// calls a method named `insert` or `get_or_insert` (macro tokens are not
+/// searched — a macro-token call is never a lane candidate). The file walk of
+/// [`option_payload_lane_file_admissible`] runs only for such bodies.
+fn body_calls_option_insert_method(block: &Block) -> bool {
+    struct Finder {
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "insert" || call.method == "get_or_insert" {
+                self.found = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut finder = Finder { found: false };
+    syn::visit::Visit::visit_block(&mut finder, block);
+    finder.found
+}
+
+/// The FILE half of the Option payload `&mut` alias lane
+/// (`CollectorLaneSeed::option_payload_file_admissible`; the body half is
+/// `body_extract::option_payload_alias_candidates`). The lane reads
+/// `x.insert(v)` / `x.get_or_insert(v)` as std's inherent `Option` methods,
+/// which is only true when nothing in the file can change what those paths and
+/// method names resolve to. MEASURED (stock rustc, 2026-09-17): a file-local
+/// `trait Tr { fn insert(self, v: u64) -> u64; }` implemented for
+/// `Option<u64>` WINS resolution over the inherent `&mut self` insert (the
+/// by-value probe step comes first) — the program returned `777` and left `x`
+/// unchanged. The file is admissible only when ALL of these hold:
+///
+/// * `Option`, `Some` and `None` are not shadowed in the type namespace, by a
+///   `use` leaf / rename / glob, or by `no_implicit_prelude` / `cfg_attr`
+///   (`try_desugar::source_may_shadow_namespace_name`);
+/// * no value-namespace item (`fn` / `const` / `static`, any depth) is named
+///   `Some` or `None`;
+/// * no `fn`, `impl` fn, trait fn or foreign fn anywhere is named `insert` or
+///   `get_or_insert`;
+/// * there is no item-position macro (a `macro_rules!` definition or an
+///   invocation) anywhere, no `mod` item and no `extern crate` item;
+/// * every `use` tree is rooted at `std`, `core` or `alloc`, and no `use`
+///   leaf binds a PRIMITIVE type name — `use core::primitive::u8 as u64;`
+///   satisfies the rooting rule and makes the file's `u64` a `u8`, which
+///   MEASURED (2026-09-17) verified a runtime-false overflow claim
+///   ([`OPTION_PAYLOAD_PRIMITIVE_TYPE_NAMES`]); no type-namespace item
+///   (`type` / `struct` / `enum` / `union` / `trait`) and no generic or
+///   associated-type parameter shadows one either;
+/// * no identifier anywhere in the file is raw (`r#insert` names the same
+///   method as `insert`, `enum r#Option` shadows `Option` — MEASURED
+///   2026-09-17: a `fn r#insert(self, ..)` trait method hijacked the call and
+///   the lane verified runtime-false claims) or non-ASCII (NFC may fold it);
+/// * every attribute anywhere is inert or trusted: a `trust_vc::..` path, a
+///   single-segment builtin from [`OPTION_PAYLOAD_INERT_ATTRIBUTES`], or a
+///   `derive` of builtin single-segment traits only. A path-qualified derive
+///   or attribute macro can emit a by-value `insert` trait for `Option`
+///   (MEASURED 2026-09-17 with `#[derive(hjd::Hijack)]`), and its output is
+///   invisible to this walk;
+/// * every macro invocation anywhere (expression, statement or pattern
+///   position) carries no `#` token and is a single-segment name or is rooted
+///   at `trust_vc`, `std`, `core` or `alloc` — a single-segment macro can
+///   only come from std here
+///   (no `macro_rules!`, `#[macro_use]` or non-std `use` survives the rules
+///   above), while `ext::m!()` in the body could bring a trait into scope.
+fn option_payload_lane_file_admissible(file: &File, func: &ItemFn) -> bool {
+    struct HazardFinder {
+        found: bool,
+    }
+    fn use_root_is_std(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Path(path) => {
+                path.ident == "std" || path.ident == "core" || path.ident == "alloc"
+            }
+            syn::UseTree::Group(group) => group.items.iter().all(use_root_is_std),
+            _ => false,
+        }
+    }
+    // H3 (review 2026-09-17). `use core::primitive::u8 as u64;` is rooted at
+    // `core`, so the rooting rule above admits it — and then the file's `u64`
+    // is `u8`, which MEASURED (2026-09-17) verifies a runtime-false claim:
+    // `let y: u64 = *r as u64; let z: u64 = 100; assert!(y + z == 300)` with
+    // `*r == 200u8` verifies at 64 bits while the program overflows a `u8`.
+    // The lane compares type SPELLINGS against the primitive names, so any use
+    // leaf that introduces or renames a primitive type name turns it off.
+    fn use_tree_binds_primitive_type_name(tree: &syn::UseTree) -> bool {
+        fn is_primitive(ident: &syn::Ident) -> bool {
+            let ident = syn::ext::IdentExt::unraw(ident).to_string();
+            OPTION_PAYLOAD_PRIMITIVE_TYPE_NAMES
+                .iter()
+                .any(|name| ident == *name)
+        }
+        match tree {
+            syn::UseTree::Path(path) => use_tree_binds_primitive_type_name(&path.tree),
+            syn::UseTree::Group(group) => {
+                group.items.iter().any(use_tree_binds_primitive_type_name)
+            }
+            // `use std::u8;` binds the deprecated MODULE `u8` in the type
+            // namespace, shadowing the primitive; `use .. as u8;` rebinds the
+            // name outright.
+            syn::UseTree::Name(name) => is_primitive(&name.ident),
+            syn::UseTree::Rename(rename) => {
+                is_primitive(&rename.ident) || is_primitive(&rename.rename)
+            }
+            syn::UseTree::Glob(_) => false,
+        }
+    }
+    fn ident_shadows_primitive_type_name(ident: &syn::Ident) -> bool {
+        let ident = syn::ext::IdentExt::unraw(ident).to_string();
+        OPTION_PAYLOAD_PRIMITIVE_TYPE_NAMES
+            .iter()
+            .any(|name| ident == *name)
+    }
+    impl HazardFinder {
+        fn value_item(&mut self, ident: &syn::Ident) {
+            let ident = syn::ext::IdentExt::unraw(ident);
+            if ident == "Some" || ident == "None" {
+                self.found = true;
+            }
+        }
+        fn fn_item(&mut self, ident: &syn::Ident) {
+            self.value_item(ident);
+            let ident = syn::ext::IdentExt::unraw(ident);
+            if ident == "insert" || ident == "get_or_insert" {
+                self.found = true;
+            }
+        }
+    }
+    fn path_is_trusted_macro_or_attr(path: &syn::Path) -> bool {
+        match path.segments.len() {
+            0 => false,
+            1 => path.leading_colon.is_none(),
+            _ => ["trust_vc", "std", "core", "alloc"]
+                .iter()
+                .any(|root| path.segments[0].ident == root),
+        }
+    }
+    fn derive_is_builtin(attr: &syn::Attribute) -> bool {
+        let Ok(paths) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+        ) else {
+            return false;
+        };
+        paths.iter().all(|path| {
+            path.leading_colon.is_none()
+                && path.segments.len() == 1
+                && matches!(path.segments[0].arguments, syn::PathArguments::None)
+                && OPTION_PAYLOAD_BUILTIN_DERIVES
+                    .iter()
+                    .any(|name| path.segments[0].ident == name)
+        })
+    }
+    impl<'ast> syn::visit::Visit<'ast> for HazardFinder {
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            let path = attr.path();
+            let admitted = if path.is_ident("derive") {
+                derive_is_builtin(attr)
+            } else if path.segments.len() == 1 && path.leading_colon.is_none() {
+                OPTION_PAYLOAD_INERT_ATTRIBUTES
+                    .iter()
+                    .any(|name| path.segments[0].ident == name)
+            } else {
+                path.leading_colon.is_none() && path.segments[0].ident == "trust_vc"
+            };
+            if !admitted {
+                self.found = true;
+            }
+            syn::visit::visit_attribute(self, attr);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            // An attribute inside macro tokens (`thread_local! { #[m::a] .. }`)
+            // is never seen by `visit_attribute`; refuse any `#` token there.
+            if !path_is_trusted_macro_or_attr(&mac.path) || tokens_carry_pound(mac.tokens.clone()) {
+                self.found = true;
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            match item {
+                syn::Item::Fn(item) => self.fn_item(&item.sig.ident),
+                syn::Item::Const(item) => self.value_item(&item.ident),
+                syn::Item::Static(item) => self.value_item(&item.ident),
+                syn::Item::Macro(_) | syn::Item::Mod(_) | syn::Item::ExternCrate(_) => {
+                    self.found = true
+                }
+                syn::Item::Use(item) => {
+                    if !use_root_is_std(&item.tree)
+                        || use_tree_binds_primitive_type_name(&item.tree)
+                    {
+                        self.found = true;
+                    }
+                }
+                // H3: a type-namespace item that shadows a primitive type name
+                // (`type u64 = u8;`, `struct usize;`, `trait bool {}`).
+                syn::Item::Struct(syn::ItemStruct { ident, .. })
+                | syn::Item::Enum(syn::ItemEnum { ident, .. })
+                | syn::Item::Union(syn::ItemUnion { ident, .. })
+                | syn::Item::Type(syn::ItemType { ident, .. })
+                | syn::Item::Trait(syn::ItemTrait { ident, .. })
+                | syn::Item::TraitAlias(syn::ItemTraitAlias { ident, .. }) => {
+                    if ident_shadows_primitive_type_name(ident) {
+                        self.found = true;
+                    }
+                }
+                syn::Item::Verbatim(_) => self.found = true,
+                _ => {}
+            }
+            syn::visit::visit_item(self, item);
+        }
+        // H3: `fn f<u64>(..)` / `impl<u64>` binds `u64` in the type namespace
+        // for the whole item.
+        fn visit_type_param(&mut self, param: &'ast syn::TypeParam) {
+            if ident_shadows_primitive_type_name(&param.ident) {
+                self.found = true;
+            }
+            syn::visit::visit_type_param(self, param);
+        }
+        fn visit_const_param(&mut self, param: &'ast syn::ConstParam) {
+            if ident_shadows_primitive_type_name(&param.ident) {
+                self.found = true;
+            }
+            syn::visit::visit_const_param(self, param);
+        }
+        fn visit_impl_item_type(&mut self, item: &'ast syn::ImplItemType) {
+            if ident_shadows_primitive_type_name(&item.ident) {
+                self.found = true;
+            }
+            syn::visit::visit_impl_item_type(self, item);
+        }
+        fn visit_trait_item_type(&mut self, item: &'ast syn::TraitItemType) {
+            if ident_shadows_primitive_type_name(&item.ident) {
+                self.found = true;
+            }
+            syn::visit::visit_trait_item_type(self, item);
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.fn_item(&item.sig.ident);
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.fn_item(&item.sig.ident);
+            syn::visit::visit_trait_item_fn(self, item);
+        }
+        fn visit_foreign_item_fn(&mut self, item: &'ast syn::ForeignItemFn) {
+            self.fn_item(&item.sig.ident);
+            syn::visit::visit_foreign_item_fn(self, item);
+        }
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if let syn::ImplItem::Const(item) = item {
+                self.value_item(&item.ident);
+            }
+            if matches!(item, syn::ImplItem::Macro(_) | syn::ImplItem::Verbatim(_)) {
+                self.found = true;
+            }
+            syn::visit::visit_impl_item(self, item);
+        }
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if matches!(item, syn::TraitItem::Macro(_) | syn::TraitItem::Verbatim(_)) {
+                self.found = true;
+            }
+            syn::visit::visit_trait_item(self, item);
+        }
+        fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+            if let syn::ForeignItem::Static(item) = item {
+                self.value_item(&item.ident);
+            }
+            if matches!(
+                item,
+                syn::ForeignItem::Macro(_) | syn::ForeignItem::Verbatim(_)
+            ) {
+                self.found = true;
+            }
+            syn::visit::visit_foreign_item(self, item);
+        }
+    }
+    if ["Option", "Some", "None"]
+        .iter()
+        .any(|name| crate::try_desugar::source_may_shadow_namespace_name(file, func, name))
+    {
+        return false;
+    }
+    if tokens_carry_raw_or_non_ascii_ident(file.to_token_stream())
+        || tokens_carry_raw_or_non_ascii_ident(func.to_token_stream())
+    {
+        return false;
+    }
+    let mut finder = HazardFinder { found: false };
+    syn::visit::Visit::visit_file(&mut finder, file);
+    // The verified function may be a transformed copy of its file node; scan
+    // it too.
+    syn::visit::Visit::visit_item_fn(&mut finder, func);
+    !finder.found
+}
+
+/// Every primitive type name the lane's type spellings are compared against.
+/// A file that binds any of these in the type namespace — through a `use`
+/// leaf or rename, a type-namespace item, or a generic parameter — can make a
+/// spelling denote a different type than the model assumes, so the lane is off
+/// for it (H3, review 2026-09-17).
+const OPTION_PAYLOAD_PRIMITIVE_TYPE_NAMES: &[&str] = &[
+    "bool", "char", "str", "f32", "f64", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16",
+    "i32", "i64", "i128", "isize",
+];
+
+#[cfg(test)]
+mod option_payload_file_gate_tests {
+    use super::option_payload_lane_file_admissible;
+
+    fn admissible(src: &str) -> bool {
+        let file: syn::File = syn::parse_str(src).expect("fixture parses");
+        let func = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(func) => Some(func.clone()),
+                _ => None,
+            })
+            .expect("fixture has a fn");
+        option_payload_lane_file_admissible(&file, &func)
+    }
+
+    /// H3 (review 2026-09-17): a file that can make a PRIMITIVE type spelling
+    /// denote a different type takes no lane.
+    #[test]
+    fn primitive_type_name_rebinding_turns_the_lane_off() {
+        for src in [
+            // The measured liar: rooted at `core`, so the rooting rule admits
+            // it, and then the file's `u64` is a `u8`.
+            "use core::primitive::u8 as u64; fn f() {}",
+            "use core::primitive::{u8 as u64}; fn f() {}",
+            "use std::u8; fn f() {}",
+            "use std::collections::HashMap as bool; fn f() {}",
+            "type u64 = u8; fn f() {}",
+            "struct usize; fn f() {}",
+            "enum char { A } fn f() {}",
+            "union f32 { a: u8 } fn f() {}",
+            "trait str {} fn f() {}",
+            "struct Holder<u64>(u64); fn f() {}",
+            "fn f<u64>() {}",
+            "struct S; impl S { fn g<isize>() {} } fn f() {}",
+        ] {
+            assert!(!admissible(src), "{src} must turn the lane off");
+        }
+    }
+
+    /// The pre-existing std/core/alloc rooting rule is unchanged, and a `use`
+    /// that binds no primitive type name keeps the lane.
+    #[test]
+    fn plain_std_uses_keep_the_lane() {
+        for src in [
+            "fn f() {}",
+            "use core::cmp::Ordering; fn f() {}",
+            "use std::collections::{BTreeMap, BTreeSet}; fn f() {}",
+            "use alloc::vec::Vec; fn f() {}",
+            "struct Plain(u64); fn f() {}",
+        ] {
+            assert!(admissible(src), "{src} must keep the lane");
+        }
+        // The pre-existing refusals this change does not touch: a non-std
+        // root, and any glob (which could re-bind `Option` / `Some` / `None`).
+        for src in [
+            "use other::Thing; fn f() {}",
+            "use crate::Thing; fn f() {}",
+            "use core::primitive::*; fn f() {}",
+        ] {
+            assert!(!admissible(src), "{src} must keep the pre-existing refusal");
+        }
+    }
+}
+
+/// Single-segment attributes the Option payload lane treats as inert (lint
+/// levels, docs, codegen hints, test markers). Anything else — including
+/// `cfg_attr`, `cfg`, `macro_use`, `path` and every attribute macro — keeps
+/// the lane off.
+const OPTION_PAYLOAD_INERT_ATTRIBUTES: &[&str] = &[
+    "allow",
+    "warn",
+    "deny",
+    "forbid",
+    "expect",
+    "doc",
+    "inline",
+    "cold",
+    "must_use",
+    "track_caller",
+    "repr",
+    "test",
+    "ignore",
+    "should_panic",
+];
+
+/// The builtin derives the Option payload lane accepts (single-segment only;
+/// a path-qualified derive is a proc macro that may emit arbitrary items).
+const OPTION_PAYLOAD_BUILTIN_DERIVES: &[&str] = &[
+    "Clone",
+    "Copy",
+    "Debug",
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "Hash",
+    "Default",
+];
+
+fn tokens_carry_pound(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Punct(punct) => punct.as_char() == '#',
+        proc_macro2::TokenTree::Group(group) => tokens_carry_pound(group.stream()),
+        _ => false,
+    })
+}
+
+/// True when any identifier token (macro and attribute tokens included) is
+/// raw (`r#name`) or non-ASCII.
+fn tokens_carry_raw_or_non_ascii_ident(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => {
+            let spelled = ident.to_string();
+            spelled.starts_with("r#") || !spelled.is_ascii()
+        }
+        proc_macro2::TokenTree::Group(group) => tokens_carry_raw_or_non_ascii_ident(group.stream()),
+        _ => false,
+    })
+}
+
+fn holder_lane_file_admissible(file: &File, func: &ItemFn) -> bool {
+    !file_items_carry_cfg_attr(file)
+        && !file_carries_holder_hazard_item(file)
+        && !holder_function_mixes_integer_widths(file, func)
+}
+
+/// True when `file` carries a `mod` item or a `const` generic parameter
+/// (function bodies INCLUDED), an item-position macro outside function bodies,
+/// or a `Drop` identifier token anywhere (an `impl Drop for ..` may sit in any
+/// function body, or inside a macro definition). See
+/// [`holder_lane_file_admissible`].
+fn file_carries_holder_hazard_item(file: &File) -> bool {
+    struct HazardFinder {
+        found: bool,
+        block_depth: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for HazardFinder {
+        fn visit_block(&mut self, block: &'ast Block) {
+            self.block_depth += 1;
+            syn::visit::visit_block(self, block);
+            self.block_depth -= 1;
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            self.found = true;
+            syn::visit::visit_item_mod(self, item);
+        }
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            if self.block_depth == 0 {
+                self.found = true;
+            }
+            syn::visit::visit_item_macro(self, item);
+        }
+        fn visit_const_param(&mut self, param: &'ast syn::ConstParam) {
+            self.found = true;
+            syn::visit::visit_const_param(self, param);
+        }
+    }
+    fn mentions_drop(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|tree| match tree {
+            proc_macro2::TokenTree::Ident(ident) => ident == "Drop",
+            proc_macro2::TokenTree::Group(group) => mentions_drop(group.stream()),
+            _ => false,
+        })
+    }
+    let mut finder = HazardFinder {
+        found: false,
+        block_depth: 0,
+    };
+    syn::visit::Visit::visit_file(&mut finder, file);
+    finder.found || mentions_drop(file.to_token_stream())
+}
+
+/// True when `func` can reach an obligation that mixes integer TYPES: the
+/// integer type names and literal suffixes spelled in `func` (attributes,
+/// signature, body), joined — to a fixpoint over identifiers — with those of
+/// every non-`fn` file item whose name `func` mentions (a struct / enum / union,
+/// a `const` / `static`, a `type` alias, a `use` leaf, a trait, an `impl` of a
+/// mentioned type), number more than one. A `self` / `Self` token counts as
+/// mixed (the receiver's type is not in the function's tokens). The encoder
+/// gives a literal-derived operand the most common width among the obligation's
+/// variables, so `*h.0 = 21i32 * 21i32; assert!(r0 != 441i32)` beside an `i8`
+/// parameter (or a `type Byte = u8;` one) wrapped the product at 8 bits and
+/// VERIFIED (confirm/final f2 p_mul_width; the holder-free twin verifies at
+/// HEAD).
+fn holder_function_mixes_integer_widths(file: &File, func: &ItemFn) -> bool {
+    const INTEGER_TYPES: &[&str] = &[
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+    ];
+    fn scan(
+        tokens: proc_macro2::TokenStream,
+        idents: &mut BTreeSet<String>,
+        widths: &mut BTreeSet<String>,
+    ) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    let spelled = ident.to_string();
+                    if INTEGER_TYPES.contains(&spelled.as_str()) {
+                        widths.insert(spelled.clone());
+                    }
+                    idents.insert(spelled);
+                }
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if let Ok(lit) = syn::parse_str::<syn::LitInt>(&literal.to_string()) {
+                        if !lit.suffix().is_empty() {
+                            widths.insert(lit.suffix().to_string());
+                        }
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) => scan(group.stream(), idents, widths),
+                proc_macro2::TokenTree::Punct(_) => {}
+            }
+        }
+    }
+    fn use_leaves(tree: &syn::UseTree, out: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => use_leaves(&path.tree, out),
+            syn::UseTree::Name(name) => out.push(name.ident.to_string()),
+            syn::UseTree::Rename(rename) => out.push(rename.rename.to_string()),
+            syn::UseTree::Glob(_) => out.push("*".to_string()),
+            syn::UseTree::Group(group) => group.items.iter().for_each(|tree| use_leaves(tree, out)),
+        }
+    }
+    let mut idents = BTreeSet::new();
+    let mut widths = BTreeSet::new();
+    scan(func.to_token_stream(), &mut idents, &mut widths);
+    if idents.contains("self") || idents.contains("Self") {
+        return true;
+    }
+    let item_names = |item: &syn::Item| -> Vec<String> {
+        match item {
+            syn::Item::Struct(item) => vec![item.ident.to_string()],
+            syn::Item::Enum(item) => vec![item.ident.to_string()],
+            syn::Item::Union(item) => vec![item.ident.to_string()],
+            syn::Item::Const(item) => vec![item.ident.to_string()],
+            syn::Item::Static(item) => vec![item.ident.to_string()],
+            syn::Item::Type(item) => vec![item.ident.to_string()],
+            syn::Item::Trait(item) => vec![item.ident.to_string()],
+            syn::Item::TraitAlias(item) => vec![item.ident.to_string()],
+            syn::Item::Use(item) => {
+                let mut out = Vec::new();
+                use_leaves(&item.tree, &mut out);
+                out
+            }
+            syn::Item::Impl(item) => {
+                let mut out = Vec::new();
+                let mut widths = BTreeSet::new();
+                let mut names = BTreeSet::new();
+                scan(item.self_ty.to_token_stream(), &mut names, &mut widths);
+                out.extend(names);
+                out
+            }
+            _ => Vec::new(),
+        }
+    };
+    let mut included = vec![false; file.items.len()];
+    loop {
+        let mut grew = false;
+        for (index, item) in file.items.iter().enumerate() {
+            if included[index] {
+                continue;
+            }
+            if item_names(item)
+                .iter()
+                .any(|name| name == "*" || idents.contains(name))
+            {
+                included[index] = true;
+                grew = true;
+                scan(item.to_token_stream(), &mut idents, &mut widths);
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    widths.len() > 1
+}
+
 #[derive(Default)]
 struct SourceConstRegistry {
     consts: BTreeMap<String, SourceConstTemplate>,
@@ -5414,12 +7962,13 @@ fn source_const_init_value(init: &Expr, ty: &TrustVcType) -> String {
 ///
 /// Returns EXACTLY rustc's compile-time `usize` value for `expr`, or `None`
 /// (fail closed). It folds:
-///   * integer literals (`Lit::Int`) parsed as `usize`;
-///   * parentheses / invisible groups;
-///   * checked `+`, `-`, `*` over `usize`;
-///   * a single-ident `Path` referencing ANOTHER already-registered `usize`
-///     const's previously folded `array_len_value` (so `const B: usize = N + 1`
-///     resolves against `N`).
+/// * integer literals (`Lit::Int`) parsed as `usize`;
+/// * parentheses / invisible groups;
+/// * checked `+`, `-`, `*` over `usize`;
+/// * a single-ident `Path` referencing ANOTHER already-registered `usize`
+///   const's previously folded `array_len_value` (so `const B: usize = N + 1`
+///   resolves against `N`).
+///
 /// Anything else — and any overflow, underflow (negative result), a non-`usize`
 /// or unresolved reference — yields `None`.
 ///
@@ -7389,6 +9938,133 @@ fn type_string_with_substitutions(
     }
 }
 
+/// H6 (function-item value applications): the spellings (whitespace-free) of
+/// every path the target body uses as a VALUE — anywhere except a call's callee
+/// position — that resolves to a sibling source function, mapped to whether that
+/// function carries a `requires`.
+///
+/// `collect_referenced_sibling_helper_contracts` is CALL-driven, so an item that
+/// is only aliased (`let t = llama; t(5)`) contributes no contract and the
+/// application `t(5)` — whose callee symbol is `t` — was never checked against
+/// `llama`'s requires. The collector cannot resolve items itself, so this map is
+/// its POSITIVE list of function items: an alias of an entry without a requires
+/// keeps its unchanged treatment, an alias of an entry with one fails closed (no
+/// lane proves the aliased requires; a clause that fails to parse counts as a
+/// requires), and an alias of anything NOT listed (an unresolved path, a havoc
+/// symbol, a spec function) fails closed too. Kept separate from the
+/// helper-contract map on purpose: inserting value references there would start
+/// recording contracts for calls that map deliberately excludes (closure-argument
+/// calls) and would widen `reject_helper_contract_calls_in_target_contracts`.
+fn collect_function_item_values(file: &File, target_func: &ItemFn) -> BTreeMap<String, bool> {
+    #[derive(Default)]
+    struct ValuePathCollector {
+        paths: Vec<syn::ExprPath>,
+    }
+    impl<'ast> Visit<'ast> for ValuePathCollector {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            // The callee of a direct call is not a value use; the call-driven
+            // helper-contract lane owns it. Anything else in callee position (a
+            // parenthesized path, an `if` selecting items) is visited.
+            if !matches!(&*call.func, syn::Expr::Path(_)) {
+                self.visit_expr(&call.func);
+            }
+            for arg in &call.args {
+                self.visit_expr(arg);
+            }
+        }
+
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            self.paths.push(path.clone());
+        }
+    }
+
+    let aliases = block_use_function_aliases(&target_func.block);
+    let source_functions = SourceFunctionRegistry::from_file(file);
+    let target_scope = enclosing_module_scope(file, target_func);
+    let no_aliases = BTreeMap::new();
+    let mut collector = ValuePathCollector::default();
+    collector.visit_block(&target_func.block);
+    let mut spellings = BTreeMap::new();
+    for path in &collector.paths {
+        let Some(reference) = source_call_reference_from_expr_path(path) else {
+            continue;
+        };
+        let reference = source_reference_with_aliases(reference, &aliases);
+        let Some((helper, _key)) = resolve_non_spec_source_function(
+            &source_functions,
+            &no_aliases,
+            &reference,
+            target_scope.as_deref(),
+            target_func,
+        ) else {
+            continue;
+        };
+        let has_requires = helper_has_requires_clause(&helper.attrs).unwrap_or(true);
+        // The same spelling can resolve once per occurrence; any requires wins.
+        *spellings
+            .entry(reference.call_symbol.replace(' ', ""))
+            .or_insert(false) |= has_requires;
+    }
+    spellings
+}
+
+/// A typed parameter whose pattern binds a `mut` (or `ref mut`) identifier,
+/// looking through `( .. )`: `mut f: F`.
+fn fn_arg_binds_mut_ident(input: &syn::FnArg) -> bool {
+    fn pat_binds_mut_ident(pat: &syn::Pat) -> bool {
+        match pat {
+            syn::Pat::Ident(ident) => ident.mutability.is_some(),
+            syn::Pat::Paren(paren) => pat_binds_mut_ident(&paren.pat),
+            _ => false,
+        }
+    }
+    matches!(input, syn::FnArg::Typed(pat_type) if pat_binds_mut_ident(&pat_type.pat))
+}
+
+/// H6: the name of every `const` / `static` item in `file` — top level, nested
+/// modules, inherent / trait impls and trait declarations. A call whose callee
+/// path ends in one of these applies a function VALUE (a fn pointer or `&dyn Fn`
+/// constant) whose target's precondition no lane proves, so the collector fails
+/// it closed. Name-based on purpose: over-approximating (a same-named function in
+/// another module) only over-rejects.
+fn collect_const_static_item_names(file: &File) -> BTreeSet<String> {
+    fn walk(items: &[syn::Item], names: &mut BTreeSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Const(item) => {
+                    names.insert(item.ident.to_string());
+                }
+                syn::Item::Static(item) => {
+                    names.insert(item.ident.to_string());
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        walk(items, names);
+                    }
+                }
+                syn::Item::Impl(item_impl) => {
+                    for impl_item in &item_impl.items {
+                        if let syn::ImplItem::Const(item) = impl_item {
+                            names.insert(item.ident.to_string());
+                        }
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    for trait_item in &item_trait.items {
+                        if let syn::TraitItem::Const(item) = trait_item {
+                            names.insert(item.ident.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut names = BTreeSet::new();
+    walk(&file.items, &mut names);
+    names
+}
+
 fn collect_referenced_sibling_helper_contracts(
     file: &File,
     target_func: &ItemFn,
@@ -7825,6 +10501,822 @@ fn collect_file_method_arg_mut_flags(file: &File) -> BTreeMap<String, Vec<bool>>
 /// signature is authoritative and can say NO (`read(c: &C)` called as `read(t)`
 /// with `t: &mut C` is an implicit reborrow-coercion to `&C` and must not
 /// havoc). Only an unresolved callee reaches this set.
+/// By-value parameters bound by a plain `name: T` pattern with no `mut` / `ref`
+/// whose type is SPELLED as a primitive scalar (integer, `bool`, `char`, float)
+/// or a Verus math scalar (`int` / `nat` / `real`), and whose name NO
+/// pattern anywhere in the body re-binds (a `let`, `match` arm, closure
+/// parameter, `for` / `if let` pattern — over-approximated by name). No method
+/// call can change such a binding's value, so it is the one exemption from the
+/// method-receiver poison (`body_extract::CollectorLaneSeed::immutable_value_params`).
+/// The type is read from the signature, not from a declaration table, so the
+/// sibling-body render lanes (whose parameters are declared nowhere) can use it.
+/// A type spelled like a generic type parameter of the signature, or like one
+/// of `generic_type_params`, is not a primitive.
+fn immutable_value_params(
+    sig: &syn::Signature,
+    block: &Block,
+    generic_type_params: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    struct PatNames(BTreeSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for PatNames {
+        fn visit_pat_ident(&mut self, pat_ident: &'ast syn::PatIdent) {
+            self.0.insert(pat_ident.ident.to_string());
+            syn::visit::visit_pat_ident(self, pat_ident);
+        }
+    }
+    const PRIMITIVE_SCALARS: &[&str] = &[
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        "bool", "char", "f32", "f64", "int", "nat", "real",
+    ];
+    let mut rebound = PatNames(BTreeSet::new());
+    syn::visit::Visit::visit_block(&mut rebound, block);
+    let mut out = BTreeSet::new();
+    for input in &sig.inputs {
+        let FnArg::Typed(pat_type) = input else {
+            continue;
+        };
+        let syn::Pat::Ident(pat_ident) = &*pat_type.pat else {
+            continue;
+        };
+        let Type::Path(type_path) = &*pat_type.ty else {
+            continue;
+        };
+        let primitive = type_path.qself.is_none()
+            && type_path.path.get_ident().is_some_and(|ident| {
+                let name = ident.to_string();
+                PRIMITIVE_SCALARS.contains(&name.as_str())
+                    && !generic_type_params.contains(&name)
+                    && !sig.generics.type_params().any(|param| param.ident == name)
+            });
+        if !primitive
+            || pat_ident.mutability.is_some()
+            || pat_ident.by_ref.is_some()
+            || pat_ident.subpat.is_some()
+        {
+            continue;
+        }
+        let name = pat_ident.ident.to_string();
+        if !rebound.0.contains(&name) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// Names bound EXACTLY ONCE across the function's parameters and every
+/// pattern of its body, where that one binding SPELLS a primitive integer type:
+/// a parameter `x: u8` / `mut x: u8`, a `let x: u8 = ..;` / `let mut x: u8;`,
+/// or a `let mut x = 5u8;` whose initializer is a suffixed integer literal.
+/// Maps the name to the type verbatim (`usize` / `isize` kept as spelled, as
+/// the `let` literal-suffix mechanism does). Rank-5 soundness cluster: an
+/// unsuffixed integer literal ASSIGNED to such a binding (`x = 250;`) has the
+/// binding's type in Rust, but rendered bare it re-lowers as the `i32`
+/// placeholder, so `x = 250; x = x + 10;` on a `u8` never saw the overflow.
+///
+/// Counting is by NAME and over-approximates: a `match` arm, closure
+/// parameter, `for` / `if let` pattern, nested item, or a binding inside a
+/// macro whose tokens do not parse as expressions or statements (every ident
+/// of such a macro counts) makes a second binding, and an ambiguous name is
+/// simply absent (the pre-existing untyped rendering). The type is therefore
+/// never borrowed from a binding the assignment might not denote.
+///
+/// The same visitor and the same counts also decide
+/// `CollectorLaneSeed::immutable_interior_mutability_free_bindings`: a name
+/// qualifies when EVERY binding the count saw is a parameter or `let` with a
+/// plain non-`mut` identifier pattern whose type is known and free of
+/// interior mutability, so whichever binding a use denotes, no method call
+/// can change it. It is empty without an enumerable file.
+fn single_typed_bindings(
+    sig: &syn::Signature,
+    block: &Block,
+    names: Option<&declared_width::FileTypeNames>,
+    file: Option<&File>,
+    generic_type_params: &BTreeSet<String>,
+) -> SingleTypedBindings {
+    // ONE leaf classifier, shared with `body_extract::local_pat_declared_int_suffix`
+    // and with the shape walk. The hand-rolled version this replaces used
+    // `path.get_ident()`, so it rejected a leading `::` while its sibling in
+    // body_extract accepted one; and neither asked whether the FILE binds the
+    // name it spells, so `type u64 = u8; let x: u64 = 200;` recorded `u64` for
+    // a `u8` binding (a live false `Verified`, now resolved through the alias).
+    fn primitive_int_suffix(
+        ty: &Type,
+        names: Option<&declared_width::FileTypeNames>,
+    ) -> Option<&'static str> {
+        declared_width::scalar_int_suffix(ty, names)
+    }
+    fn suffixed_int_literal_suffix(expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(int_lit),
+                ..
+            }) => {
+                let suffix = int_lit.suffix();
+                const INTS: &[&str] = &[
+                    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+                    "isize",
+                ];
+                INTS.iter().copied().find(|candidate| *candidate == suffix)
+            }
+            Expr::Unary(syn::ExprUnary {
+                op: syn::UnOp::Neg(_),
+                expr,
+                ..
+            })
+            | Expr::Paren(syn::ExprParen { expr, .. })
+            | Expr::Group(syn::ExprGroup { expr, .. }) => suffixed_int_literal_suffix(expr),
+            _ => None,
+        }
+    }
+    struct Bindings<'n> {
+        counts: BTreeMap<String, usize>,
+        typed: BTreeMap<String, &'static str>,
+        shapes: BTreeMap<String, declared_width::Wid>,
+        names: Option<&'n declared_width::FileTypeNames>,
+        /// Every plain parameter's written type, `mut` or not.
+        param_types: BTreeMap<String, Type>,
+        /// Per name, every binding of it written as a parameter or `let` with
+        /// a plain non-`mut`, non-`ref` identifier pattern, with what fixes
+        /// its type. A name whose count here is below its count in `counts`
+        /// has some other binding.
+        immutable: BTreeMap<String, Vec<ImmutableBindingType>>,
+    }
+    impl Bindings<'_> {
+        fn bump(&mut self, name: String) {
+            *self.counts.entry(name).or_default() += 1;
+        }
+        fn record_immutable_local(&mut self, local: &syn::Local) {
+            let (pat_ident, ascribed) = match &local.pat {
+                Pat::Type(pat_type) => match &*pat_type.pat {
+                    Pat::Ident(pat_ident) => (pat_ident, Some(&*pat_type.ty)),
+                    _ => return,
+                },
+                Pat::Ident(pat_ident) => (pat_ident, None),
+                _ => return,
+            };
+            if pat_ident.mutability.is_some()
+                || pat_ident.by_ref.is_some()
+                || pat_ident.subpat.is_some()
+            {
+                return;
+            }
+            let binding_type = match ascribed {
+                Some(ty) => ImmutableBindingType::Written(Box::new(ty.clone())),
+                None => {
+                    let Some(init) = local.init.as_ref().filter(|init| init.diverge.is_none())
+                    else {
+                        return;
+                    };
+                    match immutable_binding_init_type(&init.expr) {
+                        Some(binding_type) => binding_type,
+                        None => return,
+                    }
+                }
+            };
+            self.immutable
+                .entry(pat_ident.ident.to_string())
+                .or_default()
+                .push(binding_type);
+        }
+        /// The DEFERRED-INITIALISATION half of the `let` annotation width carry
+        /// (`let x: Option<u8>; x = Some(200);`). The `let` has no initializer,
+        /// so the `local_init_scoped_value` funnel never runs and the
+        /// ASSIGNMENT lane decides the render. A shape is recorded only when
+        /// the file's own type names resolve it; an `Undecided` ascription is
+        /// left absent so the assignment keeps today's rendering rather than
+        /// refusing on a name this extraction cannot see.
+        fn record_shape(&mut self, name: &str, ty: &Type) {
+            let Some(names) = self.names else {
+                return;
+            };
+            let shape = declared_width::shape_of(ty, names);
+            // `Undecided` is left absent so the assignment keeps today's
+            // rendering; `Opaque` (an UNENUMERABLE file — see
+            // `declared_width::FileTypeNames::enumerable`) is left absent for
+            // the same reason, so the deferred-initialisation lane is off
+            // exactly where the `let`-initializer lane is.
+            if !matches!(
+                shape,
+                declared_width::Wid::Undecided | declared_width::Wid::Opaque(_)
+            ) {
+                self.shapes.insert(name.to_string(), shape);
+            }
+        }
+        fn visit_macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+            use syn::parse::Parser;
+            if let Ok(expr) = syn::parse2::<Expr>(tokens.clone()) {
+                syn::visit::Visit::visit_expr(self, &expr);
+                return;
+            }
+            if let Ok(args) = Punctuated::<Expr, Token![,]>::parse_terminated.parse2(tokens.clone())
+            {
+                for arg in &args {
+                    syn::visit::Visit::visit_expr(self, arg);
+                }
+                return;
+            }
+            if let Ok(stmts) = syn::Block::parse_within.parse2(tokens.clone()) {
+                for stmt in &stmts {
+                    syn::visit::Visit::visit_stmt(self, stmt);
+                }
+                return;
+            }
+            fn all_idents(tokens: proc_macro2::TokenStream, out: &mut Bindings) {
+                for tree in tokens {
+                    match tree {
+                        proc_macro2::TokenTree::Ident(ident) => out.bump(ident.to_string()),
+                        proc_macro2::TokenTree::Group(group) => all_idents(group.stream(), out),
+                        _ => {}
+                    }
+                }
+            }
+            all_idents(tokens, self);
+        }
+    }
+    impl<'ast> Visit<'ast> for Bindings<'_> {
+        fn visit_pat_ident(&mut self, pat_ident: &'ast syn::PatIdent) {
+            self.bump(pat_ident.ident.to_string());
+            syn::visit::visit_pat_ident(self, pat_ident);
+        }
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            match &local.pat {
+                Pat::Type(pat_type) => {
+                    if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                        if pat_ident.by_ref.is_none() && pat_ident.subpat.is_none() {
+                            if let Some(suffix) = primitive_int_suffix(&pat_type.ty, self.names) {
+                                self.typed.insert(pat_ident.ident.to_string(), suffix);
+                            }
+                            self.record_shape(&pat_ident.ident.to_string(), &pat_type.ty);
+                        }
+                    }
+                }
+                // `let mut x = 5u8;`: a suffixed integer literal initializer
+                // fixes the binding's type exactly as an annotation does.
+                Pat::Ident(pat_ident)
+                    if pat_ident.by_ref.is_none() && pat_ident.subpat.is_none() =>
+                {
+                    if let Some(suffix) = local
+                        .init
+                        .as_ref()
+                        .filter(|init| init.diverge.is_none())
+                        .and_then(|init| suffixed_int_literal_suffix(&init.expr))
+                    {
+                        self.typed.insert(pat_ident.ident.to_string(), suffix);
+                    }
+                }
+                _ => {}
+            }
+            self.record_immutable_local(local);
+            syn::visit::visit_local(self, local);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            self.visit_macro_tokens(mac.tokens.clone());
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+    let mut bindings = Bindings {
+        counts: BTreeMap::new(),
+        typed: BTreeMap::new(),
+        shapes: BTreeMap::new(),
+        names,
+        param_types: BTreeMap::new(),
+        immutable: BTreeMap::new(),
+    };
+    for input in &sig.inputs {
+        let FnArg::Typed(pat_type) = input else {
+            continue;
+        };
+        if let Pat::Ident(pat_ident) = &*pat_type.pat {
+            if pat_ident.by_ref.is_none() && pat_ident.subpat.is_none() {
+                if let Some(suffix) = primitive_int_suffix(&pat_type.ty, names) {
+                    bindings.typed.insert(pat_ident.ident.to_string(), suffix);
+                }
+                let name = pat_ident.ident.to_string();
+                bindings.record_shape(&name, &pat_type.ty);
+                bindings
+                    .param_types
+                    .insert(name.clone(), (*pat_type.ty).clone());
+                if pat_ident.mutability.is_none() {
+                    bindings
+                        .immutable
+                        .entry(name)
+                        .or_default()
+                        .push(ImmutableBindingType::Written(pat_type.ty.clone()));
+                }
+            }
+        }
+        bindings.visit_pat(&pat_type.pat);
+    }
+    bindings.visit_block(block);
+    let Bindings {
+        counts,
+        typed,
+        shapes,
+        names: _,
+        param_types,
+        immutable,
+    } = bindings;
+    let bound_once = |name: &str| counts.get(name) == Some(&1);
+    let immutable_interior_mutability_free = match names {
+        Some(names) if names.is_enumerable() => {
+            let datatypes = file.map(file_datatype_field_types).unwrap_or_default();
+            immutable
+                .into_iter()
+                .filter_map(|(name, binding_types)| {
+                    if counts.get(&name) != Some(&binding_types.len()) || names.binds(&name) {
+                        return None;
+                    }
+                    let mut receiver_types = body_extract::ImmutableReceiverTypes::default();
+                    for binding_type in &binding_types {
+                        let ty = match binding_type {
+                            ImmutableBindingType::PrimitiveLiteral => {
+                                receiver_types.scalar = true;
+                                continue;
+                            }
+                            ImmutableBindingType::Written(ty) => ty.as_ref(),
+                            ImmutableBindingType::CopyOfParam(param) => {
+                                param_types.get(param).filter(|_| bound_once(param))?
+                            }
+                        };
+                        if !type_is_free_of_interior_mutability(
+                            ty,
+                            names,
+                            &datatypes,
+                            generic_type_params,
+                            &mut BTreeSet::new(),
+                        ) {
+                            return None;
+                        }
+                        match file_datatype_head(ty, names) {
+                            Some(head) => {
+                                receiver_types.file_types.insert(head);
+                            }
+                            None if is_primitive_scalar_type(ty, names) => {
+                                receiver_types.scalar = true;
+                            }
+                            None => receiver_types.std = true,
+                        }
+                    }
+                    Some((name, receiver_types))
+                })
+                .collect()
+        }
+        _ => BTreeMap::new(),
+    };
+    SingleTypedBindings {
+        bound_once: counts
+            .keys()
+            .filter(|name| bound_once(name))
+            .cloned()
+            .collect(),
+        int: typed
+            .into_iter()
+            .filter(|(name, _)| bound_once(name))
+            .collect(),
+        shapes: shapes
+            .into_iter()
+            .filter(|(name, _)| bound_once(name))
+            .collect(),
+        immutable_interior_mutability_free,
+    }
+}
+
+/// The whole-function binding maps, built by ONE visitor under ONE
+/// exactly-once filter so a shape is never borrowed from a binding the
+/// assignment might not denote.
+struct SingleTypedBindings {
+    /// See [`CollectorLaneSeed::single_bound_names`].
+    bound_once: BTreeSet<String>,
+    /// See [`CollectorLaneSeed::single_typed_int_bindings`].
+    int: BTreeMap<String, &'static str>,
+    /// See [`CollectorLaneSeed::declared_shape_bindings`].
+    shapes: BTreeMap<String, declared_width::Wid>,
+    /// See [`CollectorLaneSeed::immutable_interior_mutability_free_bindings`].
+    immutable_interior_mutability_free: BTreeMap<String, body_extract::ImmutableReceiverTypes>,
+}
+
+/// What fixes the type of a plain non-`mut` binding, as far as the text says.
+enum ImmutableBindingType {
+    /// A written type: a parameter's, or a `let` ascription.
+    Written(Box<Type>),
+    /// An integer, `bool`, `char` or float literal initializer. Its type is a
+    /// primitive whatever the file declares: a literal is never a path.
+    PrimitiveLiteral,
+    /// `let x = p;` where `p` is a single identifier. Only a PARAMETER bound
+    /// exactly once is followed (a parameter is in scope for the whole body,
+    /// so the identifier cannot denote anything else); any other `p` leaves
+    /// the type unknown.
+    CopyOfParam(String),
+}
+
+/// The [`ImmutableBindingType`] a `let x = init;` initializer fixes, when it
+/// fixes one.
+fn immutable_binding_init_type(init: &Expr) -> Option<ImmutableBindingType> {
+    match init {
+        Expr::Paren(syn::ExprParen { expr, .. }) | Expr::Group(syn::ExprGroup { expr, .. }) => {
+            immutable_binding_init_type(expr)
+        }
+        Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => match immutable_binding_init_type(expr)? {
+            ImmutableBindingType::PrimitiveLiteral => Some(ImmutableBindingType::PrimitiveLiteral),
+            _ => None,
+        },
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(_) | syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Float(_),
+            ..
+        }) => Some(ImmutableBindingType::PrimitiveLiteral),
+        Expr::Path(path)
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && matches!(path.path.segments[0].arguments, syn::PathArguments::None) =>
+        {
+            Some(ImmutableBindingType::CopyOfParam(
+                path.path.segments[0].ident.to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The field types of every FILE-SCOPE `struct` / `enum` item, keyed by name.
+/// `None` for a generic item: its field types mention parameters this table
+/// does not substitute.
+fn file_datatype_field_types(file: &File) -> BTreeMap<String, Option<Vec<Type>>> {
+    let mut out = BTreeMap::new();
+    for item in &file.items {
+        let (name, generics, fields): (String, &syn::Generics, Vec<Type>) = match item {
+            syn::Item::Struct(item) => (
+                item.ident.to_string(),
+                &item.generics,
+                item.fields.iter().map(|field| field.ty.clone()).collect(),
+            ),
+            syn::Item::Enum(item) => (
+                item.ident.to_string(),
+                &item.generics,
+                item.variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().map(|field| field.ty.clone()))
+                    .collect(),
+            ),
+            _ => continue,
+        };
+        let entry = generics.params.is_empty().then_some(fields);
+        out.insert(name, entry);
+    }
+    out
+}
+
+/// The file-scope `struct` / `enum` a written type names, when it names one:
+/// a bare single-segment path that the file's closed-world names resolve to a
+/// file-scope item. `None` for every other type
+/// [`type_is_free_of_interior_mutability`] admits: a primitive scalar, the std
+/// `Option` / `Vec`, a tuple or an array.
+fn file_datatype_head(ty: &Type, names: &declared_width::FileTypeNames) -> Option<String> {
+    match ty {
+        Type::Paren(paren) => file_datatype_head(&paren.elem, names),
+        Type::Group(group) => file_datatype_head(&group.elem, names),
+        Type::Path(type_path)
+            if type_path.qself.is_none()
+                && type_path.path.leading_colon.is_none()
+                && type_path.path.segments.len() == 1
+                && matches!(
+                    type_path.path.segments[0].arguments,
+                    syn::PathArguments::None
+                )
+                && matches!(
+                    declared_width::shape_of(ty, names),
+                    declared_width::Wid::Undecided
+                ) =>
+        {
+            let name = type_path.path.segments[0].ident.to_string();
+            names.denotes_file_scope_item(&name).then_some(name)
+        }
+        _ => None,
+    }
+}
+
+/// True when the written type `ty` is a primitive scalar under the file's
+/// closed-world names: an integer (or a file alias of one), `bool`, `char`, a
+/// float, or the ghost `int` / `nat`. Called only on a type
+/// [`type_is_free_of_interior_mutability`] admitted, which already refused a
+/// width-free name the file binds.
+fn is_primitive_scalar_type(ty: &Type, names: &declared_width::FileTypeNames) -> bool {
+    match ty {
+        Type::Paren(paren) => is_primitive_scalar_type(&paren.elem, names),
+        Type::Group(group) => is_primitive_scalar_type(&group.elem, names),
+        Type::Path(_) => matches!(
+            declared_width::shape_of(ty, names),
+            declared_width::Wid::Scalar(_)
+                | declared_width::Wid::DefaultInt
+                | declared_width::Wid::Neutral
+        ),
+        _ => false,
+    }
+}
+
+/// True only when a value of the written type `ty` provably holds no
+/// interior mutability, so no `&self` method can change it. The admitted
+/// types, each name resolved against the file's own names under the closed
+/// world of [`declared_width::FileTypeNames`]:
+///
+/// * a primitive scalar (every integer, `bool`, `char`, `f32`, `f64`, and the
+///   ghost `int` / `nat`), including a file-local `type` alias of a
+///   primitive integer, which `declared_width::shape_of` resolves;
+/// * the std `Option<T>` and `Vec<T>`, a tuple, and an array `[T; k]`, when
+///   every element type is admitted;
+/// * a non-generic `struct` / `enum` declared at file scope whose every field
+///   type is admitted (a cycle is not).
+///
+/// Everything else is refused: a reference or raw pointer, a type parameter,
+/// any other `type` alias, a generic or imported type, any other std type
+/// (`Cell`, `RefCell`, `Box`, `Rc`, …), and every type of an unenumerable
+/// file.
+///
+/// A path whose first segment is spelled like one of `generic_type_params`
+/// (every generic type parameter name of the file) is refused whatever it
+/// spells: `fn f<u8: Display>(x: u8)` or `fn f<W: Display>(x: W)` beside a
+/// file `struct W` names a type parameter, not the primitive or the struct.
+fn type_is_free_of_interior_mutability(
+    ty: &Type,
+    names: &declared_width::FileTypeNames,
+    datatypes: &BTreeMap<String, Option<Vec<Type>>>,
+    generic_type_params: &BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    use declared_width::Wid;
+    if !names.is_enumerable() {
+        return false;
+    }
+    let recur = |ty: &Type, visiting: &mut BTreeSet<String>| {
+        type_is_free_of_interior_mutability(ty, names, datatypes, generic_type_params, visiting)
+    };
+    match ty {
+        Type::Paren(paren) => recur(&paren.elem, visiting),
+        Type::Group(group) => recur(&group.elem, visiting),
+        Type::Tuple(tuple) => tuple.elems.iter().all(|elem| recur(elem, visiting)),
+        Type::Array(array) => recur(&array.elem, visiting),
+        Type::Path(type_path)
+            if type_path.path.leading_colon.is_none()
+                && type_path.path.segments.first().is_some_and(|segment| {
+                    generic_type_params.contains(&segment.ident.to_string())
+                }) =>
+        {
+            false
+        }
+        Type::Path(type_path) => match declared_width::shape_of(ty, names) {
+            Wid::Scalar(_) | Wid::DefaultInt => true,
+            // `Neutral` also covers `str`, which is never the type of a
+            // binding, and an IMPORTED name that spells a width-free
+            // primitive, which `shape_of` reads as that primitive only because
+            // no width can be dropped. An import may name any type, so a name
+            // the file binds is refused here.
+            Wid::Neutral => type_path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| !names.binds(&segment.ident.to_string())),
+            // `shape_of` returns these only for the std `Option` / `Vec`
+            // spelled with exactly one type argument.
+            Wid::Opt(_) | Wid::Vector(_) => {
+                let Some(syn::PathArguments::AngleBracketed(args)) = type_path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| &segment.arguments)
+                else {
+                    return false;
+                };
+                match args.args.first() {
+                    Some(syn::GenericArgument::Type(inner)) if args.args.len() == 1 => {
+                        recur(inner, visiting)
+                    }
+                    _ => false,
+                }
+            }
+            Wid::Undecided => {
+                if type_path.qself.is_some()
+                    || type_path.path.leading_colon.is_some()
+                    || type_path.path.segments.len() != 1
+                    || !matches!(
+                        type_path.path.segments[0].arguments,
+                        syn::PathArguments::None
+                    )
+                {
+                    return false;
+                }
+                let name = type_path.path.segments[0].ident.to_string();
+                if !names.denotes_file_scope_item(&name) {
+                    return false;
+                }
+                let Some(Some(fields)) = datatypes.get(&name) else {
+                    return false;
+                };
+                if !visiting.insert(name.clone()) {
+                    return false;
+                }
+                let free = fields.iter().all(|field| recur(field, visiting));
+                visiting.remove(&name);
+                free
+            }
+            Wid::Seq(_) | Wid::Tuple(_) | Wid::Ref(_) | Wid::Opaque(_) => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod immutable_binding_classification_tests {
+    use super::*;
+
+    fn admitted(src: &str) -> BTreeSet<String> {
+        let file = syn::parse_file(src).expect("fixture parses");
+        let func = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(func) if func.sig.ident == "f" => Some(func),
+                _ => None,
+            })
+            .expect("fixture declares `f`");
+        let names = declared_width::FileTypeNames::from_file(&file);
+        let generics = type_name_rebinding::generic_type_param_names(Some(&file), func);
+        single_typed_bindings(&func.sig, &func.block, Some(&names), Some(&file), &generics)
+            .immutable_interior_mutability_free
+            .into_keys()
+            .collect()
+    }
+
+    fn receiver_types(src: &str) -> BTreeMap<String, body_extract::ImmutableReceiverTypes> {
+        let file = syn::parse_file(src).expect("fixture parses");
+        let func = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(func) if func.sig.ident == "f" => Some(func),
+                _ => None,
+            })
+            .expect("fixture declares `f`");
+        let names = declared_width::FileTypeNames::from_file(&file);
+        let generics = type_name_rebinding::generic_type_param_names(Some(&file), func);
+        single_typed_bindings(&func.sig, &func.block, Some(&names), Some(&file), &generics)
+            .immutable_interior_mutability_free
+    }
+
+    #[test]
+    fn each_admitted_name_records_whether_it_is_a_scalar_a_std_or_a_file_type() {
+        let src = r#"
+            struct W { o: Option<u64> }
+            enum E { A(u64) }
+            fn f(x: u64, w: W, e: E, v: Vec<u8>, t: (u8, bool), b: bool) {
+                let p = w;
+                let q = 5;
+                if b { let m: u64 = 1u64; }
+                if b { let m: W = W { o: None }; }
+            }
+        "#;
+        let types = receiver_types(src);
+        let scalar_only = body_extract::ImmutableReceiverTypes {
+            scalar: true,
+            ..Default::default()
+        };
+        let std_only = body_extract::ImmutableReceiverTypes {
+            std: true,
+            ..Default::default()
+        };
+        let file_only = |name: &str| body_extract::ImmutableReceiverTypes {
+            file_types: set(&[name]),
+            ..Default::default()
+        };
+        assert_eq!(types["x"], scalar_only);
+        assert_eq!(types["b"], scalar_only);
+        assert_eq!(types["q"], scalar_only);
+        assert_eq!(types["v"], std_only);
+        assert_eq!(types["t"], std_only);
+        assert_eq!(types["w"], file_only("W"));
+        assert_eq!(types["p"], file_only("W"));
+        assert_eq!(types["e"], file_only("E"));
+        assert_eq!(
+            types["m"],
+            body_extract::ImmutableReceiverTypes {
+                scalar: true,
+                file_types: set(&["W"]),
+                ..Default::default()
+            }
+        );
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn admits_exactly_the_immutable_interior_mutability_free_bindings() {
+        let src = r#"
+            use std::cell::Cell;
+            struct W { o: Option<u64>, t: (u8, bool), a: [u16; 2] }
+            struct C { c: Cell<u64> }
+            struct G<T> { t: T }
+            enum E { A(u64), B { w: W } }
+            type Word = u64;
+            type Flag = bool;
+            fn f(
+                x: u64, mut y: u64, w: W, c: C, r: &u64, m: &mut W, g: G<u64>,
+                e: E, k: Word, fl: Flag, b: Box<u64>, v: Vec<u8>, h: Option<C>,
+            ) {
+                let p = w;
+                let q = 5;
+                let t: Option<W> = None;
+                let (d, z) = (1u64, 2u64);
+                let s = make();
+                let n = y;
+                let cc = c;
+            }
+        "#;
+        assert_eq!(
+            admitted(src),
+            set(&["e", "k", "n", "p", "q", "t", "v", "w", "x"])
+        );
+    }
+
+    #[test]
+    fn a_type_spelled_like_a_generic_parameter_is_refused() {
+        // A function's own type parameter spelled like a primitive or a file
+        // struct, and an `impl`'s, name a type parameter.
+        let own = r#"
+            struct W { o: Option<u64> }
+            fn f<u8: Copy, W: Copy>(x: u8, w: W, y: u64, v: Vec<u8>, t: (bool, W)) {
+                let p = x;
+                let q = w;
+            }
+        "#;
+        assert_eq!(admitted(own), set(&["y"]));
+        // The set is file-wide: an `impl`'s `u64` parameter also withdraws
+        // the free function's primitive `x: u64`. Such a file gets no
+        // `Verified` answer anyway (`type_name_rebinding`).
+        let enclosing = r#"
+            struct H<T>(T);
+            impl<u64: Copy> H<u64> { fn g(&self, a: u64) {} }
+            fn f(x: u64, y: u16) {}
+        "#;
+        assert_eq!(admitted(enclosing), set(&["y"]));
+        let std_named = r#"
+            fn f<Vec: Copy, Option: Copy>(v: Vec, o: Option, y: bool) {}
+        "#;
+        assert_eq!(admitted(std_named), set(&["y"]));
+    }
+
+    #[test]
+    fn a_name_qualifies_only_when_every_binding_of_it_does() {
+        let src = r#"
+            struct W { o: Option<u64> }
+            fn f(w: W, b: bool, u: u64) {
+                let p = w;
+                if b { let p: u64 = 1u64; }
+                let q = w;
+                let mut q = q;
+                let a = 1u64;
+                let _g = |a: u64| a;
+                let o: u64 = 2u64;
+                for o in 0..3u64 {}
+                let u: u64 = 3u64;
+            }
+        "#;
+        // `q` has a `mut` binding, `a` a closure parameter, `o` a `for`
+        // pattern; `u` is bound twice, both immutable and of type `u64`.
+        assert_eq!(admitted(src), set(&["b", "p", "u", "w"]));
+    }
+
+    #[test]
+    fn file_bound_names_and_unresolvable_types_are_refused() {
+        let bound_by_item = r#"
+            const p: u64 = 1;
+            fn f(x: u64) { let p = 2u64; }
+        "#;
+        assert_eq!(admitted(bound_by_item), set(&["x"]));
+        let shadowed_primitive = r#"
+            use std::cell::Cell;
+            struct u64 { c: Cell<u8> }
+            fn f(x: u64, y: u8) {}
+        "#;
+        assert_eq!(admitted(shadowed_primitive), set(&["y"]));
+        let glob = r#"
+            use std::cell::*;
+            fn f(x: u64) {}
+        "#;
+        assert!(admitted(glob).is_empty());
+        let inline_mod = r#"
+            struct W { o: u64 }
+            mod m {}
+            fn f(x: u64, w: W) {}
+        "#;
+        assert_eq!(admitted(inline_mod), set(&["x"]));
+    }
+}
+
 fn mut_ref_reborrowable_bindings(func: &ItemFn) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for input in &func.sig.inputs {
@@ -8286,7 +11778,8 @@ fn collect_source_broadcast_lemmas(
         // the published axiom can LOWER even when the TARGET function does not
         // itself reference them (e.g. an inactive group). This registers the
         // spec-fn return types via the same catalog path the target uses.
-        spec_catalog.apply_referenced_specs(item_fn, vc)?;
+        // A broadcast lemma iterated from `file.items` is a file-root fn.
+        spec_catalog.apply_referenced_specs(item_fn, Some(&[]), vc)?;
 
         // Typed params → FRESH, uniquely-named bound vars (so a lemma's
         // quantifier binders never collide with another lemma's binders or the
@@ -8544,8 +12037,10 @@ fn helper_call_contract_from_item_fn(
     }
     let return_binding = attr_extract::extract_return_binding(&item_fn.attrs, Some(&item_fn.sig))?
         .unwrap_or_else(|| "result".to_string());
+    let param_types = helper_contract_param_types(&item_fn.sig);
     Ok(Some(body_extract::HelperCallContract {
         params,
+        param_types,
         erased_shared_ref_params,
         mut_ref_scalar_params,
         return_binding,
@@ -8553,6 +12048,26 @@ fn helper_call_contract_from_item_fn(
         ensures,
         allow_in_spec: has_allow_in_spec_attr(&item_fn.attrs),
     }))
+}
+
+/// The declared integer type of each parameter whose type is a plain
+/// fixed-width integer path (`u8`, `i64`, `usize`, …), positionally; `None`
+/// for every other parameter type (references, generics, datatypes, …).
+fn helper_contract_param_types(sig: &syn::Signature) -> Vec<Option<TrustVcType>> {
+    sig.inputs
+        .iter()
+        .map(|input| {
+            let FnArg::Typed(pat_type) = input else {
+                return None;
+            };
+            let syn::Type::Path(type_path) = pat_type.ty.as_ref() else {
+                return None;
+            };
+            let ident = type_path.path.get_ident()?.to_string();
+            let ty = crate::ir_lowering::type_from_int_suffix(&ident).ok()?;
+            crate::ir_lowering::is_fixed_width_int(&ty).then_some(ty)
+        })
+        .collect()
 }
 
 fn helper_contract_params(sig: &syn::Signature) -> Option<(Vec<String>, Vec<bool>, Vec<bool>)> {
@@ -9016,12 +12531,14 @@ fn apply_source_spec_recommends_in_target_contracts(
         return Err(err);
     }
 
+    let generic_shadow_names = crate::spec_function_catalog::GenericShadowNames::from_file(file);
     for called_spec in collector.called_specs {
         if let Some(source_spec) = source_specs.get(&called_spec.source_path) {
             register_source_function_signature(
                 &called_spec.call_symbol,
                 source_spec.item_fn,
                 source_structs,
+                &generic_shadow_names,
                 vc,
             )?;
         }
@@ -9042,6 +12559,7 @@ fn register_source_function_signature(
     name: &str,
     item_fn: &ItemFn,
     source_structs: Option<&SourceStructRegistry>,
+    generic_shadow_names: &crate::spec_function_catalog::GenericShadowNames,
     vc: &mut VerificationContext,
 ) -> TrustVcResult<()> {
     if vc.helper_functions_typed.contains_key(name) {
@@ -9052,7 +12570,7 @@ fn register_source_function_signature(
             context: "extract source spec recommends call contracts",
             detail: format!("source spec function `{name}` has unsupported return type"),
         })?;
-    let params = helper_params(&item_fn.sig, source_structs, vc)?
+    let params: Vec<(String, TrustVcType)> = helper_params(&item_fn.sig, source_structs, vc)?
         .ok_or_else(|| TrustVcError::Encoding {
             context: "extract source spec recommends call contracts",
             detail: format!("source spec function `{name}` uses unsupported parameters"),
@@ -9060,7 +12578,30 @@ fn register_source_function_signature(
         .into_iter()
         .map(|param| (param.name, param.ty))
         .collect();
+    // H10: this registers a bare signature with NO axiom, so a generic
+    // parameter no argument carries would collapse distinct instantiations
+    // into one symbol. The source catalog admits the uniform (transparent)
+    // definitions first, which returns above; anything reaching here is
+    // treated as conditional and refused.
+    let param_types = params.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
+    crate::spec_function_catalog::check_generic_declaration(
+        "extract source spec recommends call contracts",
+        name,
+        &crate::spec_function_catalog::shadowed_generic_params(
+            &item_fn.sig,
+            &item_fn.block,
+            generic_shadow_names,
+            vc,
+            false,
+        ),
+        &crate::spec_function_catalog::uncarried_generic_params(&item_fn.sig, &param_types, &[]),
+        false,
+    )?;
     vc.declare_helper_function_typed(name, return_ty, params);
+    vc.record_helper_generic_params(
+        name,
+        crate::spec_function_catalog::declaration_generic_params(&item_fn.sig),
+    );
     Ok(())
 }
 
@@ -10275,6 +13816,157 @@ fn method_call_surface(method: &syn::ImplItemFn) -> MethodCallSurface {
     }
 }
 
+/// The `impl Default` bodies that `#[derive(Default)]` expands to, one per
+/// derived non-generic struct of `file`: `fn default() -> S { S { f:
+/// <default of f's type>, .. } }` (named fields), `S(<..>, ..)` (tuple
+/// fields) or `S` (unit). A generic struct, or a field whose type the shared
+/// `default_constructor` model does not spell, synthesizes NOTHING — the
+/// `S::default()` call then keeps its fail-closed "unknown return type".
+fn derived_default_impl_methods(file: &File) -> Vec<(String, syn::ImplItemFn)> {
+    let mut methods = Vec::new();
+    for item in &file.items {
+        let syn::Item::Struct(item_struct) = item else {
+            continue;
+        };
+        if !item_struct.generics.params.is_empty() || !attrs_derive_default(&item_struct.attrs) {
+            continue;
+        }
+        let name = item_struct.ident.to_string();
+        let constructor = match &item_struct.fields {
+            syn::Fields::Named(fields) => {
+                let Some(inits) = fields
+                    .named
+                    .iter()
+                    .map(|field| {
+                        let ident = field.ident.as_ref()?;
+                        let source =
+                            crate::default_constructor::default_value_source_for_type(&field.ty)?;
+                        Some(format!("{ident}: {source}"))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                format!("{name} {{ {} }}", inits.join(", "))
+            }
+            syn::Fields::Unnamed(fields) => {
+                let Some(inits) = fields
+                    .unnamed
+                    .iter()
+                    .map(|field| {
+                        crate::default_constructor::default_value_source_for_type(&field.ty)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                format!("{name}({})", inits.join(", "))
+            }
+            syn::Fields::Unit => name.clone(),
+        };
+        let Ok(method) = syn::parse_str::<syn::ImplItemFn>(&format!(
+            "fn default() -> {name} {{ {constructor} }}"
+        )) else {
+            continue;
+        };
+        methods.push((name, method));
+    }
+    methods
+}
+
+fn attrs_derive_default(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("derive")
+            && attr
+                .parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)
+                .map(|paths| {
+                    paths.iter().any(|path| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "Default")
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// `T::default()` for a type parameter `T` of the function under extraction is
+/// ONE uninterpreted per-parameter constant of sort `T`. Nothing is assumed
+/// about its value — the only fact it yields is congruence (`T::default() ==
+/// T::default()` verifies, `!=` is refuted), which is what a pure function of
+/// the type alone can say without knowing the instantiation. Declared as a
+/// zero-parameter typed helper so the call lowers through the ordinary
+/// registered-symbol path with return type `TypeParam(T)`; only the parameters
+/// the body or contract actually spells `T::default()` for are declared.
+fn declare_type_param_default_constants(func: &ItemFn, vc: &mut VerificationContext) {
+    let type_params: BTreeSet<String> = func
+        .sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(type_param) => Some(type_param.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    if type_params.is_empty() {
+        return;
+    }
+    struct Finder<'a> {
+        type_params: &'a BTreeSet<String>,
+        found: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Finder<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if call.args.is_empty() {
+                if let Expr::Path(path) = call.func.as_ref() {
+                    let segments = &path.path.segments;
+                    if path.qself.is_none()
+                        && segments.len() == 2
+                        && segments[1].ident == "default"
+                        && matches!(segments[0].arguments, syn::PathArguments::None)
+                        && matches!(segments[1].arguments, syn::PathArguments::None)
+                    {
+                        let receiver = segments[0].ident.to_string();
+                        if self.type_params.contains(&receiver) {
+                            self.found.insert(receiver);
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        // `trust_vc::assert!(T::default() == T::default())` is a macro whose
+        // tokens the generic visitor does not read as an expression.
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if let Ok(expr) = syn::parse2::<Expr>(mac.tokens.clone()) {
+                self.visit_expr(&expr);
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            if let syn::Meta::List(list) = &attr.meta {
+                if let Ok(expr) = syn::parse2::<Expr>(list.tokens.clone()) {
+                    self.visit_expr(&expr);
+                }
+            }
+            syn::visit::visit_attribute(self, attr);
+        }
+    }
+    let mut finder = Finder {
+        type_params: &type_params,
+        found: BTreeSet::new(),
+    };
+    finder.visit_item_fn(func);
+    for type_param in finder.found {
+        vc.declare_helper_function_typed(
+            &format!("{type_param}::default"),
+            TrustVcType::TypeParam(type_param.clone()),
+            Vec::new(),
+        );
+    }
+}
+
 /// A3: register inherent-impl associated functions, `Self::` calls, and
 /// receiver methods referenced by the target so their call value gets a type
 /// (calls.rs:154 / methods.rs unsupported-method paths fall through otherwise).
@@ -10318,12 +14010,24 @@ fn apply_inherent_impl_methods(
                 && item_impl.generics.params.is_empty()
                 && concrete_instantiation_self_type_key(&item_impl.self_ty, source_structs).is_some())
     });
-    if registry.is_empty() && !has_trait_impl && !has_concrete_instantiation_impl {
+    // `#[derive(Default)]` on a struct IS `impl Default for S { fn default() ->
+    // S { S { f: Default::default(), .. } } }`. Synthesize exactly that body
+    // (each field's default rendered by the shared `default_constructor`
+    // model) so it can be registered through the SAME body-axiom lane a
+    // hand-written no-self `impl Default` uses (the loop below this function's
+    // trait-impl loop). A file whose only relevant item is such a struct must
+    // not early-return here.
+    let derived_default_impls = derived_default_impl_methods(file);
+    if registry.is_empty()
+        && !has_trait_impl
+        && !has_concrete_instantiation_impl
+        && derived_default_impls.is_empty()
+    {
         return Ok(());
     }
     let ill_founded_recursive = ill_founded_recursive_function_names(file, vc);
     let enclosing_self = registry.enclosing_self_type(target_func);
-    let referenced = referenced_inherent_method_calls(target_func);
+    let referenced = referenced_inherent_method_calls_with_sibling_helpers(file, target_func);
     if referenced.is_empty() {
         return Ok(());
     }
@@ -10750,6 +14454,41 @@ fn apply_inherent_impl_methods(
         }
     }
 
+    // `#[derive(Default)]` structs: register the synthesized `fn default() ->
+    // S { S { f: <default>, .. } }` exactly as a hand-written no-self `impl
+    // Default for S` is registered above (the definitional body axiom
+    // `S::default() == <constructor>`). Gated the same way: only a `default`
+    // the target references, only when NO explicit `default` is declared for
+    // `S` anywhere in the file (an explicit impl owns the symbol; Rust forbids
+    // both), and never twice.
+    for (self_type, method) in &derived_default_impls {
+        let method_name = "default".to_string();
+        if !referenced_names.contains(&method_name) {
+            continue;
+        }
+        if !matches!(
+            MethodSymbolCensus::of(file, self_type, &method_name),
+            MethodSymbolCensus::Undeclared
+        ) {
+            continue;
+        }
+        if !applied.insert((self_type.clone(), method_name.clone())) {
+            continue;
+        }
+        let forms = referenced.get(&method_name).copied().unwrap_or_default();
+        if let Some(def) = InherentMethodDef::from_impl_method(
+            self_type,
+            file,
+            method,
+            source_structs,
+            vc,
+            &ill_founded_recursive,
+            &[],
+        )? {
+            def.apply_to_context(enclosing_self.as_deref(), forms, vc);
+        }
+    }
+
     // Generic inherent methods: monomorphize each per the UNIQUE concrete
     // instantiation the target uses (A2-generic). Every step fails closed —
     // an AMBIGUOUS (same-leaf collision) key, an undiscovered instantiation, a
@@ -10862,6 +14601,47 @@ struct CallForms {
 /// the target function's body and contracts, recording which form(s) each name
 /// is used in. Used to limit inherent-method registration to referenced methods
 /// and to emit only the body axiom(s) for the form(s) actually called.
+/// `referenced_inherent_method_calls` closed over the SIBLING free functions
+/// the target calls (transitively, through the file's top-level `fn` items).
+/// A sibling helper's definitional body axiom is lowered in the TARGET's
+/// context, so a `Type::method` / `recv.method()` its body spells needs the
+/// same registration as if the target had spelled it — otherwise the whole
+/// extraction fails on the helper's body ("unknown return type"), as
+/// `fn mk() -> S { S::default() }` + `fn test() { let v = mk(); .. }` did
+/// (upstream `default_trait::test_default_custom_type_spec`). Registering a
+/// definitional body axiom for an additional symbol is sound by construction
+/// (it states the impl's own computation); every collision / requires gate on
+/// the registration applies to a symbol regardless of who spelled it.
+fn referenced_inherent_method_calls_with_sibling_helpers(
+    file: &File,
+    target_func: &ItemFn,
+) -> BTreeMap<String, CallForms> {
+    let mut referenced = referenced_inherent_method_calls(target_func);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    seen.insert(target_func.sig.ident.to_string());
+    let mut worklist: Vec<String> = referenced_helper_call_symbols(target_func)
+        .into_iter()
+        .collect();
+    while let Some(symbol) = worklist.pop() {
+        if !seen.insert(symbol.clone()) {
+            continue;
+        }
+        let Some(helper) = file.items.iter().find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == symbol => Some(function),
+            _ => None,
+        }) else {
+            continue;
+        };
+        for (name, forms) in referenced_inherent_method_calls(helper) {
+            let entry = referenced.entry(name).or_default();
+            entry.method |= forms.method;
+            entry.associated |= forms.associated;
+        }
+        worklist.extend(referenced_helper_call_symbols(helper));
+    }
+    referenced
+}
+
 fn referenced_inherent_method_calls(func: &ItemFn) -> BTreeMap<String, CallForms> {
     #[derive(Default)]
     struct NameCollector {
@@ -10893,6 +14673,19 @@ fn referenced_inherent_method_calls(func: &ItemFn) -> BTreeMap<String, CallForms
                 self.visit_expr(&expr);
             }
             syn::visit::visit_macro(self, mac);
+        }
+        // `a == b` / `a != b` on a datatype with a hand-written `PartialEq` lowers
+        // to the impl's `eq` / `ne` (operators.rs, 2026-09-11), so an equality
+        // operator references those methods exactly as a `.eq(&b)` call would —
+        // without this the impl's UF and body axiom were never declared for a
+        // function that only uses the operator, and the lowering failed closed.
+        fn visit_expr_binary(&mut self, bin: &'ast syn::ExprBinary) {
+            if matches!(bin.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+                for name in ["eq", "ne"] {
+                    self.forms.entry(name.to_string()).or_default().method = true;
+                }
+            }
+            syn::visit::visit_expr_binary(self, bin);
         }
     }
     let mut collector = NameCollector::default();
@@ -11322,10 +15115,12 @@ impl InherentImplRegistry {
     fn enclosing_self_type(&self, target_func: &ItemFn) -> Option<String> {
         let target_name = target_func.sig.ident.to_string();
         let candidates = self.by_name.get(&target_name)?;
-        let mut exact = candidates.iter().filter_map(|(self_type, method)| {
-            function_discovery::impl_method_matches_item_fn(method, target_func)
-                .then(|| self_type.clone())
-        });
+        let mut exact = candidates
+            .iter()
+            .filter(|(_, method)| {
+                function_discovery::impl_method_matches_item_fn(method, target_func)
+            })
+            .map(|(self_type, _)| self_type.clone());
         let first = exact.next()?;
         if exact.next().is_some() {
             None
@@ -11370,6 +15165,19 @@ fn register_impl_method_self_receiver_kinds(items: &[syn::Item], vc: &mut Verifi
                         } else {
                             SelfReceiverKind::Ref
                         }
+                    } else if type_contains_mut_reference(&item_impl.self_ty) {
+                        // SOUNDNESS (review finding): in `impl<'a> CountRef for
+                        // &'a mut S4 { fn count(self) }` the by-value `self` IS
+                        // the `&mut S4`, so the call mutably reborrows the
+                        // CALLER's binding. `impl_self_type_base_name` strips the
+                        // reference, so the key is the same `S4` an ordinary impl
+                        // uses, and recording it as `Value` (pure) let
+                        // `s.count(); assert!(s.a == 0u64)` verify after a write.
+                        // Recorded as its OWN kind (review round 2): `RefMut`
+                        // routed the call to the struct havoc, which REFUTED
+                        // runtime-true claims about untouched fields that HEAD
+                        // verified; `ValueMutRef` poisons the receiver instead.
+                        SelfReceiverKind::ValueMutRef
                     } else {
                         // `self` / `mut self`: the receiver is moved into the
                         // callee, so it cannot mutate the caller's binding.
@@ -11379,6 +15187,61 @@ fn register_impl_method_self_receiver_kinds(items: &[syn::Item], vc: &mut Verifi
                         self_type.clone(),
                         method.sig.ident.to_string(),
                         kind,
+                    );
+                }
+            }
+            // SYNTHESIZED DATATYPE ACCESSORS (2026-09-12). `TypeEnv::
+            // register_variant_helper_methods` gives every datatype variant a
+            // tester `is_<Variant>()` and a getter `get_<Variant>_<field>()` (a
+            // struct is the single variant named like the type). They have no
+            // source `impl`, so without a kind here the first accessor read on a
+            // let-bound enum was an UNKNOWN signature → "possibly mutating" →
+            // the binding was havoced and the NEXT assertion saw a bare name
+            // ("unresolved variable `value`", external_type_specification
+            // `same_crate_enum_variant_payload_verified`). They are pure `&self`
+            // reads, so record them as `Ref`. The collision rule keeps this
+            // honest: a user `impl` that re-declares such a name `&mut self`
+            // promotes the key to `RefMut`, never the other way round.
+            syn::Item::Enum(item_enum) => {
+                let enum_name = item_enum.ident.to_string();
+                for variant in &item_enum.variants {
+                    let variant_name = variant.ident.to_string();
+                    vc.register_struct_self_receiver_kind(
+                        enum_name.clone(),
+                        format!("is_{variant_name}"),
+                        SelfReceiverKind::Ref,
+                    );
+                    for (index, field) in variant.fields.iter().enumerate() {
+                        let field_name = field
+                            .ident
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| index.to_string());
+                        vc.register_struct_self_receiver_kind(
+                            enum_name.clone(),
+                            format!("get_{variant_name}_{field_name}"),
+                            SelfReceiverKind::Ref,
+                        );
+                    }
+                }
+            }
+            syn::Item::Struct(item_struct) => {
+                let struct_name = item_struct.ident.to_string();
+                vc.register_struct_self_receiver_kind(
+                    struct_name.clone(),
+                    format!("is_{struct_name}"),
+                    SelfReceiverKind::Ref,
+                );
+                for (index, field) in item_struct.fields.iter().enumerate() {
+                    let field_name = field
+                        .ident
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| index.to_string());
+                    vc.register_struct_self_receiver_kind(
+                        struct_name.clone(),
+                        format!("get_{struct_name}_{field_name}"),
+                        SelfReceiverKind::Ref,
                     );
                 }
             }
@@ -11611,12 +15474,442 @@ enum InherentReceiver {
     Ref,
 }
 
+/// True when some MODULE in `file` carries a trusted-boundary marker
+/// (`#[trust_vc::external_body]` / `#[trust_vc::external]`) and encloses, at any
+/// depth, a `fn` of this name — free, inherent-`impl` or trait method.
+///
+/// SOUNDNESS-CRITICAL (H14, review round 1). The marker is legal on a `mod`, and
+/// there it means exactly what it means on an `impl` block: EVERY item the
+/// module encloses is a placeholder. No publisher read `ItemMod::attrs` — every
+/// `Item::Mod` descent in this file recursed into `module.content` and dropped
+/// `module.attrs` on the floor — so
+///
+/// ```ignore
+/// #[trust_vc::external]
+/// mod ext { pub fn ex() -> u32 { 100u32 } }
+/// ```
+///
+/// still published `ex() == 100` and a caller proved it from the stub, while the
+/// SAME marker one level in (on `ex` itself) correctly declined. This is the E5
+/// finding (the marker on the impl block) one enclosing item further out.
+///
+/// DELIBERATELY NAME-APPROXIMATE, in the fail-closed direction, for the same
+/// reason as [`external_marked_impl_declares_method`]: the publishers that reach
+/// here hold the callee's `ItemFn` (or `ImplItemFn`) and not the module chain it
+/// was resolved through. A false match costs one body axiom — the callee stays a
+/// typed UF carrying its declared contract — while a miss publishes a
+/// placeholder as a definition.
+///
+/// A marked `mod ext;` with no inline content declares nothing here and is
+/// skipped: there is no body in this file to publish either.
+pub(crate) fn external_marked_module_declares_name(file: &File, name: &str) -> bool {
+    fn declares(items: &[syn::Item], name: &str) -> bool {
+        items.iter().any(|item| {
+            match item {
+            syn::Item::Fn(item_fn) => item_fn.sig.ident == name,
+            syn::Item::Impl(item_impl) => item_impl.items.iter().any(|impl_item| {
+                matches!(impl_item, syn::ImplItem::Fn(method) if method.sig.ident == name)
+            }),
+            syn::Item::Trait(item_trait) => item_trait.items.iter().any(|trait_item| {
+                matches!(trait_item, syn::TraitItem::Fn(method) if method.sig.ident == name)
+            }),
+            syn::Item::Mod(module) => module
+                .content
+                .as_ref()
+                .is_some_and(|(_, inner)| declares(inner, name)),
+            _ => false,
+        }
+        })
+    }
+
+    fn walk(items: &[syn::Item], name: &str) -> bool {
+        for item in items {
+            let syn::Item::Mod(module) = item else {
+                continue;
+            };
+            let Some((_, inner)) = &module.content else {
+                continue;
+            };
+            if attr_extract::has_external_trusted_attr(&module.attrs) && declares(inner, name) {
+                return true;
+            }
+            if walk(inner, name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    walk(&file.items, name)
+}
+
+/// Does the trusted-boundary marker cover the declaration at inline-module path
+/// `path` — a `SourceFunctionRegistry` key such as `ffi::len`?
+///
+/// EXACT, where [`external_marked_boundary_covers_fn`] is approximate: the
+/// sibling-helper lane resolved its callee BY PATH, so the declaration's
+/// enclosure is known and no token or name comparison is needed. This is what
+/// separates `ffi::len` from a token-identical file-root `len`, which the
+/// round-2 `.any(marked)` tie-break could not: it saw two identical
+/// declarations, one marked and one not, and answered "marked" for both —
+/// fail-closed, but a real capability loss for the ORDINARY one under the
+/// owner's unified-compilation ruling (E12).
+///
+/// `None` means the path is not a walkable chain of INLINE modules in this file
+/// (a `mod x;` file module, a synthesized key), and the caller falls back to the
+/// approximate predicate rather than assuming "not marked".
+fn trusted_boundary_covers_path(file: &File, path: &str) -> Option<bool> {
+    let mut segments = path.split("::").collect::<Vec<_>>();
+    // The last segment is the function itself; its OWN attrs are checked by the
+    // publisher directly (`has_external_trusted_attr`).
+    segments.pop()?;
+
+    let mut items: &[syn::Item] = &file.items;
+    for segment in segments {
+        let mut found = None;
+        for item in items {
+            if let syn::Item::Mod(module) = item {
+                if module.ident == segment {
+                    let (_, inner) = module.content.as_ref()?;
+                    found = Some((module, inner));
+                    break;
+                }
+            }
+        }
+        let (module, inner) = found?;
+        if attr_extract::has_external_trusted_attr(&module.attrs) {
+            return Some(true);
+        }
+        items = inner;
+    }
+    Some(false)
+}
+
+/// Does the trusted-boundary marker on an enclosing `mod` (or `impl`) cover THIS
+/// free-function declaration?
+///
+/// SOUNDNESS-CRITICAL and CAPABILITY-CRITICAL (H14, review round 2). The round-1
+/// fix asked [`external_marked_module_declares_name`], which matches on the BARE
+/// NAME with no module-path or scope check — so ONE marked module declaring a
+/// common name silently stripped the definitional body axiom from EVERY unrelated
+/// same-named function in the file. Measured: an `#[trust_vc::external] mod ext`
+/// declaring `shared_name` plus an unrelated top-level `fn shared_name` took the
+/// caller of the TOP-LEVEL function from `Verified` to `Counterexample`. Under the
+/// owner's unified-compilation ruling an ordinary exec callee's body is
+/// legitimately visible to its caller, so that is a real capability loss, not a
+/// safe over-decline.
+///
+/// So resolve by ITEM IDENTITY first: walk the file carrying the marker down from
+/// every enclosing `mod`/`impl` exactly as the spec catalog's stamping pass does,
+/// and look for declarations whose source tokens ARE this one's
+/// (`function_discovery`'s exact-identity matchers, the same test
+/// `enclosing_inline_module_path` uses). If the file pins the declaration down,
+/// the answer is its own enclosure — and a declaration that is token-identical
+/// both inside and outside a marked module still declines (fail closed).
+///
+/// FALLBACK, deliberately: when no exact identity is found — the publisher was
+/// handed a clone, a lifted method, or a synthesized item — this returns to the
+/// name-approximate predicate. A miss there publishes a placeholder as a
+/// definition, which is the worse of the two errors.
+pub(crate) fn external_marked_boundary_covers_fn(file: &File, func: &ItemFn) -> bool {
+    let mut enclosures = Vec::new();
+    collect_fn_boundary_enclosures(&file.items, false, func, &mut enclosures);
+    if enclosures.is_empty() {
+        return external_marked_module_declares_name(file, &func.sig.ident.to_string());
+    }
+    enclosures.into_iter().any(|marked| marked)
+}
+
+/// THE entry point every body-axiom publisher that holds a RESOLVED free
+/// function must use: answer the trusted-boundary question from the path the
+/// callee was actually resolved through, and fall back to the approximate
+/// predicate only when that path is not a walkable chain of inline modules.
+///
+/// SOUNDNESS-CRITICAL and CAPABILITY-CRITICAL (H14/E12, E13). The two halves are
+/// not interchangeable and the choice between them is not a style question:
+///
+/// * [`trusted_boundary_covers_path`] is EXACT. It names the one declaration the
+///   call resolved to, so a top-level `okt` and a token-identical `ext::okt`
+///   inside a marked module are two different answers.
+/// * [`external_marked_boundary_covers_fn`] is APPROXIMATE. It collects every
+///   token-identical declaration in the file and answers `.any(marked)`, so the
+///   pair above collapses to one answer — "marked" — and the ORDINARY one loses
+///   a definitional body axiom the owner's unified-compilation ruling says it
+///   keeps.
+///
+/// E12 fixed the sibling-helper publisher and left the trait-default channel's
+/// two sites (`helper_body_is_visible`, `register_exec_callee_postcondition_axioms`)
+/// calling the approximate predicate raw, so ONE program got TWO answers on two
+/// lanes. Routing every resolved-path caller through here is what makes the tree
+/// agree with itself.
+///
+/// `resolved_path` must be `None` — not a guess — whenever the caller's
+/// resolution did not walk inline modules (an inherent associated function, a
+/// lifted method, a synthesized registry key). The fallback is deliberate: a
+/// miss there publishes a placeholder as a definition, which is the worse error.
+pub(crate) fn trusted_boundary_covers_resolved_fn(
+    file: &File,
+    resolved_path: Option<&str>,
+    func: &ItemFn,
+) -> bool {
+    match resolved_path.and_then(|path| trusted_boundary_covers_path(file, path)) {
+        Some(covered) => covered,
+        None => external_marked_boundary_covers_fn(file, func),
+    }
+}
+
+/// The inherent-method twin of [`external_marked_boundary_covers_fn`], for the
+/// publishers that hold an `ImplItemFn` rather than a lifted `ItemFn`.
+///
+/// Identity here is (method ident, enclosing-impl self-type BASE name, BODY
+/// tokens) and NOT the whole `ImplItemFn`: by the time a method reaches this
+/// publisher its receiver has been rewritten to an explicit typed argument
+/// (`&self` is handed over as `&self : &Q`), so a whole-item token comparison
+/// never matches the source AST and would collapse straight back to the
+/// name-approximate fallback. The base-name and underivable-base rules are the
+/// ones [`external_marked_impl_declares_method`] already documents.
+///
+/// Same fallback as the free-function twin, and here it is the PAIR the round-1
+/// fix installed: the marker may sit on the enclosing `impl` block or on an
+/// enclosing `mod`.
+pub(crate) fn external_marked_boundary_covers_method(
+    file: &File,
+    self_type: &str,
+    method: &syn::ImplItemFn,
+) -> bool {
+    let mut enclosures = Vec::new();
+    collect_method_boundary_enclosures(
+        &file.items,
+        false,
+        impl_self_type_base_name_str(self_type),
+        method,
+        &mut enclosures,
+    );
+    if enclosures.is_empty() {
+        let name = method.sig.ident.to_string();
+        return external_marked_impl_declares_method(file, self_type, &name)
+            || external_marked_module_declares_name(file, &name);
+    }
+    enclosures.into_iter().any(|marked| marked)
+}
+
+/// The base name of a rendered self type — `&mut W<u64>` -> `W`. Shared by
+/// [`external_marked_impl_declares_method`] and
+/// [`external_marked_boundary_covers_method`] so the two agree on what "same
+/// type" means.
+fn impl_self_type_base_name_str(ty: &str) -> &str {
+    let ty = ty.trim();
+    let ty = ty.strip_prefix('&').unwrap_or(ty).trim();
+    let ty = ty.strip_prefix("mut ").unwrap_or(ty).trim();
+    match ty.find('<') {
+        Some(idx) => ty[..idx].trim_end(),
+        None => ty,
+    }
+}
+
+/// Push `marked` once per declaration in `items` whose source tokens are exactly
+/// `func`'s, where `marked` is true when some enclosing `mod`/`impl` carries the
+/// trusted-boundary marker.
+fn collect_fn_boundary_enclosures(
+    items: &[syn::Item],
+    marked: bool,
+    func: &ItemFn,
+    out: &mut Vec<bool>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(candidate) => {
+                if candidate.sig.ident == func.sig.ident
+                    && function_discovery::item_fn_matches_item_fn(candidate, func)
+                {
+                    out.push(marked);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                let impl_marked =
+                    marked || attr_extract::has_external_trusted_attr(&item_impl.attrs);
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        if method.sig.ident == func.sig.ident
+                            && function_discovery::impl_method_matches_item_fn(method, func)
+                        {
+                            out.push(impl_marked);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    let inner_marked =
+                        marked || attr_extract::has_external_trusted_attr(&module.attrs);
+                    collect_fn_boundary_enclosures(inner, inner_marked, func, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`collect_fn_boundary_enclosures`] for an `ImplItemFn`; see
+/// [`external_marked_boundary_covers_method`] for why identity is
+/// (ident, self-type base, body tokens) rather than the whole item.
+fn collect_method_boundary_enclosures(
+    items: &[syn::Item],
+    marked: bool,
+    self_base: &str,
+    method: &syn::ImplItemFn,
+    out: &mut Vec<bool>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item_impl) => {
+                let impl_marked =
+                    marked || attr_extract::has_external_trusted_attr(&item_impl.attrs);
+                // Base names must agree when BOTH are derivable; an underivable
+                // base on either side matches, exactly as
+                // `external_marked_impl_declares_method` does.
+                let same_type = match impl_self_type_base_name(&item_impl.self_ty) {
+                    Some(impl_base) if !self_base.is_empty() => impl_base == self_base,
+                    _ => true,
+                };
+                if !same_type {
+                    continue;
+                }
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(candidate) = impl_item {
+                        if candidate.sig.ident == method.sig.ident
+                            && function_discovery::impl_method_body_matches(candidate, method)
+                        {
+                            out.push(impl_marked);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = &module.content {
+                    let inner_marked =
+                        marked || attr_extract::has_external_trusted_attr(&module.attrs);
+                    collect_method_boundary_enclosures(inner, inner_marked, self_base, method, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True when some `impl` block in `file` carries a trusted-boundary marker
+/// (`#[trust_vc::external_body]` / `#[trust_vc::external]`) and declares a method
+/// of this name for this self type.
+///
+/// SOUNDNESS-CRITICAL (H14). The marker is legal on the IMPL BLOCK, not only on
+/// the method, and every method it covers is then a placeholder exactly as if
+/// each carried the attribute itself. Measured on `5bd3a2cc`:
+/// `#[trust_vc::external_body] impl T { fn m(&self) -> u32 { 100 } }` published
+/// `T__m(self) == 100` and a caller proved `t.m() == 100` from the stub.
+///
+/// DELIBERATELY NAME-APPROXIMATE, in the fail-closed direction. The registration
+/// paths that reach here do not all carry the declaring `ItemImpl` (two go
+/// through a method registry, one is a synthesized `#[derive(Default)]` impl), so
+/// the match is by method name plus self-type BASE name — `W<u64>` and `W<A>`
+/// share the base `W` — and an underivable base on either side matches too. The
+/// cost of a false match is one lost body axiom (the method stays a typed UF with
+/// its contract); the cost of a miss is a placeholder published as a definition.
+///
+/// Reached only as the FALLBACK of [`external_marked_boundary_covers_method`],
+/// which resolves the declaration exactly when the file pins it down.
+fn external_marked_impl_declares_method(file: &File, self_type: &str, method_name: &str) -> bool {
+    fn base_of(ty: &str) -> &str {
+        let ty = ty.trim();
+        let ty = ty.strip_prefix('&').unwrap_or(ty).trim();
+        let ty = ty.strip_prefix("mut ").unwrap_or(ty).trim();
+        match ty.find('<') {
+            Some(idx) => ty[..idx].trim_end(),
+            None => ty,
+        }
+    }
+
+    fn walk(items: &[syn::Item], self_base: &str, method_name: &str) -> bool {
+        for item in items {
+            match item {
+                syn::Item::Impl(item_impl) => {
+                    if !attr_extract::has_external_trusted_attr(&item_impl.attrs) {
+                        continue;
+                    }
+                    let declares = item_impl.items.iter().any(|impl_item| {
+                        matches!(impl_item, syn::ImplItem::Fn(method)
+                            if method.sig.ident == method_name)
+                    });
+                    if !declares {
+                        continue;
+                    }
+                    // Base names must agree when BOTH are derivable; an
+                    // underivable base on either side matches (fail closed).
+                    match impl_self_type_base_name(&item_impl.self_ty) {
+                        Some(impl_base) if !self_base.is_empty() => {
+                            if impl_base == self_base {
+                                return true;
+                            }
+                        }
+                        _ => return true,
+                    }
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        if walk(inner, self_base, method_name) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    walk(&file.items, base_of(self_type), method_name)
+}
+
 impl InherentMethodDef {
     /// `file` is the declaring file and is SOUNDNESS-CRITICAL, not incidental:
     /// the definitional body axiom published here is `Ty__m(self, args) == BODY`,
     /// and deciding whether BODY is modelable needs the file's mutation vectors
     /// (see `body_has_unframeable_mutation`).
     fn from_impl_method(
+        self_type: &str,
+        file: &File,
+        method: &syn::ImplItemFn,
+        source_structs: Option<&SourceStructRegistry>,
+        ctx: &VerificationContext,
+        ill_founded_recursive: &BTreeSet<String>,
+        type_param_bindings: &[(String, TrustVcType)],
+    ) -> TrustVcResult<Option<Self>> {
+        let def = Self::from_impl_method_inner(
+            self_type,
+            file,
+            method,
+            source_structs,
+            ctx,
+            ill_founded_recursive,
+            type_param_bindings,
+        )?;
+        // A `state_machine!`-generated definition must never silently become
+        // an uninterpreted function: a relation or invariant whose body axiom
+        // is dropped would make the generated lemma contracts meaningless.
+        if crate::state_machine_dsl::is_generated(&method.attrs)
+            && def.as_ref().is_none_or(|def| def.renamed_body.is_none())
+        {
+            return Err(TrustVcError::Encoding {
+                context: "state_machine!",
+                detail: format!(
+                    "generated state_machine! definition `{self_type}::{}` has no definitional axiom; refusing to treat it as uninterpreted",
+                    method.sig.ident
+                ),
+            });
+        }
+        Ok(def)
+    }
+
+    fn from_impl_method_inner(
         self_type: &str,
         file: &File,
         method: &syn::ImplItemFn,
@@ -11746,7 +16039,17 @@ impl InherentMethodDef {
         // the ENTRY `self`, so `C { n: 0 }.via()` proved `result == 0` while every
         // execution returns 1. Same for the receiver form (`self.tick()`). See
         // `body_has_unframeable_mutation`.
-        let body_gated = method_params_shadowed(method)
+        // SOUNDNESS-CRITICAL (H14, trust boundary), the inherent-method twin of
+        // the sibling-helper gate: an `#[trust_vc::external_body]` /
+        // `#[trust_vc::external]` method publishes no definitional body axiom, in
+        // ANY mode. Its stub is a placeholder, not the code that runs.
+        // The marker on an enclosing `impl` or `mod` counts too, but is resolved
+        // by ITEM IDENTITY (`external_marked_boundary_covers_method`): a marked
+        // module declaring a common method name must not strip the body axiom off
+        // every unrelated method of that name in the file.
+        let body_gated = attr_extract::has_external_trusted_attr(&method.attrs)
+            || external_marked_boundary_covers_method(file, self_type, method)
+            || method_params_shadowed(method)
             || body_has_unframeable_mutation(&method.block, file, &method.sig)
             || self_recursive_body_axiom_unsound(&method_name, &method.block, &method.attrs)
             || ill_founded_recursive.contains(&method_name);
@@ -11774,7 +16077,11 @@ impl InherentMethodDef {
                         // safe: "an empty seed can only produce fewer havocs" is
                         // NOT a soundness argument here — fewer havocs means the
                         // `havoc_deps` drop below does not fire.
-                        &body_extract::CollectorLaneSeed::EMPTY,
+                        &body_extract::CollectorLaneSeed::sibling_body(&immutable_value_params(
+                            &method.sig,
+                            &method.block,
+                            &BTreeSet::new(),
+                        )),
                     )
                     .and_then(|(scoped_return, havoc_deps)| {
                         // A definitional axiom's binders are fixed by the method
@@ -12515,25 +16822,7 @@ fn capture_conformance_method_body(
         return None;
     }
 
-    let mut param_count = 0usize;
-    let mut rename_map: HashMap<String, String> = HashMap::new();
-    for input in &method.sig.inputs {
-        match input {
-            FnArg::Receiver(_) => {}
-            FnArg::Typed(pat_type) => {
-                let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
-                    // Non-ident parameter pattern: cannot positionally rename
-                    // soundly, so decline to capture.
-                    return None;
-                };
-                rename_map.insert(
-                    pat_ident.ident.to_string(),
-                    format!("__trust_vc_conf_arg_{param_count}"),
-                );
-                param_count += 1;
-            }
-        }
-    }
+    let (rename_map, param_count) = conformance_positional_rename_map(method)?;
 
     let return_is_unit = matches!(method.sig.output, syn::ReturnType::Default);
     let return_value =
@@ -12553,7 +16842,11 @@ fn capture_conformance_method_body(
         return_value,
         &[],
         None,
-        &body_extract::CollectorLaneSeed::EMPTY,
+        &body_extract::CollectorLaneSeed::sibling_body(&immutable_value_params(
+            &method.sig,
+            &method.block,
+            &BTreeSet::new(),
+        )),
     )?;
     // Same rule as the trait-default body axiom below: this capture becomes a
     // conformance-checked EQUATION whose binders are fixed, so a body reading an
@@ -12568,6 +16861,151 @@ fn capture_conformance_method_body(
         quote!(#body_expr).to_string(),
         param_count,
     ))
+}
+
+/// The ONE positional numbering shared by a captured conformance body and the
+/// impl method's own `ensures`: the i-th non-receiver parameter becomes
+/// `__trust_vc_conf_arg_{i}`. Returns the source-name → placeholder map and the
+/// non-receiver parameter count, or `None` for a non-ident parameter pattern
+/// (no single name to rename, so no exact positional rewrite exists).
+fn conformance_positional_rename_map(
+    method: &syn::ImplItemFn,
+) -> Option<(HashMap<String, String>, usize)> {
+    let mut param_count = 0usize;
+    let mut rename_map: HashMap<String, String> = HashMap::new();
+    for input in &method.sig.inputs {
+        match input {
+            FnArg::Receiver(_) => {}
+            FnArg::Typed(pat_type) => {
+                let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
+                    return None;
+                };
+                rename_map.insert(
+                    pat_ident.ident.to_string(),
+                    format!("__trust_vc_conf_arg_{param_count}"),
+                );
+                param_count += 1;
+            }
+        }
+    }
+    Some((rename_map, param_count))
+}
+
+/// Rewrites a trait-impl method's OWN `ensures` clauses out of the IMPL's
+/// parameter scope onto the positional placeholders its captured body uses
+/// (see [`conformance_positional_rename_map`]), so neither consumer can read
+/// them in the TRAIT's scope.
+///
+/// SOUNDNESS: Rust binds call arguments to an impl method's parameters BY
+/// POSITION; the trait's parameter names mean nothing inside the impl, which
+/// may rename or permute them. The raw clause text used to be lowered against
+/// the trait's names by both the caller axiom and the conformance extension, so
+/// `impl T for S { #[ensures(result == a)] fn f(&self, b: u64, a: u64) -> u64
+/// { a } }` published `s.f(1, 2) == 1` (runtime: 2). A contract clause is read
+/// in the scope of the declaration that wrote it and moves between scopes only
+/// by position.
+///
+/// The rewrite is one simultaneous single-segment `ExprPath` rename (`self` and
+/// `result` untouched). It DECLINES — `None`, all-or-nothing for the method, so
+/// nothing is published and nothing is asserted — whenever it cannot be exact:
+/// * a non-ident parameter pattern;
+/// * a parameter named `result` (it would collide with the return-value binder)
+///   or spelled with the reserved `__trust_vc_` prefix, or a clause already
+///   naming a `__trust_vc_` identifier (a placeholder could be captured);
+/// * a clause that does not parse as one expression;
+/// * a binder (closure/quantifier parameter, `let`, `match` arm) inside a
+///   clause that reuses a parameter name — the rename cannot tell the bound
+///   occurrence from the free one;
+/// * after renaming, a parameter name still standing as an identifier token
+///   anywhere but a `.member` position — inside a macro's token stream, a
+///   struct-literal shorthand field, or a multi-segment path the rename does
+///   not reach.
+pub(crate) fn canonicalize_impl_method_ensures(
+    method: &syn::ImplItemFn,
+    clauses: &[String],
+) -> Option<Vec<String>> {
+    let (rename_map, _param_count) = conformance_positional_rename_map(method)?;
+    if rename_map
+        .keys()
+        .any(|name| name == "result" || name.starts_with("__trust_vc_"))
+    {
+        return None;
+    }
+    let param_names: BTreeSet<String> = rename_map.keys().cloned().collect();
+
+    let mut canonical = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let mut expr: Expr = syn::parse_str(clause).ok()?;
+        if token_stream_names_reserved_ident(expr.to_token_stream()) {
+            return None;
+        }
+        let mut shadow = ParamShadowCollector {
+            param_names: &param_names,
+            shadowed: false,
+        };
+        shadow.visit_expr(&expr);
+        if shadow.shadowed {
+            return None;
+        }
+        IdentRenamer {
+            rename_map: rename_map.clone(),
+        }
+        .visit_expr_mut(&mut expr);
+        let tokens = expr.to_token_stream();
+        if token_stream_has_free_ident(tokens.clone(), &param_names) {
+            return None;
+        }
+        canonical.push(tokens.to_string());
+    }
+    Some(canonical)
+}
+
+/// True iff any identifier token (at any group depth) starts with the reserved
+/// `__trust_vc_` prefix.
+fn token_stream_names_reserved_ident(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => ident.to_string().starts_with("__trust_vc_"),
+        proc_macro2::TokenTree::Group(group) => token_stream_names_reserved_ident(group.stream()),
+        _ => false,
+    })
+}
+
+/// True iff an identifier token in `names` appears (at any group depth) other
+/// than directly after a lone member-access `.` — i.e. anywhere it could still
+/// denote the parameter rather than a field or method name. A `.` that ends a
+/// `..`/`..=` range operator is NOT a member position.
+fn token_stream_has_free_ident(tokens: proc_macro2::TokenStream, names: &BTreeSet<String>) -> bool {
+    let mut after_member_dot = false;
+    let mut prev_joint_punct = false;
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => {
+                if !after_member_dot && names.contains(&ident.to_string()) {
+                    return true;
+                }
+                after_member_dot = false;
+                prev_joint_punct = false;
+            }
+            proc_macro2::TokenTree::Punct(punct) => {
+                after_member_dot = punct.as_char() == '.'
+                    && punct.spacing() == proc_macro2::Spacing::Alone
+                    && !prev_joint_punct;
+                prev_joint_punct = punct.spacing() == proc_macro2::Spacing::Joint;
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                if token_stream_has_free_ident(group.stream(), names) {
+                    return true;
+                }
+                after_member_dot = false;
+                prev_joint_punct = false;
+            }
+            proc_macro2::TokenTree::Literal(_) => {
+                after_member_dot = false;
+                prev_joint_punct = false;
+            }
+        }
+    }
+    false
 }
 
 fn apply_sibling_helper_functions(
@@ -12664,11 +17102,14 @@ fn apply_sibling_helper_functions(
         }
         let mut spec_catalog = crate::spec_function_catalog::SpecFunctionCatalog::from_file(file);
         spec_catalog.register_exact_aliases(&block_use_function_aliases(&helper.block))?;
-        spec_catalog.apply_referenced_specs(helper, vc)?;
+        // The sibling helper's own module is not tracked here: an unknown scope
+        // keeps every module-shadowed bare name failing closed, as before.
+        spec_catalog.apply_referenced_specs(helper, None, vc)?;
         if let Some(def) = SiblingHelperDef::from_item_fn_with_name(
             &reference.call_symbol,
             file,
             helper,
+            Some(key.as_str()),
             source_structs,
             vc,
             &ill_founded_recursive,
@@ -12733,6 +17174,7 @@ fn apply_block_use_alias_helper_functions(
             &alias,
             file,
             helper,
+            Some(source_path.as_str()),
             source_structs,
             vc,
             &ill_founded_recursive,
@@ -12894,7 +17336,7 @@ fn validate_block_use_alias_resolution(
         .find(|alias| called.contains(*alias));
     if let Some(alias) = used_relative_alias {
         match enclosing_inline_module {
-            Some(module) if module.is_empty() => {}
+            Some([]) => {}
             Some(module) => {
                 return Err(TrustVcError::Encoding {
                     context: "block use alias resolution",
@@ -13024,12 +17466,19 @@ fn validate_block_use_alias_resolution(
         }
     }
 
+    // Every active alias has exactly one source path here: the ambiguity gate
+    // above already returned `Err` for any other shape.
     let active_aliases = collector
         .outer_aliases
-        .keys()
-        .filter(|alias| called.contains(*alias))
-        .cloned()
-        .collect::<BTreeSet<_>>();
+        .iter()
+        .filter(|(alias, _)| called.contains(*alias))
+        .filter_map(|(alias, source_paths)| {
+            source_paths
+                .iter()
+                .next()
+                .map(|source_path| (alias.clone(), source_path.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     reject_alias_references_outside_function(file, source_identity_func, &active_aliases)?;
 
     for alias in collector.nested_aliases.keys() {
@@ -13102,13 +17551,27 @@ fn target_contract_expression_path_names(func: &ItemFn) -> TrustVcResult<BTreeSe
 
 /// Every alias bridge is currently a query-global equality between two solver
 /// symbols. Until symbols carry lexical-scope identity, that equality is sound
-/// only when the alias spelling is absent from every OTHER source function: an
-/// unrelated spec/helper body using the same bare name would otherwise inherit
-/// the target body's import and could acquire a false defining axiom.
+/// only when every OTHER source function that uses the alias spelling means the
+/// SAME item by it: an unrelated spec/helper body using the bare name without
+/// that import would otherwise inherit the target body's import and could
+/// acquire a false defining axiom.
+///
+/// IDENTICAL IMPORTS DO NOT LEAK (2026-09-11). When the other function is a
+/// TOP-LEVEL `fn` of the same file as the target (so a relative `use` path
+/// names the same item in both), its own OUTER-block `use` binds the same
+/// spelling to the same source path, and none of its contract attributes (which
+/// live outside the body scope and resolve at module scope) mention the
+/// spelling, then Rust resolves both spellings to one item and the equality the
+/// alias states is exactly the fact that function's own import states. Two
+/// sibling proofs that both `use self::m::{f, T};` no longer refuse each other.
+/// Everything else — a module-scope `use … as` in the other function's scope,
+/// an import of the same spelling from another module, a nested-block import,
+/// an attribute reference, a function inside an inline module — keeps failing
+/// closed exactly as before.
 fn reject_alias_references_outside_function(
     file: &File,
     func: &ItemFn,
-    active_aliases: &BTreeSet<String>,
+    active_aliases: &BTreeMap<String, String>,
 ) -> TrustVcResult<()> {
     if active_aliases.is_empty() {
         return Ok(());
@@ -13125,28 +17588,59 @@ fn reject_alias_references_outside_function(
         .collect::<Vec<_>>();
     let current_index = (exact_matches.len() == 1).then_some(exact_matches[0]);
 
+    let top_level_identities = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item_fn) => Some(quote!(#item_fn).to_string()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let func_is_top_level = top_level_identities.contains(&quote!(#func).to_string());
+
     for (index, candidate) in functions.iter().enumerate() {
         if current_index == Some(index) {
             continue;
         }
         let referenced = function_source_reference_names(candidate)?;
-        if let Some(alias) = active_aliases
+        let Some((alias, source_path)) = active_aliases
             .iter()
-            .find(|alias| referenced.contains(*alias))
+            .find(|(alias, _)| referenced.contains(*alias))
+        else {
+            continue;
+        };
+        if func_is_top_level
+            && top_level_identities.contains(&quote!(#candidate).to_string())
+            && block_use_function_aliases(&candidate.block).get(alias) == Some(source_path)
+            && !contract_attribute_reference_names(candidate)?.contains(alias)
         {
-            return Err(TrustVcError::Encoding {
-                context: "block use alias resolution",
-                detail: format!(
-                    "function-body alias `{alias}` is also referenced from source function \
-                     `{}`; alias equalities are query-global until source symbols carry \
-                     lexical-scope identity, so TrustVc fails closed instead of leaking the \
-                     import into that function",
-                    candidate.sig.ident
-                ),
-            });
+            continue;
         }
+        return Err(TrustVcError::Encoding {
+            context: "block use alias resolution",
+            detail: format!(
+                "function-body alias `{alias}` is also referenced from source function \
+                 `{}` without an identical body import; alias equalities are query-global \
+                 until source symbols carry lexical-scope identity, so TrustVc fails closed \
+                 instead of leaking the import into that function",
+                candidate.sig.ident
+            ),
+        });
     }
     Ok(())
+}
+
+/// The names a function's CONTRACT ATTRIBUTES reference (call symbols and
+/// expression paths of `requires`/`ensures`/`contract`/…). These resolve at
+/// module scope, outside any body import, so an alias spelled there is never
+/// covered by a body-level `use`.
+fn contract_attribute_reference_names(func: &ItemFn) -> TrustVcResult<BTreeSet<String>> {
+    let mut names = referenced_target_contract_calls(func)?
+        .into_iter()
+        .map(|reference| reference.call_symbol)
+        .collect::<BTreeSet<_>>();
+    names.extend(target_contract_expression_path_names(func)?);
+    Ok(names)
 }
 
 fn function_source_reference_names(func: &ItemFn) -> TrustVcResult<BTreeSet<String>> {
@@ -13482,12 +17976,14 @@ impl<'ast> Visit<'ast> for UseAliasCollector {
 /// SOUNDNESS-CRITICAL — five measured cardinal false verifies across four
 /// clauses:
 ///
+/// ```text
 ///     pub fn bump(c: &mut C) { c.n = c.n + 1; }
 ///     pub fn via(mut c: C) -> u64 { bump(&mut c); c.n }      // via(c) == c.n
 ///     impl C { pub fn via(mut self) -> u64 { self.tick(); self.n } }
 ///     impl C { pub fn via(mut self) -> u64 { bump(&mut self); self.n } }
 ///     pub fn via(mut c: C) -> u64 { c.n = c.n + 1; c.n }     // clause 4
 ///     impl C { pub fn via(mut self) -> u64 { self.n = self.n + 1; self.n } }
+/// ```
 ///
 /// Each published its body against the ENTRY value, so `via(C { n: 0 })` proved
 /// `result == 0` while every execution returns 1. A published axiom is a PREMISE
@@ -13785,6 +18281,319 @@ fn file_mutation_vectors(file: &File) -> (BTreeSet<String>, BTreeSet<String>) {
     (mut_self, mut_param)
 }
 
+/// Whether `ty` contains a `&mut` reference anywhere (`&mut Self`,
+/// `Pin<&mut Self>`).
+fn type_contains_mut_reference(ty: &Type) -> bool {
+    struct MutRef(bool);
+    impl<'ast> Visit<'ast> for MutRef {
+        fn visit_type_reference(&mut self, reference: &'ast syn::TypeReference) {
+            if reference.mutability.is_some() {
+                self.0 = true;
+            }
+            syn::visit::visit_type_reference(self, reference);
+        }
+    }
+    let mut finder = MutRef(false);
+    finder.visit_type(ty);
+    finder.0
+}
+
+/// SOUNDNESS-CRITICAL (preexisting soundness holes, cluster rank 4). The
+/// method NAMES whose calls body extraction must not frame by name or by the
+/// receiver-kind registry, mapped to where they come from (for the refusal
+/// text). Walks the WHOLE file, items nested in function bodies included.
+///
+/// * PURE-NAME SHADOW (`typed_receiver: false`): a `&mut`-receiver method
+///   (`&mut self`, `self: &mut Self`, `self: Pin<&mut Self>`, ...) declared in
+///   a trait `impl` whose self type is NOT a file-declared struct / enum /
+///   union named by a bare path (`impl Grab for Vec<u64>`, `impl L for u64`,
+///   `impl<T> L for T`), including the trait's own `&mut`-receiver declarations
+///   when the trait is declared in this file. Body extraction frames a method
+///   call on a collection, scalar or unresolved receiver by method NAME
+///   (`is_pure_collection_read_method` and friends: `get`, `contains`,
+///   `first`, `len`, ...), and Rust method resolution tries the receiver
+///   type's `&mut` autoref step BEFORE auto-dereferencing, so such an impl
+///   SHADOWS the read the name list assumed — `impl Grab for Vec<u64> { fn
+///   get(&mut self, ..) }` makes `v.get(0usize)` a write, and `if b {
+///   v.get(0usize); } assert!(v.len() == 0usize)` verified. A file-declared
+///   ADT self type is excluded: the receiver-kind registry keys it by type.
+/// * TYPED `&mut` RECEIVER (`typed_receiver: true`): a method, in any `impl`
+///   or trait, whose receiver is spelled with a type (`self: &mut Self`,
+///   `self: Pin<&mut Self>`) containing `&mut`. The receiver-kind registry
+///   reads only the `&mut self` shorthand and records such a method as
+///   BY-VALUE, i.e. pure, so `r.bump(); assert!(r.x == 0u64)` verified for
+///   `fn bump(self: &mut Self)`.
+fn file_shadowing_mut_receiver_methods(
+    file: &File,
+) -> BTreeMap<String, body_extract::ShadowingMutReceiverMethod> {
+    fn receiver(sig: &syn::Signature) -> Option<&syn::Receiver> {
+        match sig.inputs.first() {
+            Some(FnArg::Receiver(receiver)) => Some(receiver),
+            _ => None,
+        }
+    }
+    fn receiver_is_mut(sig: &syn::Signature) -> bool {
+        receiver(sig).is_some_and(|receiver| {
+            (receiver.reference.is_some() && receiver.mutability.is_some())
+                || type_contains_mut_reference(&receiver.ty)
+        })
+    }
+    fn receiver_is_typed_mut(sig: &syn::Signature) -> bool {
+        receiver(sig).is_some_and(|receiver| {
+            receiver.colon_token.is_some() && type_contains_mut_reference(&receiver.ty)
+        })
+    }
+    struct TraitImpl {
+        /// The self type's bare single-segment path name, when it is one and
+        /// is not one of the impl's own type parameters.
+        bare_self_name: Option<String>,
+        self_ty: String,
+        trait_name: Option<String>,
+        mut_methods: BTreeSet<String>,
+    }
+    #[derive(Default)]
+    struct Scan {
+        adts: BTreeSet<String>,
+        trait_mut_methods: BTreeMap<String, BTreeSet<String>>,
+        impls: Vec<TraitImpl>,
+        typed: BTreeMap<String, String>,
+    }
+    impl<'ast> Visit<'ast> for Scan {
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            self.adts.insert(item.ident.to_string());
+            syn::visit::visit_item_struct(self, item);
+        }
+        fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+            self.adts.insert(item.ident.to_string());
+            syn::visit::visit_item_enum(self, item);
+        }
+        fn visit_item_union(&mut self, item: &'ast syn::ItemUnion) {
+            self.adts.insert(item.ident.to_string());
+            syn::visit::visit_item_union(self, item);
+        }
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            let trait_name = item.ident.to_string();
+            for trait_item in &item.items {
+                if let syn::TraitItem::Fn(method) = trait_item {
+                    let name = method.sig.ident.to_string();
+                    if receiver_is_mut(&method.sig) {
+                        self.trait_mut_methods
+                            .entry(trait_name.clone())
+                            .or_default()
+                            .insert(name.clone());
+                    }
+                    if receiver_is_typed_mut(&method.sig) {
+                        self.typed.entry(name).or_insert_with(|| trait_name.clone());
+                    }
+                }
+            }
+            syn::visit::visit_item_trait(self, item);
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let self_ty = item.self_ty.to_token_stream().to_string();
+            // SOUNDNESS (review finding: `impl<'a> GrabRef for &'a mut Vec<u64>
+            // { fn get(self, ..) }`): when the SELF TYPE is itself a `&mut`
+            // reference, a BY-VALUE `self` receiver is a mutable receiver —
+            // rustc reaches the impl at the `&mut` autoref step — yet neither
+            // `receiver_is_mut` (no `&mut` on the receiver) nor the
+            // receiver-kind registry classifies it as mutating, so `v.get(..)`
+            // stayed on the pure-name list and `assert!(v.len() == 0usize)`
+            // verified after a push.
+            let self_ty_is_mut_ref = type_contains_mut_reference(&item.self_ty);
+            for impl_item in &item.items {
+                if let syn::ImplItem::Fn(method) = impl_item {
+                    if receiver_is_typed_mut(&method.sig) {
+                        self.typed
+                            .entry(method.sig.ident.to_string())
+                            .or_insert_with(|| self_ty.clone());
+                    }
+                }
+            }
+            if let Some((_, trait_path, _)) = &item.trait_ {
+                let generic_params: BTreeSet<String> = item
+                    .generics
+                    .type_params()
+                    .map(|param| param.ident.to_string())
+                    .collect();
+                let bare_self_name = match &*item.self_ty {
+                    Type::Path(type_path)
+                        if type_path.qself.is_none() && type_path.path.segments.len() == 1 =>
+                    {
+                        let ident = type_path.path.segments[0].ident.to_string();
+                        (!generic_params.contains(&ident)).then_some(ident)
+                    }
+                    _ => None,
+                };
+                self.impls.push(TraitImpl {
+                    bare_self_name,
+                    self_ty,
+                    trait_name: trait_path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string()),
+                    mut_methods: item
+                        .items
+                        .iter()
+                        .filter_map(|impl_item| match impl_item {
+                            syn::ImplItem::Fn(method)
+                                if receiver_is_mut(&method.sig)
+                                    || (self_ty_is_mut_ref && receiver(&method.sig).is_some()) =>
+                            {
+                                Some(method.sig.ident.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                });
+            }
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+    /// Re-scans the token stream of every macro in `file` for items it would
+    /// expand to. A group that parses as a list of items is visited with the
+    /// same `Scan` (so the self-type and trait rules above apply to it);
+    /// anything else falls back to a token-level receiver scan that records the
+    /// bare method name. Purely additive.
+    fn scan_macro_declared_items(file: &File, scan: &mut Scan, out: &mut BTreeSet<String>) {
+        use proc_macro2::{Delimiter, TokenStream, TokenTree};
+        #[derive(Default)]
+        struct MacroFinder(Vec<TokenStream>);
+        impl<'ast> Visit<'ast> for MacroFinder {
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                self.0.push(mac.tokens.clone());
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+        /// True when the tokens that open a parameter list spell a MUTABLE
+        /// receiver: `&mut self` (with or without a lifetime) or a typed
+        /// `self: <T>` whose type mentions `&mut`.
+        fn receiver_tokens_are_mut(inner: TokenStream) -> bool {
+            let trees: Vec<TokenTree> = inner.into_iter().collect();
+            if matches!(trees.first(), Some(TokenTree::Punct(punct)) if punct.as_char() == '&') {
+                let mut index = 1usize;
+                if matches!(trees.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '\'')
+                {
+                    index += 1;
+                    if matches!(trees.get(index), Some(TokenTree::Ident(_))) {
+                        index += 1;
+                    }
+                }
+                let is_mut =
+                    matches!(trees.get(index), Some(TokenTree::Ident(ident)) if ident == "mut");
+                let is_self = matches!(trees.get(index + 1), Some(TokenTree::Ident(ident)) if ident == "self");
+                return is_mut && is_self;
+            }
+            // `self : <type up to the first top-level comma>`
+            if !matches!(trees.first(), Some(TokenTree::Ident(ident)) if ident == "self") {
+                return false;
+            }
+            if !matches!(trees.get(1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':') {
+                return false;
+            }
+            let mut saw_ref = false;
+            for tree in trees.iter().skip(2) {
+                match tree {
+                    TokenTree::Punct(punct) if punct.as_char() == ',' => break,
+                    TokenTree::Punct(punct) if punct.as_char() == '&' => saw_ref = true,
+                    TokenTree::Ident(ident) if saw_ref && ident == "mut" => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        fn walk(tokens: TokenStream, scan: &mut Scan, out: &mut BTreeSet<String>, depth: usize) {
+            if depth > 16 {
+                return;
+            }
+            if let Ok(parsed) = syn::parse2::<File>(tokens.clone()) {
+                if !parsed.items.is_empty() {
+                    scan.visit_file(&parsed);
+                }
+            }
+            let trees: Vec<TokenTree> = tokens.into_iter().collect();
+            for (index, tree) in trees.iter().enumerate() {
+                if let TokenTree::Ident(ident) = tree {
+                    if ident == "fn" {
+                        if let (Some(TokenTree::Ident(name)), Some(TokenTree::Group(group))) =
+                            (trees.get(index + 1), trees.get(index + 2))
+                        {
+                            if group.delimiter() == Delimiter::Parenthesis
+                                && receiver_tokens_are_mut(group.stream())
+                            {
+                                out.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                if let TokenTree::Group(group) = tree {
+                    walk(group.stream(), scan, out, depth + 1);
+                }
+            }
+        }
+        let mut finder = MacroFinder::default();
+        finder.visit_file(file);
+        for tokens in finder.0 {
+            walk(tokens, scan, out, 0);
+        }
+    }
+
+    let mut scan = Scan::default();
+    scan.visit_file(file);
+    // SOUNDNESS (review finding: a `macro_rules!` transcriber, or an item-macro
+    // invocation, declaring `impl Firsty for Vec<u64> { fn first(&mut self) }`):
+    // `Visit` walks only PARSED items, so the shadow was invisible and `first`
+    // stayed on the pure-name list. Re-parse every macro token group that reads
+    // as a list of items and scan it the same way; anything that does not parse
+    // falls back to the token-level receiver scan below. Both are additive: they
+    // can only ADD a refusal, never remove one.
+    let mut macro_shadows: BTreeSet<String> = BTreeSet::new();
+    scan_macro_declared_items(file, &mut scan, &mut macro_shadows);
+    let mut out = BTreeMap::new();
+    for method in &macro_shadows {
+        out.entry(method.clone())
+            .or_insert_with(|| body_extract::ShadowingMutReceiverMethod {
+                origin: "a macro expansion in this file".to_string(),
+                typed_receiver: false,
+            });
+    }
+    // Typed receivers first: that refusal has no type-keyed escape, so it
+    // must win over a shadow entry for the same name.
+    for (method, origin) in &scan.typed {
+        out.insert(
+            method.clone(),
+            body_extract::ShadowingMutReceiverMethod {
+                origin: origin.clone(),
+                typed_receiver: true,
+            },
+        );
+    }
+    for trait_impl in &scan.impls {
+        if trait_impl
+            .bare_self_name
+            .as_ref()
+            .is_some_and(|name| scan.adts.contains(name))
+        {
+            continue;
+        }
+        let declared = trait_impl
+            .trait_name
+            .as_ref()
+            .and_then(|name| scan.trait_mut_methods.get(name));
+        for method in trait_impl
+            .mut_methods
+            .iter()
+            .chain(declared.into_iter().flatten())
+        {
+            out.entry(method.clone())
+                .or_insert_with(|| body_extract::ShadowingMutReceiverMethod {
+                    origin: trait_impl.self_ty.clone(),
+                    typed_receiver: false,
+                });
+        }
+    }
+    out
+}
+
 fn normalized_use_source_path(prefix: &[String], leaf: &str) -> String {
     let mut path = prefix
         .iter()
@@ -13810,6 +18619,9 @@ struct SiblingHelperDef {
     return_ty: TrustVcType,
     body_condition: Option<String>,
     trigger: Option<String>,
+    /// H10: declaration-order type/const generic parameter names, set only when
+    /// the generic carriage gate passed (empty for a non-generic helper).
+    generic_params: Vec<String>,
 }
 
 impl SiblingHelperDef {
@@ -13842,10 +18654,16 @@ impl SiblingHelperDef {
     /// `via(c) == c.n` against the ENTRY `c` — an outright FALSE premise, and a
     /// cardinal false verify at any call site (`via(C { n: 0 })` proved
     /// `result == 0` when every execution returns 1).
+    ///
+    /// `resolved_path` is the inline-module path this callee was RESOLVED
+    /// through (the `SourceFunctionRegistry` key). It is what makes the
+    /// trusted-boundary question exact rather than token-approximate; see
+    /// [`trusted_boundary_covers_path`].
     fn from_item_fn_with_name(
         name: &str,
         file: &File,
         item_fn: &ItemFn,
+        resolved_path: Option<&str>,
         source_structs: Option<&SourceStructRegistry>,
         ctx: &VerificationContext,
         ill_founded_recursive: &BTreeSet<String>,
@@ -13874,7 +18692,18 @@ impl SiblingHelperDef {
         // proved `result == 0` while every execution returns 1. See
         // `body_has_unframeable_mutation` for why this is a publisher gate and
         // not something the render could be seeded to handle.
-        let (body_condition, trigger) = if helper_has_requires_clause(&item_fn.attrs)?
+        // SOUNDNESS-CRITICAL (H14, trust boundary). An `#[trust_vc::external_body]`
+        // / `#[trust_vc::external]` callee's braces hold a PLACEHOLDER — the real
+        // implementation is foreign or elsewhere — so `f(args) == <stub tail>` is
+        // not a definition of anything. Decline the axiom; the helper is still
+        // DECLARED below (typed UF) and its `#[requires]`/`#[ensures]` is still
+        // applied at the call site by `collect_referenced_sibling_helper_contracts`,
+        // so the callee keeps exactly what it promises and nothing more.
+        let enclosure_is_trusted_boundary =
+            trusted_boundary_covers_resolved_fn(file, resolved_path, item_fn);
+        let (body_condition, trigger) = if attr_extract::has_external_trusted_attr(&item_fn.attrs)
+            || enclosure_is_trusted_boundary
+            || helper_has_requires_clause(&item_fn.attrs)?
             || params_shadowed_in_body(item_fn)
             || body_has_unframeable_mutation(&item_fn.block, file, &item_fn.sig)
             || self_recursive_body_axiom_unsound(
@@ -13910,7 +18739,11 @@ impl SiblingHelperDef {
                         // rebinds a root it can see as a tracked binding, and a
                         // helper's params are declared in neither this throwaway
                         // scope stack nor the target's context.
-                        &body_extract::CollectorLaneSeed::EMPTY,
+                        &body_extract::CollectorLaneSeed::sibling_body(&immutable_value_params(
+                            &item_fn.sig,
+                            &item_fn.block,
+                            &BTreeSet::new(),
+                        )),
                     )
                     .filter(|(_, havoc_deps)| havoc_deps.is_empty()) else {
                         return Ok(None);
@@ -13938,12 +18771,45 @@ impl SiblingHelperDef {
             }
         };
 
+        // H10: without a published body axiom the helper is a bare
+        // uninterpreted symbol keyed by name and arguments, so generic
+        // parameters no argument carries would collapse `ereq::<u8>()` and
+        // `ereq::<u64>()` into one term. A PUBLISHED body is lowered in the
+        // erased environment and is therefore instantiation-uniform (an
+        // instantiation-dependent body fails to lower and fails the query) —
+        // provided no generic parameter name is shadowed by a type the
+        // environment resolves (`type T = u8;` published `esz() == 1`).
+        if !item_fn.sig.generics.params.is_empty() {
+            let param_types = params
+                .iter()
+                .map(|param| param.ty.clone())
+                .collect::<Vec<_>>();
+            crate::spec_function_catalog::check_generic_declaration(
+                "extract sibling helper",
+                &name,
+                &crate::spec_function_catalog::shadowed_generic_params(
+                    &item_fn.sig,
+                    &item_fn.block,
+                    &crate::spec_function_catalog::GenericShadowNames::from_file(file),
+                    ctx,
+                    false,
+                ),
+                &crate::spec_function_catalog::uncarried_generic_params(
+                    &item_fn.sig,
+                    &param_types,
+                    &[],
+                ),
+                body_condition.is_some(),
+            )?;
+        }
+
         Ok(Some(Self {
             name,
             params,
             return_ty,
             body_condition,
             trigger,
+            generic_params: crate::spec_function_catalog::declaration_generic_params(&item_fn.sig),
         }))
     }
 
@@ -14041,6 +18907,8 @@ impl SiblingHelperDef {
             return_ty,
             body_condition: Some(format!("{trigger} == {body}")),
             trigger: Some(trigger),
+            // Generic when_used_as_spec mappings are refused above.
+            generic_params: Vec::new(),
         })
     }
 
@@ -14051,6 +18919,7 @@ impl SiblingHelperDef {
             .map(|param| (param.name.clone(), param.ty.clone()))
             .collect();
         ctx.declare_helper_function_typed(&self.name, self.return_ty.clone(), helper_params);
+        ctx.record_helper_generic_params(&self.name, self.generic_params.clone());
 
         let Some(body_condition) = &self.body_condition else {
             return;
@@ -14330,6 +19199,26 @@ struct HelperCallCollector {
     calls: BTreeSet<SourceCallReference>,
 }
 
+impl HelperCallCollector {
+    /// SOUNDNESS-CRITICAL (H6, `Fn`-ABI spelling): `need4.call((5,))` /
+    /// `Fn::call(&need4, (5,))` APPLIES the contracted sibling `need4`, but its
+    /// name sits in RECEIVER (or first-argument) position, so the `ExprCall`
+    /// scan below never saw it and no contract was collected — leaving the
+    /// call-site emitter nothing to prove the `requires` from. Record the
+    /// desugared application's reference alongside.
+    fn record_fn_abi_application(&mut self, app: Option<syn::ExprCall>) {
+        let Some(app) = app else {
+            return;
+        };
+        if expr_call_has_closure_arg(&app) {
+            return;
+        }
+        if let Some(reference) = source_call_reference(&app) {
+            self.calls.insert(reference);
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for HelperCallCollector {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if !expr_call_has_closure_arg(call) {
@@ -14337,10 +19226,12 @@ impl<'ast> Visit<'ast> for HelperCallCollector {
                 self.calls.insert(reference);
             }
         }
+        self.record_fn_abi_application(body_extract::fn_abi_application_from_ufcs_call(call));
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.record_fn_abi_application(body_extract::fn_abi_application_from_method_call(call));
         if expr_method_call_has_closure_arg(call) {
             for arg in &call.args {
                 self.visit_expr(arg);

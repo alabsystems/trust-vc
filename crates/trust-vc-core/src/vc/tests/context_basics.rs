@@ -395,3 +395,88 @@ fn test_invariant_namespace_default_is_none() {
         ProofObligation::invariant_open("inv_open", "__trust_vc_invariant_open(inv, x)");
     assert_eq!(obligation.invariant_namespace, None);
 }
+
+// ── ROUND 7: FIELD-LEVEL COLLECTION PROVENANCE, the side-table contract ────
+
+/// A MISSING entry and a recorded `Unknown` are the SAME fail-closed answer, and
+/// a conflicting re-registration degrades to it rather than letting the last
+/// writer win. This is what lets every `StructDef` built outside the
+/// source-struct seam keep meaning what it meant.
+#[test]
+fn field_provenance_is_positive_only_and_conflicts_fail_closed() {
+    use crate::vc::CollectionOrigin;
+    let mut ctx = VerificationContext::new();
+    // Never observed.
+    assert_eq!(
+        ctx.struct_field_collection_origin("Holder", "data"),
+        CollectionOrigin::Unknown
+    );
+    // Observed, and readable.
+    ctx.register_struct_field_collection_origin("Holder", "data", CollectionOrigin::Exec);
+    assert_eq!(
+        ctx.struct_field_collection_origin("Holder", "data"),
+        CollectionOrigin::Exec
+    );
+    // Writing `Unknown` records NOTHING, so it can never overwrite a measurement
+    // with an absence.
+    ctx.register_struct_field_collection_origin("Holder", "data", CollectionOrigin::Unknown);
+    assert_eq!(
+        ctx.struct_field_collection_origin("Holder", "data"),
+        CollectionOrigin::Exec
+    );
+    // A DISAGREEING registration (two structs sharing a name) degrades to the
+    // fail-closed answer instead of letting one spelling answer for the other.
+    ctx.register_struct_field_collection_origin("Holder", "data", CollectionOrigin::Spec);
+    assert_eq!(
+        ctx.struct_field_collection_origin("Holder", "data"),
+        CollectionOrigin::Unknown
+    );
+    // The tuple-component table obeys the same three rules.
+    assert_eq!(
+        ctx.binding_tuple_component_origin("t", "0"),
+        CollectionOrigin::Unknown
+    );
+    ctx.register_binding_tuple_component_origin("t", "0", CollectionOrigin::Spec);
+    assert_eq!(
+        ctx.binding_tuple_component_origin("t", "0"),
+        CollectionOrigin::Spec
+    );
+    ctx.register_binding_tuple_component_origin("t", "0", CollectionOrigin::Exec);
+    assert_eq!(
+        ctx.binding_tuple_component_origin("t", "0"),
+        CollectionOrigin::Unknown
+    );
+}
+
+/// PARTICIPATION IN THE QUERY KEY, pinned rather than asserted in prose. A
+/// context that has recorded a field's provenance produces a DIFFERENT number of
+/// obligations from one that has not, so the two must never share a cache entry.
+/// The second half is the liar twin: contexts recording the SAME provenance must
+/// still share a key, or the pin would pass for a key that merely varies.
+#[test]
+fn field_provenance_separates_query_keys_and_only_when_it_differs() {
+    use crate::vc::CollectionOrigin;
+    let build = |origin: Option<CollectionOrigin>, tuple: Option<CollectionOrigin>| {
+        let mut ctx = VerificationContext::new();
+        ctx.declare_var_typed("b", TrustVcType::Int { width: 32 });
+        if let Some(origin) = origin {
+            ctx.register_struct_field_collection_origin("Holder", "data", origin);
+        }
+        if let Some(tuple) = tuple {
+            ctx.register_binding_tuple_component_origin("t", "0", tuple);
+        }
+        ctx.isolated_query_key()
+    };
+    let none = build(None, None);
+    let exec = build(Some(CollectionOrigin::Exec), None);
+    let spec = build(Some(CollectionOrigin::Spec), None);
+    let tuple = build(None, Some(CollectionOrigin::Spec));
+    assert_ne!(none, exec, "an UNRECORDED field must not share a key");
+    assert_ne!(exec, spec, "exec and spec provenance must not share a key");
+    assert_ne!(none, tuple, "an unrecorded tuple component must not share");
+    assert_eq!(
+        exec,
+        build(Some(CollectionOrigin::Exec), None),
+        "the SAME provenance must still share a key"
+    );
+}

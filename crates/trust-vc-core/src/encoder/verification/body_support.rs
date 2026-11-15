@@ -382,15 +382,10 @@ fn catalog_reachable_from(
 }
 
 fn extract_body_axiom(expr: &TrustVcExpr) -> Option<ExtractedBodyAxiom> {
-    let TrustVcExpr::Compare {
-        op: crate::ir::CompareOp::Eq,
-        left,
-        right,
-    } = expr
-    else {
-        return None;
-    };
-    let TrustVcExpr::FnCall { name, args, .. } = left.as_ref() else {
+    // A float definition is stated as `f(x) == body || (f(x) != f(x) && body
+    // != body)`; substituting the body for the call is its exact reading.
+    let (left, right) = crate::float_identity::identity_equation_sides(expr)?;
+    let TrustVcExpr::FnCall { name, args, .. } = left else {
         return None;
     };
     // Capture each param's NAME and declared TYPE together: the body axiom's LHS
@@ -410,7 +405,7 @@ fn extract_body_axiom(expr: &TrustVcExpr) -> Option<ExtractedBodyAxiom> {
         function_name: name.clone(),
         param_names,
         param_types,
-        body: right.as_ref().clone(),
+        body: right.clone(),
     })
 }
 

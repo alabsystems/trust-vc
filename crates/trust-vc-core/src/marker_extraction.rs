@@ -118,6 +118,15 @@ fn verify_markers_impl_inner(file_path: &str) -> TrustVcResult<crate::VerifyResu
             context: "parse marker source file",
             source,
         })?;
+        // This raw parse never runs the `state_machine!` expansion, so a file
+        // that declares one must not be verified here.
+        if crate::state_machine_dsl::has_item_position_invocation(&file) {
+            return Ok(VerifyResult::Error {
+                message: "files containing state_machine! are verified through the file lane \
+                          (cargo trust-vc check), not verify!() markers"
+                    .to_string(),
+            });
+        }
 
         // Create verification context
         let mut ctx = VerificationContext::new();

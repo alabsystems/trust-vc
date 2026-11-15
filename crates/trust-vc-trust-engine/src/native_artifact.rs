@@ -8,8 +8,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
+use crate::native_coverage::TrustVcNativeCoverageBasis;
+
 /// Schema version for native verifier proof-object fingerprints.
-pub const TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION: u32 = 6;
+///
+/// 8: coverage is DERIVED by the consumer (trust-ir-build's
+/// `coverage_establishment_report`, basis K), and the fingerprint binds the
+/// coverage BASIS — the kernel-replayed certificate (obligation, prover,
+/// evidence digest) and the classified family of its claim — not merely
+/// "established". The obligation status gained `certified`, and the coverage
+/// refusals are the derived rule's (`certificate_coverage_basis_not_this_certificate`,
+/// `certificate_coverage_refused`; the row-judging labels decode as
+/// `certificate_coverage_not_judged`). A v7 artifact's fingerprint bound a
+/// coverage judgement made by the retired row rule, so it is refused as stale
+/// rather than decoded; so is v6, which bound none.
+///
+/// 7: a [`TrustVcNativeProofArtifact`] serializes the obligation status and
+/// trusted flag its admission is computed from, its fingerprint binds those
+/// and the certificate's COVERAGE judgement, and decoding re-derives its
+/// admission instead of reading it.
+pub const TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION: u32 = 8;
 
 /// Native verifier suite that produced a proof artifact.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,6 +671,13 @@ pub enum TrustVcNativeArtifactObligationStatus {
     Failed,
     /// The upstream obligation was marked trusted rather than proved.
     Trusted,
+    /// The upstream obligation is `Certified`: its status claims a
+    /// kernel-recheckable CIC certificate. Judged on the REPLAY, never on the
+    /// label — admissible like `Discharged` only because admission also
+    /// requires the certificate's coverage to be established by the kernel
+    /// replay of that very certificate (trust-ir-build basis K), which no
+    /// decoded or hand-built artifact carries.
+    Certified,
 }
 
 impl TrustVcNativeArtifactObligationStatus {
@@ -664,6 +689,7 @@ impl TrustVcNativeArtifactObligationStatus {
             Self::Discharged => "discharged",
             Self::Failed => "failed",
             Self::Trusted => "trusted",
+            Self::Certified => "certified",
         }
     }
 }
@@ -694,6 +720,63 @@ pub enum TrustVcNativeArtifactAdmissionStatus {
     Accepted,
     /// The artifact binding is present but rejected fail-closed.
     Rejected,
+}
+
+/// One numeric rendering of an assertion identity, labelled by where it came
+/// from.
+///
+/// The export seam publishes an assertion id only when EVERY rendering the
+/// minting row carries agrees on it (see
+/// [`TrustVcNativeArtifactRejection::AssertionIdRenderingsDisagree`]). A
+/// rendering is `(where it was read, what it said)` so a refusal can name all of
+/// them rather than only the two that differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustVcNativeAssertionIdRendering {
+    /// Where this rendering was read from, for a refusal message.
+    pub source: String,
+    /// What it said.
+    pub value: u32,
+}
+
+impl TrustVcNativeAssertionIdRendering {
+    /// Record one rendering of an assertion identity.
+    pub fn new(source: impl Into<String>, value: u32) -> Self {
+        Self {
+            source: source.into(),
+            value,
+        }
+    }
+}
+
+/// The assertion id every rendering agrees on, or the disagreement.
+///
+/// * `Ok(Some(id))` — every rendering present says `id`.
+/// * `Ok(None)` — there is no rendering at all; nothing may be stamped, which
+///   is [`TrustVcNativeArtifactRejection::MissingAssertionId`] downstream.
+/// * `Err(_)` — two renderings disagree; the error names EVERY rendering seen,
+///   and nothing may be stamped.
+pub fn corroborated_assertion_id(
+    renderings: &[TrustVcNativeAssertionIdRendering],
+) -> Result<Option<u32>, String> {
+    let mut agreed: Option<u32> = None;
+    for rendering in renderings {
+        match agreed {
+            None => agreed = Some(rendering.value),
+            Some(value) if value == rendering.value => {}
+            Some(_) => {
+                let seen = renderings
+                    .iter()
+                    .map(|rendering| format!("{} = {}", rendering.source, rendering.value))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!(
+                    "the renderings of this obligation's assertion identity disagree, so no \
+                     assertion id may be published for it: {seen}"
+                ));
+            }
+        }
+    }
+    Ok(agreed)
 }
 
 /// Reasons a native proof object was rejected.
@@ -732,6 +815,23 @@ pub enum TrustVcNativeArtifactRejection {
     AssertionIdMismatch,
     /// The proof object assertion id disagrees with its compiler-fact source assertion id.
     CompilerFactAssertionIdMismatch,
+    /// The row this artifact was minted from carried TWO OR MORE numeric
+    /// renderings of one assertion identity and they disagree, so no id could be
+    /// published.
+    ///
+    /// The row carries the compiler-fact rendering, its republished copy on
+    /// the binding, and the INDEPENDENT rendering (the citing request's
+    /// `Assertion` replay atom). Stamping from any one of them alone lets a row
+    /// whose `independent_assertion_id` and `compiler_facts_binding.assertion_id`
+    /// were moved together (the shape a consumer deserializes out of a
+    /// trust-runner report) report assertion 1 and mint an artifact stamped
+    /// assertion 0, with nothing rejected.
+    ///
+    /// The rule: an artifact is stamped only with a value EVERY numeric
+    /// rendering the row carries agrees on. Disagreement publishes no id at all,
+    /// so this reason always travels with
+    /// [`Self::MissingAssertionId`] — fail closed rather than pick a winner.
+    AssertionIdRenderingsDisagree,
     /// The proof object is bound to a different TrustIr obligation id.
     TrustIrObligationIdMismatch,
     /// The proof object is bound to a different TrustIr module digest.
@@ -754,10 +854,115 @@ pub enum TrustVcNativeArtifactRejection {
     CompilerFactReferencesMismatch,
     /// The proof object fingerprint does not match the expected binding.
     ArtifactFingerprintMismatch,
+    // ---- Coverage (derived by the consumer: trust-ir-build basis K) -------
+    //
+    // Each of these carries the certificate-level refusal of the same name
+    // (`TrustVcNativeTrustIrCertificateRejection`) onto the artifact, so an
+    // artifact is never accepted for a certificate whose release admission
+    // did not establish `Unbounded` coverage. The retired row-judging labels
+    // (`certificate_coverage_unrecorded`, `_request_unknown`,
+    // `_obligation_not_requested`, `_bound_mismatch`, `_contested`,
+    // `_not_established_for_module`) decode as `CertificateCoverageNotJudged`.
+    /// No coverage judgement reached this proof object: it was built outside
+    /// TrustVc's validated native-bundle path (by hand, through
+    /// [`TrustVcNativeArtifactAdmission::from_native_binding_parts`], or from a
+    /// payload that predates coverage), so its certificate's coverage is
+    /// UNKNOWN — which is never `Unbounded`.
+    #[serde(
+        alias = "certificate_coverage_unrecorded",
+        alias = "certificate_coverage_request_unknown",
+        alias = "certificate_coverage_obligation_not_requested",
+        alias = "certificate_coverage_bound_mismatch",
+        alias = "certificate_coverage_contested",
+        alias = "certificate_coverage_not_established_for_module"
+    )]
+    CertificateCoverageNotJudged,
+    /// The certificate's derived coverage bound is not `Unbounded`.
+    CertificateCoverageBounded,
+    /// No coverage was established for the certificate (not kernel-replayed,
+    /// unclassified claim family, no kernel, or an unchecked report).
+    CertificateCoverageUndetermined,
+    /// A sibling certificate on the same obligation was kernel-replayed, not
+    /// this one.
+    CertificateCoverageBasisNotThisCertificate,
+    /// trust-ir-build refused something in the certificate's bundle; fatal for
+    /// every certificate of that bundle.
+    CertificateCoverageRefused,
+}
+
+impl TrustVcNativeArtifactRejection {
+    /// Whether this refusal is about the certificate's COVERAGE. Exhaustive
+    /// with no wildcard, so a variant added above must decide here.
+    const fn is_coverage_refusal(self) -> bool {
+        match self {
+            Self::MissingAssertionId
+            | Self::MissingTrustIrModuleDigest
+            | Self::MissingRequestDigest
+            | Self::MissingSuiteIdentity
+            | Self::MissingSolverIdentity
+            | Self::MissingReplayIdentity
+            | Self::MissingReplayTranscriptDigest
+            | Self::MissingCompilerFactSource
+            | Self::MissingCompilerFactReferences
+            | Self::ObligationPending
+            | Self::ObligationFailed
+            | Self::ObligationTrusted
+            | Self::CertificateUsesTrustedEvidence
+            | Self::AssertionIdMismatch
+            | Self::AssertionIdRenderingsDisagree
+            | Self::CompilerFactAssertionIdMismatch
+            | Self::TrustIrObligationIdMismatch
+            | Self::TrustIrModuleDigestMismatch
+            | Self::RequestDigestMismatch
+            | Self::SuiteIdentityMismatch
+            | Self::SolverIdentityMismatch
+            | Self::EvidenceDigestMismatch
+            | Self::CertificateDigestMismatch
+            | Self::CompilerFactsDigestMismatch
+            | Self::CompilerFactSourceMismatch
+            | Self::CompilerFactReferencesMismatch
+            | Self::ArtifactFingerprintMismatch => false,
+            Self::CertificateCoverageNotJudged
+            | Self::CertificateCoverageBounded
+            | Self::CertificateCoverageUndetermined
+            | Self::CertificateCoverageBasisNotThisCertificate
+            | Self::CertificateCoverageRefused => true,
+        }
+    }
+}
+
+/// The coverage judgement a native proof object carries into its admission.
+///
+/// Crate-private and NOT serialized (`#[serde(skip)]` on
+/// [`TrustVcNativeProofArtifactInput`]): the only way to reach `Established`
+/// is [`crate::TrustVcNativeTrustIrCertificateEvidence::admit_proof_artifact`]
+/// over a certificate whose release admission established `Unbounded`
+/// coverage against its own bundle. Everything else — a hand-built input, a
+/// deserialized one — is `NotJudged` and rejected. The fingerprint serializes
+/// it, so it binds the BASIS an established judgement rests on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NativeArtifactCoverage {
+    /// No coverage judgement was made. Rejected as
+    /// [`TrustVcNativeArtifactRejection::CertificateCoverageNotJudged`].
+    #[default]
+    NotJudged,
+    /// Release admission established `Unbounded` coverage on this basis.
+    Established(TrustVcNativeCoverageBasis),
+    /// Release admission refused the coverage for these reasons.
+    Refused(Vec<TrustVcNativeArtifactRejection>),
 }
 
 /// Fail-closed replay and admission status for a native proof object.
+///
+/// Decoding one never yields an accepted admission: acceptance needs a
+/// coverage judgement made against the bundle, which no payload carries, so
+/// a decoded admission is rejected with every reason it names plus
+/// [`TrustVcNativeArtifactRejection::CertificateCoverageNotJudged`] when it
+/// names no coverage refusal. `{"status": "accepted"}` used to decode as an
+/// accepted proof object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "WireArtifactAdmission")]
 #[must_use]
 pub struct TrustVcNativeArtifactAdmission {
     #[serde(default)]
@@ -778,8 +983,45 @@ impl Default for TrustVcNativeArtifactAdmission {
     }
 }
 
+/// Deserialization mirror of [`TrustVcNativeArtifactAdmission`]; only the
+/// reasons are read (see the type doc).
+#[derive(Deserialize)]
+struct WireArtifactAdmission {
+    #[serde(default, rename = "replay_status")]
+    _replay_status: TrustVcNativeArtifactReplayStatus,
+    #[serde(default, rename = "status")]
+    _status: TrustVcNativeArtifactAdmissionStatus,
+    #[serde(default)]
+    rejection_reasons: Vec<TrustVcNativeArtifactRejection>,
+}
+
+impl From<WireArtifactAdmission> for TrustVcNativeArtifactAdmission {
+    fn from(wire: WireArtifactAdmission) -> Self {
+        // Each reason once: the retired coverage labels all decode as
+        // `CertificateCoverageNotJudged`.
+        let mut rejection_reasons = Vec::new();
+        for reason in wire.rejection_reasons {
+            if !rejection_reasons.contains(&reason) {
+                rejection_reasons.push(reason);
+            }
+        }
+        if !rejection_reasons
+            .iter()
+            .any(|reason| reason.is_coverage_refusal())
+        {
+            rejection_reasons.push(TrustVcNativeArtifactRejection::CertificateCoverageNotJudged);
+        }
+        Self::from_rejections(rejection_reasons)
+    }
+}
+
 struct NativeAdmissionParts<'a> {
     assertion_id: &'a str,
+    /// Every OTHER numeric rendering of the same assertion identity the caller
+    /// saw, labelled by where it came from. Empty for callers that hold only
+    /// one rendering; see
+    /// [`TrustVcNativeProofArtifactInput::with_assertion_id_rendering`].
+    assertion_id_renderings: &'a [TrustVcNativeAssertionIdRendering],
     trust_ir_module_digest: &'a str,
     request_digest: Option<&'a str>,
     trust_ir_obligation_id: u32,
@@ -788,6 +1030,7 @@ struct NativeAdmissionParts<'a> {
     trusted: bool,
     solver_identity: &'a TrustVcNativeSolverIdentity,
     compiler_facts_binding: &'a TrustVcNativeCompilerFactsBinding,
+    coverage: &'a NativeArtifactCoverage,
 }
 
 impl TrustVcNativeArtifactAdmission {
@@ -810,6 +1053,11 @@ impl TrustVcNativeArtifactAdmission {
     }
 
     /// Build admission from native obligation, replay, trust, and compiler-fact metadata.
+    ///
+    /// These parts carry no coverage judgement, so the result is always
+    /// rejected with [`TrustVcNativeArtifactRejection::CertificateCoverageNotJudged`]
+    /// (beside `MissingTrustIrModuleDigest`, which it already carried): an
+    /// admission that cannot see the certificate's coverage cannot accept it.
     pub fn from_native_binding_parts(
         assertion_id: &str,
         trust_ir_obligation_id: u32,
@@ -821,6 +1069,11 @@ impl TrustVcNativeArtifactAdmission {
     ) -> Self {
         Self::from_native_admission_parts(NativeAdmissionParts {
             assertion_id,
+            // This entry point holds ONE rendering by construction (the caller
+            // passes a single id), so there is nothing to cross-check here. The
+            // export seam that holds several uses
+            // `TrustVcNativeProofArtifactInput::with_assertion_id_rendering`.
+            assertion_id_renderings: &[],
             trust_ir_module_digest: "",
             request_digest: None,
             trust_ir_obligation_id,
@@ -829,6 +1082,7 @@ impl TrustVcNativeArtifactAdmission {
             trusted,
             solver_identity,
             compiler_facts_binding,
+            coverage: &NativeArtifactCoverage::NotJudged,
         })
     }
 
@@ -836,6 +1090,24 @@ impl TrustVcNativeArtifactAdmission {
         let mut rejection_reasons = Vec::new();
         if parts.assertion_id.is_empty() {
             rejection_reasons.push(TrustVcNativeArtifactRejection::MissingAssertionId);
+        }
+        // ROUND 9, THE BLOCKER: every numeric rendering of the identity the
+        // minting row carried must agree with the id actually stamped. A
+        // disagreement publishes no id (the caller stamps the empty string), so
+        // this reason travels with `MissingAssertionId` rather than replacing
+        // it: the artifact both names no assertion and says why it may not.
+        match corroborated_assertion_id(parts.assertion_id_renderings) {
+            Ok(None) => {}
+            Ok(Some(corroborated)) => {
+                if parts.assertion_id.parse::<u32>() != Ok(corroborated) {
+                    rejection_reasons
+                        .push(TrustVcNativeArtifactRejection::AssertionIdRenderingsDisagree);
+                }
+            }
+            Err(_) => {
+                rejection_reasons
+                    .push(TrustVcNativeArtifactRejection::AssertionIdRenderingsDisagree);
+            }
         }
         if parts
             .compiler_facts_binding
@@ -893,7 +1165,10 @@ impl TrustVcNativeArtifactAdmission {
             rejection_reasons.push(TrustVcNativeArtifactRejection::MissingCompilerFactReferences);
         }
         match parts.obligation_status {
-            TrustVcNativeArtifactObligationStatus::Discharged => {}
+            // `Certified` stands or falls with the coverage check below: only
+            // the certificate's own kernel replay (basis K) establishes it.
+            TrustVcNativeArtifactObligationStatus::Discharged
+            | TrustVcNativeArtifactObligationStatus::Certified => {}
             TrustVcNativeArtifactObligationStatus::Pending
             | TrustVcNativeArtifactObligationStatus::Unspecified => {
                 rejection_reasons.push(TrustVcNativeArtifactRejection::ObligationPending);
@@ -907,6 +1182,22 @@ impl TrustVcNativeArtifactAdmission {
         }
         if parts.trusted {
             rejection_reasons.push(TrustVcNativeArtifactRejection::CertificateUsesTrustedEvidence);
+        }
+        match parts.coverage {
+            NativeArtifactCoverage::Established(_) => {}
+            NativeArtifactCoverage::NotJudged => {
+                rejection_reasons
+                    .push(TrustVcNativeArtifactRejection::CertificateCoverageNotJudged);
+            }
+            NativeArtifactCoverage::Refused(reasons) => {
+                // A `Refused` with no reason cannot be built by the crate, but
+                // an empty list must still never read as established.
+                if reasons.is_empty() {
+                    rejection_reasons
+                        .push(TrustVcNativeArtifactRejection::CertificateCoverageNotJudged);
+                }
+                rejection_reasons.extend(reasons.iter().copied());
+            }
         }
         Self::from_rejections(rejection_reasons)
     }
@@ -1063,6 +1354,11 @@ impl TrustVcNativeArtifactExpectation {
 #[must_use]
 pub struct TrustVcNativeProofArtifactInput {
     assertion_id: String,
+    /// Every numeric rendering of the same assertion identity the minting row
+    /// carried. The stamped `assertion_id` must agree with all of them; see
+    /// [`TrustVcNativeArtifactRejection::AssertionIdRenderingsDisagree`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    assertion_id_renderings: Vec<TrustVcNativeAssertionIdRendering>,
     #[serde(alias = "tmir_module_digest")]
     trust_ir_module_digest: String,
     #[serde(default)]
@@ -1076,6 +1372,11 @@ pub struct TrustVcNativeProofArtifactInput {
     evidence_digest: String,
     certificate_digest: String,
     compiler_facts_binding: TrustVcNativeCompilerFactsBinding,
+    /// The certificate's coverage judgement. Never serialized, and
+    /// `NotJudged` (rejected) unless the crate's validated native-bundle path
+    /// set it; see [`NativeArtifactCoverage`].
+    #[serde(skip)]
+    coverage: NativeArtifactCoverage,
 }
 
 impl TrustVcNativeProofArtifactInput {
@@ -1088,6 +1389,7 @@ impl TrustVcNativeProofArtifactInput {
     ) -> Self {
         Self {
             assertion_id: assertion_id.into(),
+            assertion_id_renderings: Vec::new(),
             trust_ir_module_digest: String::new(),
             request_digest: String::new(),
             trust_ir_obligation_id,
@@ -1098,6 +1400,7 @@ impl TrustVcNativeProofArtifactInput {
             evidence_digest: evidence_digest.into(),
             certificate_digest: certificate_digest.into(),
             compiler_facts_binding: TrustVcNativeCompilerFactsBinding::default(),
+            coverage: NativeArtifactCoverage::NotJudged,
         }
     }
 
@@ -1155,10 +1458,48 @@ impl TrustVcNativeProofArtifactInput {
         self.compiler_facts_binding = compiler_facts_binding;
         self
     }
+
+    /// Record one more numeric rendering of this artifact's assertion identity.
+    ///
+    /// Renderings are CROSS-CHECKED, not merged: the stamped `assertion_id` must
+    /// equal every one of them, or the artifact is rejected with
+    /// [`TrustVcNativeArtifactRejection::AssertionIdRenderingsDisagree`]. Record
+    /// every rendering the minting row carries, including the one the stamp was
+    /// taken from — a rendering that is not recorded is a rendering nothing
+    /// checks.
+    pub fn with_assertion_id_rendering(mut self, source: impl Into<String>, value: u32) -> Self {
+        self.assertion_id_renderings
+            .push(TrustVcNativeAssertionIdRendering::new(source, value));
+        self
+    }
+
+    /// Attach the certificate's coverage judgement. Crate-private on purpose:
+    /// coverage is established only against the bundle a certificate cites,
+    /// which a caller holding just these binding parts cannot show.
+    pub(crate) fn with_coverage(mut self, coverage: NativeArtifactCoverage) -> Self {
+        self.coverage = coverage;
+        self
+    }
 }
 
 /// First-class native proof object bound to one assertion and TrustIr obligation.
+///
+/// # Decoding re-derives, and refuses a stale schema
+///
+/// A serialized artifact used to carry its `admission` and
+/// `artifact_fingerprint` verbatim, and the fingerprint bound neither the
+/// obligation status, the trusted flag nor the coverage judgement the
+/// admission was computed from — so an edited payload decoded as an accepted
+/// proof object whose fingerprint still matched. Decoding now refuses any
+/// `schema_version` but the current one (a v7 or v6 payload is stale),
+/// rebuilds the artifact from its binding fields through [`Self::new`] —
+/// recomputing the admission and the fingerprint — and never believes a
+/// coverage judgement: coverage is established only against the bundle, so a
+/// decoded artifact is rejected as
+/// [`TrustVcNativeArtifactRejection::CertificateCoverageNotJudged`] and its
+/// fingerprint differs from the accepted original's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "WireProofArtifact")]
 #[must_use]
 pub struct TrustVcNativeProofArtifact {
     schema_version: u32,
@@ -1175,12 +1516,79 @@ pub struct TrustVcNativeProofArtifact {
     certificate_digest: String,
     #[serde(default)]
     compiler_facts_binding: TrustVcNativeCompilerFactsBinding,
+    obligation_status: TrustVcNativeArtifactObligationStatus,
+    trusted: bool,
     artifact_fingerprint: String,
     admission: TrustVcNativeArtifactAdmission,
 }
 
+/// Deserialization mirror of [`TrustVcNativeProofArtifact`]: the binding
+/// fields only. `artifact_fingerprint` and `admission` are recomputed, never
+/// read (unknown to this mirror, so ignored).
+#[derive(Deserialize)]
+struct WireProofArtifact {
+    schema_version: u32,
+    assertion_id: String,
+    #[serde(alias = "tmir_module_digest")]
+    trust_ir_module_digest: String,
+    #[serde(default)]
+    request_digest: String,
+    #[serde(alias = "tmir_obligation_id")]
+    trust_ir_obligation_id: u32,
+    suite_identity: TrustVcNativeVerifierSuiteIdentity,
+    solver_identity: TrustVcNativeSolverIdentity,
+    evidence_digest: String,
+    certificate_digest: String,
+    #[serde(default)]
+    compiler_facts_binding: TrustVcNativeCompilerFactsBinding,
+    // Defaulted so a v6 payload (which has neither) reaches the schema check
+    // and is refused as stale, not as malformed. A v7 payload's
+    // `obligation_status` never names `certified`; it is refused as stale
+    // by its schema version all the same.
+    #[serde(default)]
+    obligation_status: TrustVcNativeArtifactObligationStatus,
+    #[serde(default)]
+    trusted: bool,
+}
+
+impl TryFrom<WireProofArtifact> for TrustVcNativeProofArtifact {
+    type Error = String;
+
+    fn try_from(wire: WireProofArtifact) -> Result<Self, Self::Error> {
+        if wire.schema_version != TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION {
+            return Err(format!(
+                "native proof artifact schema v{} is stale (current v{}): its admission and \
+                 fingerprint were written by an older rule and are not re-derivable from it; \
+                 re-admit the certificate from its bundle",
+                wire.schema_version, TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION
+            ));
+        }
+        // Coverage stays `NotJudged`: `TrustVcNativeProofArtifactInput::new`
+        // sets it, and only the validated bundle path can change it.
+        Ok(Self::new(
+            TrustVcNativeProofArtifactInput::new(
+                wire.assertion_id,
+                wire.trust_ir_obligation_id,
+                wire.evidence_digest,
+                wire.certificate_digest,
+            )
+            .with_trust_ir_module_digest(wire.trust_ir_module_digest)
+            .with_request_digest(wire.request_digest)
+            .with_suite_identity(wire.suite_identity)
+            .with_solver_identity(wire.solver_identity)
+            .with_obligation_status(wire.obligation_status)
+            .with_trusted(wire.trusted)
+            .with_compiler_facts_binding(wire.compiler_facts_binding),
+        ))
+    }
+}
+
 impl TrustVcNativeProofArtifact {
     /// Build and admit a native proof object from typed binding parts.
+    ///
+    /// The fingerprint binds every input of the admission — the binding, the
+    /// obligation status, the trusted flag and the coverage judgement — so two
+    /// artifacts whose admissions can differ never share one.
     pub fn new(input: TrustVcNativeProofArtifactInput) -> Self {
         let fingerprint_payload = NativeArtifactFingerprintPayload {
             schema_version: TRUST_VC_NATIVE_ARTIFACT_BINDING_SCHEMA_VERSION,
@@ -1193,11 +1601,15 @@ impl TrustVcNativeProofArtifact {
             evidence_digest: &input.evidence_digest,
             certificate_digest: &input.certificate_digest,
             compiler_facts_binding: &input.compiler_facts_binding,
+            obligation_status: input.obligation_status,
+            trusted: input.trusted,
+            coverage: &input.coverage,
         };
         let artifact_fingerprint = native_artifact_fingerprint(&fingerprint_payload);
         let admission =
             TrustVcNativeArtifactAdmission::from_native_admission_parts(NativeAdmissionParts {
                 assertion_id: &input.assertion_id,
+                assertion_id_renderings: &input.assertion_id_renderings,
                 trust_ir_module_digest: &input.trust_ir_module_digest,
                 request_digest: Some(&input.request_digest),
                 trust_ir_obligation_id: input.trust_ir_obligation_id,
@@ -1206,6 +1618,7 @@ impl TrustVcNativeProofArtifact {
                 trusted: input.trusted,
                 solver_identity: &input.solver_identity,
                 compiler_facts_binding: &input.compiler_facts_binding,
+                coverage: &input.coverage,
             });
 
         Self {
@@ -1219,9 +1632,21 @@ impl TrustVcNativeProofArtifact {
             evidence_digest: input.evidence_digest,
             certificate_digest: input.certificate_digest,
             compiler_facts_binding: input.compiler_facts_binding,
+            obligation_status: input.obligation_status,
+            trusted: input.trusted,
             artifact_fingerprint,
             admission,
         }
+    }
+
+    /// Return the upstream TrustIr obligation status the admission was computed from.
+    pub const fn obligation_status(&self) -> TrustVcNativeArtifactObligationStatus {
+        self.obligation_status
+    }
+
+    /// Return whether the native certificate uses trusted evidence.
+    pub const fn trusted(&self) -> bool {
+        self.trusted
     }
 
     /// Return the schema version used for this binding.
@@ -1405,6 +1830,9 @@ struct NativeArtifactFingerprintPayload<'a> {
     evidence_digest: &'a str,
     certificate_digest: &'a str,
     compiler_facts_binding: &'a TrustVcNativeCompilerFactsBinding,
+    obligation_status: TrustVcNativeArtifactObligationStatus,
+    trusted: bool,
+    coverage: &'a NativeArtifactCoverage,
 }
 
 fn native_artifact_fingerprint(payload: &NativeArtifactFingerprintPayload<'_>) -> String {
@@ -1501,4 +1929,86 @@ fn sha256_json(payload: &impl Serialize, context: &str) -> String {
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod coverage_basis_fingerprint_tests {
+    use super::*;
+    use crate::native_coverage::TrustVcNativeKernelClaimFamily;
+
+    fn basis(evidence_digest: &str) -> TrustVcNativeCoverageBasis {
+        TrustVcNativeCoverageBasis::KernelReplayedClaim {
+            obligation_id: 0,
+            prover: "trust_vc".to_string(),
+            evidence_digest: evidence_digest.to_string(),
+            family: TrustVcNativeKernelClaimFamily::ContractGroundDecision,
+        }
+    }
+
+    fn artifact(coverage: NativeArtifactCoverage) -> TrustVcNativeProofArtifact {
+        TrustVcNativeProofArtifact::new(
+            TrustVcNativeProofArtifactInput::new("1", 0, "evidence", "certificate")
+                .with_trust_ir_module_digest("module")
+                .with_request_digest("request")
+                .with_obligation_status(TrustVcNativeArtifactObligationStatus::Certified)
+                .with_coverage(coverage),
+        )
+    }
+
+    /// Schema 8: the fingerprint binds WHAT established the coverage, not
+    /// only that something did — two artifacts identical in every binding
+    /// field but the kernel-replayed certificate their coverage rests on
+    /// never share a fingerprint, and neither shares one with an unjudged
+    /// artifact.
+    #[test]
+    fn the_fingerprint_binds_the_coverage_basis() {
+        let first = artifact(NativeArtifactCoverage::Established(basis("sha256:aa")));
+        let second = artifact(NativeArtifactCoverage::Established(basis("sha256:bb")));
+        let unjudged = artifact(NativeArtifactCoverage::NotJudged);
+        assert_eq!(first.schema_version(), 8);
+        assert_ne!(first.artifact_fingerprint(), second.artifact_fingerprint());
+        assert_ne!(
+            first.artifact_fingerprint(),
+            unjudged.artifact_fingerprint()
+        );
+        assert_ne!(
+            second.artifact_fingerprint(),
+            unjudged.artifact_fingerprint()
+        );
+    }
+
+    /// `Certified` passes the STATUS check only; with no coverage judgement it
+    /// is still refused, by name, as not judged.
+    #[test]
+    fn a_certified_status_without_a_coverage_judgement_is_not_accepted() {
+        let unjudged = artifact(NativeArtifactCoverage::NotJudged);
+        let reasons = unjudged.admission().rejection_reasons();
+        assert!(!unjudged.admission().is_accepted());
+        assert!(reasons.contains(&TrustVcNativeArtifactRejection::CertificateCoverageNotJudged));
+        assert!(!reasons.contains(&TrustVcNativeArtifactRejection::ObligationTrusted));
+        assert!(!reasons.contains(&TrustVcNativeArtifactRejection::ObligationPending));
+    }
+
+    /// The retired row-judging labels decode as `certificate_coverage_not_judged`,
+    /// once, and never as an acceptance.
+    #[test]
+    fn retired_coverage_labels_decode_as_not_judged() {
+        let admission: TrustVcNativeArtifactAdmission = serde_json::from_value(serde_json::json!({
+            "status": "accepted",
+            "rejection_reasons": [
+                "certificate_coverage_unrecorded",
+                "certificate_coverage_request_unknown",
+                "certificate_coverage_obligation_not_requested",
+                "certificate_coverage_bound_mismatch",
+                "certificate_coverage_contested",
+                "certificate_coverage_not_established_for_module"
+            ]
+        }))
+        .expect("retired labels still decode");
+        assert!(!admission.is_accepted());
+        assert_eq!(
+            admission.rejection_reasons(),
+            &[TrustVcNativeArtifactRejection::CertificateCoverageNotJudged]
+        );
+    }
 }

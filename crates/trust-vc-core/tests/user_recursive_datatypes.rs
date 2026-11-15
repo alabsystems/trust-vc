@@ -149,11 +149,7 @@ fn ill_founded_recursion_proves_no_false() {
 fn unsupported_recursion_stays_fail_closed() {
     for func in ["use_stream", "use_even", "use_negpos"] {
         let result = verdict(func);
-        let is_fail_closed = match &result {
-            Err(_) => true,
-            Ok(VerifyResult::Error { .. }) => true,
-            _ => false,
-        };
+        let is_fail_closed = matches!(&result, Err(_) | Ok(VerifyResult::Error { .. }));
         assert!(
             is_fail_closed,
             "{func} must fail closed (no-base-case / mutual / negative-position \

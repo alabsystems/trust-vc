@@ -130,19 +130,6 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         1,
     ),
     (
-        // INCREMENT 1 (Fn-bound typing foundation) FLIP: an `F: Fn(u64) -> u64`
-        // value parameter is typed as a first-class `SpecFn(u64, u64)`, so `f(3)`
-        // lowers to the CONGRUENT `spec_fn_apply` UF. `Fn` is deterministic across
-        // calls, so two calls with equal arguments give the equal result — a
-        // SOUND, non-tautological property. Formerly fail-closed
-        // ("Undefined function: f"). The result stays otherwise unconstrained and
-        // `FnMut`/`FnOnce` remain fail-closed (see the adversarial suite
-        // `trust-vc-core/tests/fn_bound_closure_typing_soundness.rs`).
-        "exec_closure_fn_trait_bound_application_is_deterministic_verified",
-        "pass_closure_via_typ_param / Fn-bound closure argument call is deterministic",
-        1,
-    ),
-    (
         // INCREMENT 2a (Fn-bound callee-side obligation model) FLIP: an `F: Fn(u64)
         // -> u64` value parameter can now USE the closure's own spec. At `f(a)` the
         // callee-side seam emits the SOUND conditional assume `call_requires%(f, a)
@@ -254,6 +241,15 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
             "standalone closure",
             "assignment",
         ],
+    ),
+    (
+        // An `F: Fn(u64) -> u64` parameter called twice with the same argument:
+        // the congruent `spec_fn_apply` term proves `a == b`, which is false for
+        // a closure that reads shared state, so the `Verified` answer is refused
+        // (see `trust-vc-core/tests/callable_param_repeat_soundness.rs`).
+        "exec_closure_fn_trait_bound_application_is_deterministic_verified",
+        "pass_closure_via_typ_param / Fn-bound closure argument called twice",
+        &["bodiless call repeated"],
     ),
 ];
 

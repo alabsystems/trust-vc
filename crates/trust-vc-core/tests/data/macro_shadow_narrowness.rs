@@ -6,7 +6,12 @@
 //! for a capability loss.
 
 use trust_vc::{assume, ensures};
-use vstd::prelude::*;
+// A named import from the lane's own crate, not `vstd::prelude::*`: a glob
+// from outside the file can bind the primitive type names spelled here (the
+// type-name rule) and a trait whose method a call here takes (the trait
+// method rule), and either refuses a `Verified` answer, which these pins of
+// macro names do not test.
+use trust_vc_types::seq;
 
 /// The unqualified spelling — 78 occurrences in the ported corpus.
 #[trust_vc::ensures(true)]

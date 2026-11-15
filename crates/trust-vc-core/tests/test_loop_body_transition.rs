@@ -181,15 +181,13 @@ fn bad_post(mut i: i32) {
     );
 }
 
-/// GATE: a conditional (non-flat) body must NOT be captured — it falls back to
-/// pure havoc. This closes the stale-read false-Verified hole: with a body like
-/// `if c { i = i + 1 }` a naive capture would read a stale loop-head `i` for any
-/// later dependent assignment and could pin a transition that misses a real
-/// post-state. Here the invariant `i <= n` is in fact PRESERVED (guard `i < n`
-/// gives `i <= n-1`, so `i + 1 <= n` on the taken branch, and `i <= n` on the
-/// skipped branch), yet because the body is not flat we capture nothing and the
-/// inductive step havocs `i` — leaving the (true) invariant unproven. NOT
-/// verified is the SOUND, conservative direction (incomplete, never unsound).
+/// CONDITIONAL JOIN (flipped 2026-09-10): a flat `if c { i = i + 1 }` body is
+/// captured EXACTLY — the join binds `i` to `if c { i + 1 } else { i }`, so a
+/// later dependent assignment reads the joined value (never a stale loop-head
+/// `i`) and the inductive step sees both paths. The invariant `i <= n` is
+/// PRESERVED (guard `i < n` gives `i + 1 <= n` on the taken branch, `i <= n` on
+/// the skipped one), so this TRUE program verifies. The liars for the join live
+/// in `tests/conditional_body_join_transitions_capability.rs`.
 #[test]
 fn test_conditional_body_falls_back_to_havoc_not_verified() {
     let code = r#"
@@ -206,9 +204,9 @@ fn cond_body(mut i: i32, n: i32, c: bool) {
 "#;
     let result = verify("cond_body", code, "cond_body");
     assert!(
-        !result.is_verified(),
-        "a conditional (non-flat) body must fall back to havoc (no transition captured); \
-         capturing here would risk a false Verified, got: {result:?}"
+        result.is_verified(),
+        "a flat conditional body joins into a conditional value and stays in the \
+         exact lane, so the preserved invariant verifies, got: {result:?}"
     );
 }
 
@@ -361,8 +359,11 @@ fn let_shadow_modified(mut i: i32, mut n: i32) {
 }
 
 /// NARROWNESS PIN #2: `let mut` is re-assignable, so it is not a one-shot
-/// definition and stays out of the gate. Conservative — this program is TRUE
-/// and is over-rejected, which is the safe direction.
+/// definition and stays out of the EXACT gate. Since 2026-09-10 the havoc lane
+/// still captures the counter's single top-level write (`i = i + 1`, read
+/// only from itself — `havoc_lane_single_write_transitions`), so this TRUE
+/// program now verifies through that partial transition; the `let mut` itself
+/// is never modeled (nothing about `t` is assumed).
 #[test]
 fn test_let_mut_stays_out_of_exact_capture() {
     let code = r#"
@@ -379,15 +380,18 @@ fn let_mut_body(mut i: i32) {
 "#;
     let result = verify("let_mut_body", code, "let_mut_body");
     assert!(
-        !result.is_verified(),
-        "`let mut` can be re-assigned later in the body, so it must not be \
-         admitted into exact transition capture (fail-closed), got: {result:?}"
+        result.is_verified(),
+        "the counter's single top-level write is an exact transition even in the \
+         havoc lane (the `let mut` stays unmodeled), got: {result:?}"
     );
 }
 
 /// NARROWNESS PIN #3: a call initializer is exactly what `expr_is_pure_arith`
-/// exists to exclude — it need not be a total, side-effect-free function of the
-/// loop-head state. Conservative over-rejection.
+/// exists to exclude from the EXACT gate — it need not be a total,
+/// side-effect-free function of the loop-head state. Since 2026-09-10 the havoc
+/// lane captures the counter's single top-level write regardless (the call
+/// takes no `&mut i`; a `&mut i` argument would count as a second write and
+/// block the capture), so this TRUE program verifies.
 #[test]
 fn test_let_with_call_initializer_stays_out_of_exact_capture() {
     let code = r#"
@@ -407,8 +411,8 @@ fn let_call_body(mut i: i32) {
 "#;
     let result = verify("let_call_body", code, "let_call_body");
     assert!(
-        !result.is_verified(),
-        "a call initializer is not pure arithmetic and must keep the body out of \
-         exact transition capture (fail-closed), got: {result:?}"
+        result.is_verified(),
+        "the counter's single top-level write is an exact transition even in the \
+         havoc lane (the call initializer stays unmodeled), got: {result:?}"
     );
 }

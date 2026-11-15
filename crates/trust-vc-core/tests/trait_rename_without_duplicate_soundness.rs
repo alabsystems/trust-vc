@@ -298,7 +298,9 @@ pub fn liar<T: Alias>(x: T) -> u64 { trust_vc::assert!(x.m() == 9u64); 0u64 }
 /// `TraitBound::trait_name` too. With the bound unresolved the method was
 /// unsupported and the whole lane was dark; resolved, `bump()` must havoc the
 /// receiver so two `peek()` reads bracketing it are NOT equal, while the same
-/// program without the mutation still proves they are.
+/// program without the mutation still proves they are. An impl's `peek` can
+/// read a `Cell`, so that proof is refused as a repeated call; only a
+/// `Verified` answer becomes the refusal.
 #[test]
 fn a_renamed_bound_keeps_the_mut_self_mutation_framing() {
     const MUTATED: &str = r#"
@@ -326,10 +328,11 @@ pub fn probe<T: Alias>(t: &mut T) -> u64 {
         "`bump()` did not havoc the renamed-bound receiver — the dropped-mutation \
          false verify this map exists to prevent"
     );
+    let unmutated = verify("framingctl", "probe", UNMUTATED);
     assert!(
-        is_verified(&verify("framingctl", "probe", UNMUTATED)),
-        "no mutation happened, so the two reads ARE equal — havocing here would be \
-         over-rejection, not soundness"
+        matches!(&unmutated, VerifyResult::Error { message } if message.starts_with("bodiless call repeated")),
+        "without the mutation the two reads are one term, which is refused as a repeated \
+         call; a refutation here would be the framing over-rejecting: {unmutated:?}"
     );
 }
 

@@ -53,7 +53,7 @@ fn trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("trust-vc binary not found; run `cargo build` first");
+    panic!("trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first");
 }
 
 fn run(args: &[&str]) -> (String, String, i32) {

@@ -142,6 +142,18 @@ const EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "verified",
         3,
     ),
+    (
+        "test_generic_adt_eq_counterexample",
+        "test_generic_adt_eq",
+        "counterexample",
+        3,
+    ),
+    (
+        "test_generic_adt_u8_counterexample",
+        "test_generic_adt_u8",
+        "counterexample",
+        2,
+    ),
 ];
 
 // The tuple-struct destructure gap has closed (monomorphized tuple-field
@@ -443,15 +455,31 @@ fn adts_generics_rs_verified_subset_verifies_from_file() {
 
 #[test]
 fn adts_generics_rs_false_generic_struct_case_is_rejected_from_file() {
+    // Re-pinned 2026-09-13: these refutations used to be accepted as either
+    // Counterexample or a fail-closed Unknown; the engine now refutes every one
+    // with a model (the u8 lower bound with `a = 0`, the inequality as a
+    // hypothesis-robust reflexive disequality), so only Counterexample is the
+    // honest verdict. The two `test_generic_adt_*_counterexample` rows are the
+    // upstream cases verbatim (`one` with both asserts, `two`).
     for (case, upstream_case, min_obligations) in [
         (
-            "generic_struct_projection_wrong_inequality_currently_unknown",
+            "generic_struct_projection_wrong_inequality_counterexample",
             "test_generic_adt_eq false inequality",
             2,
         ),
         (
-            "generic_struct_u8_field_at_least_one_currently_unknown",
+            "generic_struct_u8_field_at_least_one_counterexample",
             "test_generic_adt_u8 false lower bound",
+            2,
+        ),
+        (
+            "test_generic_adt_eq_counterexample",
+            "test_generic_adt_eq",
+            3,
+        ),
+        (
+            "test_generic_adt_u8_counterexample",
+            "test_generic_adt_u8",
             2,
         ),
     ] {
@@ -461,11 +489,8 @@ fn adts_generics_rs_false_generic_struct_case_is_rejected_from_file() {
             "{case} ({upstream_case}) should collect at least {min_obligations} obligation(s), got {obligation_count}"
         );
         assert!(
-            matches!(
-                result,
-                VerifyResult::Counterexample { .. } | VerifyResult::Unknown { .. }
-            ),
-            "{case} ({upstream_case}) should fail closed or be rejected, got: {result:?}"
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{case} ({upstream_case}) should be refuted with a model, got: {result:?}"
         );
     }
 }
@@ -666,9 +691,9 @@ fn adts_generics_rs_generic_tuple_struct_field_projection_verifies_from_file() {
 fn adts_generics_rs_port_inventory_stays_intentional() {
     for case in [
         "generic_struct_projection_preserves_equal_payloads",
-        "generic_struct_projection_wrong_inequality_currently_unknown",
+        "generic_struct_projection_wrong_inequality_counterexample",
         "generic_struct_u8_field_nonnegative",
-        "generic_struct_u8_field_at_least_one_currently_unknown",
+        "generic_struct_u8_field_at_least_one_counterexample",
         "generic_spec_identity_preserves_projected_field",
         "generic_exec_identity_struct_field_currently_error",
         "generic_spec_identity_struct_field_currently_error",
@@ -684,6 +709,8 @@ fn adts_generics_rs_port_inventory_stays_intentional() {
         "generic_enum_match_extracts_payload_verified",
         "generic_enum_variant_helpers_currently_error",
         "generic_tuple_struct_destructure_currently_error",
+        "test_generic_adt_eq_counterexample",
+        "test_generic_adt_u8_counterexample",
     ] {
         let function = port_function(case);
         assert_eq!(

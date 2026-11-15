@@ -52,6 +52,9 @@ pub(crate) fn build_type_env(ctx: &VerificationContext) -> Result<TypeEnv, Trust
     for name in &ctx.manual_partial_eq_types {
         env.register_manual_partial_eq(name.clone());
     }
+    for method in &ctx.std_operator_methods {
+        env.register_std_operator_method(method.clone());
+    }
 
     // Register function context names so obligation conditions can reference them.
     // Zero-arity functions act as variables; N-arity functions are uninterpreted
@@ -104,6 +107,9 @@ pub(crate) fn build_type_env(ctx: &VerificationContext) -> Result<TypeEnv, Trust
         env.insert_fn(name.clone(), return_ty.clone());
         let param_types: Vec<_> = params.iter().map(|(_, ty)| ty.clone()).collect();
         env.insert_fn_params(name.clone(), param_types);
+        if let Some(generic_params) = ctx.helper_generic_params.get(name) {
+            env.insert_fn_generic_params(name.clone(), generic_params.clone());
+        }
     }
 
     register_trait_bound_methods(&mut env, ctx)?;
@@ -185,6 +191,17 @@ fn register_trait_bound_methods_for_bounds(
                 box_receiver: None,
             };
             register_method_metadata(env, &bound.type_param, &method.name, meta)?;
+            // H10 (method half): carry the method's OWN declaration-order
+            // generic parameters to the call site. `register_method_metadata`
+            // may have kept an equal existing entry rather than re-inserting,
+            // so record unconditionally — the list is a property of the
+            // declaration, and `insert_method_generic_params` ignores a method
+            // that has no metadata.
+            env.insert_method_generic_params(
+                bound.type_param.clone(),
+                method.name.clone(),
+                method.generic_params.clone(),
+            );
         }
     }
 
@@ -219,7 +236,12 @@ fn register_trait_bound_methods_for_bounds(
 ///   declaring `m`) — is NOT registered, so `s.m()` stays fail-closed (Verus
 ///   also rejects the ambiguity); and
 /// * an existing binding (datatype accessor, inherent method, generic bound)
-///   is never overridden — inherent methods shadow trait methods, as in Rust.
+///   is never overridden — inherent methods shadow trait methods, as in Rust;
+///   and
+/// * a member of a SIBLING-IMPL group — two impls of one trait for one self type
+///   (`impl Dm<bool> for S` beside `impl Dm<u32> for S`) — registers nothing and
+///   makes its trait's method keys ambiguous, so no call into the group
+///   resolves (`crate::trait_impl_groups`).
 ///
 /// This function is INFALLIBLE and purely additive: it never propagates a
 /// conflict error (which would taint the whole `build_type_env` and sink every
@@ -233,8 +255,14 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
     // wholesale rather than resolved to an arbitrary impl.
     let mut candidates: HashMap<(String, String), MethodMeta> = HashMap::new();
     let mut ambiguous: HashSet<(String, String)> = HashSet::new();
+    // H10 (method half): the declaration-order generic parameters of the trait
+    // method behind each candidate, keyed identically. A concrete receiver
+    // reaches the SAME shared UF as a bound receiver, so its call site needs
+    // the same carriage check.
+    let mut candidate_generics: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let collided = crate::trait_impl_groups::collided_group_members(&ctx.trait_impl_decls);
 
-    for impl_decl in &ctx.trait_impl_decls {
+    for (impl_decl, collided) in ctx.trait_impl_decls.iter().zip(collided) {
         // Resolve the concrete self type to a fully-concrete registered struct
         // datatype, mirroring `resolve_trait_impl_concrete_types`. Only then is
         // its `Box_T`/self sort guaranteed to be declared by the encoder.
@@ -251,6 +279,24 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
         else {
             continue;
         };
+
+        // SIBLING-IMPL GROUP (`crate::trait_impl_groups`): this impl shares its
+        // (trait, self type) key with another impl, so `Tr__m(Box_S(s))` — the
+        // term every spelling of the call lowers to, with the trait arguments
+        // and the self type's references erased — cannot say WHICH impl is
+        // called. Measured: beside `impl Dm<bool> for S {}` (default `d` = 2),
+        // `impl Dm<u32> for S { fn d -> 1 }` made `Dm::<u32>::d(&s) == 2` and
+        // `Dm::<bool>::d(&s) == Dm::<u32>::d(&s)` VERIFY. Mark every method key
+        // AMBIGUOUS rather than merely skipping: a skipped key would let an
+        // unrelated trait's impl claim `(S, m)` alone, and the UFCS lowering
+        // (`lower_concrete_trait_path_call`) keys on the receiver type, not on
+        // the trait the path names.
+        if collided {
+            for method in &trait_decl.methods {
+                ambiguous.insert((concrete_type_name.clone(), method.name.clone()));
+            }
+            continue;
+        }
 
         let box_fn = format!("Box_{concrete_type_name}");
 
@@ -288,6 +334,7 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
                             ambiguous.insert(key.clone());
                         }
                         None => {
+                            candidate_generics.insert(key.clone(), method.generic_params.clone());
                             candidates.insert(key, meta);
                         }
                     }
@@ -318,6 +365,7 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
                     ambiguous.insert(key.clone());
                 }
                 None => {
+                    candidate_generics.insert(key.clone(), method.generic_params.clone());
                     candidates.insert(key, meta);
                 }
             }
@@ -333,7 +381,9 @@ fn register_trait_impl_methods_for_concrete_types(env: &mut TypeEnv, ctx: &Verif
         if env.lookup_method(&key.0, &key.1).is_some() {
             continue;
         }
-        env.insert_method_metadata(key.0, key.1, meta);
+        let generic_params = candidate_generics.remove(&key).unwrap_or_default();
+        env.insert_method_metadata(key.0.clone(), key.1.clone(), meta);
+        env.insert_method_generic_params(key.0, key.1, generic_params);
     }
 }
 

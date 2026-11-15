@@ -68,24 +68,26 @@ pub const OPERATORS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         2,
     ),
     (
-        "custom_partial_eq_method_currently_blocked",
+        "custom_partial_eq_method_verified",
         "test_eq_overload",
-        "error",
-        0,
+        "verified",
+        3,
+    ),
+    (
+        "custom_partial_eq_method_negated_counterexample",
+        "test_eq_overload",
+        "counterexample",
+        3,
+    ),
+    (
+        "custom_partial_eq_method_structural_liar_counterexample",
+        "test_eq_overload",
+        "counterexample",
+        3,
     ),
 ];
 
-pub const OPERATORS_RS_FAIL_CLOSED_ERROR_PATTERNS: &[(&str, &[&str])] = &[(
-    "custom_partial_eq_method_currently_blocked",
-    &[
-        "eq",
-        "PartialEq",
-        "unsupported",
-        "unknown",
-        "opaque",
-        "unresolved",
-    ],
-)];
+pub const OPERATORS_RS_FAIL_CLOSED_ERROR_PATTERNS: &[(&str, &[&str])] = &[];
 
 pub fn operators_rs_expected_cases() -> &'static [(&'static str, &'static str, &'static str, usize)]
 {
@@ -196,9 +198,29 @@ fn boolean_logical_operator_wrong_counterexample() {
 }
 
 #[trust_vc::ensures(true)]
-fn custom_partial_eq_method_currently_blocked() {
+fn custom_partial_eq_method_verified() {
     let left = OperatorCustomPartialEq { value: 1 };
     let right = OperatorCustomPartialEq { value: 2 };
 
     trust_vc::assert!(left.eq(&right));
+}
+
+// Liar twins of upstream `test_eq_overload` (2026-09-11): the hand-written
+// `eq` is the INVERTED comparison `self.value != other.value`, and the call
+// means exactly that body — so the negation is refuted, and so is the
+// structural reading `{1}.eq(&{1})` (which the custom body makes FALSE).
+#[trust_vc::ensures(true)]
+fn custom_partial_eq_method_negated_counterexample() {
+    let left = OperatorCustomPartialEq { value: 1 };
+    let right = OperatorCustomPartialEq { value: 2 };
+
+    trust_vc::assert!(!left.eq(&right));
+}
+
+#[trust_vc::ensures(true)]
+fn custom_partial_eq_method_structural_liar_counterexample() {
+    let left = OperatorCustomPartialEq { value: 1 };
+    let same = OperatorCustomPartialEq { value: 1 };
+
+    trust_vc::assert!(left.eq(&same));
 }

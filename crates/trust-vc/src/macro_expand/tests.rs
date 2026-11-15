@@ -260,3 +260,97 @@ fn test_expand_track_let_exec_call_initializer_collects_runtime_value() {
         "track_let should preserve following statements in the scoped block: {expanded}"
     );
 }
+
+const PRECONDITION_CHECK: &str = "\"trust_vc precondition failed: {}\"";
+const POSTCONDITION_CHECK: &str = "\"trust_vc postcondition failed: {}\"";
+const ASSERTION_CHECK: &str = "\"trust_vc assertion failed: {}\"";
+const INVARIANT_CHECK: &str = "\"trust_vc loop invariant failed\"";
+
+#[track_caller]
+fn assert_only_type_checked(expanded: &str, check: &str, what: &str) {
+    assert!(
+        !expanded.contains(check) && expanded.contains("if false"),
+        "{what} should only be type-checked at run time: {expanded}"
+    );
+}
+
+#[test]
+fn test_a_clause_that_can_call_a_ghost_function_is_not_checked_at_run_time() {
+    for clause in [
+        quote!(inc(x) > 5u64),
+        quote!(s.view() == s.a),
+        quote!(v[i] == 0u64),
+    ] {
+        let requires = expand_requires(clause.clone()).to_string();
+        assert_only_type_checked(
+            &requires,
+            PRECONDITION_CHECK,
+            &format!("requires({clause})"),
+        );
+        let ensures = expand_ensures(clause.clone()).to_string();
+        assert_only_type_checked(&ensures, POSTCONDITION_CHECK, &format!("ensures({clause})"));
+        let parsed: syn::Expr = syn::parse2(clause.clone()).expect("clause should parse");
+        let assertion = expand_assert(clause.clone(), &parsed).to_string();
+        assert_only_type_checked(&assertion, ASSERTION_CHECK, &format!("assert!({clause})"));
+        let invariant = crate::macro_expand_ext::expand_invariant(clause.clone()).to_string();
+        assert_only_type_checked(
+            &invariant,
+            INVARIANT_CHECK,
+            &format!("invariant!({clause})"),
+        );
+    }
+}
+
+#[test]
+fn test_a_clause_that_calls_nothing_keeps_its_run_time_check() {
+    let requires = expand_requires(quote!(x < 100u64)).to_string();
+    assert!(
+        requires.contains(PRECONDITION_CHECK),
+        "requires(x < 100u64) should keep its run-time check: {requires}"
+    );
+    let ensures = expand_ensures(quote!(r == x + 1u64)).to_string();
+    assert!(
+        ensures.contains(POSTCONDITION_CHECK),
+        "ensures(r == x + 1u64) should keep its run-time check: {ensures}"
+    );
+    let clause = quote!(x + 1u64 > x);
+    let parsed: syn::Expr = syn::parse2(clause.clone()).expect("clause should parse");
+    let assertion = expand_assert(clause, &parsed).to_string();
+    assert!(
+        assertion.contains(ASSERTION_CHECK),
+        "assert!(x + 1u64 > x) should keep its run-time check: {assertion}"
+    );
+    let invariant = crate::macro_expand_ext::expand_invariant(quote!(i <= n)).to_string();
+    assert!(
+        invariant.contains(INVARIANT_CHECK),
+        "invariant!(i <= n) should keep its run-time check: {invariant}"
+    );
+}
+
+#[test]
+fn test_a_precondition_read_over_the_integers_is_not_checked_at_run_time() {
+    for clause in [quote!(z + 1u32 > z), quote!(-x < 0i64), quote!(a * b >= a)] {
+        let requires = expand_requires(clause.clone()).to_string();
+        assert_only_type_checked(
+            &requires,
+            PRECONDITION_CHECK,
+            &format!("requires({clause})"),
+        );
+    }
+    let measure = crate::macro_expand_ext::expand_loop_decreases(quote!(n - i)).to_string();
+    assert!(
+        measure.contains("if false"),
+        "loop_decreases!(n - i) should not be evaluated at run time: {measure}"
+    );
+    let plain = crate::macro_expand_ext::expand_loop_decreases(quote!(n)).to_string();
+    assert!(
+        !plain.contains("if false"),
+        "loop_decreases!(n) should still be evaluated: {plain}"
+    );
+}
+
+#[test]
+fn test_recommends_is_never_checked_at_run_time() {
+    let recommends = expand_recommends(quote!(x > 0u64)).to_string();
+    assert_only_type_checked(&recommends, "debug_assert !", "recommends(x > 0u64)");
+}

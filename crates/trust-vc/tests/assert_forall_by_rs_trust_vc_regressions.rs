@@ -750,3 +750,142 @@ fn assert_forall_by_rs_implies_hypothesis_is_load_bearing() {
          an opaque body leaked and the `uninterp` stand-in is unfaithful. Got {result:?}"
     );
 }
+
+// ===========================================================================
+// OBLIGATION-CONDITION RENDERING PINS
+//
+// An `obligation_fingerprints` entry in `evals/verus/verus-tests.json` is
+// `sha256(obligation.condition())` and nothing else — see
+// `cargo-trust-vc/src/verify.rs`'s `condition_fingerprint`. That makes the pin
+// a content commitment on a STRING the engine renders, and it means an engine
+// change that alters only the SPELLING of a condition turns the pin red with
+// two opaque hashes and no way to tell a re-rendering from an encoder
+// regression.
+//
+// That is not hypothetical. `7d300d66` ("top-level `==>`/`<==>` over a
+// let-bound local now resolves") routed the `__trust_vc_implies!` /
+// `__trust_vc_iff!` marker macros through the SCOPED renderer instead of the
+// verbatim token fallback. Its message says the change is "byte-identical for
+// param/literal operands"; the rendered string is not, on two counts —
+// `format_two_expr_macro` emits `marker!(lhs, rhs)` where the token fallback
+// emitted `marker ! (lhs , rhs)`, and the scoped renderer parenthesises each
+// variable occurrence. Three `assert_forall_by.rs` pins moved:
+//
+//   assert forall|x: int| 0 <= x implies 1 <= f1(x)
+//     before  __trust_vc_implies ! (0int <= x , 1int <= f1 (x))
+//     after   __trust_vc_implies!(0int <= (x), 1int <= f1((x)))
+//
+//   assert forall|x: int| implies_f(x) ==> implies_g(x)
+//     before  __trust_vc_implies ! (implies_f (x) , implies_g (x))
+//     after   __trust_vc_implies!(implies_f((x)), implies_g((x)))
+//
+// Same connective, same two operands, same binder, same symbols: a spelling
+// change, and the pins were stale rather than tripped. They sat red and
+// unexplained for two months because nothing recorded the TEXT.
+//
+// These two tests are that record. The first pins the rendered condition
+// itself, so the next drift reports two readable strings instead of two
+// hashes; the second re-derives the manifest fingerprint from that same string,
+// so the rendering and the manifest can never move apart — change one without
+// the other and one of these two fails.
+// ===========================================================================
+
+/// `(port case, obligation name, rendered condition)` for the assert-forall-by
+/// GOAL of every case whose pin is over a `==>` / `implies` matrix.
+const ASSERT_FORALL_BY_GOAL_RENDERINGS: &[(&str, &str, &str)] = &[
+    (
+        "forallstmt2_test",
+        "assert_forall_by_0",
+        "__trust_vc_implies!(0int <= (x), 1int <= f1((x)))",
+    ),
+    (
+        "forallstmt2_test_fails1",
+        "assert_forall_by_0",
+        "__trust_vc_implies!(0int <= (x), 1int <= f1((x)))",
+    ),
+    (
+        "forallstmt_implies",
+        "assert_forall_by_0",
+        "__trust_vc_implies!(implies_f((x)), implies_g((x)))",
+    ),
+];
+
+fn sha256_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let mut out = String::from("sha256:");
+    for byte in hasher.finalize() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+#[test]
+fn assert_forall_by_rs_goal_condition_rendering_is_pinned() {
+    for (case, obligation_name, expected_condition) in ASSERT_FORALL_BY_GOAL_RENDERINGS {
+        let vc = extract_port_case(case);
+        let rendered = vc
+            .obligations()
+            .iter()
+            .find(|obligation| obligation.name() == *obligation_name)
+            .map(|obligation| obligation.condition().to_string())
+            .unwrap_or_else(|| panic!("{case} should raise an obligation named {obligation_name}"));
+        assert_eq!(
+            rendered.as_str(),
+            *expected_condition,
+            "{case}/{obligation_name}: the RENDERED obligation condition moved.\n  \
+             was: {expected_condition}\n  now: {rendered}\n\
+             Read the two strings before doing anything else. If they denote the SAME \
+             obligation (a binder renamed, a paren added, spacing), this is a rendering \
+             change: update this pin AND re-pin the manifest from an observed run \
+             (`cargo trust-vc evidence --run-trust-vc-corpus \
+             --repin-obligation-rendering-drift \
+             source/rust_verify_test/tests/assert_forall_by.rs`). If the obligation \
+             itself changed — a different goal, a different hypothesis set, a quantifier \
+             scoped differently — the encoder regressed and the pin caught it: fix the \
+             engine and leave both pins alone."
+        );
+    }
+}
+
+#[test]
+fn assert_forall_by_rs_goal_rendering_matches_the_manifest_fingerprint() {
+    let source =
+        std::fs::read_to_string(verus_manifest_path()).expect("Verus manifest should be readable");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&source).expect("Verus manifest should parse as JSON");
+    let row = manifest["entries"]
+        .as_array()
+        .expect("Verus manifest should contain entries")
+        .iter()
+        .find(|entry| {
+            entry["upstream_path"].as_str()
+                == Some("source/rust_verify_test/tests/assert_forall_by.rs")
+        })
+        .expect("Verus manifest should contain assert_forall_by.rs row");
+
+    for (case, obligation_name, expected_condition) in ASSERT_FORALL_BY_GOAL_RENDERINGS {
+        let fingerprint = sha256_fingerprint(expected_condition);
+        let declared_case = row["expected_cases"]
+            .as_array()
+            .expect("assert_forall_by.rs row should contain expected_cases")
+            .iter()
+            .find(|entry| entry["case_id"].as_str() == Some(*case))
+            .unwrap_or_else(|| panic!("manifest should declare case {case}"));
+        let pinned = declared_case["obligation_fingerprints"]
+            .as_array()
+            .unwrap_or_else(|| panic!("case {case} should pin obligation fingerprints"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|declared| declared == fingerprint);
+        assert!(
+            pinned,
+            "{case}/{obligation_name}: the manifest does not pin {fingerprint}, which is \
+             sha256 of the rendered condition `{expected_condition}`. A fingerprint IS that \
+             hash (cargo-trust-vc/src/verify.rs `condition_fingerprint`), so the rendering \
+             pin above and evals/verus/verus-tests.json have drifted apart — whichever was \
+             changed, the other must move with it."
+        );
+    }
+}

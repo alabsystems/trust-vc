@@ -283,37 +283,102 @@ fn lock_collector(collector: &Arc<Mutex<ReportCollector>>) -> MutexGuard<'_, Rep
     }
 }
 
-/// Returns `true` when the current step's proof certificate passed strict
-/// validation.  Used by the confirmation-skip optimisation (Slice 3 of #2706):
-/// a strict UNSAT proof is a stronger guarantee than a second solver run, so
-/// we can skip the collection-confirmation re-check.
+/// True iff a STRICT-checked refutation of `obligation`'s own negated goal has
+/// been recorded for the step currently open.
+///
+/// "Strict-checked" is [`ProofCertificate::strict_verified`], which requires
+/// the certificate's premises to be the posed query: a refutation with a
+/// premise trust-vc never asserted is no determinism guarantee about the
+/// obligation, so the confirmation re-solve runs for it.
+///
+/// Callers use this to skip the confirmation re-solve (#2706 slice 3): a strict
+/// proof certificate is a stronger determinism guarantee than running the same
+/// query a second time. That argument holds only for the assertion the
+/// certificate actually refutes, so the identity is a parameter (#2654).
+///
+/// This used to take no argument and, when the open step had no certificate,
+/// fall through to `collector.proof` — the unit-level "last proof produced"
+/// slot, which routinely belongs to a DIFFERENT obligation. Under that fallback
+/// assertion `A` could skip its confirmation check because assertion `B` had
+/// produced a strict proof, which is not a determinism guarantee about `A` at
+/// all. There is no correct unit-level answer to a per-assertion question, so
+/// the fallback is gone: no per-assertion certificate means `false`, and the
+/// confirmation re-solve runs. That is the fail-closed direction — it can only
+/// add checking.
 #[cfg(feature = "proof-certificates")]
-pub(crate) fn current_proof_is_strict() -> bool {
+pub(crate) fn current_proof_is_strict(obligation: &str) -> bool {
     ACTIVE_CAPTURE.with(|slot| {
         let guard = slot.borrow();
         let Some(capture) = guard.as_ref() else {
             return false;
         };
         let collector = lock_collector(&capture.collector);
-        if let Some(step_index) = capture.step_stack.last().copied() {
-            if let Some(step) = collector.steps.get(step_index) {
-                if let Some(proof) = step.proof() {
-                    return proof.strict_verified();
-                }
-            }
-        }
-
-        collector
-            .proof
-            .as_ref()
-            .is_some_and(|p| p.strict_verified())
+        let Some(step_index) = capture.step_stack.last().copied() else {
+            return false;
+        };
+        let Some(step) = collector.steps.get(step_index) else {
+            return false;
+        };
+        step.proof()
+            .is_some_and(|proof| proof.strict_verified() && proof.refutes_obligation(obligation))
     })
 }
 
+/// Record the solver's UNSAT refutation of `refuted_obligation`'s negated goal.
+///
+/// `refuted_obligation` is the `PreparedObligation::name` of the goal that was
+/// actually negated and asserted into the scope the solver just decided UNSAT.
+/// It comes from the solve site, which holds the obligation itself.
+///
+/// # Identity binding (#2654)
+///
+/// The certificate is attached to the open report step ONLY when that step's
+/// label is `refuted_obligation`. That equality is what makes the attachment a
+/// claim about the step's own goal.
+///
+/// The check is not cosmetic. Several paths issue more than one solver query
+/// under a single obligation step, and this function used to attach whatever
+/// arrived last:
+///
+/// * `verification::split::try_verify_quantified_conjunction_split` discharges
+///   `forall x. (C1 AND ... AND Cn)` as `n` separate `forall x. Ck` queries
+///   under the parent's step. Each sub-query names itself
+///   `"<parent> [forall conjunct k of n]"`, so the last one used to overwrite
+///   the parent step's certificate with a refutation of `Ck` alone — measured
+///   in `tests/proof_certificate_assertion_identity.rs`.
+/// * `try_localize_failure` splits the same way on the counterexample path.
+///
+/// A mismatched artifact is DROPPED rather than attached. That leaves the step
+/// with no certificate, which every downstream consumer already treats as "no
+/// replayable evidence" and fails closed on under a policy that requires one. It
+/// is never replaced by a weaker or synthesized certificate.
+///
+/// A mismatch does not disturb a certificate already attached for this step's
+/// own goal: an Alethe refutation is self-contained (it carries its own `assume`
+/// steps), so a genuine refutation of `NOT goal` stays a genuine refutation of
+/// `NOT goal` no matter what query runs afterwards. Dropping it would lose real
+/// evidence for no soundness gain.
+///
+/// # Premise binding
+///
+/// Identity says which query was refuted; it does not say the certificate's
+/// `assume` steps ARE that query. `evidence` is computed at the solve site,
+/// which still holds the query trust-vc posed (see
+/// `kernel_bridge::certify_last_refutation`): it binds the premises and runs
+/// the kernel. It is evaluated only when a report is capturing, and before the
+/// certificate is attached anywhere, so neither a step nor `collector.proof`
+/// ever carries a strict or kernel claim for a certificate whose premises are
+/// foreign to the query.
+///
+/// `collector.proof` still receives every artifact (it is the unit-level
+/// "last proof produced" slot, used for diagnostics and for the single-assertion
+/// fallback in `trust-vc-trust-engine`). It now carries its own identity, so
+/// that fallback can check the binding instead of inferring it from cardinality.
 #[cfg(feature = "proof-certificates")]
 pub(crate) fn record_proof_artifact(
     artifact: &ay_dpll::api::UnsatProofArtifact,
-    proof: Option<&ay_core::Proof>,
+    evidence: impl FnOnce() -> super::kernel_bridge::CertificateEvidence,
+    refuted_obligation: &str,
 ) {
     ACTIVE_CAPTURE.with(|slot| {
         let guard = slot.borrow();
@@ -323,18 +388,27 @@ pub(crate) fn record_proof_artifact(
         if capture.suppression_depth > 0 {
             return;
         }
-        let mut cert = ProofCertificate::from_artifact(artifact);
-
-        // Run the trust-vc-kernel independent checker if the raw proof is available.
-        if let Some(ay_proof) = proof {
-            let kernel_ok = super::kernel_bridge::verify_proof_with_kernel(ay_proof, None);
-            cert = cert.with_kernel_verified(kernel_ok);
-        }
+        let cert = ProofCertificate::from_artifact(artifact, refuted_obligation)
+            .with_evidence(&evidence());
 
         let mut collector = lock_collector(&capture.collector);
         if let Some(step_index) = capture.step_stack.last().copied() {
             if let Some(step) = collector.steps.get_mut(step_index) {
-                step.proof = Some(cert.clone());
+                if cert.refutes_obligation(&step.label) {
+                    step.proof = Some(cert.clone());
+                } else {
+                    // This refutation is of a DIFFERENT goal than the one this
+                    // step reports (a sub-query of a split, typically). It is a
+                    // real refutation, but not of this assertion, so it may not
+                    // stand as this assertion's certificate.
+                    tracing::debug!(
+                        step_label = %step.label,
+                        refuted_obligation = %refuted_obligation,
+                        existing_proof = step.proof.is_some(),
+                        "dropping proof certificate: it refutes a different goal \
+                         than the step it would be attached to (#2654)"
+                    );
+                }
             }
         }
         collector.proof = Some(cert);

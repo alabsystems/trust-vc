@@ -118,7 +118,7 @@ pub(in crate::encoder) fn verify_with_confirmation(
                 // Slice 3 of #2706: skip confirmation when a strict proof
                 // certificate is available (stronger than a second solver run).
                 #[cfg(feature = "proof-certificates")]
-                if crate::verification_report::current_proof_is_strict() {
+                if crate::verification_report::current_proof_is_strict(&assertion.name) {
                     tracing::debug!(
                         assertion = %assertion.name,
                         "skipping inductive-step confirmation — strict proof certificate available"
@@ -151,8 +151,11 @@ pub(in crate::encoder) fn verify_with_confirmation(
                         crate::verification_report::record_used_assumptions(&[]);
                         Ok(AssertionOutcome::Unknown {
                             reason: format!(
-                                "Confirmation check disagreed for '{}' (inductive step): {:?} \
-                                 — possible ay-dpll non-determinism (#2241)",
+                                "Confirmation check disagreed for '{}' (inductive step): \
+                                 the re-solve returned {:?} — fail-closed. That can be a \
+                                 genuine solver disagreement (ay #2241), a timeout, or ay \
+                                 declining to publish a computed result whose envelope \
+                                 expired; read the outcome before attributing it",
                                 assertion.name, other
                             ),
                             category: Some(UnknownCategory::ConfirmationDisagree),

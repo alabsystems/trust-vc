@@ -191,6 +191,7 @@ fn outcome_predicates_are_consistent() {
             location: None,
             result: VerifyResult::Counterexample {
                 obligation_name: "f".to_string(),
+                location: None,
                 model: None,
                 bindings: Vec::new(),
             },

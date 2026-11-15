@@ -13,7 +13,7 @@ use super::obligation::{InvariantMask, ProofObligation, TypedProofObligation};
 use crate::counterexample_names::CounterexampleVarMeta;
 use crate::ir::{TraitDecl, TraitImplDecl};
 use crate::solver_budget::ConflictBudget;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Typed helper function signature: (return_type, params, trait_bounds).
 pub(crate) type HelperFnSignature = (
@@ -43,11 +43,24 @@ pub(crate) type InherentMethodSignature =
 /// - `Value` (`self` / `mut self`): the receiver is moved into the callee; it
 ///   cannot mutate the *caller's* binding (which is consumed), so reads of the
 ///   pre-call value are sound — treated as non-mutating for the caller.
+/// - `ValueMutRef` (by-value `self` of an `impl .. for &mut T`): the receiver
+///   IS the `&mut T`, so the call mutably reborrows the CALLER's binding
+///   exactly like `&mut self` does — but the body extractor POISONS the binding
+///   instead of havocking it (review round 2: the havoc REFUTED runtime-true
+///   claims about untouched fields, results and postconditions — `s.peek();
+///   assert!(s.a == 5u64)` — that HEAD verified; the poison fails them closed
+///   as `unresolved variable`). It counts as a mutation for every fail-closed
+///   classification (`struct_method_mutates_caller`, the value-lane effect
+///   scanner, the `&mut`-struct postcondition reject); the loop / branch
+///   modified-set collector leaves it OUT of the modified set, so the region
+///   exit re-poisons the receiver (a branch) or refuses the loop instead of
+///   framing a havoc that would refute a true claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelfReceiverKind {
     RefMut,
     Ref,
     Value,
+    ValueMutRef,
 }
 
 /// Context about the function being verified.
@@ -238,6 +251,72 @@ pub struct VerificationContext {
     /// O(1) name→index lookup into `variables`. Maintained by `declare_var*`
     /// and `push_variable`. Part of #1684.
     variable_index: HashMap<String, usize>,
+    /// ROUND 6 — the exec-container-vs-spec-collection provenance of each
+    /// declared variable's ORIGIN SYN SPELLING, recorded at the parameter-typing
+    /// seam and nowhere else. See [`CollectionOrigin`].
+    ///
+    /// Kept as a SIDE TABLE rather than a `VariableDecl` field deliberately: a
+    /// missing entry and [`CollectionOrigin::Unknown`] mean the same thing — no
+    /// provenance was observed, fail closed — so every `VariableDecl` built
+    /// outside the seam (hundreds of them, almost all in tests) keeps meaning
+    /// exactly what it meant before, and no construction site can silently
+    /// assert a provenance it never measured.
+    collection_origins: HashMap<String, CollectionOrigin>,
+    /// ROUND 7 — the SAME provenance for a STRUCT FIELD, keyed by
+    /// (carrier datatype name, field name) and recorded from the field's own
+    /// ORIGIN SYN SPELLING when the source struct is registered
+    /// (`vc_extraction::register_struct_defs`). `StructDef` records MODELED
+    /// field types only, so without this table a spec `Seq<u64>` field and an
+    /// exec `Vec<u64>` field are the same `TrustVcType::Seq` and nothing can
+    /// tell them apart — which is how an exec `Vec<int>` FIELD bought the
+    /// ghost-closure skip that the PARAMETER seam denies the identical
+    /// spelling.
+    ///
+    /// A SIDE TABLE for the same reason [`Self::collection_origins`] is one: a
+    /// missing entry and [`CollectionOrigin::Unknown`] mean the same thing — no
+    /// provenance was observed, fail closed — so every `StructDef` built
+    /// outside the source-struct seam (the encoder tests, `from_parts`, the IR
+    /// lane) keeps meaning exactly what it meant before, and no construction
+    /// site can assert a provenance it never measured.
+    struct_field_collection_origins: HashMap<(String, String), CollectionOrigin>,
+    /// ROUND 7 — the same provenance for a TUPLE COMPONENT of ONE DECLARED
+    /// BINDING, keyed by (variable name, component index as written: `"0"`,
+    /// `"1"`, …).
+    ///
+    /// Keyed by the BINDING and not by the carrier, deliberately, and this is a
+    /// soundness point rather than a convenience: a tuple's carrier name is
+    /// derived from its MODELED element types
+    /// ([`crate::ir_expr::tuple_datatype_name`]), so `(Vec<int>, u64)` and
+    /// `(Seq<int>, u64)` produce the IDENTICAL carrier name `(Seq<int>,u64)`
+    /// after the collapse. A carrier-keyed entry would therefore let one
+    /// spelling answer for the other — exactly the confusion this table exists
+    /// to end. The binding's own parameter type string is the one place a tuple
+    /// component's spelling survives.
+    binding_tuple_component_origins: HashMap<(String, String), CollectionOrigin>,
+    /// ROUND 10 — the spec-collection / spec-function NAMES this SOURCE FILE
+    /// REDEFINES with an item of its own (`type Seq<T> = Vec<T>;`,
+    /// `struct Seq { .. }`, `enum Map { .. }`, `type SpecFn = u64;`).
+    ///
+    /// SOUNDNESS. Every ghost reading in the closure lane keys on a BARE NAME:
+    /// the spec-collection type table
+    /// (`param_extract::syn_type_string_is_spec_collection`), the ghost
+    /// CONSTRUCTOR path (`Seq::new(..)`) and the `SpecFn`/`FnSpec` sink. Round 9
+    /// narrowed the first of those to spellings written WITH arguments, which
+    /// closed a bare monomorphic alias and left every other shape open.
+    /// Measured at `5106f577`, cache off, all `Verified` on bodies that ALWAYS
+    /// divide by zero, each against the identical body whose only difference is
+    /// the NAME: a generic alias `type Seq<T> = Vec<T>` at a parameter, at a
+    /// struct FIELD and at a `let`; the same through a module re-export; a user
+    /// `struct Seq` with `Seq::new()`; a monomorphic `type Seq = Vec<u64>` with
+    /// `Seq::new()`; the constructor-as-SINK `Seq::build(n, |i| ..)`; and
+    /// `SpecFn::new(|x| ..)` over `type SpecFn = u64`.
+    ///
+    /// A name an item in this file DEFINES is not the spec collection, so every
+    /// one of those readings must fall through to `Unknown`/not-ghost, which
+    /// fails closed into a definition-site body check. The cost is the file that
+    /// defines the ghost types THEMSELVES (vstd's own `seq.rs`): there the
+    /// ghost skip is refused, which is the sound direction.
+    shadowed_spec_names: HashSet<String>,
     /// Variables whose Rust source type was an immutable reference erased to
     /// its referent type for verification. This lets lowering accept exactly
     /// one `*x` dereference for shared-reference parameters without making all
@@ -247,6 +326,12 @@ pub struct VerificationContext {
     /// This lets lowering accept `ghost.view()` as identity without making
     /// ordinary `T::view()` calls identity.
     pub(crate) erased_ghost_vars: HashSet<String>,
+    /// Name of the return binding a `postcondition` obligation reads (`result`
+    /// unless the contract renames it), set by function extraction before the
+    /// body is walked. The body walk uses it to check every postcondition at
+    /// each explicit `return`, with the returned value substituted, against
+    /// only the facts established before that `return`.
+    pub(crate) postcondition_result_var: Option<String>,
     pub(crate) function_context: Option<FunctionContext>,
     pub(crate) verification_mode: VerificationMode,
     pub(crate) overflow_behavior: OverflowBehavior,
@@ -269,6 +354,13 @@ pub struct VerificationContext {
     /// like a param's `requires`, without leaking into the inductive step or
     /// post-loop (both of which havoc the modified var). Keyed by invariant name.
     pub(crate) loop_entry_scopes: HashMap<String, Vec<ProofObligation>>,
+    /// Loop invariants of a loop NESTED in another loop's body (2026-09-10).
+    /// Their base (entry) check must not see the function's entry facts about
+    /// the vars the nested loop modifies: at a nested entry those vars hold
+    /// their site value over the enclosing head (the entry scope binds it),
+    /// not their function-entry value. The typed base case filters those
+    /// assumptions out for the names here.
+    pub(crate) loop_nested_entry_invariants: HashSet<String>,
     /// Bound variable declarations scoped to `assert_forall_by` obligations.
     /// These are available only while proving the matching `AssertBy`, not as
     /// globally declared verification variables. Part of #2551.
@@ -282,6 +374,14 @@ pub struct VerificationContext {
     pub(crate) source_type_aliases: HashMap<String, crate::ir::TrustVcType>,
     pub(crate) loop_guards: HashMap<String, String>,
     pub(crate) loop_modified_vars: HashMap<String, Vec<String>>,
+    /// Which LOOP each loop-lane obligation (invariant, except-break invariant,
+    /// `loop_ensures`, exit/continue-site check, measure) belongs to, keyed by
+    /// obligation name (2026-09-11). An inductive step, measure step, exit
+    /// check or normal-exit `loop_ensures` assumes exactly the invariants of
+    /// ITS OWN loop at the pre-state — all of them, as Verus does — never
+    /// another loop's (an earlier loop's invariant is not a fact at a later
+    /// loop's head; assuming it there was a measured false-verify).
+    pub(crate) loop_invariant_groups: HashMap<String, usize>,
     /// Straight-line loop-body state transition for each loop invariant, keyed
     /// by invariant name. Each entry maps a loop-modified variable to the
     /// scoped-value string giving its post-body value expressed over loop-head
@@ -302,10 +402,15 @@ pub struct VerificationContext {
         HashMap<crate::ir::ImplMethodKey, crate::ir::ConformanceMethodBody>,
     /// The impl method's OWN declared `#[trust_vc::ensures(..)]` postconditions,
     /// keyed by the concrete UF name (`Type__method`). Populated ONLY for
-    /// non-exempt impl methods whose single-pure-return body was ALSO captured
-    /// (`trait_impl_method_bodies`), so the conformance pass can pin
-    /// `result == body` and VERIFY `body ⊨ impl_ensures` before any caller is
-    /// allowed to assume the strengthened postcondition. Consumed by the
+    /// non-exempt methods of a NON-external impl whose single-pure-return body
+    /// was ALSO captured (`trait_impl_method_bodies`), so the conformance pass
+    /// can pin `result == body` and VERIFY `body ⊨ impl_ensures` before any
+    /// caller is allowed to assume the strengthened postcondition. The clauses
+    /// are stored in POSITIONAL canonical form — the i-th non-receiver parameter
+    /// spelled `__trust_vc_conf_arg_{i}`, the captured body's numbering — never
+    /// in the impl's (or the trait's) parameter names, and a method whose clauses
+    /// admit no exact rewrite is not registered at all
+    /// (`canonicalize_impl_method_ensures`). Consumed by the
     /// conformance-extension (assert) and the impl-postcondition propagation
     /// axiom. Empty for impls that declare no own `ensures`. Part of the
     /// impl-ensures conformance-extension + propagation (traits_extend_ensures).
@@ -325,6 +430,15 @@ pub struct VerificationContext {
     /// available in TypeEnv, not just the last-called one (which overwrites
     /// `function_context`). Part of #2431, #2053, #2425.
     pub(crate) helper_functions_typed: HashMap<String, HelperFnSignature>,
+    /// H10: the declaration-order names of a registered helper's type and const
+    /// generic parameters (lifetimes skipped). Recorded ONLY by a registration
+    /// that has checked generic carriage
+    /// (`spec_function_catalog::check_generic_declaration`), so the call-site
+    /// check can map a multi-argument turbofish onto the carrying positions. A
+    /// helper without an entry keeps the fail-closed single-argument rule, and
+    /// re-declaring a helper clears its entry: a stale order can never describe
+    /// a different signature.
+    pub(crate) helper_generic_params: HashMap<String, Vec<String>>,
     /// Inherent-impl method metadata for `recv.method(args)` lowering, keyed by
     /// `(self_type_string, method_name)`. Populated by inherent-method extraction
     /// and threaded into `TypeEnv` method metadata by `build_type_env`. Part of A3.
@@ -368,6 +482,10 @@ pub struct VerificationContext {
     /// operator on them (or any datatype transitively containing one) must NOT
     /// structural-lower — see `ir_lowering::operators` and `TypeEnv::has_manual_partial_eq`.
     pub(crate) manual_partial_eq_types: HashSet<String>,
+    /// The operator methods (`add`, `shl`, `shr`) that are the std operator on
+    /// a primitive integer in this function's source file: the std trait is in
+    /// scope at every call of them there. The lowering refuses any other.
+    pub(crate) std_operator_methods: BTreeSet<String>,
     /// Type invariant predicates for struct types. Maps type name → invariant
     /// body expression written in terms of field selectors. Part of #2419 Slice 2.
     pub(crate) type_invariants: HashMap<String, crate::ir::TrustVcExpr>,
@@ -451,6 +569,60 @@ pub struct VerificationContext {
     /// wins). `None` for every function without a failing closure def-side
     /// check — a verified or absent closure contributes nothing.
     pub(crate) closure_def_side_failure: Option<crate::VerifyResult>,
+    /// Why a `Verified` answer for this context cannot be published, when one
+    /// cannot. [`Self::verify`] turns a `Verified` result into an `Error`
+    /// carrying this message and leaves every other result unchanged. Set by
+    /// the file lane for a file whose type spellings need not denote the types
+    /// extraction read (`vc_extraction::type_name_rebinding`).
+    pub(crate) verified_refusal: Option<String>,
+    /// The source file obligations raised in this context belong to, for
+    /// DIAGNOSTIC location only.
+    ///
+    /// Set by the file-context lane (`verify_function_from_file` and the
+    /// `cargo trust-vc` scan), which is the only lane that knows a path.
+    /// Nothing about verification reads it — it is stamped onto the rendered
+    /// `file:line:column` so a refuted obligation can be traced back to a line
+    /// of the file the corpus runner scanned.
+    pub(crate) diagnostic_source_file: Option<String>,
+    /// The source position currently being extracted.
+    ///
+    /// The file lane raises obligations from deep inside a syn walk, far from
+    /// any one place that could attach a span, so the walk parks the enclosing
+    /// STATEMENT's position here and [`Self::push_obligation`] stamps it onto
+    /// every obligation that does not already carry a more precise one. A
+    /// statement is the right granularity because it is what the evidence
+    /// gate's span reader expands from: it walks forward from the reported line
+    /// until delimiter depth returns to zero, which is exactly the statement
+    /// upstream Verus marks with `FAILS`.
+    pub(crate) ambient_source_location: Option<crate::SourceLocation>,
+}
+
+/// What a variable's ORIGIN SYNTACTIC SPELLING says about whether a collection
+/// it models is an EXEC container or a SPEC collection.
+///
+/// SOUNDNESS-CRITICAL, and the reason this is a TRI-state rather than a bool.
+/// `Vec<u64>` and `Seq<u64>` both lower to `TrustVcType::Seq`; `BTreeSet<u64>`
+/// and `Set<int>` both lower to `TrustVcType::Set`; `HashMap<u64,u64>` and
+/// `Map<int,int>` both lower to `TrustVcType::Map`. After that collapse NOTHING
+/// distinguishes an exec container from a spec collection, so the distinction is
+/// captured HERE, from the per-binding origin type string, at the
+/// parameter-typing seam — and nowhere else.
+///
+/// BOTH readings are POSITIVE-only. A spelling that matches neither positive
+/// table is [`CollectionOrigin::Unknown`], never silently one of the other two:
+/// a consumer that needs the distinction must FAIL CLOSED on `Unknown` rather
+/// than guess. (Round 6: reading `Unknown` as "spec" is exactly what let an exec
+/// `BTreeSet`/`HashSet`/`BTreeMap` buy the ghost-closure skip.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CollectionOrigin {
+    /// The spelling matched neither positive table. FAIL CLOSED.
+    #[default]
+    Unknown,
+    /// An EXEC std container: `Vec`/slice/array, `VecDeque`, `BTreeSet`,
+    /// `HashSet`, `BTreeMap`, `HashMap`, `BinaryHeap`, `LinkedList`.
+    Exec,
+    /// A SPEC collection: `Seq`, `Set`, `Map`, `Multiset`.
+    Spec,
 }
 
 /// A named variable declaration with its TrustVc type, used in verification contexts.
@@ -518,6 +690,16 @@ impl VerificationContext {
     }
 
     /// Creates a context from pre-built variable declarations and proof obligations.
+    ///
+    /// NOTE (round 6): a `VariableDecl` carries the `bounded_len` bit but NOT the
+    /// [`CollectionOrigin`] side table, so a context rebuilt this way keeps the
+    /// Vec-vs-Seq reading and loses the wider exec-vs-spec one. That direction is
+    /// FAIL-CLOSED by construction — an unrecorded provenance reads `Unknown`,
+    /// which makes a collection receiver UNRESOLVED and its closure body CHECKED
+    /// — so the cost is over-rejection, never a skip. Callers that need the
+    /// provenance preserved declare through
+    /// [`Self::declare_var_typed_origin`] instead (the parameter-typing seam
+    /// does, and so do `body_extract`'s dummy-context copies).
     pub fn from_parts(variables: Vec<VariableDecl>, obligations: Vec<ProofObligation>) -> Self {
         let mut context = Self {
             obligations,
@@ -630,6 +812,12 @@ impl VerificationContext {
         &self.loop_entry_scopes
     }
 
+    /// Returns the invariants whose loop is nested in another loop's body.
+    #[must_use]
+    pub fn loop_nested_entry_invariants(&self) -> &HashSet<String> {
+        &self.loop_nested_entry_invariants
+    }
+
     /// Returns the bound variable declarations scoped to `assert_forall_by` obligations.
     #[must_use]
     pub fn forall_bound_vars(&self) -> &HashMap<String, Vec<VariableDecl>> {
@@ -646,6 +834,12 @@ impl VerificationContext {
     #[must_use]
     pub fn loop_modified_vars(&self) -> &HashMap<String, Vec<String>> {
         &self.loop_modified_vars
+    }
+
+    /// Returns the loop group of every loop-lane obligation, keyed by name.
+    #[must_use]
+    pub fn loop_invariant_groups(&self) -> &HashMap<String, usize> {
+        &self.loop_invariant_groups
     }
 
     /// Resolves how `recv.method(..)` takes its `self` receiver, given the
@@ -669,6 +863,14 @@ impl VerificationContext {
         &self,
     ) -> HashMap<(String, String), SelfReceiverKind> {
         self.struct_self_receiver_kinds.clone()
+    }
+
+    /// Borrowing view of the file-wide impl-method `self`-receiver-kind
+    /// registry, for enumeration by method name.
+    pub(crate) fn struct_self_receiver_kinds(
+        &self,
+    ) -> &HashMap<(String, String), SelfReceiverKind> {
+        &self.struct_self_receiver_kinds
     }
 
     /// Resolves how a TRAIT-DECLARED method takes its `self` receiver.
@@ -731,8 +933,62 @@ impl VerificationContext {
     }
 
     /// Appends a proof obligation to this context.
+    ///
+    /// Stamps the ambient source location (see `ambient_source_location`) onto
+    /// obligations raised without one. An emission site that pinned its own
+    /// span keeps it — `or_source_location` never overwrites.
     pub fn push_obligation(&mut self, obligation: ProofObligation) {
-        self.obligations.push(obligation);
+        self.obligations.push(self.locate_obligation(obligation));
+    }
+
+    /// Applies this context's ambient location and diagnostic file to
+    /// `obligation`, leaving an already-located obligation untouched.
+    pub(crate) fn locate_obligation(&self, obligation: ProofObligation) -> ProofObligation {
+        // BOTH halves are required. A location of `12:5` with no file names
+        // nothing a reader or the evidence gate can open, and the lanes that
+        // never set a path (the proc-macro expansion, the in-crate unit tests)
+        // are exactly the lanes whose spans come from rebuilt token streams.
+        let (Some(ambient), Some(file)) =
+            (&self.ambient_source_location, &self.diagnostic_source_file)
+        else {
+            return obligation;
+        };
+        obligation.or_source_location(ambient.clone().or_file(file))
+    }
+
+    /// Records the operator methods that are the std operator on a primitive
+    /// integer in this function's source file.
+    pub(crate) fn set_std_operator_methods<'a>(
+        &mut self,
+        methods: impl IntoIterator<Item = &'a str>,
+    ) {
+        self.std_operator_methods = methods.into_iter().map(str::to_string).collect();
+    }
+
+    /// Records the file obligations raised here should be located in.
+    pub fn set_diagnostic_source_file(&mut self, file: impl Into<String>) {
+        self.diagnostic_source_file = Some(file.into());
+    }
+
+    /// The file obligations raised here are located in, when known.
+    #[must_use]
+    pub fn diagnostic_source_file(&self) -> Option<&str> {
+        self.diagnostic_source_file.as_deref()
+    }
+
+    /// Parks `location` as the ambient position and returns the previous one,
+    /// which the caller must put back (see `AssertionCollector::visit_stmt`).
+    pub fn replace_ambient_source_location(
+        &mut self,
+        location: Option<crate::SourceLocation>,
+    ) -> Option<crate::SourceLocation> {
+        std::mem::replace(&mut self.ambient_source_location, location)
+    }
+
+    /// The ambient position currently being extracted, when one is parked.
+    #[must_use]
+    pub fn ambient_source_location(&self) -> Option<&crate::SourceLocation> {
+        self.ambient_source_location.as_ref()
     }
 
     /// An ISOLATED child context for a spec-carrying closure's DEF-SIDE check.
@@ -842,6 +1098,28 @@ impl VerificationContext {
         }
     }
 
+    /// Refuse a `Verified` answer for this context with `message`. The first
+    /// message is kept. See `verified_refusal`.
+    pub(crate) fn refuse_verified(&mut self, message: String) {
+        if self.verified_refusal.is_none() {
+            self.verified_refusal = Some(message);
+        }
+    }
+
+    /// `result`, except that a `Verified` result becomes an `Error` when this
+    /// context carries a `verified_refusal`.
+    pub(crate) fn apply_verified_refusal(
+        &self,
+        result: crate::VerifyResult,
+    ) -> crate::VerifyResult {
+        match (&result, &self.verified_refusal) {
+            (crate::VerifyResult::Verified, Some(message)) => crate::VerifyResult::Error {
+                message: message.clone(),
+            },
+            _ => result,
+        }
+    }
+
     /// Records that the source catalog actually published this definition after
     /// all opacity/body/termination gates. Crate-private by design: this is proof
     /// provenance, not a public solver-tuning switch.
@@ -850,8 +1128,11 @@ impl VerificationContext {
     }
 
     /// Appends a typed proof obligation to this context.
+    ///
+    /// Same ambient-location stamp as [`Self::push_obligation`] — a typed
+    /// obligation is no less a statement of the body than a string one.
     pub fn push_typed_obligation(&mut self, obligation: TypedProofObligation) {
-        self.obligations.push(obligation.into_proof_obligation());
+        self.push_obligation(obligation.into_proof_obligation());
     }
 
     /// Sets the verification mode (body-level or call-site).
@@ -941,8 +1222,7 @@ impl VerificationContext {
     /// Pushes an assertion obligation without requiring callers to assemble
     /// the `ProofObligation` directly.
     pub fn push_assert(&mut self, name: &str, condition: &str) {
-        self.obligations
-            .push(ProofObligation::assert(name, condition));
+        self.push_obligation(ProofObligation::assert(name, condition));
     }
 
     /// Adds an assumption obligation (deprecated, use `push_obligation`).
@@ -957,8 +1237,7 @@ impl VerificationContext {
     /// Pushes an assumption obligation without requiring callers to assemble
     /// the `ProofObligation` directly.
     pub fn push_assume(&mut self, name: &str, condition: &str) {
-        self.obligations
-            .push(ProofObligation::assume(name, condition));
+        self.push_obligation(ProofObligation::assume(name, condition));
     }
 
     /// Canonical, SOLVER-INPUT-COMPLETE cache key for this context.
@@ -1018,6 +1297,10 @@ impl VerificationContext {
             warnings,
             variables,
             variable_index,
+            collection_origins,
+            struct_field_collection_origins,
+            binding_tuple_component_origins,
+            shadowed_spec_names,
             erased_shared_ref_vars,
             erased_ghost_vars,
             function_context,
@@ -1032,11 +1315,13 @@ impl VerificationContext {
             hidden_fns,
             assert_by_scopes,
             loop_entry_scopes,
+            loop_nested_entry_invariants,
             forall_bound_vars,
             prophecy_bindings,
             source_type_aliases,
             loop_guards,
             loop_modified_vars,
+            loop_invariant_groups,
             loop_body_transitions,
             helper_functions,
             trait_decls,
@@ -1045,6 +1330,7 @@ impl VerificationContext {
             trait_impl_method_ensures,
             conformance_exempt_methods,
             helper_functions_typed,
+            helper_generic_params,
             inherent_methods,
             struct_self_receiver_kinds,
             trait_method_self_receiver_kinds,
@@ -1052,6 +1338,7 @@ impl VerificationContext {
             derived_partial_eq_types,
             derived_clone_types,
             manual_partial_eq_types,
+            std_operator_methods,
             type_invariants,
             invariant_mask,
             tracked_params,
@@ -1065,7 +1352,22 @@ impl VerificationContext {
             source_catalog_admitted_definitions,
             skip_retry_cascade,
             closure_def_side_failure,
+            verified_refusal,
+            diagnostic_source_file,
+            ambient_source_location,
+            postcondition_result_var,
         } = self;
+
+        // DIAGNOSTIC ONLY, and deliberately absent from the key: neither names
+        // a hypothesis, an obligation or a solver setting, so two contexts that
+        // differ only in where their obligations were read from are the same
+        // query. The obligations' own recorded locations are absent too — see
+        // `unlocated_obligations` below, which strips BOTH location channels,
+        // so an obligation moved to another line IS served its old verdict.
+        // That is intended: the key's contract is SOLVER-INPUT-COMPLETE, and
+        // the only consumer (`TERMINATION_QUERY_MEMO`) stores a location-free
+        // `TerminationCheck`, so a stale location can never reach a caller.
+        let _ = (diagnostic_source_file, ambient_source_location);
 
         /// Renders a hash-ordered container canonically: each entry is rendered
         /// with `Debug` and the resulting strings are sorted, so iteration order
@@ -1086,7 +1388,18 @@ impl VerificationContext {
         let _ = write!(key, "pointer_width={}\u{1}", crate::ir::pointer_width());
 
         // Ordered containers and scalars: `Debug` directly.
-        let _ = write!(key, "obligations={obligations:?}\u{1}");
+        // Rendered WITHOUT their source locations. This key's contract is
+        // SOLVER-INPUT-COMPLETE (see the doc above), and a location is
+        // diagnostic: two contexts whose obligations differ only in which line
+        // raised them present the solver with the identical query, so they must
+        // share a verdict. Leaving locations in would also have silently
+        // narrowed the cache the moment the file lane started recording them —
+        // every ported function would have got its own entry.
+        let unlocated_obligations = obligations
+            .iter()
+            .map(ProofObligation::without_source_location)
+            .collect::<Vec<_>>();
+        let _ = write!(key, "obligations={unlocated_obligations:?}\u{1}");
         let _ = write!(key, "warnings={warnings:?}\u{1}");
         let _ = write!(key, "variables={variables:?}\u{1}");
         let _ = write!(key, "function_context={function_context:?}\u{1}");
@@ -1098,7 +1411,10 @@ impl VerificationContext {
             key,
             "overflow_behavior_explicit={overflow_behavior_explicit:?}\u{1}"
         );
-        let _ = write!(key, "div0_behavior_explicit={div0_behavior_explicit:?}\u{1}");
+        let _ = write!(
+            key,
+            "div0_behavior_explicit={div0_behavior_explicit:?}\u{1}"
+        );
         let _ = write!(
             key,
             "bitshift_behavior_explicit={bitshift_behavior_explicit:?}\u{1}"
@@ -1113,7 +1429,11 @@ impl VerificationContext {
         // budget decides where the solver gives up, so a verdict established
         // under one budget must not be served to a query running another.
         let _ = write!(key, "rlimit_conflicts={rlimit_conflicts:?}\u{1}");
-        let _ = write!(key, "demand_inline={:?}\u{1}", demand_inline.cache_key_parts());
+        let _ = write!(
+            key,
+            "demand_inline={:?}\u{1}",
+            demand_inline.cache_key_parts()
+        );
         let _ = write!(key, "duplicate_var_error={duplicate_var_error:?}\u{1}");
         let _ = write!(
             key,
@@ -1128,22 +1448,70 @@ impl VerificationContext {
             key,
             "closure_def_side_failure={closure_def_side_failure:?}\u{1}"
         );
+        let _ = write!(key, "verified_refusal={verified_refusal:?}\u{1}");
+        let _ = write!(
+            key,
+            "postcondition_result_var={postcondition_result_var:?}\u{1}"
+        );
 
         // Hash-ordered containers: canonicalised.
         render_sorted(&mut key, "variable_index", variable_index);
+        // IN THE KEY, deliberately. `collection_origins` is read during
+        // EXTRACTION rather than at encode time, so an argument could be made
+        // that the obligations it produced already distinguish the two contexts.
+        // It rides here anyway because it is cheap and because the failure it
+        // would otherwise admit is a false `Verified`: a context whose exec
+        // `BTreeSet` provenance was not yet recorded produces FEWER obligations
+        // than the same context with it, and those two renderings must never
+        // share a cache entry.
+        render_sorted(&mut key, "collection_origins", collection_origins);
+        // IN THE KEY for the same reason, and the reason is the same shape as
+        // the one above: a context in which a field's provenance has NOT been
+        // recorded reads that field `Unknown` and produces FEWER obligations
+        // than the same context with it recorded (`Unknown` fails closed into a
+        // definition-site check only where the receiver is not positively
+        // ghost; where it IS recorded `Spec`, the skip applies and the check
+        // disappears). A context with fewer obligations must never share a
+        // cache entry with one that has more, in either direction.
+        render_sorted(
+            &mut key,
+            "struct_field_collection_origins",
+            struct_field_collection_origins,
+        );
+        render_sorted(
+            &mut key,
+            "binding_tuple_component_origins",
+            binding_tuple_component_origins,
+        );
+        // IN THE KEY for the same reason as the three tables above, and with
+        // the same direction of failure: a context that has NOT recorded this
+        // file's shadowing reads `Seq<u64>` as a spec collection and produces
+        // FEWER obligations (the ghost skip applies) than the same context with
+        // it recorded. The two renderings must never share a cache entry.
+        render_sorted(&mut key, "shadowed_spec_names", shadowed_spec_names);
         render_sorted(&mut key, "erased_shared_ref_vars", erased_shared_ref_vars);
         render_sorted(&mut key, "erased_ghost_vars", erased_ghost_vars);
         render_sorted(&mut key, "hidden_fns", hidden_fns);
         render_sorted(&mut key, "assert_by_scopes", assert_by_scopes);
         render_sorted(&mut key, "loop_entry_scopes", loop_entry_scopes);
+        render_sorted(
+            &mut key,
+            "loop_nested_entry_invariants",
+            loop_nested_entry_invariants,
+        );
         render_sorted(&mut key, "forall_bound_vars", forall_bound_vars);
         render_sorted(&mut key, "prophecy_bindings", prophecy_bindings);
         render_sorted(&mut key, "source_type_aliases", source_type_aliases);
         render_sorted(&mut key, "loop_guards", loop_guards);
         render_sorted(&mut key, "loop_modified_vars", loop_modified_vars);
+        render_sorted(&mut key, "loop_invariant_groups", loop_invariant_groups);
         render_sorted(&mut key, "loop_body_transitions", loop_body_transitions);
         render_sorted(&mut key, "helper_functions", helper_functions);
-        render_sorted(&mut key, "trait_impl_method_bodies", trait_impl_method_bodies);
+        render_sorted(
+            &mut key,
+            "trait_impl_method_bodies",
+            trait_impl_method_bodies,
+        );
         render_sorted(
             &mut key,
             "trait_impl_method_ensures",
@@ -1155,6 +1523,7 @@ impl VerificationContext {
             conformance_exempt_methods,
         );
         render_sorted(&mut key, "helper_functions_typed", helper_functions_typed);
+        render_sorted(&mut key, "helper_generic_params", helper_generic_params);
         render_sorted(&mut key, "inherent_methods", inherent_methods);
         render_sorted(
             &mut key,
@@ -1173,6 +1542,7 @@ impl VerificationContext {
         );
         render_sorted(&mut key, "derived_clone_types", derived_clone_types);
         render_sorted(&mut key, "manual_partial_eq_types", manual_partial_eq_types);
+        render_sorted(&mut key, "std_operator_methods", std_operator_methods);
         render_sorted(&mut key, "type_invariants", type_invariants);
         render_sorted(&mut key, "tracked_params", tracked_params);
         render_sorted(&mut key, "counterexample_var_meta", counterexample_var_meta);

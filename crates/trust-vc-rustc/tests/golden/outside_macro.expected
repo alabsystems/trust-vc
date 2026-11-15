@@ -1,0 +1,8 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - trust-vc refused: outside-verus-macro: ExternalBody on an item outside verus! @[3]
+  error - trust-vc refused: attribute: ExternalBody on an external item @[21]
+functions:
+  ext::inside external -
+vcir:

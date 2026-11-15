@@ -140,14 +140,30 @@ impl AYEncoder {
             TrustVcExpr::IntLit { value, ty } => {
                 Self::value_fits_in_type(*value, ty).then_some(*value)
             }
-            TrustVcExpr::Neg(inner) => Self::try_reduce_to_int(inner).and_then(|v| v.checked_neg()),
+            // Negation and arithmetic are reduced in their DERIVED type
+            // (`ir_lowering::types`), and a result that type cannot hold is
+            // not folded (the symbolic encoder owns the wrap, and an untyped
+            // literal's type is settled by the peer it meets): `-(-128i8)` is
+            // the `i8` negation, not 128, and `-13i16 / 256u16` is the exact
+            // (Euclidean) `-1`, not the `u16`-declared truncation 0.
+            // An untyped literal OPERATION is computed in the type of the peer
+            // it meets, which this fold does not see (`200 + 100` next to a
+            // `u8` is `u8` arithmetic): folded only where every type agrees.
+            TrustVcExpr::Neg(_) | TrustVcExpr::Arith { .. } | TrustVcExpr::SpecialArith { .. }
+                if crate::ir_lowering::is_untyped_operation(expr) =>
+            {
+                crate::ir_lowering::untyped_operation_value_all_types_agree(expr)
+            }
+            TrustVcExpr::Neg(inner) => {
+                let value = Self::try_reduce_to_int(inner)?.checked_neg()?;
+                Self::value_fits_in_type(value, &crate::ir_lowering::infer_expr_type(expr))
+                    .then_some(value)
+            }
             TrustVcExpr::Not(inner) => try_reduce_bitwise_not(inner),
             TrustVcExpr::Arith {
-                op,
-                left,
-                right,
-                ty,
+                op, left, right, ..
             } => {
+                let ty = crate::ir_lowering::infer_expr_type(expr);
                 let l = Self::try_reduce_to_int(left)?;
                 let r = Self::try_reduce_to_int(right)?;
                 let left_ty = crate::ir_lowering::infer_expr_type(left);
@@ -156,8 +172,8 @@ impl AYEncoder {
                 {
                     return None;
                 }
-                let value = try_reduce_arith_op(*op, l, r, ty)?;
-                Self::value_fits_in_type(value, ty).then_some(value)
+                let value = try_reduce_arith_op(*op, l, r, &ty)?;
+                Self::value_fits_in_type(value, &ty).then_some(value)
             }
             TrustVcExpr::Ite {
                 cond,
@@ -178,10 +194,11 @@ impl AYEncoder {
                 value,
                 body,
             } => {
-                if !let_value_reduces(value, ty) {
+                let bound = bound_let_value(value, ty)?;
+                if !let_value_reduces(&bound, ty) {
                     return None;
                 }
-                let substituted = substitute_let_binding(name, value, body);
+                let substituted = substitute_let_binding(name, &bound, body);
                 Self::try_reduce_to_int(&substituted)
             }
             TrustVcExpr::SpecialArith {
@@ -298,10 +315,11 @@ impl AYEncoder {
                 value,
                 body,
             } => {
-                if !let_value_reduces(value, ty) {
+                let bound = bound_let_value(value, ty)?;
+                if !let_value_reduces(&bound, ty) {
                     return None;
                 }
-                let substituted = substitute_let_binding(name, value, body);
+                let substituted = substitute_let_binding(name, &bound, body);
                 Self::try_compute_eval(&substituted)
             }
             TrustVcExpr::CollectionOp { .. }
@@ -556,10 +574,11 @@ fn try_reduce_to_value(expr: &crate::ir::TrustVcExpr) -> Option<ComputedValue> {
             value,
             body,
         } => {
-            if !let_value_reduces(value, ty) {
+            let bound = bound_let_value(value, ty)?;
+            if !let_value_reduces(&bound, ty) {
                 return None;
             }
-            let substituted = substitute_let_binding(name, value, body);
+            let substituted = substitute_let_binding(name, &bound, body);
             try_reduce_to_value(&substituted)
         }
         TrustVcExpr::FnCall {
@@ -1505,8 +1524,38 @@ fn try_compare_by_structural_equality(
     if left != right || !is_total_structural_expr(left) {
         return None;
     }
+    // A float `==` is IEEE equality, which is not reflexive: `NaN == NaN` is
+    // false. It is reflexive only for a value that cannot be NaN. A float
+    // inside a compound operand is left unfolded.
+    let ty = crate::ir_lowering::infer_expr_type(left);
+    if matches!(ty, crate::ir::TrustVcType::Float { .. }) {
+        if !float_value_is_never_nan(left) {
+            return None;
+        }
+    } else if crate::ir_lowering::operators::type_is_or_holds_float(&ty, None) {
+        return None;
+    }
 
     Some(matches!(op, CompareOp::Eq))
+}
+
+/// Whether a float-typed expression can never evaluate to NaN: a conversion of
+/// an integer (`4u8 as f32`, and the `0.0f32` literal, which lowers to one),
+/// possibly converted again between float widths. Rounding and overflow give a
+/// finite value or an infinity, never NaN.
+fn float_value_is_never_nan(expr: &crate::ir::TrustVcExpr) -> bool {
+    use crate::ir::{TrustVcExpr, TrustVcType};
+    match expr {
+        TrustVcExpr::Cast { expr, from_ty, .. } => match from_ty {
+            TrustVcType::Int { .. }
+            | TrustVcType::Uint { .. }
+            | TrustVcType::MathInt
+            | TrustVcType::Nat => true,
+            TrustVcType::Float { .. } => float_value_is_never_nan(expr),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn is_total_structural_expr(expr: &crate::ir::TrustVcExpr) -> bool {
@@ -1556,6 +1605,31 @@ fn is_total_structural_expr(expr: &crate::ir::TrustVcExpr) -> bool {
         | TrustVcExpr::PlaceDisjoint { .. }
         | TrustVcExpr::ProphecyNew { .. }
         | TrustVcExpr::ProphecyResolve { .. } => false,
+    }
+}
+
+/// A `let`'s value BOUND at its declared type, as the encoder binds it
+/// (`ir_lowering::int_binding`, design-trust-proof-backend.md §5b rule 6): a
+/// value of the type as is, an untyped literal form typed at it, a
+/// fixed-width value at `int`/`nat` lifted by a cast; `None` — do not fold,
+/// the encoder refuses it — for a value the type cannot hold. The evaluator
+/// used to substitute the value bare: `let v: u8 = -764435651; v == ..` was
+/// folded to a decided `false` instead of refused, and a fixed-width value
+/// bound at `int` kept its own arithmetic in the body.
+fn bound_let_value(
+    value: &crate::ir::TrustVcExpr,
+    ty: &crate::ir::TrustVcType,
+) -> Option<crate::ir::TrustVcExpr> {
+    use crate::ir_lowering::IntBinding;
+    match crate::ir_lowering::int_binding(value, ty) {
+        IntBinding::Same | IntBinding::NotInteger => Some(value.clone()),
+        IntBinding::Literal(typed) => Some(*typed),
+        IntBinding::LiftToInt => Some(crate::ir::TrustVcExpr::Cast {
+            from_ty: crate::ir_lowering::infer_expr_type(value),
+            expr: Box::new(value.clone()),
+            to_ty: ty.clone(),
+        }),
+        IntBinding::Mismatch(_) => None,
     }
 }
 

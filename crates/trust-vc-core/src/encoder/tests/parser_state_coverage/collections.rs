@@ -4,6 +4,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
+// quality-audit: allow-file allow-rust-size — the collection-metadata unit tests of one parser module
 use ay_dpll::api::Sort;
 use std::collections::HashMap;
 
@@ -492,5 +493,155 @@ fn test_emit_collection_len_guard_queues_only_registered_guard() {
     assert_eq!(
         parser.overflow_checks[0].0, "guarded len access",
         "emit_collection_len_guard should preserve the stored guard label"
+    );
+}
+
+// =====================================================================
+// A collection reached through a UF APPLICATION (a struct FIELD in a spec
+// expression lowers to `FnCall { name: <selector UF>, .. }`, never to a
+// `ReadPlace`) gets dom/len companions — and the SAME place gets the SAME ones.
+// =====================================================================
+
+/// Builds `<selector>(s)` for a `Map<u32, u32>`-typed field of a receiver `s`.
+fn field_selector_map_call() -> crate::ir::TrustVcExpr {
+    crate::ir::TrustVcExpr::FnCall {
+        name: "S__m".to_string(),
+        args: vec![crate::ir::TrustVcExpr::Var {
+            name: "s".to_string(),
+            ty: crate::ir::TrustVcType::Int { width: 32 },
+        }],
+        return_ty: crate::ir::TrustVcType::Map(
+            Box::new(crate::ir::TrustVcType::Int { width: 32 }),
+            Box::new(crate::ir::TrustVcType::Int { width: 32 }),
+        ),
+    }
+}
+
+#[test]
+fn collection_typed_fn_call_result_gets_dom_metadata() {
+    let mut solver = make_solver();
+    let mut variables = HashMap::new();
+    let mut var_types = HashMap::new();
+    let mut functions = HashMap::new();
+    let mut collection_lengths = HashMap::new();
+
+    let s = solver.bv_var("s", 32);
+    variables.insert("s".to_string(), s);
+    var_types.insert("s".to_string(), crate::ir::TrustVcType::Int { width: 32 });
+    let decl = solver
+        .try_declare_fun(
+            "S__m",
+            &[Sort::bitvec(32)],
+            Sort::array(Sort::bitvec(32), Sort::bitvec(32)),
+        )
+        .expect("declare selector UF");
+    functions.insert("S__m".to_string(), decl);
+
+    let mut parser = AstExpressionParser::new(
+        &mut solver,
+        &variables,
+        &mut collection_lengths,
+        &var_types,
+        &functions,
+    );
+
+    let expr = field_selector_map_call();
+    let term = parser
+        .encode_trust_vc_expr(&expr)
+        .expect("encode selector UF application");
+
+    // THE LOAD-BEARING ASSERTION: without the `ensure_projected_collection_meta`
+    // call at the end of `encode_fn_call`, this term carries no metadata and
+    // `encode_contains_key` answers "not supported without dom tracking".
+    let dom = parser.lookup_collection_dom(term, None);
+    assert!(
+        dom.is_some(),
+        "a Map-typed UF application must carry a domain term so contains_key() can read it"
+    );
+    assert_eq!(
+        parser.lookup_collection_kind(term, None),
+        Some(CollectionKind::Map),
+        "a Map-typed UF application must be classified as a Map"
+    );
+}
+
+#[test]
+fn same_field_place_encodes_to_same_term_and_same_dom() {
+    let mut solver = make_solver();
+    let mut variables = HashMap::new();
+    let mut var_types = HashMap::new();
+    let mut functions = HashMap::new();
+    let mut collection_lengths = HashMap::new();
+
+    let s = solver.bv_var("s", 32);
+    variables.insert("s".to_string(), s);
+    var_types.insert("s".to_string(), crate::ir::TrustVcType::Int { width: 32 });
+    let decl = solver
+        .try_declare_fun(
+            "S__m",
+            &[Sort::bitvec(32)],
+            Sort::array(Sort::bitvec(32), Sort::bitvec(32)),
+        )
+        .expect("declare selector UF");
+    functions.insert("S__m".to_string(), decl);
+
+    let mut parser = AstExpressionParser::new(
+        &mut solver,
+        &variables,
+        &mut collection_lengths,
+        &var_types,
+        &functions,
+    );
+
+    let expr = field_selector_map_call();
+    let first = parser
+        .encode_trust_vc_expr(&expr)
+        .expect("encode first occurrence");
+    let first_dom = parser
+        .lookup_collection_dom(first, None)
+        .expect("first occurrence has a dom");
+    let second = parser
+        .encode_trust_vc_expr(&expr)
+        .expect("encode second occurrence");
+    let second_dom = parser
+        .lookup_collection_dom(second, None)
+        .expect("second occurrence has a dom");
+
+    // SAME PLACE => SAME TERM. Measured, not assumed: if `try_apply` did not
+    // hash-cons, each occurrence would mint an independent dom and
+    // `m.contains_key(k) ==> m.contains_key(k)` would stop being provable.
+    assert_eq!(
+        first, second,
+        "two occurrences of the same field place must encode to the same Term"
+    );
+    // SAME TERM => SAME DOM.
+    assert_eq!(
+        first_dom, second_dom,
+        "two occurrences of the same field place must share one domain array"
+    );
+
+    // A DIFFERENT place must NOT share that dom.
+    let other = crate::ir::TrustVcExpr::FnCall {
+        name: "S__m".to_string(),
+        args: vec![crate::ir::TrustVcExpr::IntLit {
+            value: 7,
+            ty: crate::ir::TrustVcType::Int { width: 32 },
+        }],
+        return_ty: crate::ir::TrustVcType::Map(
+            Box::new(crate::ir::TrustVcType::Int { width: 32 }),
+            Box::new(crate::ir::TrustVcType::Int { width: 32 }),
+        ),
+    };
+    let other_term = parser
+        .encode_trust_vc_expr(&other)
+        .expect("encode a different receiver");
+    assert_ne!(
+        first, other_term,
+        "a different receiver must not collapse onto the same carrier term"
+    );
+    assert_ne!(
+        Some(first_dom),
+        parser.lookup_collection_dom(other_term, None),
+        "a different place must not borrow another place's domain array"
     );
 }

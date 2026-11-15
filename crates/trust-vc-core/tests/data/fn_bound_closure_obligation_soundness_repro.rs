@@ -8,9 +8,11 @@
 //
 // At a Fn-bound call `let r = f(a)` (where `f: F`, `F: Fn(A) -> B` is typed
 // `SpecFn` by Increment 1) the callee-side seam emits, over the OPAQUE reflection
-// UFs `call_requires%` / `call_ensures%`, the SOUND conditional assumption
+// UFs `call_requires%` / `call_ensures%`, a PROVEN precondition (H6 —
+// Verus/vstd call semantics) and the SOUND conditional assumption
 //
-//     call_requires%(f, a)  ==>  call_ensures%(f, a, f(a))
+//     PROVE   call_requires%(f, a)
+//     ASSUME  call_requires%(f, a)  ==>  call_ensures%(f, a, f(a))
 //
 // binding the REAL returned `spec_fn_apply(f, a)` term. This is the closure's own
 // contract ("if the precondition holds for the args, the postcondition holds for
@@ -25,9 +27,13 @@
 //  * `call_ensures%` stays OPAQUE: it pins NO concrete value, so a concrete claim
 //    about the result (`assert!(f(a) == 5)`) is not provable (TRAP #1). The callee
 //    never invents a def-side for the parameter.
-//  * The Increment-1 congruent term is untouched: determinism (`f(3) == f(3)`)
-//    verifies from congruence alone WITHOUT any obligation, and a concrete pin
-//    (`f(3) == 3`) still counterexamples.
+//  * The Increment-1 congruent term is untouched: two calls with the same
+//    argument are one term, so `f(3) == f(3)` is proved from congruence once
+//    the applied `f.requires((3,))` is declared (and its `Verified` answer is
+//    refused, since a stateful `Fn` closure returns two values), and a concrete
+//    pin (`f(3) == 3`) still counterexamples. Before H6 the requires was only an
+//    antecedent, never proven, so a callee that applied `f` where its caller's
+//    closure precondition fails (a whole-program runtime panic) verified.
 
 // ===========================================================================
 // POSITIVE (tail form) — MUST VERIFY. The callee declares `requires
@@ -117,13 +123,24 @@ fn fnbound_obligation_missing_requires_assert_cx<F: Fn(u64) -> u64>(f: F, a: u64
 }
 
 // ===========================================================================
-// REGRESSION (Increment 1 intact): determinism WITHOUT a requires clause still
-// VERIFIES from the congruent `spec_fn_apply` term alone — the callee-side seam
-// adds ONLY a conditional assume (inert here, its result unused), NO standalone
-// obligation that a requires-free call could fail. MUST VERIFY.
+// REGRESSION (Increment 1 intact): two calls under the applied requires are
+// still proved equal from the congruent `spec_fn_apply` term alone — the
+// callee-side seam adds ONLY a conditional assume (inert here, its result
+// unused). The claim is false for a stateful `Fn` closure, so the `Verified`
+// answer MUST BE REFUSED (a refutation would mean the seam over-constrained the
+// term).
 // ===========================================================================
+#[trust_vc::requires(f.requires((3u64,)))]
+fn fnbound_obligation_determinism_refused<F: Fn(u64) -> u64>(f: F) {
+    let a = f(3u64);
+    let b = f(3u64);
+    trust_vc::assert!(a == b);
+}
+
+// H6 twin: the same determinism WITHOUT the requires — the call-site
+// `f.requires((3,))` is unprovable. MUST COUNTEREXAMPLE on `__call_requires`.
 #[trust_vc::ensures(true)]
-fn fnbound_obligation_determinism_verified<F: Fn(u64) -> u64>(f: F) {
+fn fnbound_obligation_determinism_no_requires_cx<F: Fn(u64) -> u64>(f: F) {
     let a = f(3u64);
     let b = f(3u64);
     trust_vc::assert!(a == b);
@@ -142,7 +159,8 @@ fn fnbound_obligation_pins_concrete_no_requires_cx<F: Fn(u64) -> u64>(f: F) {
 
 // ===========================================================================
 // REGRESSION: `FnMut` stays fail-closed (non-deterministic; not typed `SpecFn`,
-// so the call does not lower and no obligation is emitted). MUST NOT VERIFY.
+// so the application is rejected at extraction — "function value"). MUST NOT
+// VERIFY.
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn fnbound_obligation_fnmut_fail_closed<F: FnMut(u64) -> u64>(mut f: F) {

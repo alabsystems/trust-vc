@@ -127,6 +127,42 @@ fn test_set_fold_two_insert_sum() {
     );
 }
 
+// Liar twins of the verified `test_set_fold_singleton` / `test_set_fold_two_insert_sum` /
+// `test_set_fold_empty` rows: the SAME shapes with a false sum. They are refuted
+// (Counterexample) and pinned by the suite's `FOLD_LIAR_TWINS`, deliberately NOT as rows
+// of the table above:
+// upstream `test_set_fold` is `=> Ok(())`, and a mapped `counterexample` row would be
+// a per-case verdict mismatch for the gate.
+#[trust_vc::ensures(true)]
+fn test_set_fold_singleton_wrong_sum_counterexample() {
+    trust_vc::assert!(Set::<usize>::empty().insert(9usize).finite());
+    trust_vc::assert!(Set::<usize>::empty().insert(9usize).len() > 0usize);
+    trust_vc::assert!(
+        Set::<usize>::empty()
+            .insert(9usize)
+            .fold(0usize, SpecFn::new(|p: usize, a: usize| p + a))
+            == 10usize
+    );
+}
+
+#[trust_vc::ensures(true)]
+fn test_set_fold_two_insert_wrong_sum_counterexample() {
+    trust_vc::assert!(
+        Set::<usize>::empty()
+            .insert(4usize)
+            .insert(7usize)
+            .fold(0usize, SpecFn::new(|p: usize, a: usize| p + a))
+            == 12usize
+    );
+}
+
+#[trust_vc::ensures(true)]
+fn test_set_fold_empty_wrong_sum_counterexample() {
+    trust_vc::assert!(
+        Set::<usize>::empty().fold(0usize, SpecFn::new(|p: usize, a: usize| p + a)) == 1usize
+    );
+}
+
 #[trust_vc::ensures(true)]
 fn test_set_fold_collection_accumulator_fail_closed() {
     trust_vc::assert!(
@@ -174,6 +210,25 @@ fn test1_finite_insert_order_extensionality() {
     trust_vc::assert!(
         Set::<i32>::empty().insert(1i32).insert(2i32)
             == Set::<i32>::empty().insert(2i32).insert(1i32)
+    );
+}
+
+// Liar twins of verified `test1` rows above: each is the SAME shape with a false claim,
+// refuted (Counterexample) and pinned by the suite's `TEST1_LIAR_TWINS`, not as table rows
+// (upstream `test1` is `=> Ok(())`). The three SYMBOLIC-set rows (`filter` twice, `map`)
+// have no twin here: re-measured 2026-09-14 at ay 0.26.0, five false claims on those
+// shapes all came back `unknown ((incomplete quantifier-unhandled))`, never a
+// Counterexample, and an unrefuted liar is not evidence.
+#[trust_vc::ensures(true)]
+fn test1_set_new_empty_contains_counterexample() {
+    trust_vc::assert!(Set::<int>::new().contains(0 as int));
+}
+
+#[trust_vc::ensures(true)]
+fn test1_finite_insert_wrong_extensionality_counterexample() {
+    trust_vc::assert!(
+        Set::<i32>::empty().insert(1i32).insert(2i32)
+            == Set::<i32>::empty().insert(2i32).insert(3i32)
     );
 }
 

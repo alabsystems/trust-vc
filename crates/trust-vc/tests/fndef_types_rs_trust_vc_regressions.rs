@@ -314,6 +314,9 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "exec_recursion_mutual missing cyclic dependency diagnostic",
         1,
     ),
+    // 2026-09-11: calling an `F: Fn(u8) -> bool` parameter yields an opaque spec-function value (upstream basic_test).
+    // H6: the call proves `f.requires((4,))`, declared as upstream `takes_fn1` does.
+    ("fn_trait_bound_value_call_verified", "basic_test", 4),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
@@ -444,16 +447,6 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
             "function-item value",
             "function value",
             "fndef_trait_llama",
-        ],
-    ),
-    (
-        "fn_trait_bound_value_call_currently_errors",
-        "basic_test",
-        &[
-            "Undefined function: f",
-            "unknown return type for function 'f'",
-            "Fn(u8) -> bool",
-            "function value",
         ],
     ),
     (

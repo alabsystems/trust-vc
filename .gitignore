@@ -1,8 +1,5 @@
 # Rust
 target/
-# Stock-toolchain harness build dir (scripts/stock-harness.sh) — keeps stock
-# artifacts out of the Trust-toolchain cache in target/.
-target-stock/
 **/*.rs.bk
 
 # Cargo-trust-vc evidence output
@@ -11,10 +8,16 @@ reports/evidence/*.md
 .trust_vc/evidence/
 .trust-vc/evidence/
 
+# Upstream Verus suite runs (scripts/verus_suite/: stages, logs, events, transcripts)
+.verus-suite/
+
 # Fuzzing
 /fuzz/artifacts/
 /fuzz/corpus/
 /fuzz/coverage/
+# fuzz/ is its own detached workspace; fuzz/run.sh and the fuzz crate's own
+# tests resolve a lockfile there on every build.
+/fuzz/Cargo.lock
 
 # Claude scheduler artifacts (autonomous-loop cron)
 .claude/scheduled_tasks.lock

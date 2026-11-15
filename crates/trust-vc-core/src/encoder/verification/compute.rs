@@ -48,6 +48,9 @@ impl ComputeValue {
             Self::Bool(value) if matches!(ty, TrustVcType::Bool) => {
                 Some(TrustVcExpr::BoolLit(*value))
             }
+            // Only a value the type HOLDS becomes a literal of it (§5b rule 6):
+            // an out-of-range value is not re-read at the type (`IntLit { -1,
+            // u8 }` has two readings), so the evaluation declines.
             Self::Int(value)
                 if matches!(
                     ty,
@@ -55,7 +58,7 @@ impl ComputeValue {
                         | TrustVcType::Uint { .. }
                         | TrustVcType::MathInt
                         | TrustVcType::Nat
-                ) =>
+                ) && crate::ir_lowering::type_holds_integer(ty, *value) == Some(true) =>
             {
                 Some(TrustVcExpr::IntLit {
                     value: *value,
@@ -199,6 +202,15 @@ impl<'a> ComputeEvaluator<'a> {
             TrustVcExpr::BoolLit(value) => Some(ComputeValue::Bool(*value)),
             TrustVcExpr::IntLit { value, .. } => Some(ComputeValue::Int(*value)),
             TrustVcExpr::UnitLit => Some(ComputeValue::Unit),
+            // An untyped literal OPERATION (`200 + 100`) is computed in the type
+            // of the peer it meets, which this evaluator does not see: its value
+            // is known only when every type agrees on it; otherwise decline.
+            TrustVcExpr::Neg(_) | TrustVcExpr::Arith { .. }
+                if crate::ir_lowering::is_untyped_operation(expr) =>
+            {
+                crate::ir_lowering::untyped_operation_value_all_types_agree(expr)
+                    .map(ComputeValue::Int)
+            }
             TrustVcExpr::Neg(inner) => {
                 let value = self.eval_int(inner, remaining_calls)?;
                 let negated = value.checked_neg()?;
@@ -214,11 +226,12 @@ impl<'a> ComputeEvaluator<'a> {
                 Some(ComputeValue::Int(wrap_compute_int_to_type(negated, &ty)?))
             }
             TrustVcExpr::Arith {
-                op,
-                left,
-                right,
-                ty,
+                op, left, right, ..
             } => {
+                // The DERIVED type (`ir_lowering::types`), as the symbolic
+                // encoder uses: operands of two different fixed-width types
+                // compute exactly (`int`), whatever the node declares.
+                let ty = &crate::ir_lowering::infer_expr_type(expr);
                 let left = self.eval_int(left, remaining_calls)?;
                 let right = self.eval_int(right, remaining_calls)?;
                 let value = match op {
@@ -814,6 +827,17 @@ pub(in crate::encoder) fn try_compute_with_bindings(
     revealed_fns: &std::collections::HashSet<String>,
     hidden_fns: &std::collections::HashSet<String>,
 ) -> Option<bool> {
+    // The IR evaluator reads declared types as the encoder does: a goal the
+    // one IR typing validator refuses is not evaluated either (§5b rule 13).
+    let unscoped = crate::ir_lowering::TypingScope {
+        variables: None,
+        locals: None,
+        functions: None,
+        parameters: None,
+    };
+    if crate::ir_lowering::validate_ir_typing(assertion_expr, &unscoped).is_err() {
+        return None;
+    }
     let bindings = build_compute_bindings(assumptions, verified_assert_by, scoped_assumptions);
     let rewritten = if bindings.is_empty() {
         assertion_expr.clone()
@@ -869,9 +893,10 @@ fn substitute_compute_vars(
 
     let rec = |expr: &TrustVcExpr| substitute_compute_vars(expr, bindings);
     match expr {
-        TrustVcExpr::Var { name, .. } => {
-            bindings.get(name).cloned().unwrap_or_else(|| expr.clone())
-        }
+        TrustVcExpr::Var { name, ty } => bindings.get(name).map_or_else(
+            || expr.clone(),
+            |replacement| crate::ir_lowering::pin_substituted_value(ty, replacement),
+        ),
         TrustVcExpr::Arith {
             op,
             left,
@@ -993,7 +1018,7 @@ fn substitute_compute_vars(
                     // capture-avoiding and the interpreter sound.
                     let shadowed = pattern_bound_names(&arm.pattern);
                     let (body, guard) = if shadowed.is_empty() {
-                        (rec(&arm.body), arm.guard.as_ref().map(|g| rec(g)))
+                        (rec(&arm.body), arm.guard.as_ref().map(rec))
                     } else {
                         let inner: HashMap<String, TrustVcExpr> = bindings
                             .iter()

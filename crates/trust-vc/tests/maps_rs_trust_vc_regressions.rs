@@ -16,6 +16,11 @@ fn maps_port_path() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/verus/ported/maps.rs")
 }
 
+fn maps_local_witnesses_path() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/verus/ported/maps_local_witnesses.rs")
+}
+
 fn maps_fails_subtype_path() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../evals/verus/ported/maps_fails_subtype")
@@ -364,6 +369,40 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Liar twins of verified rows that had none of their own shape in the port file
+/// (measured 2026-09-15 at ay 0.26.0, TRUST_VC_DISABLE_VC_CACHE=1). They stay out of
+/// `EXPECTED_CASES`, the port table and the manifest: their upstream cases are
+/// `=> Ok(())`, so a mapped `counterexample` row would be a verdict mismatch.
+///
+/// They also live in a SEPARATE FILE, `evals/verus/ported/maps_local_witnesses.rs`,
+/// which no manifest entry declares. Each carries a `#[trust_vc::ensures(..)]`
+/// contract, and the corpus gate scans every contract-carrying function of a
+/// DECLARED `trust_vc_path` as a case of that entry — so inside `maps.rs` an
+/// undeclared twin failed the whole path with `unexpected observed case`. Nothing
+/// about the twins changed in the move; only the file they sit in did.
+///
+/// NOT every verified row gets one: `set_choose_regression_408`'s negation came back
+/// `unknown ((incomplete quantifier-unhandled))`, so that pin stays without a twin
+/// (recorded as a hole in `evals/verus/ported/maps.rs`).
+const LOCAL_WITNESS_COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
+    (
+        "map_contains_absent_key_fails",
+        "map_contains liar twin: contains_key of an absent key",
+    ),
+    (
+        "map_contains_absent_value_fails",
+        "map_contains liar twin: contains_value of an absent value",
+    ),
+    (
+        "map_insert_does_not_imply_contains_fails",
+        "map_insert_implies_contains liar twin: the inserted key claimed absent",
+    ),
+    (
+        "map_index_syntax_wrong_value_fails",
+        "map index syntax liar twin: the inserted value read back wrong",
+    ),
+];
+
 #[test]
 fn maps_rs_verified_subset_verifies_from_file() {
     let path = maps_port_path();
@@ -395,11 +434,94 @@ fn maps_rs_counterexample_subset_is_rejected_from_file() {
 }
 
 #[test]
+fn maps_rs_local_witness_counterexamples_are_rejected_from_file() {
+    let path = maps_local_witnesses_path();
+    let path = path
+        .to_str()
+        .expect("maps local witnesses path should be UTF-8");
+
+    for (case, upstream_case) in LOCAL_WITNESS_COUNTEREXAMPLE_CASES {
+        let result = verify_function_from_file(path, case)
+            .unwrap_or_else(|err| panic!("{case} ({upstream_case}) should extract: {err}"));
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{case} ({upstream_case}) should be rejected, got: {result:?}"
+        );
+    }
+}
+
+/// Per-unit Trust verification scope for a fixture typecheck.
+///
+/// `rust-toolchain.toml` pins `channel = "trust"`, whose compiler verifies
+/// every unit it compiles and is strict by default. Unscoped, `cargo check` of
+/// this fixture stops in third-party units (the `quote`, `proc-macro2` and
+/// `serde_core` build scripts, the `unicode-ident` library) before the fixture
+/// crate is reached, so the assertion below would read their errors. The scope
+/// is the one the evidence gate gives a corpus fixture
+/// (`trust_per_unit_scope_args` in cargo-trust-vc): the default profile, which
+/// here is the fixture crate alone, stays verified at `advisory`; every package
+/// it only links (`"*"`, which never matches the fixture itself) is compiled
+/// with the pipeline off.
+const FIXTURE_VERIFICATION_SCOPE: &[&str] = &[
+    "-Zprofile-rustflags",
+    "--config",
+    "profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]",
+    "--config",
+    "profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]",
+];
+
+/// The Trust toolchain's `cargo`, which accepts the per-unit scope above.
+///
+/// A test run under Targo hands the child `$CARGO` = Targo, and Targo cannot
+/// run this probe: both of its lanes are whole-build (`trust` verifies every
+/// unit fail-closed, `--unverified` appends `-Ztrust-verify=off` to every unit,
+/// the fixture included). The Trust toolchain ships its upstream-Cargo
+/// compatibility frontend `cargo` beside Targo (same toolchain, same trustc),
+/// so that one is used. Owner directive 2026-09-28: no PATH `cargo` fallback
+/// and no pass-through of a `$CARGO` that is not Targo; either would let a
+/// stock toolchain run the probe.
+fn scoped_cargo_program() -> PathBuf {
+    let cargo = format!("cargo{}", std::env::consts::EXE_SUFFIX);
+    let program = std::env::var_os("CARGO").map(PathBuf::from).expect(
+        "$CARGO is unset: run this test under the Trust toolchain (`targo --unverified test`)",
+    );
+    let is_targo = program
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == "targo" || stem.starts_with("targo-"));
+    assert!(
+        is_targo,
+        "$CARGO `{}` is not the Trust toolchain's targo; run this test with `targo --unverified test`",
+        program.display()
+    );
+    let sibling = program.with_file_name(&cargo);
+    assert!(
+        sibling.is_file(),
+        "the Trust toolchain ships `{cargo}` beside targo, but `{}` is missing",
+        sibling.display()
+    );
+    sibling
+}
+
+/// A `cargo check` child under the per-unit scope. An environment `RUSTFLAGS`
+/// or `CARGO_ENCODED_RUSTFLAGS` would replace profile rustflags for every unit,
+/// so the child does not inherit either.
+fn cargo_check_command() -> Command {
+    let mut command = Command::new(scoped_cargo_program());
+    command
+        .args(FIXTURE_VERIFICATION_SCOPE)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .arg("check");
+    command
+}
+
+#[test]
 fn maps_rs_subtype_fixture_fails_closed_with_expected_diagnostic() {
-    let output = Command::new("cargo")
-        .arg("check")
-        .arg("--quiet")
+    let output = cargo_check_command()
+        .arg("--verbose")
         .current_dir(maps_fails_subtype_path())
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .expect("maps_fails_subtype cargo check should run");
 
@@ -411,5 +533,19 @@ fn maps_rs_subtype_fixture_fails_closed_with_expected_diagnostic() {
     assert!(
         stderr.contains("mismatched types"),
         "maps_fails_subtype diagnostic should contain mismatched types, got: {stderr}"
+    );
+    // The scope is per unit: the fixture crate itself was compiled with its
+    // verification on, not switched off with the packages it links.
+    let fixture_unit = stderr
+        .lines()
+        .find(|line| {
+            line.contains("Running `")
+                && line.contains("--crate-name trust_vc_verus_maps_fails_subtype ")
+        })
+        .unwrap_or_else(|| panic!("the fixture crate's compiler invocation is missing: {stderr}"));
+    assert!(
+        fixture_unit.contains("-Ztrust-policy=advisory")
+            && !fixture_unit.contains("-Ztrust-verify=off"),
+        "the fixture crate must be compiled with verification on: {fixture_unit}"
     );
 }

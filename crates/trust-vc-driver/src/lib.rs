@@ -12,7 +12,7 @@
 //! consumes Trust's compiler IR — **`trust-ir`** — carrying resolved compiler
 //! facts (`NativeCompilerFactRef`: types/borrows) and a `ProofCertificate`
 //! lineage. See `design-trust-proof-backend.md` (the north star) and
-//! `design-rustc-driver-frontend.md` (this crate's front end).
+//! `docs/archive/design-rustc-driver-frontend.md` (this crate's front end).
 //!
 //! This crate hosts two things:
 //!
@@ -45,9 +45,9 @@
 //!   verdict" works end to end.
 //! * `driver` — the real `rustc_driver::Callbacks` that obtains `TyCtxt`, finds
 //!   verification targets, walks THIR, and produces [`lower::DriverFn`]s. It is
-//!   gated behind `feature = "rustc-driver"` and a **nightly + rustc-dev**
-//!   toolchain (see this crate's `rust-toolchain.toml`), so the default build
-//!   stays stable and dependency-light.
+//!   gated behind `feature = "rustc-driver"` and the Trust toolchain's
+//!   `rustc_private` crates (which its sysroot serves), so the default build
+//!   stays dependency-light.
 //!
 //! The two layers meet at exactly one type — [`lower::DriverFn`] — so the hard,
 //! toolchain-pinned rustc glue is thin and replaceable while the reusable

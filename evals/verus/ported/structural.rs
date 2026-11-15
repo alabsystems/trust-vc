@@ -65,18 +65,27 @@ pub const STRUCTURAL_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "counterexample",
         1,
     ),
+    // RE-PINNED 2026-09-13: the `.eq()` METHOD call on a hand-written
+    // `PartialEq` lowers to the impl's own body (2026-09-11), and this body is
+    // the constant `false`, so the claim is genuinely refuted (model: two
+    // arbitrary `ManualEq` values); its negation verifies (twin below).
     (
-        "structural_manual_partial_eq_method_currently_blocked",
+        "structural_manual_partial_eq_method_counterexample",
         "test_not_structural_generic",
-        "error",
-        0,
+        "counterexample",
+        3,
+    ),
+    (
+        "structural_manual_partial_eq_method_negation_verified",
+        "test_not_structural_generic",
+        "verified",
+        3,
     ),
 ];
 
-pub const STRUCTURAL_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[(
-    "structural_manual_partial_eq_method_currently_blocked",
-    &["unsupported method", "eq()"],
-)];
+// No case fails closed on an error message any more (the manual-`PartialEq`
+// `.eq()` call was RE-PINNED to a genuine Counterexample on 2026-09-13).
+pub const STRUCTURAL_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[];
 
 pub fn structural_rs_expected_cases(
 ) -> &'static [(&'static str, &'static str, &'static str, usize)] {
@@ -219,6 +228,14 @@ fn structural_vehicle_wildcard_payload_match_verified(passengers: u64) -> bool {
 }
 
 #[trust_vc::ensures(true)]
-fn structural_manual_partial_eq_method_currently_blocked(left: ManualEq, right: ManualEq) {
+fn structural_manual_partial_eq_method_counterexample(left: ManualEq, right: ManualEq) {
     trust_vc::assert!(left.eq(&right));
+}
+
+// The hand-written `eq` body is the constant `false`, so its negation is the
+// TRUE claim: this twin proves the `.eq()` method lane reads the impl body
+// (an uninterpreted `eq` could not verify it).
+#[trust_vc::ensures(true)]
+fn structural_manual_partial_eq_method_negation_verified(left: ManualEq, right: ManualEq) {
+    trust_vc::assert!(!left.eq(&right));
 }

@@ -29,6 +29,8 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     pub(in crate::encoder) static FORCE_SCOPE_POP_FAILURE_ONCE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    pub(in crate::encoder) static FORCE_SOLVE_PANIC_ONCE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     pub(in crate::encoder) static SETUP_FROM_PREPARED_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(in crate::encoder) static PER_ASSERTION_PRUNE_PLAN_BUILD_COUNT: std::cell::Cell<usize> =
@@ -97,6 +99,16 @@ pub(in crate::encoder) fn take_forced_scope_pop_failure() -> bool {
 #[cfg(not(test))]
 pub(in crate::encoder) fn take_forced_scope_pop_failure() -> bool {
     false
+}
+
+/// Make the next solve on this thread panic inside ay's solve call, once.
+#[cfg(test)]
+pub(in crate::encoder) fn take_forced_solve_panic() -> bool {
+    FORCE_SOLVE_PANIC_ONCE.with(|flag| {
+        let enabled = flag.get();
+        flag.set(false);
+        enabled
+    })
 }
 
 #[cfg(test)]

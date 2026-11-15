@@ -6,6 +6,7 @@
 
 use ay_dpll::api::Term;
 
+use crate::encoder::width_coercion::{ir_type_signedness, OwnSign};
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
 use crate::ir::{ArithOp, SpecialArithOp, TrustVcExpr, TrustVcType};
@@ -33,6 +34,42 @@ impl<'a> AstExpressionParser<'a> {
         }
 
         crate::ir_lowering::infer_expr_type(expr)
+    }
+
+    /// True when `expr` is built ONLY from default-width (`Int { width: 32 }`)
+    /// integer literals — suffixed `i32` or unsuffixed, which lower
+    /// identically — combined by `+ - * / %`, `& | ^` and unary `-`, with every
+    /// interior node itself typed `Int { width: 32 }`. Such a tree has one
+    /// value, fixed by its IR width; see
+    /// `default_int_literal_narrowing_suppressed`. Shifts, casts, calls,
+    /// variables and every other shape return `false` (encoded unchanged).
+    fn is_closed_default_int_literal_tree(expr: &TrustVcExpr) -> bool {
+        match expr {
+            TrustVcExpr::IntLit {
+                ty: TrustVcType::Int { width: 32 },
+                ..
+            } => true,
+            TrustVcExpr::Neg(inner) => Self::is_closed_default_int_literal_tree(inner),
+            TrustVcExpr::Arith {
+                left,
+                right,
+                ty: TrustVcType::Int { width: 32 },
+                ..
+            } => {
+                Self::is_closed_default_int_literal_tree(left)
+                    && Self::is_closed_default_int_literal_tree(right)
+            }
+            TrustVcExpr::SpecialArith {
+                op: SpecialArithOp::BitAnd | SpecialArithOp::BitOr | SpecialArithOp::BitXor,
+                left,
+                right,
+                ty: TrustVcType::Int { width: 32 },
+            } => {
+                Self::is_closed_default_int_literal_tree(left)
+                    && Self::is_closed_default_int_literal_tree(right)
+            }
+            _ => false,
+        }
     }
 
     /// True when `expr` is a collection `.len()` whose term is Int-sorted under
@@ -82,11 +119,21 @@ impl<'a> AstExpressionParser<'a> {
         right: &TrustVcExpr,
         ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
-        // Arithmetic semantics follow the expression/result type in Rust.
-        // Fallback to operand-type AND semantics only for unexpected non-int
-        // `ty` values (defensive path for manually constructed IR).
-        let left_hint_ty = self.infer_effective_arith_expr_type(right, None);
-        let right_hint_ty = self.infer_effective_arith_expr_type(left, None);
+        // The operation's type is DERIVED from both operands
+        // (`ir_lowering::types`), never taken from `ty` alone: one fixed-width
+        // type `T` computes in `T`; operands of different fixed-width types
+        // (`x: u8 + y: i16`, `29878u16 * -256i32`) compute EXACTLY over the
+        // integers, each operand read with its own type's signedness. `ty` said
+        // `u8`/`u16` there (the syn lowering copied the left operand's type;
+        // a typed producer may say anything), and the wider result was then
+        // read unsigned: `0u8 + (-1i16)` compared as 65535.
+        //
+        // Each operand's hint is the type its VALUE has at this use site: an
+        // untyped literal takes its peer's type only when it fits
+        // (`coerce_default_int_literal`).
+        self.check_untyped_conditional_operation_in_every_type(op, left, right, ty)?;
+        let (left_hint_ty, right_hint_ty) =
+            crate::ir_lowering::binary_operand_types(left, right, ty);
         let left_ty = self.infer_effective_arith_expr_type(left, Some(&left_hint_ty));
         let right_ty = self.infer_effective_arith_expr_type(right, Some(&right_hint_ty));
         let effective_ty = if matches!(ty, TrustVcType::Real)
@@ -99,7 +146,7 @@ impl<'a> AstExpressionParser<'a> {
         {
             TrustVcType::MathInt
         } else {
-            ty.clone()
+            crate::ir_lowering::derive_binary_int_type(left, right, ty)
         };
         let unsigned = match &effective_ty {
             TrustVcType::Uint { .. } => true,
@@ -109,9 +156,45 @@ impl<'a> AstExpressionParser<'a> {
                     && matches!(right_ty, TrustVcType::Uint { .. })
             }
         };
+        // The signedness each BV operand DENOTES: its OWN type at this use
+        // site — never its peer's or the operation's (an operand whose type
+        // fixes none is refused where it would be widened or lifted), and
+        // never `term_widths` (see `term_widths.rs`).
+        let left_signed = self.own_sign(left, Some(&left_hint_ty));
+        let right_signed = self.own_sign(right, Some(&right_hint_ty));
 
-        let left_term = self.encode_expr_with_integer_hint(left, Some(&left_hint_ty))?;
-        let right_term = self.encode_expr_with_integer_hint(right, Some(&right_hint_ty))?;
+        // SOUNDNESS (rank-5 cluster, member 31): a CLOSED default-width literal
+        // operation (`21i32 * 21i32`, `100 + 100`, `(31i32 - 10i32) * (..)`)
+        // must be computed at its IR width. Context narrowing of its literal
+        // leaves would compute — and silently wrap — it at the most common
+        // variable width (BV8 `21 * 21 == 185` next to an `i8` variable),
+        // while the constant-fold overflow verdict below is taken at 32 bits,
+        // so no obligation catches the wrap. Suppress the narrowing for the
+        // operands only; every other operand shape is encoded unchanged.
+        //
+        // NARROWING (rank-5 regression): do NOT suppress when this tree sits in
+        // a narrower-typed operand position (`z + (100 + 100)` with `z: u8`,
+        // `y == 100 + 100` with `y: i8`). There the literals really are typed at
+        // the peer's narrow width, and suppressing would compute the ENCLOSING
+        // narrow operation at 32 bits, dropping its overflow obligation. See
+        // `narrow_typed_literal_operand_context`.
+        let closed_literal_operation = matches!(ty, TrustVcType::Int { width: 32 })
+            && !self.narrow_typed_literal_operand_context
+            && Self::is_closed_default_int_literal_tree(left)
+            && Self::is_closed_default_int_literal_tree(right);
+        if closed_literal_operation {
+            self.default_int_literal_narrowing_suppressed += 1;
+        }
+        let operand_terms = self
+            .encode_expr_with_integer_hint(left, Some(&left_hint_ty))
+            .and_then(|left_term| {
+                self.encode_expr_with_integer_hint(right, Some(&right_hint_ty))
+                    .map(|right_term| (left_term, right_term))
+            });
+        if closed_literal_operation {
+            self.default_int_literal_narrowing_suppressed -= 1;
+        }
+        let (left_term, right_term) = operand_terms?;
 
         let right_is_zero = super::super::is_trust_vc_literal_zero(right);
         let right_is_one = super::super::is_trust_vc_literal_one(right);
@@ -146,8 +229,8 @@ impl<'a> AstExpressionParser<'a> {
         }
 
         if matches!(effective_ty, TrustVcType::MathInt | TrustVcType::Nat) {
-            let left_term = self.coerce_bv_term_to_int_for_type(left_term, &left_ty)?;
-            let right_term = self.coerce_bv_term_to_int_for_type(right_term, &right_ty)?;
+            let left_term = self.lift_bv_operand_to_int(left_term, left_signed)?;
+            let right_term = self.lift_bv_operand_to_int(right_term, right_signed)?;
             return self.encode_int_arith(
                 op,
                 left_term,
@@ -174,9 +257,16 @@ impl<'a> AstExpressionParser<'a> {
         // Route A (#2779): spec-collection `.len()` is Int while a peer integer
         // operand encodes as BV (e.g. `s.len() - n`, `s.len() + t.len()` where a
         // literal is BV). When the actual term sorts are a mixed Int/BV pair,
-        // lift the BV operand to Int (unsigned — lengths/usize are non-negative)
-        // and use Int arithmetic so length math stays over the unbounded
-        // integers (monotone, no wrap). Analogue of the compare-path bridge.
+        // lift the BV operand to the integer it DENOTES and use Int arithmetic
+        // so length math stays over the unbounded integers (monotone, no wrap).
+        // Analogue of the compare-path bridge.
+        //
+        // The lift takes the BV operand's own signedness. It used to be
+        // unsigned unconditionally ("lengths/usize are non-negative"), but the
+        // BV operand is the PEER of the length, not the length: `a.len() +
+        // (-3i64)` was `a.len() + 2^64 - 3`, so `a.len() == 2` entailed
+        // `a.len() + (-3) > 100` (Verified, false) and refuted
+        // `a.len() + (-3) < 0` (true) — tests/operand_signedness_soundness.rs.
         {
             use ay_dpll::api::Sort;
             let left_sort = self.solver.term_sort(left_term);
@@ -186,20 +276,8 @@ impl<'a> AstExpressionParser<'a> {
                 (Sort::Int, Sort::BitVec(_)) | (Sort::BitVec(_), Sort::Int)
             );
             if mixed_int_bv {
-                let left_int = if matches!(left_sort, Sort::Int) {
-                    left_term
-                } else {
-                    self.solver
-                        .try_bv2int(left_term)
-                        .map_err(|e| e.to_string())?
-                };
-                let right_int = if matches!(right_sort, Sort::Int) {
-                    right_term
-                } else {
-                    self.solver
-                        .try_bv2int(right_term)
-                        .map_err(|e| e.to_string())?
-                };
+                let left_int = self.lift_bv_operand_to_int(left_term, left_signed)?;
+                let right_int = self.lift_bv_operand_to_int(right_term, right_signed)?;
                 return self.encode_int_arith(
                     op,
                     left_int,
@@ -212,14 +290,18 @@ impl<'a> AstExpressionParser<'a> {
             }
         }
 
-        // Coerce BV widths to match
-        let (left_term, right_term) = self.coerce_bv_widths(left_term, right_term)?;
+        // Coerce BV widths to match, each operand extended by its own sign.
+        let (left_term, right_term) =
+            self.coerce_bv_widths_signed((left_term, left_signed), (right_term, right_signed))?;
 
+        // The result's width is the coerced operands' (their sort); its
+        // signedness is the operation's — never an operand term's
+        // `term_widths` entry, which a hash-consed constant shares with every
+        // other occurrence of the same bits.
         let coerced_width_info = self
-            .term_widths
-            .get(&left_term)
-            .or_else(|| self.term_widths.get(&right_term))
-            .copied();
+            .bv_term_width(left_term)
+            .or_else(|| self.bv_term_width(right_term))
+            .map(|width| (width, !unsigned));
 
         // Resolve operand width for div-by-zero checks: prefer coerced width,
         // fall back to TrustVcType from the IR node.
@@ -391,6 +473,84 @@ impl<'a> AstExpressionParser<'a> {
         Ok(result)
     }
 
+    /// An untyped literal operation that holds a CONDITIONAL and meets no peer
+    /// here (`(if c { 2 } else { 2 }) * 200`, still at the `i32` placeholder)
+    /// is computed at `i32`, Rust's default; but the peer that fixes its type
+    /// may be one this encoding does not see — a later use of the binding it
+    /// initializes (`let a = ..; let z: u8 = a;`), the parameter of the call
+    /// it is an argument of — and Rust then computes it, and checks it, in
+    /// that type. Its overflow obligation therefore also holds in EVERY
+    /// fixed-width type all its literals fit (each such encoding raises its
+    /// own checks; its value is discarded). Checked only at `i32`, `let mut w
+    /// = 0; if c { w = 200; } w = w + 100; let z: u8 = w;` was `Verified`
+    /// while the `u8` addition overflows. A constant form needs none of this:
+    /// the compiler rejects an overflow in it.
+    fn check_untyped_conditional_operation_in_every_type(
+        &mut self,
+        op: ArithOp,
+        left: &TrustVcExpr,
+        right: &TrustVcExpr,
+        ty: &TrustVcType,
+    ) -> TrustVcResult<()> {
+        if !self.overflow_behavior.should_check() || self.quantifier_depth > 0 {
+            return Ok(());
+        }
+        let node = TrustVcExpr::Arith {
+            op,
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+            ty: ty.clone(),
+        };
+        self.check_untyped_nonconstant_form_in_every_type(&node, ty)
+    }
+
+    /// The every-type check of [`Self::check_untyped_conditional_operation_in_every_type`]
+    /// for any untyped literal form `node` (typed `ty`) whose value is not a
+    /// constant: one holding a conditional, or a SHIFT by an amount that is
+    /// not a literal (`1 << k`), whose amount obligation depends on the width
+    /// the form takes — `g8(1 << k)` shifts a `u8`, and panics at `k == 8`.
+    fn check_untyped_nonconstant_form_in_every_type(
+        &mut self,
+        node: &TrustVcExpr,
+        ty: &TrustVcType,
+    ) -> TrustVcResult<()> {
+        if !self.overflow_behavior.should_check() || self.quantifier_depth > 0 {
+            return Ok(());
+        }
+        if !crate::ir_lowering::is_untyped_literal(node)
+            || !crate::ir_lowering::untyped_form_is_conditional(node)
+        {
+            return Ok(());
+        }
+        // A form whose only conditionals are an untyped binding's one-valued
+        // ones (`ir_lowering::untyped_site`) is a CONSTANT whose type is not
+        // determined here: refused when it panics in a type it may take,
+        // and otherwise left to its `i32` reading.
+        let collapsed = crate::ir_lowering::collapse_undetermined_forms(node);
+        if !crate::ir_lowering::untyped_form_is_conditional(&collapsed) {
+            if let Some(panics_in) = crate::ir_lowering::constant_form_panicking_type(&collapsed) {
+                return Err(format!(
+                    "an untyped integer literal form bound to a name whose type is not \
+                     determined here panics as `{}`",
+                    panics_in.to_type_string()
+                )
+                .into());
+            }
+            return Ok(());
+        }
+        for width in [8, 16, 32, 64, 128] {
+            for candidate in [TrustVcType::Int { width }, TrustVcType::Uint { width }] {
+                if candidate == *ty {
+                    continue;
+                }
+                if let Some(typed) = crate::ir_lowering::untyped_literal_at_peer(node, &candidate) {
+                    self.encode_subexpr(&typed)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn encode_float_arith(&mut self, op: ArithOp, left: Term, right: Term) -> TrustVcResult<Term> {
         let rne = self
             .solver
@@ -413,11 +573,72 @@ impl<'a> AstExpressionParser<'a> {
                 .solver
                 .try_fp_div(rne, left, right)
                 .map_err(|e| e.to_string().into()),
-            ArithOp::Rem => self
-                .solver
-                .try_fp_rem(left, right)
-                .map_err(|e| e.to_string().into()),
+            // Rust `%` on floats is C `fmod`, NOT SMT-LIB `fp.rem` (the IEEE
+            // remainder): `fp.rem` plus an exact one-step correction.
+            ArithOp::Rem => self.encode_float_fmod(left, right),
         }
+    }
+
+    /// Rust's float `%` exactly: C `fmod` / LLVM `frem`, the TRUNCATING
+    /// remainder `x - trunc(x / y) * y`, which has the dividend's sign
+    /// (`5.0 % 3.0 == 2.0`, `-5.0 % 3.0 == -2.0`, `-6.0 % 3.0 == -0.0`).
+    ///
+    /// SMT-LIB `fp.rem` is a different function, the IEEE 754 remainder
+    /// `x - n * y` with `n = roundTiesToEven(x / y)`: `fp.rem(5, 3) = -1`.
+    /// Lowering `%` to `fp.rem` alone verified the false `5 % 3 < 0` (f32
+    /// and f64) and refuted the true `5 % 3 == 2` and `0 <= x => 0 <= x % 3`
+    /// (TRUST-VC-FREM-1; the same defect as trust-ir's TRUST-IR-AY-FREM-1,
+    /// whose encoding and proof this mirrors). The encoding is
+    ///
+    /// ```text
+    /// r    = fp.rem(x, y)
+    /// fmod = ite(!isZero(r) && !isNaN(r) && isNegative(r) != isNegative(x),
+    ///            fp.add(RNE, r, ite(isNegative(x), -|y|, |y|)),
+    ///            r)
+    /// ```
+    ///
+    /// **Why this is `fmod` (finite `x`, finite nonzero `y`).** Both functions
+    /// are odd in `x` (negating `x` negates the quotient; round-to-nearest-even
+    /// and truncation are both symmetric about zero) and even in `y`
+    /// (negating `y` negates `n`, so `n * y` is unchanged); a zero result
+    /// takes the sign of `x` in both. With `a = |x|`, `b = |y|` and `s` the
+    /// sign of `x`: `fmod(x, y) = s * fmod(a, b)` and
+    /// `fp.rem(x, y) = s * rem(a, b)`. Let `t = floor(a / b)`, so
+    /// `fmod(a, b) = a - t * b`, in `[0, b)`. Round-to-nearest picks `n = t`
+    /// or `n = t + 1` (a tie lands on either, by parity).
+    ///
+    /// * `n = t`: `rem(a, b) = fmod(a, b) >= 0`, so `r` is zero or has the
+    ///   sign of `x`, and is already `fmod`.
+    /// * `n = t + 1`: `rem(a, b) = fmod(a, b) - b`, in `[-b/2, 0)`: nonzero,
+    ///   opposite in sign to `a`, and `fmod(a, b) = rem(a, b) + b`.
+    ///
+    /// So "`r` nonzero, not NaN, and opposite in sign to `x`" is exactly the
+    /// `n = t + 1` case, where `fmod(x, y) = r + copysign(|y|, x)`.
+    /// `copysign` is spelled with `isNegative(x)`, sound because `x` is not
+    /// NaN whenever `r` is not.
+    ///
+    /// **Why the add is EXACT.** Its real sum is `fmod(x, y)`, which is a
+    /// float, so RNE (any rounding mode) returns it unrounded. It is a float:
+    /// with `Q` the smaller of the operands' quanta, `a`, `b` and
+    /// `a - t * b` are integer multiples of `Q`, and `fmod(a, b) <= a`,
+    /// `fmod(a, b) < b`; divided by `Q` it is at most the integral
+    /// significand of the operand with quantum `Q`, below `2^p`. A multiple
+    /// of `Q` (at or above the format's least quantum) with fewer than `p`
+    /// significant bits is representable. The sum lies in `s * [b/2, b)`:
+    /// nonzero, so no signed-zero rounding question arises.
+    ///
+    /// **Special operands** never take the corrected branch, and `fp.rem`
+    /// already agrees with `fmod` on them: `x` or `y` NaN, `x` infinite, or
+    /// `y` zero give NaN (the guard excludes a NaN `r`); `y` infinite with `x`
+    /// finite gives `x` in both (same sign as `x`, branch not taken); a zero
+    /// `x` with nonzero `y`, and an exact multiple, give a zero with the sign
+    /// of `x` in both (excluded by `isZero(r)`).
+    ///
+    /// `encoder/tests/float_rem_fmod.rs` pins concrete cases bit for bit to
+    /// Rust's own `%`, and `tests/float_rem_fmod_soundness.rs` the end-to-end
+    /// verdicts.
+    fn encode_float_fmod(&mut self, x: Term, y: Term) -> TrustVcResult<Term> {
+        fp_fmod(self.solver, x, y).map_err(|e| e.to_string().into())
     }
 
     /// Encode arithmetic for Real-typed operands (spec-level mathematical reals).
@@ -508,15 +729,52 @@ impl<'a> AstExpressionParser<'a> {
         right: &TrustVcExpr,
         ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
-        let left_term = self.encode_subexpr(left)?;
-        let right_term = self.encode_subexpr(right)?;
+        let is_shift = matches!(op, SpecialArithOp::Shl | SpecialArithOp::Shr);
+        // A closed untyped-literal tree that met no peer and holds a value
+        // beyond `i32` (`4294967295 ^ 2`) has no `i32` reading: it is its exact
+        // value (`ir_lowering::types`).
+        if !is_shift {
+            let node = TrustVcExpr::SpecialArith {
+                op,
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                ty: ty.clone(),
+            };
+            if crate::ir_lowering::is_untyped_literal(&node)
+                && !crate::ir_lowering::untyped_literal_fits(&node, &TrustVcType::Int { width: 32 })
+            {
+                if let Some(value) = crate::ir_lowering::untyped_literal_value(&node) {
+                    return self.encode_int_lit(value, &TrustVcType::MathInt);
+                }
+            }
+        }
+        if is_shift {
+            let node = TrustVcExpr::SpecialArith {
+                op,
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                ty: ty.clone(),
+            };
+            self.check_untyped_nonconstant_form_in_every_type(&node, ty)?;
+        }
+        // Bitwise operands are typed like arithmetic operands: an untyped
+        // literal takes its peer's type only when it fits (`encode_arith`).
+        // A shift's amount is independent of its value operand.
+        let (left_hint_ty, right_hint_ty) = if is_shift {
+            (None, None)
+        } else {
+            let (l, r) = crate::ir_lowering::binary_operand_types(left, right, ty);
+            (Some(l), Some(r))
+        };
+        let left_term = self.encode_expr_with_integer_hint(left, left_hint_ty.as_ref())?;
+        let right_term = self.encode_expr_with_integer_hint(right, right_hint_ty.as_ref())?;
 
         if self.int_mode() {
             return self.encode_int_special_arith(op, left, right, left_term, right_term, ty);
         }
         let collect_side_checks = self.quantifier_depth == 0;
 
-        if matches!(op, SpecialArithOp::Shl | SpecialArithOp::Shr) {
+        if is_shift {
             return self.encode_bv_shift(
                 op,
                 left,
@@ -528,12 +786,44 @@ impl<'a> AstExpressionParser<'a> {
             );
         }
 
-        let (left_term, right_term) = self.coerce_bv_widths(left_term, right_term)?;
+        let (left_value_ty, right_value_ty) = (
+            left_hint_ty.unwrap_or(TrustVcType::Unit),
+            right_hint_ty.unwrap_or(TrustVcType::Unit),
+        );
+        // Operands of DIFFERENT fixed-width types (`x: u8 | y: i16`): the
+        // derived type is `int`, and the value is the exact two's-complement
+        // result over the integers — each operand extended by its OWN sign to a
+        // width holding both (`max(w + [unsigned])`), where `& | ^` cannot
+        // overflow, then read signed. The node's `ty` (which the syn lowering
+        // copied from the left operand) used to register the wider result as
+        // unsigned: `0u8 | (-1i16)` compared as 65535.
+        if crate::ir_lowering::is_fixed_width_int(&left_value_ty)
+            && crate::ir_lowering::is_fixed_width_int(&right_value_ty)
+            && left_value_ty != right_value_ty
+        {
+            let own_left = self.own_sign(left, Some(&left_value_ty));
+            let own_right = self.own_sign(right, Some(&right_value_ty));
+            return self.encode_mixed_bitwise_exact(
+                op,
+                (left_term, own_left),
+                (right_term, own_right),
+            );
+        }
+        let derived = crate::ir_lowering::derive_binary_int_type(left, right, ty);
+        // Each operand is widened by its OWN type's signedness only (an
+        // operand whose own type fixes none is refused, never given its
+        // peer's or the derived type's), and the result carries the derived
+        // type's.
+        let own_left = self.own_sign(left, Some(&left_value_ty));
+        let own_right = self.own_sign(right, Some(&right_value_ty));
+        let (left_term, right_term) =
+            self.coerce_bv_widths_signed((left_term, own_left), (right_term, own_right))?;
+        let result_signed =
+            ir_type_signedness(&derived).or(own_left.get().filter(|_| own_left == own_right));
         let coerced_width_info = self
-            .term_widths
-            .get(&left_term)
-            .or_else(|| self.term_widths.get(&right_term))
-            .copied();
+            .bv_term_width(left_term)
+            .or_else(|| self.bv_term_width(right_term))
+            .zip(result_signed);
 
         let result = match op {
             SpecialArithOp::Shl | SpecialArithOp::Shr => unreachable!(),
@@ -557,6 +847,45 @@ impl<'a> AstExpressionParser<'a> {
         Ok(result)
     }
 
+    /// `left op right` for `& | ^` over operands of two DIFFERENT fixed-width
+    /// types, as the exact integer (Int-sorted): each operand is extended by
+    /// its own type's sign to `W = max(width + [unsigned])` bits, where every
+    /// value of both types is a signed `W`-bit number and the bitwise result of
+    /// two such numbers is one too, and the result is read signed.
+    fn encode_mixed_bitwise_exact(
+        &mut self,
+        op: SpecialArithOp,
+        (left, left_own): (Term, OwnSign),
+        (right, right_own): (Term, OwnSign),
+    ) -> TrustVcResult<Term> {
+        let needed = |this: &Self, term: Term, own: OwnSign| -> TrustVcResult<u32> {
+            let width = this
+                .bv_term_width(term)
+                .ok_or_else(|| "mixed-type bitwise operand is not a bit-vector".to_string())?;
+            let signed = own
+                .get()
+                .ok_or_else(|| "mixed-type bitwise operand has no signedness".to_string())?;
+            Ok(width + u32::from(!signed))
+        };
+        let width = needed(self, left, left_own)?.max(needed(self, right, right_own)?);
+        let left = self.widen_bv_to(left, width, left_own)?;
+        let right = self.widen_bv_to(right, width, right_own)?;
+        let bits = match op {
+            SpecialArithOp::BitAnd => self.solver.try_bvand(left, right),
+            SpecialArithOp::BitOr => self.solver.try_bvor(left, right),
+            SpecialArithOp::BitXor => self.solver.try_bvxor(left, right),
+            SpecialArithOp::Shl | SpecialArithOp::Shr => {
+                return Err("shift is not a mixed-type bitwise operation"
+                    .to_string()
+                    .into())
+            }
+        }
+        .map_err(|e| e.to_string())?;
+        // Built here as a two's-complement pattern of both operands' signed
+        // `width`-bit readings: read signed by construction.
+        self.lift_bv_operand_to_int(bits, OwnSign::of_constructed(true))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn encode_bv_shift(
         &mut self,
@@ -568,13 +897,15 @@ impl<'a> AstExpressionParser<'a> {
         right_term: Term,
         collect_side_checks: bool,
     ) -> TrustVcResult<Term> {
-        let left_width_info = self.term_widths.get(&left_term).copied();
         let left_ty = crate::ir_lowering::infer_expr_type(left);
         let lhs_width = left_ty
             .bit_width()
             .or_else(|| ty.bit_width())
-            .or_else(|| left_width_info.map(|(w, _)| w))
+            .or_else(|| self.bv_term_width(left_term))
             .ok_or_else(|| "shift overflow check requires known LHS bit width".to_string())?;
+        // Width and signedness from the IR types only: with neither `ty` nor
+        // the LHS type fixing them, the result is left unregistered rather
+        // than inheriting whatever `term_widths` says about a hash-consed LHS.
         let result_width_info = ty
             .bit_width()
             .map(|width| (width, !ty.is_unsigned()))
@@ -582,8 +913,7 @@ impl<'a> AstExpressionParser<'a> {
                 left_ty
                     .bit_width()
                     .map(|width| (width, !left_ty.is_unsigned()))
-            })
-            .or(left_width_info);
+            });
 
         // `by(bit_vector)` (SolverMode::BitVector) interprets the assertion as
         // pure bitvector math: an over-shift is `bvlshr`/`bvshl`/`bvashr`
@@ -621,7 +951,8 @@ impl<'a> AstExpressionParser<'a> {
             self.check_shift_overflow(right_term, lhs_width, check_name)?;
         }
 
-        let shift_amount = self.coerce_shift_amount_to_lhs_width(right_term, lhs_width)?;
+        let rhs_own = self.own_sign(right, None);
+        let shift_amount = self.coerce_shift_amount_to_lhs_width(right_term, lhs_width, rhs_own)?;
         let result = match op {
             SpecialArithOp::Shl => self
                 .solver
@@ -649,32 +980,86 @@ impl<'a> AstExpressionParser<'a> {
         Ok(result)
     }
 
+    /// Bring a shift amount to the LHS width without changing what it shifts.
+    ///
+    /// The width is the amount's sort; the extension sign is its IR type's
+    /// (`rhs_signed`), never a `term_widths` entry. SMT-LIB reads a shift
+    /// amount as UNSIGNED, and an amount whose sign bit is set is at least
+    /// `2^(w-1) >= 128` for every `w >= 8`, which already exceeds every LHS
+    /// width either extension could produce — so an amount whose type fixes
+    /// no sign is zero-extended with no change of meaning.
     fn coerce_shift_amount_to_lhs_width(
         &mut self,
         shift_amount: Term,
         lhs_width: u32,
+        rhs_own: OwnSign,
     ) -> TrustVcResult<Term> {
         if lhs_width == 0 {
             return Err("shift amount coercion requires nonzero LHS bit width"
                 .to_string()
                 .into());
         }
-        let Some((rhs_width, rhs_signed)) = self.term_widths.get(&shift_amount).copied() else {
+        let Some(rhs_width) = self.bv_term_width(shift_amount) else {
             return Ok(shift_amount);
+        };
+        // The amount's own sign; one whose type fixes none is read as SMT-LIB
+        // reads every amount — unsigned (same shift, see above).
+        let rhs_own = if rhs_own.get().is_some() {
+            rhs_own
+        } else {
+            OwnSign::of_constructed(false)
         };
         if rhs_width == lhs_width {
             return Ok(shift_amount);
         }
         if rhs_width < lhs_width {
-            let extended = self.extend_term(shift_amount, lhs_width - rhs_width, rhs_signed)?;
-            self.term_widths.insert(extended, (lhs_width, rhs_signed));
-            return Ok(extended);
+            return self.widen_bv_to(shift_amount, lhs_width, rhs_own);
         }
-        let narrowed = self
-            .solver
-            .try_bvextract(shift_amount, lhs_width - 1, 0)
-            .map_err(|e| e.to_string())?;
-        self.term_widths.insert(narrowed, (lhs_width, rhs_signed));
-        Ok(narrowed)
+        // An amount WIDER than the value is never truncated. Bit extraction
+        // made `1u8 << 256u16` the shift by `256 mod 256 == 0`, so it verified
+        // `== 1` while `1u8 << 8u32` verified `== 0` — two semantics at once.
+        // The one semantics (SMT-LIB's, which `by(bit_vector)` documents and
+        // Verus uses): the amount is read unsigned at its own width, and an
+        // amount `>= lhs_width` shifts every bit out. Saturate it to
+        // `lhs_width` (representable in `lhs_width` bits) before narrowing, so
+        // `bvshl`/`bvlshr` give 0 and `bvashr` the sign fill, exactly as the
+        // full-width amount would.
+        let solver = &mut *self.solver;
+        let saturated = (|| {
+            let bound = solver.try_bv_const(i64::from(lhs_width), rhs_width)?;
+            let over = solver.try_bvuge(shift_amount, bound)?;
+            let low = solver.try_bvextract(shift_amount, lhs_width - 1, 0)?;
+            let full = solver.try_bv_const(i64::from(lhs_width), lhs_width)?;
+            solver.try_ite(over, full, low)
+        })()
+        .map_err(|e| e.to_string())?;
+        self.term_widths.insert(saturated, (lhs_width, false));
+        Ok(saturated)
     }
+}
+
+/// The term [`AstExpressionParser::encode_float_fmod`] documents: Rust's float
+/// `%` (C `fmod`) over the FloatingPoint terms `x` and `y`, built as
+/// `fp.rem(x, y)` plus its exact one-step correction.
+fn fp_fmod(
+    solver: &mut ay_dpll::api::Solver,
+    x: Term,
+    y: Term,
+) -> Result<Term, ay_dpll::api::SolverError> {
+    let r = solver.try_fp_rem(x, y)?;
+    let r_zero = solver.try_fp_is_zero(r)?;
+    let r_nan = solver.try_fp_is_nan(r)?;
+    let r_unadjusted = solver.try_or(r_zero, r_nan)?;
+    let r_ordinary = solver.try_not(r_unadjusted)?;
+    let r_negative = solver.try_fp_is_negative(r)?;
+    let x_negative = solver.try_fp_is_negative(x)?;
+    let sign_differs = solver.try_xor(r_negative, x_negative)?;
+    let overshot = solver.try_and(r_ordinary, sign_differs)?;
+    // copysign(|y|, x)
+    let y_magnitude = solver.try_fp_abs(y)?;
+    let y_magnitude_negated = solver.try_fp_neg(y_magnitude)?;
+    let step = solver.try_ite(x_negative, y_magnitude_negated, y_magnitude)?;
+    let rne = solver.try_fp_rounding_mode("RNE")?;
+    let corrected = solver.try_fp_add(rne, r, step)?;
+    solver.try_ite(overshot, corrected, r)
 }

@@ -699,16 +699,15 @@ fn test_seq_subrange_int_start_crossing_representable_len_verified() {
 // #2565: Match/ITE signedness merge uses declared type, not arm order
 // ========================================================================
 
-/// DISCRIMINATING (#2565): Match with mixed-signedness arms must record the
-/// declared type's signedness, not the arm-order-dependent signedness.
-///
-/// Setup: 2-arm match where arm 1 body is i32 (signed) and arm 2 body is u32
-/// (unsigned), with declared type Int{32} (signed). Before fix, the last
-/// source-order arm processed first in reverse sets signedness — so arm 2 (u32)
-/// wins and the result is tracked as unsigned. After fix, ty=Int{32} overrides
-/// to signed.
+/// DISCRIMINATING (#2565, design-trust-proof-backend.md §5b): a match whose
+/// arms have DIFFERENT types (`i32` arm, `u32` wildcard arm, declared
+/// `Int{32}`) is the integer its taken arm denotes, like a conditional
+/// (`test_ite_mixed_signedness_is_lifted_to_int`). #2565 fixed the arm order
+/// deciding the result's signedness by taking the declared type's instead;
+/// neither sign reads both arms' bits (`u32::MAX` is not an `i32`), so the
+/// match's type is derived from its arms and the result is lifted to `Int`.
 #[test]
-fn test_match_mixed_signedness_uses_declared_type() {
+fn test_match_mixed_signedness_is_lifted_to_int() {
     use crate::ir::TrustVcType;
     use crate::ir_expr::{MatchArm, MatchPattern, TrustVcExpr};
 
@@ -785,29 +784,28 @@ fn test_match_mixed_signedness_uses_declared_type() {
         .encode_trust_vc_expr(&match_expr)
         .expect("encode_match should succeed");
 
-    // The match result must be tracked as signed (from ty=Int{32}),
-    // regardless of which arm was processed first.
-    let &(width, signed) = parser
-        .term_widths
-        .get(&match_term)
-        .expect("match result must have term_widths entry");
-    assert_eq!(width, 32, "match result width should be 32");
+    // Arms of two DIFFERENT types (`i32`, `u32`) denote an integer: the match
+    // is lifted to `Int`, each arm with its own sign — neither the arm order
+    // (#2565) nor the declared type decides how the other arm's bits are read.
+    assert_eq!(
+        parser.solver.term_sort(match_term),
+        Sort::Int,
+        "a mixed-type match denotes the integer its taken arm denotes"
+    );
     assert!(
-        signed,
-        "match result signedness should be true (signed) from declared type Int{{32}}, \
-         not false (unsigned) from arm processing order (#2565)"
+        parser.term_widths.get(&match_term).is_none(),
+        "an Int-sorted match carries no bit-vector width"
     );
 }
 
-/// DISCRIMINATING (#2565): ITE with mixed-signedness branches must record the
-/// declared type's signedness, not the then-branch-first preference.
-///
-/// Setup: ITE where then-branch is u32 (unsigned) and else-branch is i32
-/// (signed), with declared type Int{32} (signed). Before fix, then_coerced's
-/// signedness always wins — so the result is tracked as unsigned. After fix,
-/// ty=Int{32} overrides to signed.
+/// DISCRIMINATING (#2565, design-trust-proof-backend.md §5b): an ITE whose
+/// branches have DIFFERENT types (`u32` then, `i32` else, declared `Int{32}`)
+/// is the integer its chosen branch denotes. #2565 fixed the then-branch's
+/// signedness winning by taking the declared type's instead; neither can read
+/// both branches' bits, so the ITE's type is now derived from both branches
+/// and the result is lifted to `Int`.
 #[test]
-fn test_ite_mixed_signedness_uses_declared_type() {
+fn test_ite_mixed_signedness_is_lifted_to_int() {
     use crate::ir::TrustVcType;
     use crate::ir_expr::TrustVcExpr;
 
@@ -870,17 +868,18 @@ fn test_ite_mixed_signedness_uses_declared_type() {
         .encode_trust_vc_expr(&ite_expr)
         .expect("encode_ite should succeed");
 
-    // The ITE result must be tracked as signed (from ty=Int{32}),
-    // not unsigned (from then-branch preference).
-    let &(width, signed) = parser
-        .term_widths
-        .get(&ite_term)
-        .expect("ITE result must have term_widths entry");
-    assert_eq!(width, 32, "ITE result width should be 32");
+    // Branches of two DIFFERENT types (`u32`, `i32`) denote an integer: the
+    // ITE is lifted to `Int`, each branch with its own sign — neither the
+    // then-branch's signedness (#2565) nor the declared type's decides how
+    // the other branch's bits are read.
+    assert_eq!(
+        parser.solver.term_sort(ite_term),
+        Sort::Int,
+        "a mixed-type ITE denotes the integer its chosen branch denotes"
+    );
     assert!(
-        signed,
-        "ITE result signedness should be true (signed) from declared type Int{{32}}, \
-         not false (unsigned) from then-branch preference (#2565)"
+        parser.term_widths.get(&ite_term).is_none(),
+        "an Int-sorted ITE carries no bit-vector width"
     );
 }
 

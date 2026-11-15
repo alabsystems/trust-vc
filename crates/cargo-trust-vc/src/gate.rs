@@ -10,8 +10,12 @@
 //! each stage runs the real tool and a non-zero stage exit fails the gate.
 
 use crate::evidence::CorpusTriageReport;
+// The lane every compiling gate stage names: the gate builds this repo as a
+// tool, not as a verification subject.
+use crate::TARGO_UNVERIFIED_LANE;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -34,12 +38,22 @@ const CANONICAL_CORPUS_MANIFEST: &str = "evals/verus/verus-tests.json";
 const VERUS_REPO_URL: &str = "https://github.com/verus-lang/verus";
 const REQUIRED_VERUS_TEST_ROOTS: &[&str] =
     &["source/rust_verify_test/tests", "source/cargo-verus/tests"];
+/// The evidence kind whose expected cases the manifest SCHEMA fixes: it forces
+/// `expected_verdict: verified` with `min_obligations: 0` and no
+/// `obligation_fingerprints`, so the count those rows carry pins nothing. See
+/// clause (2b) of `ACCEPTED_CASE_CORRESPONDENCE_BOUND`.
+const CARGO_TRUST_VC_INTEGRATION_TEST_KIND: &str = "cargo_trust_vc_integration_test";
 const ALLOWED_CORPUS_CLASSIFICATIONS: &[&str] =
     &["unchanged", "ported", "unsupported-gap", "not-applicable"];
 /// The checked-in report is currently about 1.3 MiB. Keep generous growth
 /// headroom while rejecting accidental logs or attacker-sized JSON before
 /// deserialization.
 const MAX_CORPUS_TRIAGE_JSON_BYTES: usize = 8 * 1024 * 1024;
+/// Repository-relative path of the Trust-toolchain fuzz runner.
+const TRUST_FUZZ_SCRIPT: &str = "fuzz/run.sh";
+/// What `targo trust-vc fuzz` says when its `$CARGO` is not targo.
+const FUZZ_NEEDS_TARGO: &str =
+    "the fuzz lane runs fuzz/run.sh on the Trust toolchain's `targo` (run it as `targo trust-vc fuzz`)";
 
 /// Outcome of a single gate stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -142,20 +156,26 @@ fn checkout_evidence_guidance() -> String {
 /// Run the full local gate. Returns the process exit code (0 pass, 1 stage failed).
 pub(crate) fn run_gate(args: &GateArgs) -> Result<i32, String> {
     let cargo = cargo_command();
+    // Every toolchain stage runs through the Trust toolchain's `targo`. A
+    // `$CARGO` that fails the targo discriminator fails those stages in-band
+    // instead of letting a stock `cargo fmt` pass under the same name.
+    let targo_identity = probe_targo(&cargo, &args.current_dir, GATE_NEEDS_TARGO);
     let mut stages: Vec<StageResult> = Vec::new();
 
-    stages.push(run_stage(
+    stages.push(run_targo_stage(
         "fmt",
         &cargo,
+        targo_identity.as_ref(),
         &["fmt", "--all", "--check"],
         &args.current_dir,
         args.json,
     ));
-    stages.push(run_stage(
+    stages.push(run_targo_stage(
         "clippy",
         &cargo,
+        targo_identity.as_ref(),
         &[
-            "clippy",
+            "tippy",
             "--locked",
             "--workspace",
             "--all-targets",
@@ -170,26 +190,34 @@ pub(crate) fn run_gate(args: &GateArgs) -> Result<i32, String> {
     if args.quick {
         stages.push(skipped_stage(
             "test",
-            &format!("{cargo} test --locked --workspace"),
+            &format!("{cargo} {TARGO_UNVERIFIED_LANE} test --locked --workspace"),
             "skipped by --quick",
             args.json,
         ));
     } else {
-        stages.push(run_stage(
+        stages.push(run_targo_stage(
             "test",
             &cargo,
-            &["test", "--locked", "--workspace"],
+            targo_identity.as_ref(),
+            &[TARGO_UNVERIFIED_LANE, "test", "--locked", "--workspace"],
             &args.current_dir,
             args.json,
         ));
     }
 
-    // Build the shipped examples. `cargo build --examples` covers every
-    // example target across the workspace without running them.
-    stages.push(run_stage(
+    // Build the shipped examples. `build --examples` covers every example
+    // target across the workspace without running them.
+    stages.push(run_targo_stage(
         "examples",
         &cargo,
-        &["build", "--locked", "--examples", "--workspace"],
+        targo_identity.as_ref(),
+        &[
+            TARGO_UNVERIFIED_LANE,
+            "build",
+            "--locked",
+            "--examples",
+            "--workspace",
+        ],
         &args.current_dir,
         args.json,
     ));
@@ -199,8 +227,10 @@ pub(crate) fn run_gate(args: &GateArgs) -> Result<i32, String> {
     // to the triage report and do not make this local gate fail.
     stages.push(run_evidence_stage(args));
 
-    // Fuzz smoke: only when cargo-fuzz is installed and not disabled.
-    stages.push(run_fuzz_smoke_stage(args, &cargo));
+    // Fuzz smoke: fuzz/run.sh under targo; skipped when disabled or when the
+    // runner is missing.
+    let fuzz_runner = FuzzRunner::select(&cargo, &args.current_dir, targo_identity.is_ok());
+    stages.push(run_fuzz_smoke_stage(args, &fuzz_runner));
 
     let overall = if stages.iter().any(|stage| stage.status == StageStatus::Fail) {
         StageStatus::Fail
@@ -219,6 +249,64 @@ pub(crate) fn run_gate(args: &GateArgs) -> Result<i32, String> {
     }
 
     Ok(if overall == StageStatus::Fail { 1 } else { 0 })
+}
+
+/// What the gate says when its `$CARGO` is not targo.
+const GATE_NEEDS_TARGO: &str =
+    "the gate needs the Trust toolchain's `targo` (run it as `targo trust-vc gate`)";
+
+/// Prove that `cargo` is the Trust toolchain's `targo` before it is handed a
+/// targo lane flag. `targo --unverified --version` is the discriminator that
+/// holds: targo accepts the lane flag, upstream cargo (including a cargo binary
+/// shipped under the name `targo`) rejects it. Returns the refusal detail,
+/// ending with `needs` (what the caller requires, naming targo), when it is not.
+pub(crate) fn probe_targo(cargo: &str, current_dir: &Path, needs: &str) -> Result<(), String> {
+    let output = Command::new(cargo)
+        .current_dir(current_dir)
+        .args([TARGO_UNVERIFIED_LANE, "--version"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
+            "`{cargo} {TARGO_UNVERIFIED_LANE} --version` exited {}; {needs}{}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "by signal".to_string(), |code| code.to_string()),
+            captured_command_failure_detail(&output.stdout, &output.stderr)
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default()
+        )),
+        Err(error) => Err(format!("failed to launch `{cargo}`: {error}; {needs}")),
+    }
+}
+
+/// Run one toolchain stage through `targo`, or fail it in-band when the
+/// discriminator already showed `cargo` is not targo. There is deliberately no
+/// stock-cargo fallback here.
+fn run_targo_stage(
+    name: &str,
+    cargo: &str,
+    targo_identity: Result<&(), &String>,
+    args: &[&str],
+    current_dir: &Path,
+    json: bool,
+) -> StageResult {
+    if let Err(refusal) = targo_identity {
+        let command = format!("{cargo} {}", args.join(" "));
+        if !json {
+            eprintln!("[gate] {name}: FAIL ({refusal})");
+        }
+        return StageResult {
+            name: name.to_string(),
+            command,
+            status: StageStatus::Fail,
+            exit_code: None,
+            duration_ms: 0,
+            detail: Some(refusal.clone()),
+        };
+    }
+    run_stage(name, cargo, args, current_dir, json)
 }
 
 fn run_evidence_stage(args: &GateArgs) -> StageResult {
@@ -528,6 +616,21 @@ fn validate_corpus_triage_report(report: &CorpusTriageReport) -> Result<String, 
     let mut accepted_paths = BTreeSet::new();
     let mut accepted_trust_vc_path_count = 0usize;
     let mut accepted_expected_case_count = 0usize;
+    // The accepted-case total is not shippable on its own: the three buckets
+    // are three unequal kinds of evidence (only `counterexample` enters the
+    // source-level correspondence rule at all). Recount them here so a report
+    // whose split has been zeroed, dropped or re-apportioned while the total
+    // stands cannot pass the gate.
+    let mut accepted_cases_counterexample = 0usize;
+    let mut accepted_cases_verified = 0usize;
+    let mut accepted_cases_error = 0usize;
+    // And the `verified` bucket is not one kind of evidence either: for a
+    // `cargo_trust_vc_integration_test` entry the schema REQUIRES `verified`
+    // with `min_obligations: 0` and no fingerprints, so its count pins nothing.
+    // Recount that sub-bucket here too, and re-derive the schema fact it rests
+    // on, so a report cannot label a case schema-fixed while it carries a real
+    // pin, or hide a schema-fixed case inside the author-pinned remainder.
+    let mut accepted_cases_verified_schema_fixed = 0usize;
     let mut accepted_known_gap_entries = 0usize;
     let mut accepted_classification_counts = BTreeMap::<String, usize>::new();
     for entry in &report.accepted_executable_ports {
@@ -614,6 +717,44 @@ fn validate_corpus_triage_report(report: &CorpusTriageReport) -> Result<String, 
             entry.expected_cases.len(),
             "accepted expected-case count",
         )?;
+        let schema_fixed_entry = entry.evidence_kind == CARGO_TRUST_VC_INTEGRATION_TEST_KIND;
+        for expected_case in &entry.expected_cases {
+            let bucket = match expected_case.expected_verdict.as_str() {
+                "counterexample" => &mut accepted_cases_counterexample,
+                "verified" => &mut accepted_cases_verified,
+                "error" => &mut accepted_cases_error,
+                other => {
+                    return Err(format!(
+                        "accepted executable `{}` expected case `{}` declares unaccepted verdict `{other}`",
+                        entry.upstream_path, expected_case.case_id
+                    ));
+                }
+            };
+            checked_count_add(bucket, 1, "accepted expected-case split")?;
+            if schema_fixed_entry {
+                if expected_case.expected_verdict != "verified" {
+                    return Err(format!(
+                        "accepted executable `{}` expected case `{}` is `{}` inside a {CARGO_TRUST_VC_INTEGRATION_TEST_KIND} entry, where the schema requires `verified`",
+                        entry.upstream_path,
+                        expected_case.case_id,
+                        expected_case.expected_verdict
+                    ));
+                }
+                if expected_case.min_obligations != 0
+                    || !expected_case.obligation_fingerprints.is_empty()
+                {
+                    return Err(format!(
+                        "accepted executable `{}` expected case `{}` carries an obligation pin inside a {CARGO_TRUST_VC_INTEGRATION_TEST_KIND} entry, where the schema forbids one",
+                        entry.upstream_path, expected_case.case_id
+                    ));
+                }
+                checked_count_add(
+                    &mut accepted_cases_verified_schema_fixed,
+                    1,
+                    "accepted schema-fixed verified-case count",
+                )?;
+            }
+        }
         checked_count_add(
             &mut accepted_known_gap_entries,
             usize::from(!entry.known_gaps.is_empty()),
@@ -643,6 +784,46 @@ fn validate_corpus_triage_report(report: &CorpusTriageReport) -> Result<String, 
         return Err(format!(
             "accepted expected-case count {accepted_expected_case_count} does not match summary count {}",
             summary.accepted_expected_case_count
+        ));
+    }
+    for (label, counted, claimed) in [
+        (
+            "counterexample",
+            accepted_cases_counterexample,
+            summary.accepted_expected_cases_counterexample,
+        ),
+        (
+            "verified",
+            accepted_cases_verified,
+            summary.accepted_expected_cases_verified,
+        ),
+        (
+            "error",
+            accepted_cases_error,
+            summary.accepted_expected_cases_error,
+        ),
+        (
+            "verified (schema-fixed)",
+            accepted_cases_verified_schema_fixed,
+            summary.accepted_expected_cases_verified_schema_fixed,
+        ),
+    ] {
+        if counted != claimed {
+            return Err(format!(
+                "accepted expected-case `{label}` count {counted} does not match summary count {claimed}"
+            ));
+        }
+    }
+    if accepted_cases_counterexample + accepted_cases_verified + accepted_cases_error
+        != accepted_expected_case_count
+    {
+        return Err(format!(
+            "accepted expected-case split {accepted_cases_counterexample}+{accepted_cases_verified}+{accepted_cases_error} does not account for all {accepted_expected_case_count} accepted cases"
+        ));
+    }
+    if accepted_cases_verified_schema_fixed > accepted_cases_verified {
+        return Err(format!(
+            "schema-fixed verified-case count {accepted_cases_verified_schema_fixed} exceeds the verified bucket {accepted_cases_verified}"
         ));
     }
     if accepted_known_gap_entries != summary.accepted_known_gap_entries {
@@ -773,21 +954,23 @@ fn is_full_git_commit(value: &str) -> bool {
         && value.bytes().any(|byte| byte != b'0')
 }
 
-fn run_fuzz_smoke_stage(args: &GateArgs, cargo: &str) -> StageResult {
-    let command = format!("{cargo} fuzz run <target> -- -max_total_time={GATE_FUZZ_SMOKE_SECS}");
+/// Short run of every fuzz target. Under targo that is `fuzz/run.sh`, which
+/// builds the targets on `targo --unverified build` with cargo-fuzz's `-s none`
+/// coverage instrumentation and runs libFuzzer without a sanitizer (the Trust
+/// sysroot ships no sanitizer runtime: `ld: library 'rustc-trust_rt.asan' not
+/// found`, measured 2026-09-28, and `targo fuzz` is not a command). A `$CARGO`
+/// that is not targo keeps `$CARGO fuzz run`, the stock exception in
+/// fuzz/README.md; this stage never falls back to a stock cargo on its own.
+fn run_fuzz_smoke_stage(args: &GateArgs, runner: &FuzzRunner) -> StageResult {
+    let command = runner.display("<target>", GATE_FUZZ_SMOKE_SECS);
     if args.quick {
         return skipped_stage("fuzz-smoke", &command, "skipped by --quick", args.json);
     }
     if args.no_fuzz {
         return skipped_stage("fuzz-smoke", &command, "skipped by --no-fuzz", args.json);
     }
-    if !cargo_fuzz_available(cargo) {
-        return skipped_stage(
-            "fuzz-smoke",
-            &command,
-            "cargo-fuzz not installed (cargo install cargo-fuzz)",
-            args.json,
-        );
+    if !runner.available() {
+        return skipped_stage("fuzz-smoke", &command, &runner.missing_reason(), args.json);
     }
 
     let start = Instant::now();
@@ -795,10 +978,7 @@ fn run_fuzz_smoke_stage(args: &GateArgs, cargo: &str) -> StageResult {
         if !args.json {
             eprintln!("[gate] fuzz smoke: {target}");
         }
-        let mut fuzz = Command::new(cargo);
-        fuzz.current_dir(&args.current_dir)
-            .args(["fuzz", "run", target, "--"])
-            .arg(format!("-max_total_time={GATE_FUZZ_SMOKE_SECS}"));
+        let mut fuzz = runner.command(&args.current_dir, target, GATE_FUZZ_SMOKE_SECS);
         match execute_gate_command(&mut fuzz, args.json) {
             Ok((status, _)) if status.success() => {}
             Ok((status, captured_detail)) => {
@@ -822,7 +1002,8 @@ fn run_fuzz_smoke_stage(args: &GateArgs, cargo: &str) -> StageResult {
                     exit_code: None,
                     duration_ms: start.elapsed().as_millis(),
                     detail: Some(format!(
-                        "failed to launch cargo fuzz for `{target}`: {error}"
+                        "failed to launch `{}`: {error}",
+                        runner.display(target, GATE_FUZZ_SMOKE_SECS)
                     )),
                 };
             }
@@ -849,14 +1030,16 @@ fn run_stage(
     run_stage_owned(name, program, &owned, current_dir, json)
 }
 
-fn run_stage_owned(
+fn run_stage_owned<P: AsRef<OsStr>>(
     name: &str,
-    program: &str,
+    program: P,
     args: &[String],
     current_dir: &Path,
     json: bool,
 ) -> StageResult {
-    let command = format!("{program} {}", args.join(" "));
+    let program = program.as_ref();
+    let program_display = program.to_string_lossy();
+    let command = format!("{program_display} {}", args.join(" "));
     if !json {
         eprintln!("[gate] {name}: {command}");
     }
@@ -888,7 +1071,7 @@ fn run_stage_owned(
             status: StageStatus::Fail,
             exit_code: None,
             duration_ms,
-            detail: Some(format!("failed to launch `{program}`: {error}")),
+            detail: Some(format!("failed to launch `{program_display}`: {error}")),
         },
     }
 }
@@ -1062,20 +1245,46 @@ fn parse_time_secs(value: &str) -> Result<u64, String> {
     Ok(secs)
 }
 
-/// Run the libfuzzer targets. Requires cargo-fuzz; otherwise prints the exact
-/// install/run instructions and returns exit code 2 (does not fake a run).
+/// Run the libfuzzer targets. Under targo each target runs through
+/// `fuzz/run.sh`; a `$CARGO` that is not targo needs its own `fuzz`
+/// subcommand (the stock exception). When the runner is missing this prints
+/// the repair and returns exit code 2 (does not fake a run).
 pub(crate) fn run_fuzz(args: &FuzzArgs) -> Result<i32, String> {
     let cargo = cargo_command();
-    if !cargo_fuzz_available(&cargo) {
-        eprintln!("Error: cargo-fuzz is not installed.");
-        eprintln!();
-        eprintln!("Install it, then re-run:");
-        eprintln!("  cargo install cargo-fuzz");
+    let is_targo = probe_targo(&cargo, &args.current_dir, FUZZ_NEEDS_TARGO).is_ok();
+    let runner = FuzzRunner::select(&cargo, &args.current_dir, is_targo);
+    if !runner.available() {
         let target = args.target.as_deref().unwrap_or("ensures_false");
-        eprintln!(
-            "  cargo fuzz run {target} -- -max_total_time={}",
-            args.time_secs
-        );
+        eprintln!("Error: {}.", runner.missing_reason());
+        eprintln!();
+        match &runner {
+            FuzzRunner::TrustScript { .. } => {
+                eprintln!("Run it from the trust-vc checkout root:");
+                eprintln!("  {}", runner.display(target, args.time_secs));
+            }
+            FuzzRunner::CargoFuzz { .. } => {
+                eprintln!("The Trust lane (fuzz/run.sh on `targo --unverified build`):");
+                eprintln!("  targo trust-vc fuzz {target} --time {}", args.time_secs);
+                eprintln!();
+                // STOCK EXCEPTION, only for an AddressSanitizer build: the
+                // Trust sysroot ships no sanitizer runtime (measured
+                // `ld: library 'rustc-trust_rt.asan' not found`). The commands
+                // name an INSTALLED nightly and turn rustup's auto-install
+                // off: `rustup run` on a missing toolchain downloads it.
+                eprintln!(
+                    "STOCK EXCEPTION, for an AddressSanitizer build only (see fuzz/README.md);"
+                );
+                eprintln!(
+                    "  <nightly> is one `rustup toolchain list` shows, and RUSTUP_AUTO_INSTALL=0 makes a"
+                );
+                eprintln!("  missing one an error instead of a network download:");
+                eprintln!("  RUSTUP_AUTO_INSTALL=0 rustup run <nightly> cargo install cargo-fuzz");
+                eprintln!(
+                    "  RUSTUP_AUTO_INSTALL=0 rustup run <nightly> cargo fuzz run {target} -- -max_total_time={}",
+                    args.time_secs
+                );
+            }
+        }
         eprintln!();
         eprintln!("Available targets: {}", FUZZ_TARGETS.join(", "));
         return Ok(2);
@@ -1088,12 +1297,15 @@ pub(crate) fn run_fuzz(args: &FuzzArgs) -> Result<i32, String> {
 
     for target in targets {
         println!("Running fuzz target `{target}` for {}s", args.time_secs);
-        let status = Command::new(&cargo)
-            .current_dir(&args.current_dir)
-            .args(["fuzz", "run", target, "--"])
-            .arg(format!("-max_total_time={}", args.time_secs))
+        let status = runner
+            .command(&args.current_dir, target, args.time_secs)
             .status()
-            .map_err(|error| format!("failed to launch cargo fuzz: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "failed to launch `{}`: {error}",
+                    runner.display(target, args.time_secs)
+                )
+            })?;
         if !status.success() {
             eprintln!(
                 "fuzz target `{target}` failed with exit code {}",
@@ -1105,19 +1317,100 @@ pub(crate) fn run_fuzz(args: &FuzzArgs) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Return true if `cargo fuzz` is runnable (cargo-fuzz installed).
-fn cargo_fuzz_available(cargo: &str) -> bool {
-    Command::new(cargo)
-        .args(["fuzz", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+/// How a fuzz target is built and run for the `$CARGO` in use.
+///
+/// Under targo the targets do not go through cargo-fuzz: cargo-fuzz 0.13.2
+/// spawns a bare `cargo` from PATH (`src/project.rs`, `Command::new("cargo")`),
+/// not `$CARGO`, so its build would leave both Targo lanes, and `targo fuzz` is
+/// not a command. `fuzz/run.sh` does cargo-fuzz's build step itself on
+/// `targo --unverified build` with the same coverage instrumentation, then runs
+/// libFuzzer. A `$CARGO` that fails the targo discriminator keeps
+/// `$CARGO fuzz run`: the labelled stock exception, never chosen on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FuzzRunner {
+    TrustScript { script: PathBuf, targo: String },
+    CargoFuzz { cargo: String },
+}
+
+impl FuzzRunner {
+    /// `is_targo` is the verdict of [`probe_targo`] on `cargo`.
+    fn select(cargo: &str, current_dir: &Path, is_targo: bool) -> Self {
+        if is_targo {
+            FuzzRunner::TrustScript {
+                script: current_dir.join(TRUST_FUZZ_SCRIPT),
+                targo: cargo.to_string(),
+            }
+        } else {
+            FuzzRunner::CargoFuzz {
+                cargo: cargo.to_string(),
+            }
+        }
+    }
+
+    /// The command a human would type for `target` with a `secs` budget.
+    fn display(&self, target: &str, secs: u64) -> String {
+        match self {
+            FuzzRunner::TrustScript { .. } => {
+                format!("{TRUST_FUZZ_SCRIPT} {target} -max_total_time={secs}")
+            }
+            FuzzRunner::CargoFuzz { cargo } => {
+                format!("{cargo} fuzz run {target} -- -max_total_time={secs}")
+            }
+        }
+    }
+
+    fn available(&self) -> bool {
+        match self {
+            FuzzRunner::TrustScript { script, .. } => script.is_file(),
+            FuzzRunner::CargoFuzz { cargo } => Command::new(cargo)
+                .args(["fuzz", "--version"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false),
+        }
+    }
+
+    fn missing_reason(&self) -> String {
+        match self {
+            FuzzRunner::TrustScript { script, .. } => {
+                format!("{} not found", script.display())
+            }
+            FuzzRunner::CargoFuzz { cargo } => format!(
+                "`{cargo}` is not the Trust toolchain's targo and `{cargo} fuzz` is not \
+                 available; {FUZZ_NEEDS_TARGO}"
+            ),
+        }
+    }
+
+    fn command(&self, current_dir: &Path, target: &str, secs: u64) -> Command {
+        let budget = format!("-max_total_time={secs}");
+        match self {
+            FuzzRunner::TrustScript { script, targo } => {
+                let mut command = Command::new("bash");
+                command
+                    .current_dir(current_dir)
+                    .env("TARGO", targo)
+                    .arg(script)
+                    .arg(target)
+                    .arg(budget);
+                command
+            }
+            FuzzRunner::CargoFuzz { cargo } => {
+                let mut command = Command::new(cargo);
+                command
+                    .current_dir(current_dir)
+                    .args(["fuzz", "run", target, "--"])
+                    .arg(budget);
+                command
+            }
+        }
+    }
 }
 
 fn cargo_command() -> String {
-    std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+    crate::trust_cargo_command()
 }
 
 /// Compute the index of the first stage argument for a cargo subcommand named
@@ -1144,7 +1437,10 @@ const SUBCOMMAND_INDEX: &[(&str, &str)] = &[
         "gate",
         "Run the full local gate: fmt, clippy, test, examples, evidence, fuzz smoke",
     ),
-    ("fuzz", "Run the libfuzzer targets (requires cargo-fuzz)"),
+    (
+        "fuzz",
+        "Run the libfuzzer targets (fuzz/run.sh under targo)",
+    ),
     (
         "evidence",
         "Generate Verus-replacement parity evidence reports",
@@ -1190,12 +1486,19 @@ fn gate_help() -> String {
     out.push_str("cargo trust-vc gate — run every local check, in order\n\n");
     out.push_str("Usage:\n  cargo trust-vc gate [OPTIONS]\n\n");
     out.push_str("Stages (in order):\n");
-    out.push_str("  fmt       cargo fmt --all --check\n");
-    out.push_str("  clippy    cargo clippy --locked --workspace --all-targets -- -D warnings\n");
-    out.push_str("  test      cargo test --locked --workspace\n");
-    out.push_str("  examples  cargo build --locked --examples --workspace\n");
-    out.push_str("  evidence  cargo trust-vc evidence --corpus-triage-report --json\n");
-    out.push_str("  fuzz-smoke  short cargo-fuzz run per target (if cargo-fuzz installed)\n\n");
+    out.push_str("  fmt       targo fmt --all --check\n");
+    out.push_str("  clippy    targo tippy --locked --workspace --all-targets -- -D warnings\n");
+    out.push_str("  test      targo --unverified test --locked --workspace\n");
+    out.push_str("  examples  targo --unverified build --locked --examples --workspace\n");
+    out.push_str("  evidence  targo trust-vc evidence --corpus-triage-report --json\n");
+    out.push_str(&format!(
+        "  fuzz-smoke  {TRUST_FUZZ_SCRIPT} <target> -max_total_time={GATE_FUZZ_SMOKE_SECS} per target\n"
+    ));
+    out.push_str("            (targo --unverified build plus libFuzzer, no sanitizer)\n\n");
+    out.push_str(
+        "Every toolchain stage runs `$CARGO` (targo under `targo trust-vc gate`, else\n\
+         `targo` from PATH) and fails when it is not targo; there is no stock fallback.\n\n",
+    );
     out.push_str("Options:\n");
     out.push_str("  --quick            Skip slow stages (test, fuzz)\n");
     out.push_str("  --no-fuzz          Skip the fuzz smoke stage\n");
@@ -1221,7 +1524,11 @@ fn fuzz_help() -> String {
         "  --time <SECS>  Per-target wall-clock budget (default {DEFAULT_FUZZ_TIME_SECS})\n"
     ));
     out.push_str("\nWhen no TARGET is given, every target runs in sequence.\n");
-    out.push_str("Requires cargo-fuzz (`cargo install cargo-fuzz`).\n");
+    out.push_str(
+        "Each target runs through fuzz/run.sh (`targo --unverified build` plus libFuzzer,\n",
+    );
+    out.push_str("no sanitizer: the Trust sysroot ships none); run it from the checkout root.\n");
+    out.push_str("An AddressSanitizer run is the stock-nightly exception in fuzz/README.md.\n");
     out
 }
 
@@ -1229,6 +1536,20 @@ fn fuzz_help() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    fn unique_frontend_test_dir(label: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "trust-vc-gate-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     fn raw(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
@@ -1253,6 +1574,9 @@ mod tests {
                 "accepted_executable_entries": 1,
                 "accepted_trust_vc_path_count": 1,
                 "accepted_expected_case_count": 1,
+                "accepted_expected_cases_counterexample": 0,
+                "accepted_expected_cases_verified": 1,
+                "accepted_expected_cases_error": 0,
                 "unsupported_gap_entries": 1,
                 "unclassified_entries": 0,
                 "not_applicable_entries": 1,
@@ -1352,6 +1676,130 @@ mod tests {
     }
 
     #[test]
+    fn gate_help_names_the_targo_fmt_and_tippy_route() {
+        let help = gate_help();
+        assert!(help.contains("targo fmt --all --check"), "{help}");
+        assert!(
+            help.contains("targo tippy --locked --workspace --all-targets -- -D warnings"),
+            "{help}"
+        );
+        assert!(
+            help.contains("targo --unverified test --locked --workspace"),
+            "{help}"
+        );
+        assert!(
+            help.contains("targo --unverified build --locked --examples --workspace"),
+            "{help}"
+        );
+        assert!(!help.contains("rust_frontend.sh"), "{help}");
+        assert!(!help.contains("cargo clippy"), "{help}");
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).expect("synthetic executable should be written");
+        let mut permissions = std::fs::metadata(path)
+            .expect("synthetic executable metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .expect("synthetic executable should be executable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_stages_run_targo_with_their_lane() {
+        use std::fs;
+
+        let root = unique_frontend_test_dir("targo-stages");
+        fs::create_dir_all(&root).expect("synthetic gate root should exist");
+        let fake_targo = root.join("targo");
+        write_executable(
+            &fake_targo,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> targo-invocations.txt\n",
+        );
+        let cargo = fake_targo.to_string_lossy().into_owned();
+        let identity = probe_targo(&cargo, &root, GATE_NEEDS_TARGO);
+        assert_eq!(identity, Ok(()));
+
+        let fmt = run_targo_stage(
+            "fmt",
+            &cargo,
+            identity.as_ref(),
+            &["fmt", "--all", "--check"],
+            &root,
+            true,
+        );
+        assert_eq!(fmt.status, StageStatus::Pass, "{fmt:?}");
+        assert_eq!(fmt.command, format!("{cargo} fmt --all --check"));
+        let test = run_targo_stage(
+            "test",
+            &cargo,
+            identity.as_ref(),
+            &[TARGO_UNVERIFIED_LANE, "test", "--locked", "--workspace"],
+            &root,
+            true,
+        );
+        assert_eq!(test.status, StageStatus::Pass, "{test:?}");
+        assert_eq!(
+            fs::read_to_string(root.join("targo-invocations.txt"))
+                .expect("targo invocations should be recorded"),
+            "--unverified\n--version\nfmt\n--all\n--check\n--unverified\ntest\n--locked\n--workspace\n"
+        );
+
+        fs::remove_dir_all(&root).expect("synthetic gate root should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cargo_that_is_not_targo_fails_every_toolchain_stage_without_running_it() {
+        use std::fs;
+
+        let root = unique_frontend_test_dir("not-targo");
+        fs::create_dir_all(&root).expect("synthetic gate root should exist");
+        // Upstream cargo's answer to the discriminator.
+        let stock_cargo = root.join("cargo");
+        write_executable(
+            &stock_cargo,
+            "#!/bin/sh\nif [ \"$1\" = --unverified ]; then echo \"error: unexpected argument '--unverified' found\" >&2; exit 1; fi\ntouch ran-a-stage\n",
+        );
+        let cargo = stock_cargo.to_string_lossy().into_owned();
+        let identity = probe_targo(&cargo, &root, GATE_NEEDS_TARGO);
+        let refusal = identity
+            .clone()
+            .expect_err("stock cargo must fail the discriminator");
+        assert!(refusal.contains("targo"), "{refusal}");
+        assert!(refusal.contains("unexpected argument"), "{refusal}");
+
+        let fmt = run_targo_stage(
+            "fmt",
+            &cargo,
+            identity.as_ref(),
+            &["fmt", "--all", "--check"],
+            &root,
+            true,
+        );
+        assert_eq!(fmt.status, StageStatus::Fail, "{fmt:?}");
+        assert_eq!(fmt.detail.as_deref(), Some(refusal.as_str()));
+        assert!(
+            !root.join("ran-a-stage").exists(),
+            "a non-targo cargo must not run the stage"
+        );
+
+        let missing = probe_targo(
+            &root.join("definitely-missing").to_string_lossy(),
+            &root,
+            GATE_NEEDS_TARGO,
+        )
+        .expect_err("a missing program fails the discriminator");
+        assert!(missing.contains("failed to launch"), "{missing}");
+
+        fs::remove_dir_all(&root).expect("synthetic gate root should be removed");
+    }
+
+    #[test]
     fn rejects_verus_path_with_checkout_evidence_guidance() {
         for tail in [
             raw(&["--verus-path", "/tmp/verus"]),
@@ -1406,6 +1854,7 @@ mod tests {
             port_manifest_only: false,
             update_verus_tests_manifest: false,
             refresh_trust_vc_corpus_evidence: false,
+            repin_obligation_rendering_drift: Vec::new(),
             corpus_triage_report: true,
             scaffold_verus_port_stubs: false,
             verus_command: None,
@@ -1414,6 +1863,114 @@ mod tests {
             .expect("checked-in canonical manifest should produce offline triage");
         validate_corpus_triage_report(&report)
             .expect("checked-in canonical manifest triage should pass gate validation");
+    }
+
+    /// The accepted-case TOTAL must never travel without its split, so a
+    /// report that keeps the total and zeroes the bucket that says how the
+    /// cases were checked is incoherent, not merely terse.
+    ///
+    /// `counterexample` is the only bucket the source-level correspondence
+    /// rule reaches; re-apportioning cases into it, or out of it, changes what
+    /// the accepted-case count means.
+    #[test]
+    fn rejects_an_accepted_case_split_that_does_not_match_the_entries() {
+        let mut zeroed = valid_triage_report();
+        zeroed.replacement_summary.accepted_expected_cases_verified = 0;
+        let error = validate_corpus_triage_report(&zeroed)
+            .expect_err("a zeroed split must not pass with the total standing");
+        assert!(
+            error.contains("`verified` count 1 does not match summary count 0"),
+            "unexpected error: {error}"
+        );
+
+        let mut relabelled = valid_triage_report();
+        relabelled
+            .replacement_summary
+            .accepted_expected_cases_verified = 0;
+        relabelled
+            .replacement_summary
+            .accepted_expected_cases_counterexample = 1;
+        let error = validate_corpus_triage_report(&relabelled)
+            .expect_err("moving a case into the correspondence-scoped bucket must not pass");
+        assert!(
+            error.contains("`counterexample` count 0 does not match summary count 1"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// And the `verified` bucket's own sub-split is recomputed here too.
+    ///
+    /// Clause (2b) of the bound says 48 of the verified cases are pinned by
+    /// NOTHING because the schema wrote their verdict and their zero count. A
+    /// hand-written sub-count would let that sentence drift off the corpus it
+    /// describes, and a mislabelled entry would let a case that really does
+    /// carry a pin be reported as pin-free (or the reverse). Both directions
+    /// fail here.
+    #[test]
+    fn rejects_a_verified_sub_split_that_does_not_match_the_entries() {
+        // A schema-fixed entry whose schema-fixed sub-count was not reported.
+        let mut undisclosed = valid_triage_report();
+        undisclosed.accepted_executable_ports[0].evidence_kind =
+            CARGO_TRUST_VC_INTEGRATION_TEST_KIND.to_string();
+        undisclosed.accepted_executable_ports[0].expected_cases[0].min_obligations = 0;
+        let error = validate_corpus_triage_report(&undisclosed)
+            .expect_err("a schema-fixed case hidden in the author-pinned remainder must not pass");
+        assert!(
+            error.contains("`verified (schema-fixed)` count 1 does not match summary count 0"),
+            "unexpected error: {error}"
+        );
+
+        // The same report with the sub-count disclosed passes, so the refusal
+        // above is the sub-count and nothing else.
+        let mut disclosed = undisclosed.clone();
+        disclosed
+            .replacement_summary
+            .accepted_expected_cases_verified_schema_fixed = 1;
+        validate_corpus_triage_report(&disclosed)
+            .expect("a disclosed schema-fixed sub-count should pass");
+
+        // A claimed schema-fixed case in an entry the schema does not fix.
+        let mut overclaimed = valid_triage_report();
+        overclaimed
+            .replacement_summary
+            .accepted_expected_cases_verified_schema_fixed = 1;
+        let error = validate_corpus_triage_report(&overclaimed)
+            .expect_err("an author-pinned case reported as schema-fixed must not pass");
+        assert!(
+            error.contains("`verified (schema-fixed)` count 0 does not match summary count 1"),
+            "unexpected error: {error}"
+        );
+
+        // And a schema-fixed entry whose case carries a REAL pin is refused
+        // outright: "the schema wrote it" must stay true of every case counted.
+        let mut pinned = undisclosed.clone();
+        pinned
+            .replacement_summary
+            .accepted_expected_cases_verified_schema_fixed = 1;
+        pinned.accepted_executable_ports[0].expected_cases[0].min_obligations = 1;
+        let error = validate_corpus_triage_report(&pinned)
+            .expect_err("a pinned case inside a schema-fixed entry must not pass");
+        assert!(
+            error.contains("carries an obligation pin inside a cargo_trust_vc_integration_test"),
+            "unexpected error: {error}"
+        );
+
+        let mut fingerprinted = undisclosed.clone();
+        fingerprinted
+            .replacement_summary
+            .accepted_expected_cases_verified_schema_fixed = 1;
+        fingerprinted.accepted_executable_ports[0].expected_cases[0]
+            .obligation_fingerprints
+            .push(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            );
+        let error = validate_corpus_triage_report(&fingerprinted)
+            .expect_err("a fingerprinted case inside a schema-fixed entry must not pass");
+        assert!(
+            error.contains("carries an obligation pin inside a cargo_trust_vc_integration_test"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1425,6 +1982,7 @@ mod tests {
         report.replacement_summary.accepted_executable_entries = 0;
         report.replacement_summary.accepted_trust_vc_path_count = 0;
         report.replacement_summary.accepted_expected_case_count = 0;
+        report.replacement_summary.accepted_expected_cases_verified = 0;
         report.replacement_summary.unsupported_gap_entries = 1;
         report.replacement_summary.not_applicable_entries = 0;
         report.accepted_executable_ports.clear();
@@ -1694,12 +2252,84 @@ mod tests {
             no_fuzz: false,
             json: true,
         };
-        let stage = run_fuzz_smoke_stage(&args, "configured-cargo");
+        let targo = FuzzRunner::select("configured-targo", &args.current_dir, true);
+        let stage = run_fuzz_smoke_stage(&args, &targo);
+        assert_eq!(stage.status, StageStatus::Skipped);
+        assert_eq!(
+            stage.command,
+            format!("fuzz/run.sh <target> -max_total_time={GATE_FUZZ_SMOKE_SECS}")
+        );
+        let stock = FuzzRunner::select("configured-cargo", &args.current_dir, false);
+        let stage = run_fuzz_smoke_stage(&args, &stock);
         assert_eq!(stage.status, StageStatus::Skipped);
         assert_eq!(
             stage.command,
             format!("configured-cargo fuzz run <target> -- -max_total_time={GATE_FUZZ_SMOKE_SECS}")
         );
+    }
+
+    #[test]
+    fn fuzz_runs_through_the_trust_script_under_targo_and_cargo_fuzz_otherwise() {
+        let root = Path::new("/checkout");
+        for targo in ["targo", "/opt/trust/bin/targo"] {
+            let runner = FuzzRunner::select(targo, root, true);
+            assert_eq!(
+                runner,
+                FuzzRunner::TrustScript {
+                    script: root.join("fuzz/run.sh"),
+                    targo: targo.to_string(),
+                },
+                "{targo}"
+            );
+            let command = runner.command(root, "ensures_false", 3);
+            assert_eq!(command.get_program(), "bash");
+            let argv: Vec<&OsStr> = command.get_args().collect();
+            assert_eq!(
+                argv,
+                [
+                    root.join("fuzz/run.sh").as_os_str(),
+                    OsStr::new("ensures_false"),
+                    OsStr::new("-max_total_time=3"),
+                ]
+            );
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "TARGO" && value == Some(OsStr::new(targo))),
+                "fuzz/run.sh must build with the same targo: {targo}"
+            );
+            let shown = runner.display("<target>", 3);
+            assert_eq!(shown, "fuzz/run.sh <target> -max_total_time=3");
+            assert!(!shown.contains("cargo"), "{shown}");
+        }
+
+        // A $CARGO that failed the targo discriminator keeps `$CARGO fuzz`.
+        let runner = FuzzRunner::select("cargo", root, false);
+        assert_eq!(
+            runner,
+            FuzzRunner::CargoFuzz {
+                cargo: "cargo".to_string()
+            }
+        );
+        let command = runner.command(root, "mode_crossing", 7);
+        assert_eq!(command.get_program(), "cargo");
+        let argv: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(
+            argv,
+            ["fuzz", "run", "mode_crossing", "--", "-max_total_time=7"]
+        );
+        assert!(runner.missing_reason().contains("targo trust-vc fuzz"));
+    }
+
+    #[test]
+    fn trust_fuzz_runner_is_available_only_where_the_script_exists() {
+        let missing = FuzzRunner::select("targo", Path::new("/definitely/not/a/checkout"), true);
+        assert!(!missing.available());
+        assert!(missing.missing_reason().contains("fuzz/run.sh not found"));
+        assert!(!missing.missing_reason().contains("cargo install"));
+
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(FuzzRunner::select("targo", &repo, true).available());
     }
 
     #[test]

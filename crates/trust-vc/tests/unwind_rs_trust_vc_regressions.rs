@@ -35,6 +35,8 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "basic",
     ),
     ("test_caller_no_unwind3_no_panic_path_verified", "basic"),
+    // 2026-09-11: a local zero-argument closure applied in the body verifies (upstream test_closure2 shape).
+    ("test_closure2_application_verified", "basic"),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
@@ -46,24 +48,14 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
         "test_caller_conditional4_contract_boundary_counterexample",
         "basic",
     ),
+    ("test_closure2_application_liar_counterexample", "basic"),
 ];
 
-const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
-    (
-        "test_caller_no_unwind1_panic_boundary_currently_errors",
-        "basic",
-        &["macro", "panic"],
-    ),
-    (
-        "test_closure2_unwind_boundary_currently_errors",
-        "basic",
-        &[
-            "unknown return type for function 'f'",
-            "standalone closure",
-            "closure",
-        ],
-    ),
-];
+const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[(
+    "test_caller_no_unwind1_panic_boundary_currently_errors",
+    "basic",
+    &["macro", "panic"],
+)];
 
 #[derive(Debug, Eq, PartialEq)]
 struct CaseMetadata {

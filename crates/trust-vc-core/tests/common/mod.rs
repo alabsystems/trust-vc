@@ -45,3 +45,35 @@ where
         Err(panic_payload) => std::panic::resume_unwind(panic_payload),
     }
 }
+
+/// Whether a protocol-lane error says no `ty` advertising every required
+/// capability ran: a test of the lane fails on it, never counts it as a
+/// fail-closed answer, so the suite cannot pass without a qualifying `ty`.
+#[allow(dead_code)]
+pub fn no_qualifying_ty(message: &str) -> bool {
+    [
+        "ty binary not found",
+        "ty run failed",
+        "ty output refused",
+        "ty capabilities missing",
+    ]
+    .iter()
+    .any(|rule| message.starts_with(rule))
+}
+
+/// The rule a protocol-lane `Error` names (`ty <rule> for protocol ...`).
+#[allow(dead_code)]
+pub fn lane_rule(message: &str) -> &str {
+    message
+        .strip_prefix("ty ")
+        .and_then(|rest| rest.split(" for protocol '").next())
+        .unwrap_or(message)
+}
+
+/// Whether a protocol-lane error is ty's own no-verdict (it raised, or ran
+/// with a declared soundness deviation) rather than the lane and ty
+/// disagreeing about the document, which a test of the lane fails on.
+#[allow(dead_code)]
+pub fn ty_declined(message: &str) -> bool {
+    ["check error", "soundness refused", "found no initial state"].contains(&lane_rule(message))
+}

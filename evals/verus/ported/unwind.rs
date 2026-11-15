@@ -39,6 +39,12 @@ pub const UNWIND_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
+        "test_closure2_application_verified",
+        "basic",
+        "verified",
+        1,
+    ),
+    (
         "test_caller_no_unwind2_contract_boundary_counterexample",
         "basic",
         "counterexample",
@@ -51,13 +57,13 @@ pub const UNWIND_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "test_caller_no_unwind1_panic_boundary_currently_errors",
+        "test_closure2_application_liar_counterexample",
         "basic",
-        "error",
-        0,
+        "counterexample",
+        1,
     ),
     (
-        "test_closure2_unwind_boundary_currently_errors",
+        "test_caller_no_unwind1_panic_boundary_currently_errors",
         "basic",
         "error",
         0,
@@ -68,10 +74,6 @@ pub const UNWIND_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     (
         "test_caller_no_unwind1_panic_boundary_currently_errors",
         &["panic"],
-    ),
-    (
-        "test_closure2_unwind_boundary_currently_errors",
-        &["unknown return type for function 'f'", "closure"],
     ),
 ];
 
@@ -136,8 +138,16 @@ fn test_caller_no_unwind1_panic_boundary_currently_errors() {
 }
 
 #[trust_vc::ensures(true)]
-fn test_closure2_unwind_boundary_currently_errors() {
+fn test_closure2_application_verified() {
     let f = || 1u8;
     let observed = f();
     trust_vc::assert!(observed == 1u8);
+}
+
+// Liar twin (2026-09-11): the zero-argument closure returns 1.
+#[trust_vc::ensures(true)]
+fn test_closure2_application_liar_counterexample() {
+    let f = || 1u8;
+    let observed = f();
+    trust_vc::assert!(observed == 2u8);
 }

@@ -10,7 +10,9 @@
 //! instantiation — here the `u64` call site.
 //!
 //! Compare against `spec_fn_generic_unshadowed.rs`, which is byte-identical
-//! except that it does not declare `struct T`. Both must reach the same verdict.
+//! except that it does not declare `struct T`. Both reach `Verified`; here the
+//! type-name rule then refuses it, because a generic is spelled like a type of
+//! the file.
 
 pub struct T {
     pub a: u64,

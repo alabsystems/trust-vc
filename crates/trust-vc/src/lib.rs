@@ -366,6 +366,20 @@ pub fn exists(input: TokenStream) -> TokenStream {
     solver_entrypoints::exists(input)
 }
 
+/// Item-position non-tokenized state machine (D1a).
+///
+/// Runs the same parse, well-formedness and admission as the file lane
+/// (`trust_vc_core::state_machine_dsl`) and emits the same items plus the
+/// compile-only shims (`pub mod NAME { pub use .. as State; }` and associated
+/// wrappers) so `NAME::State::…` paths resolve under rustc. A refused machine
+/// is a `compile_error!`. Verification happens on the file lane only.
+#[proc_macro]
+pub fn state_machine(input: TokenStream) -> TokenStream {
+    TokenStream::from(trust_vc_core::state_machine_dsl::expand_tokens(
+        proc_macro2::TokenStream::from(input),
+    ))
+}
+
 /// Pre-state value accessor for postconditions.
 ///
 /// Use `old!(expr)` within `ensures!` to refer to the value at function entry.

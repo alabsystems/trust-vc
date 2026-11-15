@@ -15,7 +15,7 @@ use num_bigint::BigInt;
 use std::collections::HashSet;
 
 use crate::encoder::diagnostics::EncodingApproximation;
-use crate::encoder::quantifiers::integer_range_bounds;
+use crate::encoder::quantifiers::{integer_range_bounds, lower_bound_only};
 use crate::encoder::types::{quantifier_sort_for_type, sort_for_type};
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
@@ -77,6 +77,18 @@ impl<'a> AstExpressionParser<'a> {
                 left,
                 right,
             } if quantifiers_alpha_equal(left, right) => Ok(self.solver.bool_const(false)),
+            // The opposite order operator is the negation only over a total
+            // order. Over floats a NaN makes `a <= b` and `a > b` both false,
+            // so an order comparison of floats is refuted by its exact
+            // negation. `!=` is the negation of IEEE `==` by definition, so
+            // `==` and `!=` swap for floats too.
+            TrustVcExpr::Compare { op, left, right }
+                if !matches!(op, CompareOp::Eq | CompareOp::Ne)
+                    && self.compare_operands_are_float(left, right) =>
+            {
+                let holds = self.encode_compare(*op, left, right)?;
+                self.solver.try_not(holds).map_err(|e| e.to_string().into())
+            }
             TrustVcExpr::Compare { op, left, right } => {
                 self.encode_compare(invert_compare_op(*op), left, right)
             }
@@ -506,6 +518,7 @@ impl<'a> AstExpressionParser<'a> {
         let bound_names = HashSet::from([name.as_str()]);
         let Some(candidate) = find_conjunctive_equality_witness(body, name, ty, &bound_names)
             .or_else(|| find_reflexive_order_witness(body, name, ty, &bound_names))
+            .or_else(|| find_strict_order_constant_witness(body, name, ty))
         else {
             return Ok(None);
         };
@@ -920,10 +933,15 @@ fn substitute_var_with_int_lit(
                 TrustVcExpr::Var { ref name, .. }
                     if name.as_str() == self.target && !bound.contains(self.target) =>
                 {
-                    TrustVcExpr::IntLit {
-                        value: self.value,
-                        ty: self.ty.clone(),
-                    }
+                    // Pinned at the variable's type: an `i32` literal is
+                    // otherwise the untyped placeholder its peers retype.
+                    crate::ir_lowering::pin_substituted_value(
+                        &self.ty,
+                        &TrustVcExpr::IntLit {
+                            value: self.value,
+                            ty: self.ty.clone(),
+                        },
+                    )
                 }
                 other => fold_expr_scoped_children(self, other, bound),
             }
@@ -955,13 +973,19 @@ pub(in crate::encoder) fn statically_refutes_finite_exists(expr: &TrustVcExpr) -
     let [(var_name, var_ty)] = bound_vars.as_slice() else {
         return false;
     };
-    let Some((lower, upper)) = integer_range_bounds(var_ty) else {
-        return false;
+    // A domain with only a lower bound (`nat`) still refutes the shapes that
+    // need no upper bound (`i < 0`, `i <= -1`, `i == -1`).
+    let (lower, upper) = match integer_range_bounds(var_ty) {
+        Some((lower, upper)) => (lower, Some(upper)),
+        None => match lower_bound_only(var_ty) {
+            Some(lower) => (lower, None),
+            None => return false,
+        },
     };
     let Some((op, value)) = normalize_bound_var_comparison(var_name, body) else {
         return false;
     };
-    comparison_has_no_finite_witness(op, &value, &lower, &upper)
+    comparison_has_no_finite_witness(op, &value, &lower, upper.as_ref())
 }
 
 fn normalize_bound_var_comparison(
@@ -989,6 +1013,8 @@ fn is_bound_var(var_name: &str, expr: &TrustVcExpr) -> bool {
 fn integer_constant_value(expr: &TrustVcExpr) -> Option<BigInt> {
     match expr {
         TrustVcExpr::IntLit { value, .. } => Some(BigInt::from(*value)),
+        // A negative literal lowers as `Neg(IntLit)`; its value is exact.
+        TrustVcExpr::Neg(inner) => integer_constant_value(inner).map(|value| -value),
         TrustVcExpr::IntConst { ty, kind } => {
             let (lower, upper) = integer_range_bounds(ty)?;
             match kind {
@@ -1011,22 +1037,24 @@ fn flip_compare_op(op: CompareOp) -> CompareOp {
     }
 }
 
+/// `upper` is the EXCLUSIVE upper bound, or `None` for a domain unbounded
+/// above (`nat`), where only the lower-bound shapes can rule out a witness.
 fn comparison_has_no_finite_witness(
     op: CompareOp,
     value: &BigInt,
     lower: &BigInt,
-    upper: &BigInt,
+    upper: Option<&BigInt>,
 ) -> bool {
     match op {
-        CompareOp::Eq => value < lower || value >= upper,
-        CompareOp::Ne => {
+        CompareOp::Eq => value < lower || upper.is_some_and(|upper| value >= upper),
+        CompareOp::Ne => upper.is_some_and(|upper| {
             let only_value = lower + BigInt::from(1);
             &only_value == upper && value == lower
-        }
+        }),
         CompareOp::Lt => value <= lower,
         CompareOp::Le => value < lower,
-        CompareOp::Gt => value >= &(upper - BigInt::from(1)),
-        CompareOp::Ge => value >= upper,
+        CompareOp::Gt => upper.is_some_and(|upper| value >= &(upper - BigInt::from(1))),
+        CompareOp::Ge => upper.is_some_and(|upper| value >= upper),
     }
 }
 
@@ -1132,7 +1160,88 @@ fn find_reflexive_order_witness(
         return None;
     }
     let candidate_source = exact_projection_source(candidate)?;
-    (candidate_source.ty == *bound_ty).then(|| candidate_source.expr)
+    (candidate_source.ty == *bound_ty).then_some(candidate_source.expr)
+}
+
+/// Find the constant's neighbour as a witness for a STRICT order against an
+/// integer constant.
+///
+/// For a body that is exactly `i > c` / `c < i` (resp. `i < c` / `c > i`) with
+/// `c` an integer constant and `i` the binder (or an exact math-integer cast of
+/// it), the witness `max(c + 1, MIN_T)` (resp. `min(c - 1, MAX_T)`) satisfies
+/// the body whenever ANY witness does: the binder domain `T` is an integer
+/// interval, so every witness `w > c` has `w >= max(c + 1, MIN_T)`, and that
+/// value lies in the domain exactly when some witness does. Refuting the ground
+/// fact `range_T(w) && body(w)` is therefore EXACT — a true existential is
+/// proved and a false one still refutes — where the ordinary path hands ay a
+/// triggerless negated `exists` its CEGQI declines (`quantifier-cegqi` on the
+/// quantifiers.rs `test1` port shape `exists|i: u32| i > 300u32`). A neighbour
+/// that would fall outside the domain (`i > MAX_T`, `i < MIN_T`) is declined;
+/// those shapes refute statically. Unbounded `int` needs no clamp; `nat`
+/// clamps at 0. Integer binders only — the constant's VALUE is all that
+/// matters (the comparison is mathematical at quantifier depth), so an
+/// unsuffixed literal needs no coercion.
+fn find_strict_order_constant_witness(
+    expr: &TrustVcExpr,
+    bound_name: &str,
+    bound_ty: &TrustVcType,
+) -> Option<TrustVcExpr> {
+    if !matches!(
+        bound_ty,
+        TrustVcType::Int { .. }
+            | TrustVcType::Uint { .. }
+            | TrustVcType::MathInt
+            | TrustVcType::Nat
+    ) {
+        return None;
+    }
+    let TrustVcExpr::Compare { op, left, right } = expr else {
+        return None;
+    };
+    // Orient as `binder OP constant`.
+    let (op, constant) = if is_exact_bound_projection(left, bound_name, bound_ty) {
+        (*op, right)
+    } else if is_exact_bound_projection(right, bound_name, bound_ty) {
+        (flip_compare_op(*op), left)
+    } else {
+        return None;
+    };
+    let value = integer_constant_value(constant)?;
+    let (lower, upper) = match integer_range_bounds(bound_ty) {
+        Some((lower, upper)) => (Some(lower), Some(upper)),
+        None => (lower_bound_only(bound_ty), None),
+    };
+    let one = BigInt::from(1);
+    let witness = match op {
+        CompareOp::Gt => {
+            let candidate = value + &one;
+            let candidate = match lower {
+                Some(lower) if candidate < lower => lower,
+                _ => candidate,
+            };
+            if upper.is_some_and(|upper| candidate >= upper) {
+                return None;
+            }
+            candidate
+        }
+        CompareOp::Lt => {
+            let candidate = value - &one;
+            let candidate = match upper {
+                Some(upper) if candidate >= upper => upper - &one,
+                _ => candidate,
+            };
+            if lower.is_some_and(|lower| candidate < lower) {
+                return None;
+            }
+            candidate
+        }
+        _ => return None,
+    };
+    let value = i128::try_from(&witness).ok()?;
+    Some(TrustVcExpr::IntLit {
+        value,
+        ty: bound_ty.clone(),
+    })
 }
 
 fn is_exact_bound_projection(expr: &TrustVcExpr, bound_name: &str, bound_ty: &TrustVcType) -> bool {
@@ -1210,6 +1319,76 @@ fn is_zero_int_literal(expr: &TrustVcExpr) -> bool {
     matches!(expr, TrustVcExpr::IntLit { value: 0, .. })
 }
 
+/// True iff `left` and `right` are alpha-equivalent quantifiers: same kind, the
+/// same number of bound variables with pairwise-equal types, and bodies that are
+/// structurally identical after renaming `left`'s bound-variable names to
+/// `right`'s. Triggers are intentionally ignored — they steer e-matching but do
+/// not change a quantifier's truth value, so two quantifiers that differ only in
+/// triggers are still semantically equal.
+///
+/// Conservative: any structural difference the renaming does not reconcile
+/// (notably a nested quantifier that rebinds a differently-named variable) yields
+/// `false`, so the caller falls through to the ordinary solver path. It is only
+/// ever used to recognize a TRUE equality (returning `false` here can never make
+/// a false equality look proven).
+fn quantifiers_alpha_equal(left: &TrustVcExpr, right: &TrustVcExpr) -> bool {
+    let (
+        TrustVcExpr::Quantifier {
+            kind: lk,
+            bound_vars: lbv,
+            body: lbody,
+            ..
+        },
+        TrustVcExpr::Quantifier {
+            kind: rk,
+            bound_vars: rbv,
+            body: rbody,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return false;
+    };
+    if lk != rk || lbv.len() != rbv.len() {
+        return false;
+    }
+    let mut rename = std::collections::HashMap::new();
+    for ((ln, lt), (rn, rt)) in lbv.iter().zip(rbv.iter()) {
+        if lt != rt {
+            return false;
+        }
+        if ln != rn {
+            rename.insert(ln.clone(), rn.clone());
+        }
+    }
+    let renamed = if rename.is_empty() {
+        (**lbody).clone()
+    } else {
+        let mut renamer = BoundVarRenamer { rename: &rename };
+        crate::ir_expr_traversal::TrustVcExprFolder::fold_expr(&mut renamer, (**lbody).clone())
+    };
+    renamed == **rbody
+}
+
+/// Owned-tree folder that renames free `Var` references (and nested quantifier
+/// bound-variable declarations) according to a name map. Used to alpha-rename one
+/// quantifier body onto another's bound-variable names for the equality check.
+struct BoundVarRenamer<'a> {
+    rename: &'a std::collections::HashMap<String, String>,
+}
+
+impl crate::ir_expr_traversal::TrustVcExprFolder for BoundVarRenamer<'_> {
+    fn fold_expr(&mut self, expr: TrustVcExpr) -> TrustVcExpr {
+        match expr {
+            TrustVcExpr::Var { name, ty } => {
+                let name = self.rename.get(&name).cloned().unwrap_or(name);
+                TrustVcExpr::Var { name, ty }
+            }
+            other => crate::ir_expr_traversal::fold_expr_children(self, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod constructive_witness_tests {
     use super::*;
@@ -1275,75 +1454,5 @@ mod constructive_witness_tests {
             right: Box::new(var("j", nat.clone())),
         };
         assert!(find_reflexive_order_witness(&mismatched, "j", &nat, &names).is_none());
-    }
-}
-
-/// True iff `left` and `right` are alpha-equivalent quantifiers: same kind, the
-/// same number of bound variables with pairwise-equal types, and bodies that are
-/// structurally identical after renaming `left`'s bound-variable names to
-/// `right`'s. Triggers are intentionally ignored — they steer e-matching but do
-/// not change a quantifier's truth value, so two quantifiers that differ only in
-/// triggers are still semantically equal.
-///
-/// Conservative: any structural difference the renaming does not reconcile
-/// (notably a nested quantifier that rebinds a differently-named variable) yields
-/// `false`, so the caller falls through to the ordinary solver path. It is only
-/// ever used to recognize a TRUE equality (returning `false` here can never make
-/// a false equality look proven).
-fn quantifiers_alpha_equal(left: &TrustVcExpr, right: &TrustVcExpr) -> bool {
-    let (
-        TrustVcExpr::Quantifier {
-            kind: lk,
-            bound_vars: lbv,
-            body: lbody,
-            ..
-        },
-        TrustVcExpr::Quantifier {
-            kind: rk,
-            bound_vars: rbv,
-            body: rbody,
-            ..
-        },
-    ) = (left, right)
-    else {
-        return false;
-    };
-    if lk != rk || lbv.len() != rbv.len() {
-        return false;
-    }
-    let mut rename = std::collections::HashMap::new();
-    for ((ln, lt), (rn, rt)) in lbv.iter().zip(rbv.iter()) {
-        if lt != rt {
-            return false;
-        }
-        if ln != rn {
-            rename.insert(ln.clone(), rn.clone());
-        }
-    }
-    let renamed = if rename.is_empty() {
-        (**lbody).clone()
-    } else {
-        let mut renamer = BoundVarRenamer { rename: &rename };
-        crate::ir_expr_traversal::TrustVcExprFolder::fold_expr(&mut renamer, (**lbody).clone())
-    };
-    &renamed == &**rbody
-}
-
-/// Owned-tree folder that renames free `Var` references (and nested quantifier
-/// bound-variable declarations) according to a name map. Used to alpha-rename one
-/// quantifier body onto another's bound-variable names for the equality check.
-struct BoundVarRenamer<'a> {
-    rename: &'a std::collections::HashMap<String, String>,
-}
-
-impl crate::ir_expr_traversal::TrustVcExprFolder for BoundVarRenamer<'_> {
-    fn fold_expr(&mut self, expr: TrustVcExpr) -> TrustVcExpr {
-        match expr {
-            TrustVcExpr::Var { name, ty } => {
-                let name = self.rename.get(&name).cloned().unwrap_or(name);
-                TrustVcExpr::Var { name, ty }
-            }
-            other => crate::ir_expr_traversal::fold_expr_children(self, other),
-        }
     }
 }

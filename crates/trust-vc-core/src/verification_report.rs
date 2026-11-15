@@ -228,18 +228,78 @@ impl DemandInlineRecovery {
 ///
 /// Available only when the `proof-certificates` feature is enabled and the
 /// solver produces a proof for a verified result.
+///
+/// # Assertion identity (#2654)
+///
+/// `refuted_obligation` names the obligation whose NEGATION was asserted into
+/// the solver scope that produced this refutation. It is captured at the single
+/// recording site (`encoder::verification::solve`) from the very
+/// `PreparedObligation` that was just solved, so it is a fact about the query,
+/// not a label applied afterwards.
+///
+/// This exists because certificate-to-obligation binding used to be POSITIONAL
+/// (whatever step was on top of the capture stack when the artifact was
+/// recorded), and several verification paths issue MORE THAN ONE solver query
+/// under a single obligation step — the conjunct split
+/// (`verification::split::try_verify_quantified_conjunction_split`) discharges
+/// `forall x. (C1 AND C2)` as separate `forall x. Ck` queries. Under positional
+/// binding the LAST sub-query's refutation was attached to the parent step, so
+/// the parent assertion carried a certificate that refutes only one conjunct.
+/// A consumer replaying that Alethe text confirms `Ck`, not the assertion.
+/// The identity recorded here lets `capture::record_proof_artifact` refuse that
+/// attachment instead of silently over-claiming.
+///
+/// # Premise binding
+///
+/// Identity says WHICH query was refuted; it does not say the certificate's
+/// `assume` steps ARE that query, and both checkers take the premises as
+/// given. A certificate with a premise trust-vc never asserted is a valid
+/// refutation of something else. So [`Self::strict_verified`],
+/// [`Self::kernel_verified`] and [`Self::clean_supported`] are claims about the
+/// OBLIGATION and require [`Self::premises_bound`]; the derivation-only facts
+/// are [`Self::derivation_strict_verified`] and
+/// [`Self::kernel_skeleton_accepted`]. Binding never changes the verdict: an
+/// unbound certificate leaves a `Verified` result standing on the solver.
+///
+/// A query that AY's term builder folded to `false` binds: the certificate
+/// refutes the query trust-vc posed, and what that shows about the obligation
+/// rests on the builder's rewrite, as it does for every other certificate.
+/// [`Self::query_collapsed`] discloses it. The posed query also holds the
+/// no-overflow and collection-precondition predicates trust-vc proved by a
+/// separate solve and then assumed; that solve has no certificate, and
+/// [`Self::assumed_lemma_premises`] counts the premises that are such
+/// predicates.
 #[cfg(feature = "proof-certificates")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct ProofCertificate {
     alethe: String,
-    strict_verified: bool,
-    clean_supported: bool,
+    /// AY's native strict verdict on the derivation, premises taken as given.
+    derivation_strict_verified: bool,
+    /// AY's clean-subset verdict on the derivation, premises taken as given.
+    derivation_clean_supported: bool,
     trust_count: u32,
     hole_count: u32,
     resolution_count: u32,
     theory_count: u32,
-    kernel_verified: bool,
+    /// The trust-vc-kernel replayed the refutation (premises taken as given).
+    kernel_skeleton_accepted: bool,
+    /// Theory lemmas the kernel took as axioms.
+    kernel_trusted_theory_lemmas: u32,
+    /// Generic rule steps the kernel took as inputs without a check.
+    kernel_trusted_rule_steps: u32,
+    /// Why the kernel did not accept the proof, when it did not.
+    kernel_refusal: Option<String>,
+    /// `None` iff every `assume` premise is a term of the query trust-vc posed
+    /// for this obligation (or an exact instance of a posed `forall`);
+    /// otherwise why not.
+    premise_binding_defect: Option<String>,
+    /// A premise is the constant `false`: the query collapsed while built.
+    query_collapsed: bool,
+    /// Premises that are predicates trust-vc proved by a separate,
+    /// uncertified solve and then assumed.
+    assumed_lemma_premises: u32,
+    refuted_obligation: String,
 }
 
 #[cfg(feature = "proof-certificates")]
@@ -250,16 +310,63 @@ impl ProofCertificate {
         &self.alethe
     }
 
-    /// Whether the strict proof checker accepted this proof.
+    /// Whether this certificate is strict-checked evidence for its obligation:
+    /// AY's strict checker accepted the derivation AND its premises are the
+    /// obligation's own query ([`Self::premises_bound`]).
     #[must_use]
     pub const fn strict_verified(&self) -> bool {
-        self.strict_verified
+        self.derivation_strict_verified && self.premises_bound()
     }
 
-    /// Whether the proof uses only clean-supported rules.
+    /// Whether AY's strict checker accepted the derivation, with the premises
+    /// taken as given. Not a claim about the obligation; see
+    /// [`Self::strict_verified`].
+    #[must_use]
+    pub const fn derivation_strict_verified(&self) -> bool {
+        self.derivation_strict_verified
+    }
+
+    /// Whether the proof uses only clean-supported rules and is a refutation of
+    /// this obligation's own query ([`Self::premises_bound`]).
     #[must_use]
     pub const fn clean_supported(&self) -> bool {
-        self.clean_supported
+        self.derivation_clean_supported && self.premises_bound()
+    }
+
+    /// Whether every `assume` premise is a term of the query trust-vc posed for
+    /// this obligation, or an exact instance of a `forall` it posed.
+    #[must_use]
+    pub const fn premises_bound(&self) -> bool {
+        self.premise_binding_defect.is_none()
+    }
+
+    /// Whether a premise is the constant `false`. AY's term builder folded the
+    /// query to `false` while trust-vc built it, for example `ret == x * y`
+    /// with `ret := x * y`. The refutation is then trivial, and the whole
+    /// evidence for the obligation is the builder's rewrite. That rewrite is
+    /// trusted, as every builder rewrite is. This withholds no claim; it says
+    /// how little the derivation itself carries.
+    #[must_use]
+    pub const fn query_collapsed(&self) -> bool {
+        self.query_collapsed
+    }
+
+    /// How many premises are predicates trust-vc proved by a separate solve
+    /// and then assumed: the no-overflow and collection-precondition
+    /// predicates of the obligation's own arithmetic and indexing. Those
+    /// solves record no certificate. With any of them, the certificate shows
+    /// the obligation given those predicates, and the predicates rest on the
+    /// separate solves' verdicts. This withholds no claim; it says what the
+    /// certificate does not cover.
+    #[must_use]
+    pub const fn assumed_lemma_premises(&self) -> u32 {
+        self.assumed_lemma_premises
+    }
+
+    /// Why the premises are not this obligation's query, when they are not.
+    #[must_use]
+    pub fn premise_binding_defect(&self) -> Option<&str> {
+        self.premise_binding_defect.as_deref()
     }
 
     /// Number of trust steps (unverified axioms).
@@ -286,28 +393,127 @@ impl ProofCertificate {
         self.theory_count
     }
 
-    /// Whether the trust-vc-kernel independent checker verified this proof.
+    /// Whether the trust-vc-kernel independently checked this certificate as a
+    /// refutation of its obligation's own query: the premises are bound
+    /// ([`Self::premises_bound`]) and the kernel replayed the refutation, every
+    /// resolution re-derived with polarity read off the proof's term store and
+    /// the empty clause derived by a checked step.
+    ///
+    /// The kernel has no semantic checker for theory lemmas, and some generic
+    /// rule steps are not propositional; it takes those clauses as given. Their
+    /// number is [`Self::kernel_trusted_steps`]. Only AY's strict checker
+    /// checks them, so when there are any this also requires
+    /// [`Self::derivation_strict_verified`]. [`Self::kernel_fully_checked`] is
+    /// the claim with none of them.
     #[must_use]
     pub const fn kernel_verified(&self) -> bool {
-        self.kernel_verified
+        self.premises_bound()
+            && self.kernel_skeleton_accepted
+            && (self.kernel_trusted_steps() == 0 || self.derivation_strict_verified)
     }
 
-    /// Return a copy with the `kernel_verified` flag changed.
-    pub(crate) fn with_kernel_verified(mut self, verified: bool) -> Self {
-        self.kernel_verified = verified;
+    /// Whether the kernel replayed the refutation, with the premises taken as
+    /// given. Not a claim about the obligation; see [`Self::kernel_verified`].
+    #[must_use]
+    pub const fn kernel_skeleton_accepted(&self) -> bool {
+        self.kernel_skeleton_accepted
+    }
+
+    /// Clauses the kernel took as given: theory lemmas plus generic rule steps
+    /// neither it nor the bridge derived.
+    #[must_use]
+    pub const fn kernel_trusted_steps(&self) -> u32 {
+        self.kernel_trusted_theory_lemmas
+            .saturating_add(self.kernel_trusted_rule_steps)
+    }
+
+    /// Theory lemmas the kernel took as axioms.
+    #[must_use]
+    pub const fn kernel_trusted_theory_lemmas(&self) -> u32 {
+        self.kernel_trusted_theory_lemmas
+    }
+
+    /// Generic rule steps the kernel took as inputs without a check.
+    #[must_use]
+    pub const fn kernel_trusted_rule_steps(&self) -> u32 {
+        self.kernel_trusted_rule_steps
+    }
+
+    /// [`Self::kernel_verified`] with nothing taken on trust: the kernel and
+    /// the bridge derived every clause of the refutation from its premises.
+    #[must_use]
+    pub const fn kernel_fully_checked(&self) -> bool {
+        self.kernel_verified() && self.kernel_trusted_steps() == 0
+    }
+
+    /// Why the kernel did not accept the proof, when it did not.
+    #[must_use]
+    pub fn kernel_refusal(&self) -> Option<&str> {
+        self.kernel_refusal.as_deref()
+    }
+
+    /// Name of the obligation whose negation the solver actually refuted to
+    /// produce this certificate (#2654).
+    ///
+    /// This is the obligation identity captured at the solve site, NOT the label
+    /// of whatever report step happened to be open. A consumer that mints a
+    /// per-assertion proof artifact must check this against the assertion it is
+    /// certifying; an empty string means the identity was not recorded and the
+    /// certificate must not be treated as evidence for any specific assertion.
+    #[must_use]
+    pub fn refuted_obligation(&self) -> &str {
+        &self.refuted_obligation
+    }
+
+    /// True iff this certificate is the solver's refutation of `obligation`'s
+    /// own negated goal.
+    ///
+    /// The empty identity never matches, so an unattributed certificate can
+    /// never be adopted as evidence for an assertion.
+    #[must_use]
+    pub fn refutes_obligation(&self, obligation: &str) -> bool {
+        !self.refuted_obligation.is_empty() && self.refuted_obligation == obligation
+    }
+
+    /// Return a copy carrying what the solve site established about this
+    /// certificate: whether its premises are the posed query, and the kernel's
+    /// verdict on its derivation.
+    pub(crate) fn with_evidence(mut self, evidence: &kernel_bridge::CertificateEvidence) -> Self {
+        self.premise_binding_defect = evidence.binding.clone().err();
+        self.query_collapsed = evidence.query_collapsed;
+        self.assumed_lemma_premises = evidence.assumed_lemma_premises;
+        self.kernel_skeleton_accepted = evidence.kernel.skeleton_accepted;
+        self.kernel_trusted_theory_lemmas = evidence.kernel.trusted_theory_lemmas;
+        self.kernel_trusted_rule_steps = evidence.kernel.trusted_rule_steps;
+        self.kernel_refusal = evidence.kernel.refusal.clone();
         self
     }
 
-    pub(crate) fn from_artifact(artifact: &UnsatProofArtifact) -> Self {
+    /// Mint a certificate from AY's artifact. It starts UNBOUND and
+    /// kernel-unchecked, so it makes no claim about its obligation until
+    /// [`Self::with_evidence`] records what was established.
+    pub(crate) fn from_artifact(artifact: &UnsatProofArtifact, refuted_obligation: &str) -> Self {
         Self {
             alethe: artifact.alethe.clone(),
-            strict_verified: matches!(artifact.strict_verdict, StrictProofVerdict::Verified(_)),
-            clean_supported: artifact.clean_supported,
+            derivation_strict_verified: matches!(
+                artifact.strict_verdict,
+                StrictProofVerdict::Verified(_)
+            ),
+            derivation_clean_supported: artifact.clean_supported,
             trust_count: artifact.quality.trust_count,
             hole_count: artifact.quality.hole_count,
             resolution_count: artifact.quality.resolution_count,
             theory_count: artifact.quality.theory_lemma_count,
-            kernel_verified: false,
+            kernel_skeleton_accepted: false,
+            kernel_trusted_theory_lemmas: 0,
+            kernel_trusted_rule_steps: 0,
+            kernel_refusal: Some("the kernel was not run on this certificate".to_string()),
+            premise_binding_defect: Some(
+                "the certificate was not checked against its posed query".to_string(),
+            ),
+            query_collapsed: false,
+            assumed_lemma_premises: 0,
+            refuted_obligation: refuted_obligation.to_string(),
         }
     }
 }
@@ -486,8 +692,11 @@ impl VerificationReport {
         self.total_elapsed
     }
 
-    /// Returns the UNSAT proof certificate if proof production was enabled
-    /// and the result was Verified.
+    /// Returns the last UNSAT proof certificate recorded for this report, if
+    /// proof production was enabled. It refutes ONE obligation,
+    /// [`ProofCertificate::refuted_obligation`], and its claims are about that
+    /// obligation only; each step carries the certificate of its own
+    /// obligation ([`StepDiagnostic::proof`]).
     #[cfg(feature = "proof-certificates")]
     #[must_use]
     pub fn proof(&self) -> Option<&ProofCertificate> {
@@ -513,6 +722,29 @@ impl VerificationReport {
     #[cfg(feature = "proof-certificates")]
     pub(crate) fn with_proof(mut self, proof: Option<ProofCertificate>) -> Self {
         self.proof = proof;
+        self
+    }
+
+    /// This report with every `Verified` step turned into an `Error` and every
+    /// proof certificate dropped, for a context whose `Verified` answer cannot
+    /// be published. A step's own answer proves no more than the function's,
+    /// so a reader that walks the steps (obligation certificates, proven facts,
+    /// optimization hints) must not find one. Other step results are kept.
+    pub(crate) fn without_verified_steps(mut self) -> Self {
+        for step in &mut self.steps {
+            if step.result == StepResultKind::Verified {
+                step.result = StepResultKind::Error;
+                step.unknown = None;
+            }
+            #[cfg(feature = "proof-certificates")]
+            {
+                step.proof = None;
+            }
+        }
+        #[cfg(feature = "proof-certificates")]
+        {
+            self.proof = None;
+        }
         self
     }
 }
@@ -580,10 +812,42 @@ mod tests {
     }
 
     #[test]
+    fn test_without_verified_steps_turns_only_verified_steps_into_errors() {
+        let report = VerificationReport::from_parts(
+            VerifyResult::Error {
+                message: "refused".to_string(),
+            },
+            None,
+            vec![
+                step("overflow_check_0", StepResultKind::Verified),
+                step("overflow_check_1", StepResultKind::Counterexample),
+                step("timed_out", StepResultKind::Unknown),
+                step("cleanup", StepResultKind::Skipped),
+            ],
+            Duration::from_millis(20),
+        )
+        .without_verified_steps();
+
+        let results: Vec<_> = report.steps().iter().map(StepDiagnostic::result).collect();
+        assert_eq!(
+            results,
+            vec![
+                StepResultKind::Error,
+                StepResultKind::Counterexample,
+                StepResultKind::Unknown,
+                StepResultKind::Skipped,
+            ]
+        );
+        assert!(report.steps()[0].unknown().is_none());
+        assert!(report.steps()[2].unknown().is_some());
+    }
+
+    #[test]
     fn test_first_non_verified_step_returns_first_counterexample() {
         let report = VerificationReport::from_parts(
             VerifyResult::Counterexample {
                 obligation_name: "postcondition".to_string(),
+                location: None,
                 model: None,
                 bindings: Vec::new(),
             },

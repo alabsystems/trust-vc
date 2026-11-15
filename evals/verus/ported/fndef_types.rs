@@ -168,10 +168,10 @@ pub const FNDEF_TYPES_RS_EXPECTED_CASES: &[FndefTypesExpectedCase] = &[
         0,
     ),
     (
-        "fn_trait_bound_value_call_currently_errors",
+        "fn_trait_bound_value_call_verified",
         "basic_test",
-        "error",
-        0,
+        "verified",
+        4,
     ),
     (
         "fn_once_trait_bound_value_call_currently_errors",
@@ -313,15 +313,6 @@ pub const FNDEF_TYPES_RS_EXPECTED_ERROR_PATTERNS: &[FndefTypesExpectedErrorPatte
             "function-item value",
             "function value",
             "fndef_trait_llama",
-        ],
-    ),
-    (
-        "fn_trait_bound_value_call_currently_errors",
-        &[
-            "Undefined function: f",
-            "unknown return type for function 'f'",
-            "Fn(u8) -> bool",
-            "function value",
         ],
     ),
     (
@@ -608,8 +599,10 @@ fn trait_method_function_item_value_call_currently_errors() {
     trust_vc::assert!(b);
 }
 
-#[trust_vc::ensures(true)]
-fn fn_trait_bound_value_call_currently_errors<F: Fn(u8) -> bool>(f: F) {
+// The application proves `f.requires((4,))`, faithful to
+// upstream `takes_fn1`'s `call_requires(f, (4,))`.
+#[trust_vc::requires(f.requires((4u8,)))]
+fn fn_trait_bound_value_call_verified<F: Fn(u8) -> bool>(f: F) {
     let b = f(4u8);
     trust_vc::assert!(b || !b);
 }

@@ -66,26 +66,29 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "test_integer_using_trait_add",
         2,
     ),
+    // 2026-09-11: a hand-written `PartialEq::eq` METHOD call means its body (upstream test_eq_overload).
+    ("custom_partial_eq_method_verified", "test_eq_overload", 3),
 ];
 
-const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[(
-    "boolean_logical_operator_wrong_counterexample",
-    "test_arith/test_eq_ineq",
-    1,
-)];
+const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
+    (
+        "boolean_logical_operator_wrong_counterexample",
+        "test_arith/test_eq_ineq",
+        1,
+    ),
+    (
+        "custom_partial_eq_method_negated_counterexample",
+        "test_eq_overload",
+        3,
+    ),
+    (
+        "custom_partial_eq_method_structural_liar_counterexample",
+        "test_eq_overload",
+        3,
+    ),
+];
 
-const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[(
-    "custom_partial_eq_method_currently_blocked",
-    "test_eq_overload",
-    &[
-        "eq",
-        "PartialEq",
-        "unsupported",
-        "unknown",
-        "opaque",
-        "unresolved",
-    ],
-)];
+const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[];
 
 fn expect_error_contains_any(
     path: &str,
@@ -163,10 +166,22 @@ fn expected_case_inventory() -> Vec<(&'static str, &'static str, &'static str, u
             2,
         ),
         (
-            "custom_partial_eq_method_currently_blocked",
+            "custom_partial_eq_method_verified",
             "test_eq_overload",
-            "error",
-            0,
+            "verified",
+            3,
+        ),
+        (
+            "custom_partial_eq_method_negated_counterexample",
+            "test_eq_overload",
+            "counterexample",
+            3,
+        ),
+        (
+            "custom_partial_eq_method_structural_liar_counterexample",
+            "test_eq_overload",
+            "counterexample",
+            3,
         ),
     ]
 }

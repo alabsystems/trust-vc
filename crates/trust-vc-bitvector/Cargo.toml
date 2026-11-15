@@ -1,0 +1,13 @@
+[package]
+name = "trust-vc-bitvector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed isolated bit-vector question data and bounded admission"
+
+[dependencies]
+
+[lints]
+workspace = true

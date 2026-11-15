@@ -451,6 +451,17 @@ pub fn expand_returns(input: ItemFn, return_names: TokenStream) -> TokenStream {
     } = postcondition;
     let rewritten_body = rewrite_returns_postcondition_body((**block).clone());
     let condition = quote! { result == (#postcondition_expr) }.to_string();
+    let runtime_check = crate::runtime_check::runtime_check_or_typecheck(
+        &quote! { result == (#postcondition_expr) },
+        crate::runtime_check::ClauseArithmetic::FixedWidthChecked,
+        quote! {
+            assert!(
+                result == (#postcondition_expr),
+                "trust_vc postcondition failed: result == ({})",
+                stringify!(#postcondition_expr)
+            );
+        },
+    );
     let result_runtime_capture = if signature_has_supported_shared_reference_return(sig) {
         quote! {
             #support_root::collect_let_binding_runtime_value_from_ref("result", result);
@@ -496,11 +507,7 @@ pub fn expand_returns(input: ItemFn, return_names: TokenStream) -> TokenStream {
             }
             #[cfg(not(test))]
             {
-                assert!(
-                    result == (#postcondition_expr),
-                    "trust_vc postcondition failed: result == ({})",
-                    stringify!(#postcondition_expr)
-                );
+                #runtime_check
             }
 
             result
@@ -780,6 +787,30 @@ mod tests {
         assert!(
             s.contains("collect_let_binding_runtime_value_from_ref"),
             "test path should constrain result to the runtime return value: {s}"
+        );
+    }
+
+    #[test]
+    fn test_expand_returns_checks_only_a_call_free_value_at_run_time() {
+        let check = "\"trust_vc postcondition failed: result == ({})\"";
+        let literal: ItemFn = syn::parse2(quote! {
+            fn value() -> u8 { 20u8 }
+        })
+        .unwrap();
+        let kept = expand_returns(literal, quote! { 20u8 }).to_string();
+        assert!(
+            kept.contains(check),
+            "a call-free returns value keeps its run-time check: {kept}"
+        );
+
+        let ghost: ItemFn = syn::parse2(quote! {
+            fn next(x: u64) -> u64 { x + 1u64 }
+        })
+        .unwrap();
+        let typed_only = expand_returns(ghost, quote! { inc(x) }).to_string();
+        assert!(
+            !typed_only.contains(check) && typed_only.contains("if false"),
+            "a returns value that calls a function is only type-checked: {typed_only}"
         );
     }
 

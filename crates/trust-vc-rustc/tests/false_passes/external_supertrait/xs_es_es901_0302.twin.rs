@@ -1,0 +1,16 @@
+pub use self::Q as Sub;
+verus!{
+pub trait Tr { }
+pub struct Z { pub z: u8 }
+pub struct S<X> { pub x: X }
+pub trait U {
+    spec fn mm(&self) -> u8;
+}
+pub trait Q { }
+impl<X: Q> U for S<X> {
+    open spec fn mm(&self) -> u8 { 2 }
+}
+pub trait V0 {
+    proof fn f0<X: Sub>(s: S<X>) ensures s.mm() == 2 { }
+}
+} // verus!

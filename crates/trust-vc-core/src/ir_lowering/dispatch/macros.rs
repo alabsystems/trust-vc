@@ -342,12 +342,20 @@ fn lower_seq_macro(
                     "seq![] requires an element type; use Seq::<T>::empty()".to_string(),
                 ));
             }
+            crate::ir_lowering::entry::refuse_unsuffixed_float_elements(
+                elements.iter(),
+                "a `seq!` literal",
+            )?;
             elements
                 .iter()
                 .map(|element| lower_syn_expr_with_depth(element, env, depth))
                 .collect::<Result<Vec<_>, _>>()?
         }
         SeqMacroInput::Repeat { value, len } => {
+            crate::ir_lowering::entry::refuse_unsuffixed_float_elements(
+                std::iter::once(&*value),
+                "a `seq!` literal",
+            )?;
             let repeat_len = len.base10_parse::<usize>().map_err(|err| {
                 LoweringError::UnsupportedExpr(format!(
                     "seq![value; len] requires a usize literal length: {}",
@@ -378,10 +386,16 @@ fn lower_vec_macro(
 
     let elements =
         match input {
-            SeqMacroInput::Elements(elements) if !elements.is_empty() => elements
-                .iter()
-                .map(|element| lower_syn_expr_with_depth(element, env, depth))
-                .collect::<Result<Vec<_>, _>>()?,
+            SeqMacroInput::Elements(elements) if !elements.is_empty() => {
+                crate::ir_lowering::entry::refuse_unsuffixed_float_elements(
+                    elements.iter(),
+                    "a `vec!` literal",
+                )?;
+                elements
+                    .iter()
+                    .map(|element| lower_syn_expr_with_depth(element, env, depth))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
             SeqMacroInput::Elements(_) => return Err(LoweringError::TypeInference(
                 "vec![] requires an element type; empty Vec literals are not modeled in this slice"
                     .to_string(),
@@ -563,7 +577,7 @@ fn lower_set_macro(
     Ok(set)
 }
 
-fn seq_literal_empty_constructor_name(elem_ty: &TrustVcType) -> String {
+pub(super) fn seq_literal_empty_constructor_name(elem_ty: &TrustVcType) -> String {
     format!(
         "{COLLECTION_CONSTRUCTOR_PREFIX}Seq_{}_empty",
         collection_literal_type_component(elem_ty)
@@ -889,7 +903,7 @@ fn fold_closed_literals(expr: &syn::Expr) -> syn::Expr {
 /// `test1_fails3` stays refuted — trust-vc must not prove more than Verus.
 fn choose_closure_key(closure: &syn::ExprClosure) -> String {
     let mut normalized = closure.clone();
-    normalized.body = Box::new(fold_closed_literals(&closure.body));
+    *normalized.body = fold_closed_literals(&closure.body);
     quote::quote!(#normalized).to_string()
 }
 
@@ -1206,76 +1220,6 @@ fn small_integer_witness_assignments(
         assignments = next;
     }
     assignments
-}
-
-#[cfg(test)]
-mod small_integer_witness_tests {
-    use super::*;
-
-    #[test]
-    fn signed_basis_is_cartesian_and_type_correct() {
-        let params = vec![
-            ("i".to_string(), TrustVcType::MathInt),
-            ("j".to_string(), TrustVcType::Int { width: 16 }),
-        ];
-        let assignments = small_integer_witness_assignments(&params);
-        assert_eq!(assignments.len(), 9);
-        for assignment in assignments {
-            for (name, expected_ty) in &params {
-                match assignment.get(name) {
-                    Some(TrustVcExpr::IntLit { value, ty }) => {
-                        assert!([-1, 0, 1].contains(value));
-                        assert_eq!(ty, expected_ty);
-                    }
-                    other => panic!("expected typed integer witness for {name}, got {other:?}"),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unsigned_basis_is_nonnegative() {
-        let params = vec![
-            ("n".to_string(), TrustVcType::Nat),
-            ("u".to_string(), TrustVcType::Uint { width: 8 }),
-        ];
-        let assignments = small_integer_witness_assignments(&params);
-        assert_eq!(assignments.len(), 4);
-        assert!(assignments.iter().all(|assignment| {
-            assignment
-                .values()
-                .all(|expr| matches!(expr, TrustVcExpr::IntLit { value: 0 | 1, .. }))
-        }));
-    }
-
-    #[test]
-    fn arity_cap_and_unsupported_types_keep_universal_only() {
-        let four = (0..4)
-            .map(|index| (format!("v{index}"), TrustVcType::MathInt))
-            .collect::<Vec<_>>();
-        assert!(small_integer_witness_assignments(&four).is_empty());
-        assert!(
-            small_integer_witness_assignments(&[("b".to_string(), TrustVcType::Bool,)]).is_empty()
-        );
-    }
-
-    #[test]
-    fn conjunction_depth_is_logarithmic() {
-        fn depth(expr: &TrustVcExpr) -> usize {
-            match expr {
-                TrustVcExpr::Logic {
-                    op: LogicOp::And,
-                    left,
-                    right,
-                } => 1 + depth(left).max(depth(right)),
-                _ => 1,
-            }
-        }
-
-        let exprs = (0..28).map(|_| TrustVcExpr::BoolLit(true)).collect();
-        let conjunction = balanced_conjunction(exprs).expect("non-empty conjunction");
-        assert_eq!(depth(&conjunction), 6);
-    }
 }
 
 fn substitute_unbound_vars(
@@ -1648,4 +1592,74 @@ fn extract_closure_params(
         }
     }
     Ok(params)
+}
+
+#[cfg(test)]
+mod small_integer_witness_tests {
+    use super::*;
+
+    #[test]
+    fn signed_basis_is_cartesian_and_type_correct() {
+        let params = vec![
+            ("i".to_string(), TrustVcType::MathInt),
+            ("j".to_string(), TrustVcType::Int { width: 16 }),
+        ];
+        let assignments = small_integer_witness_assignments(&params);
+        assert_eq!(assignments.len(), 9);
+        for assignment in assignments {
+            for (name, expected_ty) in &params {
+                match assignment.get(name) {
+                    Some(TrustVcExpr::IntLit { value, ty }) => {
+                        assert!([-1, 0, 1].contains(value));
+                        assert_eq!(ty, expected_ty);
+                    }
+                    other => panic!("expected typed integer witness for {name}, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_basis_is_nonnegative() {
+        let params = vec![
+            ("n".to_string(), TrustVcType::Nat),
+            ("u".to_string(), TrustVcType::Uint { width: 8 }),
+        ];
+        let assignments = small_integer_witness_assignments(&params);
+        assert_eq!(assignments.len(), 4);
+        assert!(assignments.iter().all(|assignment| {
+            assignment
+                .values()
+                .all(|expr| matches!(expr, TrustVcExpr::IntLit { value: 0 | 1, .. }))
+        }));
+    }
+
+    #[test]
+    fn arity_cap_and_unsupported_types_keep_universal_only() {
+        let four = (0..4)
+            .map(|index| (format!("v{index}"), TrustVcType::MathInt))
+            .collect::<Vec<_>>();
+        assert!(small_integer_witness_assignments(&four).is_empty());
+        assert!(
+            small_integer_witness_assignments(&[("b".to_string(), TrustVcType::Bool,)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn conjunction_depth_is_logarithmic() {
+        fn depth(expr: &TrustVcExpr) -> usize {
+            match expr {
+                TrustVcExpr::Logic {
+                    op: LogicOp::And,
+                    left,
+                    right,
+                } => 1 + depth(left).max(depth(right)),
+                _ => 1,
+            }
+        }
+
+        let exprs = (0..28).map(|_| TrustVcExpr::BoolLit(true)).collect();
+        let conjunction = balanced_conjunction(exprs).expect("non-empty conjunction");
+        assert_eq!(depth(&conjunction), 6);
+    }
 }

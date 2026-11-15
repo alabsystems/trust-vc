@@ -112,14 +112,32 @@ fn test_real_negation() {
     expect_verified(&result, "-x + x should equal 0 for reals");
 }
 
-/// Decimal source literals lower to exact Real rationals, not binary floats.
+/// Decimal `real` literals lower to exact Real rationals, not binary floats.
 #[test]
 fn test_source_decimal_real_literal_exact() {
     let mut ctx = VerificationContext::new();
-    ctx.push_obligation(ProofObligation::assert("decimal_exact", "1.5 == 3.0 / 2.0"));
+    ctx.push_obligation(ProofObligation::assert(
+        "decimal_exact",
+        "1.5real == 3.0real / 2.0real",
+    ));
 
     let result = AYEncoder::verify(&ctx);
     expect_verified(&result, "decimal real literals should be exact rationals");
+}
+
+/// An operation over UNSUFFIXED float literals alone has a Rust float type,
+/// whose rounding an exact real does not model: refused, never `Verified`.
+#[test]
+fn test_source_unsuffixed_float_literal_operation_is_refused() {
+    let mut ctx = VerificationContext::new();
+    ctx.push_obligation(ProofObligation::assert("f64_sum", "0.1 + 0.2 == 0.3"));
+
+    let result = AYEncoder::verify(&ctx);
+    expect_error_containing(
+        &result,
+        "unsuffixed float literals only",
+        "`0.1 + 0.2 == 0.3`, false in `f64`,",
+    );
 }
 
 /// Upstream real.rs `test_chained`: nat casts participate in real chained comparisons.
@@ -448,6 +466,12 @@ fn test_ir_i8_cast_to_real_preserves_signed_value() {
 }
 
 /// IR float arithmetic must lower to native `fp.*` terms, not Int/Real/BV ops.
+///
+/// `%` is NOT bare `fp.rem`: Rust's float `%` is C `fmod`, and SMT-LIB
+/// `fp.rem` is the IEEE remainder (`fp.rem(5, 3) = -1`, `5.0 % 3.0 == 2.0`).
+/// It lowers to `ite(overshot, fp.add(RNE, fp.rem(x, y), ±|y|), fp.rem(x, y))`
+/// (TRUST-VC-FREM-1). This test pins only the term SHAPE; the VALUE is pinned
+/// bit for bit to Rust's `%` by `float_rem_fmod.rs`.
 #[test]
 fn test_ir_float_arith_emits_fp_ops() {
     let width = 32;
@@ -479,7 +503,6 @@ fn test_ir_float_arith_emits_fp_ops() {
         (ArithOp::Sub, "fp.sub", 3),
         (ArithOp::Mul, "fp.mul", 3),
         (ArithOp::Div, "fp.div", 3),
-        (ArithOp::Rem, "fp.rem", 2),
     ] {
         let expr = TrustVcExpr::Arith {
             op,
@@ -499,6 +522,40 @@ fn test_ir_float_arith_emits_fp_ops() {
             }
         );
     }
+
+    let rem = TrustVcExpr::Arith {
+        op: ArithOp::Rem,
+        left: Box::new(float_var("x", width)),
+        right: Box::new(float_var("y", width)),
+        ty: float_ty.clone(),
+    };
+    let term = parser
+        .encode_trust_vc_expr(&rem)
+        .expect("float remainder should encode");
+    assert_eq!(parser.solver.term_sort(term), Sort::FloatingPoint(8, 24));
+    assert_eq!(
+        parser.solver.term_kind(term),
+        TermKind::Ite,
+        "float `%` must be the corrected fmod term, never bare IEEE `fp.rem`"
+    );
+    let children = parser.solver.term_children(term);
+    assert_eq!(children.len(), 3);
+    assert_eq!(
+        parser.solver.term_kind(children[1]),
+        TermKind::App {
+            name: "fp.add".to_string(),
+            num_args: 3,
+        },
+        "the corrected branch adds copysign(|y|, x) to the IEEE remainder"
+    );
+    assert_eq!(
+        parser.solver.term_kind(children[2]),
+        TermKind::App {
+            name: "fp.rem".to_string(),
+            num_args: 2,
+        },
+        "the uncorrected branch is the IEEE remainder itself"
+    );
 }
 
 /// Float comparisons and unary negation must use native FP operators.

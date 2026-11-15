@@ -20,6 +20,41 @@ pub(super) fn lower_binary(
     env: &TypeEnv,
     depth: usize,
 ) -> Result<TrustVcExpr, LoweringError> {
+    // An arithmetic operation or comparison over UNSUFFIXED float literals
+    // alone (`0.1 + 0.2`, and `a + b == 0.3` once `let a = 0.1; let b = 0.2;`
+    // is substituted) has a Rust float type — `f64` unless a use the lowering
+    // does not see makes it `f32` — never an exact real. Such a literal is
+    // lowered as the exact `real` it is next to a `real` peer, so `0.1 + 0.2
+    // == 0.3` was `Verified` where `f64` arithmetic makes it false. Refused,
+    // except a comparison of one form with ITSELF (the extractor's reflexive
+    // `(-0.0) == (-0.0)` safety obligation), whose operands are one float
+    // and one real alike; an operation inside it is refused on its own.
+    let reflexive = quote::ToTokens::to_token_stream(&*bin.left).to_string()
+        == quote::ToTokens::to_token_stream(&*bin.right).to_string();
+    let arithmetic_or_comparison = match &bin.op {
+        syn::BinOp::Add(_)
+        | syn::BinOp::Sub(_)
+        | syn::BinOp::Mul(_)
+        | syn::BinOp::Div(_)
+        | syn::BinOp::Rem(_) => true,
+        syn::BinOp::Eq(_)
+        | syn::BinOp::Ne(_)
+        | syn::BinOp::Lt(_)
+        | syn::BinOp::Le(_)
+        | syn::BinOp::Gt(_)
+        | syn::BinOp::Ge(_) => !reflexive,
+        _ => false,
+    };
+    if arithmetic_or_comparison
+        && is_unsuffixed_float_literal_tree(&bin.left)
+        && is_unsuffixed_float_literal_tree(&bin.right)
+    {
+        return Err(LoweringError::UnsupportedExpr(format!(
+            "`{}` operates on unsuffixed float literals only: its type is a Rust float \
+             (`f64` by default), whose rounding an exact real does not model",
+            quote::ToTokens::to_token_stream(bin)
+        )));
+    }
     let left = Box::new(lower_syn_expr_with_depth(&bin.left, env, depth)?);
     let guarded_env = match &bin.op {
         syn::BinOp::And(_) => env_with_option_is_some_guard(&bin.left, env),
@@ -41,10 +76,64 @@ pub(super) fn lower_binary(
         let left_ty = infer_expr_type(&left);
         let mut visited = std::collections::BTreeSet::new();
         if let Some(name) = datatype_with_manual_partial_eq(&left_ty, env, &mut visited) {
+            // THE IMPL'S OWN `eq` (2026-09-11, rows 385/489): when the LEFT type
+            // itself carries the hand-written impl and its `eq` is registered as
+            // an inherent method (a `Type__eq` UF with the body axiom the `.eq()`
+            // METHOD call already lowers to), `a == b` IS `PartialEq::eq(&a, &b)`
+            // in Rust, so lower it to that call; `a != b` is `PartialEq::ne`,
+            // which is the impl's `ne` when written and `!eq` otherwise — the
+            // exact dispatch. A manual impl reached only through a FIELD of a
+            // derived-PartialEq datatype has no axiom for the outer comparison
+            // and keeps failing closed below.
+            let left_type_name = left_ty.to_type_string();
+            if name == left_type_name {
+                if let Some(expr) =
+                    lower_manual_partial_eq_operator(&bin.op, &left_type_name, env, left, right)
+                {
+                    return Ok(expr);
+                }
+                return Err(LoweringError::UnsupportedExpr(format!(
+                    "`==`/`!=` on datatype `{name}` has a hand-written `PartialEq` impl \
+                     whose `eq` is not registered as an inherent method (a non-structural \
+                     custom `eq` would make structural lowering unsound) — call `.eq()` \
+                     in exec code or compare fields explicitly"
+                )));
+            }
             return Err(LoweringError::UnsupportedExpr(format!(
                 "`==`/`!=` on datatype `{name}` has a hand-written `PartialEq` impl \
                  (a non-structural custom `eq` would make structural lowering unsound) \
                  — call `.eq()` in exec code or compare fields explicitly"
+            )));
+        }
+        // The left operand's type can be less precise than the right one's
+        // (`None == o`), so both are checked from here on.
+        let right_ty = infer_expr_type(&right);
+        let mut visited = std::collections::BTreeSet::new();
+        if let Some(name) = datatype_with_manual_partial_eq(&right_ty, env, &mut visited) {
+            return Err(LoweringError::UnsupportedExpr(format!(
+                "`==`/`!=` on a value that holds datatype `{name}`, which has a hand-written \
+                 `PartialEq` impl (a non-structural custom `eq` would make structural \
+                 lowering unsound) — compare fields explicitly"
+            )));
+        }
+        // SOUNDNESS GATE: a float inside a compound value. Rust's `PartialEq` for
+        // a derived struct or enum, a tuple, `Option`, `Result`, an array or a
+        // `Vec` compares a float component with IEEE equality, under which
+        // `NaN != NaN` and `0.0 == -0.0`. Structural equality says a value always
+        // equals itself and tells `0.0` from `-0.0`, so it answers both of those
+        // the other way. A bare float is not affected: its `==` lowers to IEEE
+        // equality.
+        let float_holder = [&left_ty, &right_ty]
+            .into_iter()
+            .find(|ty| float_inside_compound(ty, env))
+            .cloned();
+        if let Some(ty) = float_holder {
+            return Err(LoweringError::UnsupportedExpr(format!(
+                "`==`/`!=` on `{}` compares a float inside a compound value: Rust's \
+                 `PartialEq` compares it with IEEE equality (NaN is not equal to itself, \
+                 0.0 equals -0.0), which structural equality does not model — compare \
+                 the float components explicitly",
+                ty.to_type_string()
             )));
         }
     }
@@ -52,8 +141,182 @@ pub(super) fn lower_binary(
     lower_binop(&bin.op, left, right)
 }
 
+/// Whether `expr` is built from UNSUFFIXED float literals alone (`0.1`,
+/// `-(1.5)`, `(0.1 + 0.2) * 3.0`): a closed form whose type only a peer fixes.
+/// A conditional, `match` or block whose every value is such a form is one
+/// too (`if c { 0.1 } else { 0.2 }`), and so is a value written to a binding
+/// whose witness is one (`__trust_vc_bind_like((0.0), 0.1)`, the rendering of
+/// `let mut a = 0.0; a = 0.1;`): its type is the untyped float's.
+pub(super) fn is_unsuffixed_float_literal_tree(expr: &syn::Expr) -> bool {
+    match unparen_expr(expr) {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Float(lit),
+            ..
+        }) => lit.suffix().is_empty(),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
+            is_unsuffixed_float_literal_tree(&unary.expr)
+        }
+        syn::Expr::Binary(binary) => {
+            matches!(
+                binary.op,
+                syn::BinOp::Add(_)
+                    | syn::BinOp::Sub(_)
+                    | syn::BinOp::Mul(_)
+                    | syn::BinOp::Div(_)
+                    | syn::BinOp::Rem(_)
+            ) && is_unsuffixed_float_literal_tree(&binary.left)
+                && is_unsuffixed_float_literal_tree(&binary.right)
+        }
+        syn::Expr::If(expr_if) => match &expr_if.else_branch {
+            Some((_, else_branch)) => {
+                block_value_is_unsuffixed_float_form(&expr_if.then_branch)
+                    && is_unsuffixed_float_literal_tree(else_branch)
+            }
+            None => false,
+        },
+        syn::Expr::Match(expr_match) => {
+            !expr_match.arms.is_empty()
+                && expr_match
+                    .arms
+                    .iter()
+                    .all(|arm| is_unsuffixed_float_literal_tree(&arm.body))
+        }
+        syn::Expr::Block(block) => block_value_is_unsuffixed_float_form(&block.block),
+        syn::Expr::Call(call) => {
+            matches!(
+                &*call.func,
+                syn::Expr::Path(path)
+                    if path.qself.is_none()
+                        && path.path.is_ident(crate::ir_lowering::BIND_LIKE_MARKER)
+            ) && call.args.len() == 2
+                && call.args.iter().all(is_unsuffixed_float_literal_tree)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `block`'s value (its tail expression) is an unsuffixed float form.
+fn block_value_is_unsuffixed_float_form(block: &syn::Block) -> bool {
+    matches!(block.stmts.last(), Some(syn::Stmt::Expr(tail, None))
+        if is_unsuffixed_float_literal_tree(tail))
+}
+
+/// Whether `ty` holds a float below its top level: in a field of a datatype
+/// (a struct, an enum payload, a tuple, `Option`, `Result`), an element of a
+/// sequence, array, set or multiset, or a key or value of a map. A bare float
+/// is not reported, since its `==` lowers to IEEE equality.
+pub(crate) fn float_inside_compound(ty: &TrustVcType, env: &TypeEnv) -> bool {
+    !matches!(ty, TrustVcType::Float { .. }) && type_is_or_holds_float(ty, Some(env))
+}
+
+/// Whether `ty` is a float or holds one anywhere inside it. `env` looks up a
+/// recursive reference's datatype; a recursive reference to a datatype that is
+/// neither being walked nor found in `env` counts as holding a float, because
+/// its fields cannot be checked.
+pub(crate) fn type_is_or_holds_float(ty: &TrustVcType, env: Option<&TypeEnv>) -> bool {
+    type_holds_float(ty, env, &mut std::collections::BTreeSet::new())
+}
+
+fn type_holds_float(
+    ty: &TrustVcType,
+    env: Option<&TypeEnv>,
+    visited: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    match ty {
+        TrustVcType::Float { .. } => true,
+        TrustVcType::Seq(inner)
+        | TrustVcType::Array(inner, _)
+        | TrustVcType::Set(inner)
+        | TrustVcType::Multiset(inner) => type_holds_float(inner, env, visited),
+        TrustVcType::Map(key, value) => {
+            type_holds_float(key, env, visited) || type_holds_float(value, env, visited)
+        }
+        TrustVcType::Datatype { name, variants } => {
+            if !visited.insert(name.clone()) {
+                return false;
+            }
+            variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|(_, field_ty)| type_holds_float(field_ty, env, visited))
+            })
+        }
+        TrustVcType::RecursiveRef(name) => {
+            if visited.contains(name) {
+                return false;
+            }
+            match env.and_then(|env| env.lookup_type_alias(name)).cloned() {
+                Some(resolved) => type_holds_float(&resolved, env, visited),
+                None => true,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Why `==` on an element of this type is not the solver's structural equality,
+/// if it is not: the element is or holds a float, or holds a datatype with a
+/// hand-written `PartialEq`. `Vec::contains` and slice `contains` call the
+/// element's `PartialEq`, so a membership test over such elements cannot be
+/// read as structural membership.
+pub(crate) fn element_equality_not_structural(elem: &TrustVcType, env: &TypeEnv) -> Option<String> {
+    if matches!(elem, TrustVcType::Float { .. }) || float_inside_compound(elem, env) {
+        return Some(format!(
+            "its element type `{}` is or holds a float, which Rust's `PartialEq` compares \
+             with IEEE equality (NaN is not equal to itself, 0.0 equals -0.0)",
+            elem.to_type_string()
+        ));
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    datatype_with_manual_partial_eq(elem, env, &mut visited).map(|name| {
+        format!(
+            "its element type `{}` holds datatype `{name}`, which has a hand-written \
+             `PartialEq` impl",
+            elem.to_type_string()
+        )
+    })
+}
+
+/// `a == b` / `a != b` on a datatype whose hand-written `PartialEq` methods are
+/// registered as inherent-method UFs: `eq` → `Type__eq(a, b)`, `ne` → the
+/// written `Type__ne(a, b)` when it exists, else `!Type__eq(a, b)` (Rust's
+/// default `ne`). `None` when the impl's `eq` is not registered (the caller
+/// keeps the structural gate's fail-closed error). Both operands are passed
+/// bare — a `PartialEq` impl on a concrete type never takes the trait UF's
+/// `Poly` self-domain, and the method's `&other` borrow is erased exactly as
+/// the `.eq(&other)` method-call path erases it.
+fn lower_manual_partial_eq_operator(
+    op: &syn::BinOp,
+    type_name: &str,
+    env: &TypeEnv,
+    left: Box<TrustVcExpr>,
+    right: Box<TrustVcExpr>,
+) -> Option<TrustVcExpr> {
+    let eq_meta = env.lookup_method(type_name, "eq")?;
+    if eq_meta.box_receiver.is_some() {
+        return None;
+    }
+    let call = |meta: &crate::ir_lowering::env::MethodMeta| TrustVcExpr::FnCall {
+        name: meta.uf_name.clone(),
+        args: vec![(*left).clone(), (*right).clone()],
+        return_ty: meta.return_type.clone(),
+    };
+    match op {
+        syn::BinOp::Eq(_) => Some(call(eq_meta)),
+        syn::BinOp::Ne(_) => match env.lookup_method(type_name, "ne") {
+            Some(ne_meta) if ne_meta.box_receiver.is_none() => Some(call(ne_meta)),
+            _ => Some(TrustVcExpr::Not(Box::new(call(eq_meta)))),
+        },
+        _ => None,
+    }
+}
+
 /// If `ty` is a datatype that carries a hand-written `impl PartialEq` — directly,
-/// or transitively through a field — return the name of the offending datatype.
+/// or transitively through a field — or a collection whose elements (a map's
+/// keys or values) hold one, return the name of the offending datatype. `==` on
+/// a `Vec` or a map calls the elements' `PartialEq`, so a hand-written one
+/// there makes the collection's `==` non-structural too.
 /// Recursion is cycle-guarded (recursive datatypes like `enum Nat { Succ(Box<Nat>) }`
 /// re-enter their own name). A datatype with only `#[derive(PartialEq)]` (or no
 /// `PartialEq`) yields `None`, so its `==` still lowers to structural equality.
@@ -62,8 +325,19 @@ fn datatype_with_manual_partial_eq(
     env: &TypeEnv,
     visited: &mut std::collections::BTreeSet<String>,
 ) -> Option<String> {
-    let TrustVcType::Datatype { name, variants } = ty else {
-        return None;
+    let (name, variants) = match ty {
+        TrustVcType::Datatype { name, variants } => (name, variants),
+        TrustVcType::Seq(inner)
+        | TrustVcType::Array(inner, _)
+        | TrustVcType::Set(inner)
+        | TrustVcType::Multiset(inner) => {
+            return datatype_with_manual_partial_eq(inner, env, visited);
+        }
+        TrustVcType::Map(key, value) => {
+            return datatype_with_manual_partial_eq(key, env, visited)
+                .or_else(|| datatype_with_manual_partial_eq(value, env, visited));
+        }
+        _ => return None,
     };
     if env.has_manual_partial_eq(name) {
         return Some(name.clone());
@@ -204,7 +478,13 @@ fn lower_arith(op: ArithOp, left: Box<TrustVcExpr>, right: Box<TrustVcExpr>) -> 
     }
     let left = Box::new(coerce_unsuffixed_literal(*left, &right_ty));
     let right = Box::new(coerce_unsuffixed_literal(*right, &left_ty));
-    let ty = infer_expr_type(&left);
+    // The node's type is DERIVED from both operands (`types.rs`), never copied
+    // from the left one: `x + y` with `x: u8`, `y: i16` is Verus spec
+    // arithmetic over the integers, not a `u8` — typing it `u8` made a
+    // comparison read the (wider, signed) sum as unsigned, so `0u8 + (-1i16)`
+    // compared as 65535 and `x + y >= 256` came back Verified. A difference
+    // of two `nat`s is an `int`.
+    let ty = super::arith_node_type(op, &left, &right);
     TrustVcExpr::Arith {
         op,
         left,
@@ -343,57 +623,30 @@ fn option_some_selector(option: &OptionTypeInfo, receiver: TrustVcExpr) -> Trust
     }
 }
 
-/// Coerce an unsuffixed integer literal's type to match a peer operand.
+/// Coerce an unsuffixed integer literal's type to match a peer operand —
+/// only where that never changes its value.
 ///
 /// Coerces `IntLit` nodes and `Neg(IntLit)` nodes with the default `Int{32}`
 /// type — suffixed literals and non-literal expressions are left unchanged.
 /// Used by comparisons (#2068), arithmetic (#2071), and bitwise/shift operators.
 ///
-/// The `Neg(IntLit)` case handles expressions like `(-1)` in `x + (-1)` where
-/// `x: u8`. Without this, `-1` stays as `Int{32}` (width 32) while `x` is
-/// `Uint{8}` (width 8), causing a width mismatch in BV encoding (#2067).
+/// VALUE-PRESERVING: the literal takes the peer's type only when the value it
+/// denotes (for `Neg(IntLit v)`, `-v`) is a value of that type
+/// (`types::untyped_literal_fits`). `(-1)` next to a `u8` used to become
+/// `Neg(IntLit { 1, u8 })` — the `u8` negation of 1, i.e. 255 — and `300` next
+/// to a `u8` a `u8` literal the type cannot hold. Such a literal now keeps its
+/// own type, which makes the enclosing operation mixed-type and therefore
+/// exact (`types.rs`).
 pub(crate) fn coerce_unsuffixed_literal(expr: TrustVcExpr, peer_ty: &TrustVcType) -> TrustVcExpr {
-    match expr {
-        TrustVcExpr::IntLit {
-            value,
-            ty: TrustVcType::Int { width: 32 },
-        } if matches!(
-            peer_ty,
-            TrustVcType::Uint { .. }
-                | TrustVcType::Int { .. }
-                | TrustVcType::MathInt
-                | TrustVcType::Nat
-                | TrustVcType::Real
-        ) =>
-        {
-            TrustVcExpr::IntLit {
-                value,
-                ty: peer_ty.clone(),
-            }
-        }
-        TrustVcExpr::Neg(inner)
-            if matches!(
-                inner.as_ref(),
-                TrustVcExpr::IntLit {
-                    ty: TrustVcType::Int { width: 32 },
-                    ..
-                }
-            ) && matches!(
-                peer_ty,
-                TrustVcType::Uint { .. }
-                    | TrustVcType::Int { .. }
-                    | TrustVcType::MathInt
-                    | TrustVcType::Nat
-                    | TrustVcType::Real
-            ) =>
-        {
-            if matches!(peer_ty, TrustVcType::Nat) {
-                return TrustVcExpr::Neg(inner);
-            }
-            TrustVcExpr::Neg(Box::new(coerce_unsuffixed_literal(*inner, peer_ty)))
-        }
-        other => other,
+    let literal = match &expr {
+        TrustVcExpr::IntLit { .. } => true,
+        TrustVcExpr::Neg(inner) => matches!(inner.as_ref(), TrustVcExpr::IntLit { .. }),
+        _ => false,
+    };
+    if !literal {
+        return expr;
     }
+    super::untyped_literal_at_peer(&expr, peer_ty).unwrap_or(expr)
 }
 
 fn lower_special(
@@ -433,7 +686,8 @@ fn lower_special(
     let right_ty = infer_expr_type(&right);
     let left = Box::new(coerce_unsuffixed_literal(*left, &right_ty));
     let right = Box::new(coerce_unsuffixed_literal(*right, &left_ty));
-    let ty = infer_expr_type(&left);
+    // Derived from both operands, as for arithmetic (`lower_arith`).
+    let ty = super::derived_node_type(&left, &right);
     TrustVcExpr::SpecialArith {
         op,
         left,
@@ -485,6 +739,14 @@ fn lower_negated_int_literal(operand: &syn::Expr) -> Result<Option<TrustVcExpr>,
     if !suffix.is_empty() {
         super::diagnostic_parity::check_int_literal_in_range(negated, &ty)?;
     }
+    if suffix == "i32" {
+        // `-128i32` is the `i32` literal -128, pinned like `128i32`
+        // (`atoms::typed_int_literal`).
+        return Ok(Some(super::atoms::typed_int_literal(
+            TrustVcExpr::IntLit { value: negated, ty },
+            suffix,
+        )));
+    }
     Ok(Some(TrustVcExpr::Neg(Box::new(TrustVcExpr::IntLit {
         value,
         ty,
@@ -506,6 +768,19 @@ pub(super) fn lower_unary(
         }
     }
     let inner = Box::new(lower_syn_expr_with_depth(&un.expr, env, depth)?);
+    // A bitwise `!` over an UNSUFFIXED integer literal form (`!0`, `!w` once
+    // `let w = 0` is substituted, a branch value of one) is a value of the
+    // type the peer it meets gives it (`!0` is 255 in `u8`, -1 in `i32`), but
+    // it is not an untyped form: it stays an `i32` value, and next to a `u8`
+    // peer made a mixed, hence EXACT, operation — `!0 + y` raised no overflow
+    // obligation. Refused.
+    if matches!(un.op, syn::UnOp::Not(_)) && super::is_untyped_literal(&inner) {
+        return Err(LoweringError::UnsupportedExpr(format!(
+            "`{}` is a bitwise `!` of an unsuffixed integer literal, whose value depends on \
+             the type a peer gives it",
+            quote::ToTokens::to_token_stream(un)
+        )));
+    }
     match &un.op {
         syn::UnOp::Not(_) => Ok(TrustVcExpr::Not(inner)),
         syn::UnOp::Neg(_) => Ok(TrustVcExpr::Neg(inner)),

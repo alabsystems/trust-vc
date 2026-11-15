@@ -30,21 +30,13 @@ fn pinned_upstream_integers_path() -> PathBuf {
     common::pinned_verus_test_path("integers.rs")
 }
 
-const FAIL_CLOSED_CASES: &[(&str, &str)] = &[
-    (
-        "test_finite_signed_to_nat_cast_fails_without_nonnegative",
-        "finite_signed_to_nat_requires_nonnegative",
-    ),
-    (
-        "test_enum_to_int_discriminant_constants",
-        "test_enum_to_int",
-    ),
-    ("test_enum_to_int_symbolic_return", "test_enum_to_int"),
-    (
-        "test_enum_to_int_overflow_wrap",
-        "test_enum_to_int_overflow",
-    ),
-];
+/// `test_enum_to_int_overflow_wrap` is not here: it states the tautology
+/// `result == v as u8` about `v as u8`, upstream verifies it, and
+/// `verified_liar_twins.rs` pins its `Verified` answer with refuted twins.
+const FAIL_CLOSED_CASES: &[(&str, &str)] = &[(
+    "test_finite_signed_to_nat_cast_fails_without_nonnegative",
+    "finite_signed_to_nat_requires_nonnegative",
+)];
 
 const EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     ("test1_int_nat_arithmetic", "test1", "verified", 17),
@@ -129,6 +121,30 @@ const EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         4,
     ),
     ("test_bool_to_int", "test_bool_to_int", "verified", 5),
+    (
+        "test_enum_to_int_discriminant_constants",
+        "test_enum_to_int",
+        "verified",
+        4,
+    ),
+    (
+        "test_enum_to_int_discriminant_liar_counterexample",
+        "test_enum_to_int",
+        "counterexample",
+        2,
+    ),
+    (
+        "test_enum_to_int_symbolic_return",
+        "test_enum_to_int",
+        "verified",
+        3,
+    ),
+    (
+        "test_enum_to_int_symbolic_return_liar_counterexample",
+        "test_enum_to_int",
+        "counterexample",
+        2,
+    ),
     ("test_finite_unsigned_to_nat_casts", "test1", "verified", 6),
     (
         "test_nat_to_finite_cast_wrap_constant",
@@ -438,6 +454,30 @@ fn integers_rs_expected_case_metadata_is_exact() {
                 4,
             ),
             ("test_bool_to_int", "test_bool_to_int", "verified", 5),
+            (
+                "test_enum_to_int_discriminant_constants",
+                "test_enum_to_int",
+                "verified",
+                4,
+            ),
+            (
+                "test_enum_to_int_discriminant_liar_counterexample",
+                "test_enum_to_int",
+                "counterexample",
+                2,
+            ),
+            (
+                "test_enum_to_int_symbolic_return",
+                "test_enum_to_int",
+                "verified",
+                3,
+            ),
+            (
+                "test_enum_to_int_symbolic_return_liar_counterexample",
+                "test_enum_to_int",
+                "counterexample",
+                2,
+            ),
             ("test_finite_unsigned_to_nat_casts", "test1", "verified", 6,),
             (
                 "test_nat_to_finite_cast_wrap_constant",

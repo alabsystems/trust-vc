@@ -24,10 +24,12 @@
 use crate::error::TrustVcError;
 use crate::prepared_context::{PreparedObligation, PreparedVerificationContext};
 
+pub(in crate::encoder) mod arith_reading;
 pub(super) mod assertion;
 pub(super) mod assertion_bv_reuse;
 pub(super) mod assertion_timeout;
 pub(super) mod assumption;
+pub(super) mod bitvector_query;
 pub(in crate::encoder) mod body_support;
 pub(super) mod broadcast;
 pub(in crate::encoder) mod broadcast_model_revalidation;
@@ -44,6 +46,7 @@ pub(super) mod overflow;
 pub(super) mod overflow_logic;
 pub(super) mod panic;
 pub(in crate::encoder) mod pruning;
+pub(super) mod query;
 pub(super) mod rewrite;
 pub(super) mod setup;
 pub(super) mod solve;

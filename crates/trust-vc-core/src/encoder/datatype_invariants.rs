@@ -292,6 +292,21 @@ impl AYEncoder {
         // helper hoist that mentions `v` cannot be silently captured by the
         // closing binder.
         let capture_watermark = self.assertion_watermark();
+        crate::ir_lowering::validate_ir_typing(
+            body,
+            &crate::ir_lowering::TypingScope {
+                variables: Some(&field_var_types),
+                locals: None,
+                functions: None,
+                parameters: None,
+            },
+        )
+        .map_err(|detail| {
+            datatype_error(format!(
+                "Failed to encode invariant body for '{}': {}",
+                type_name, detail
+            ))
+        })?;
         let body_term = {
             let mut col_lengths = std::collections::HashMap::new();
             let funcs = std::collections::HashMap::new();
@@ -345,8 +360,7 @@ impl AYEncoder {
             }
             None => {
                 let trigger_groups = [vec![inv_v]];
-                let trigger_refs: Vec<&[Term]> =
-                    trigger_groups.iter().map(Vec::as_slice).collect();
+                let trigger_refs: Vec<&[Term]> = trigger_groups.iter().map(Vec::as_slice).collect();
                 let quantified = self
                     .solver
                     .try_forall_with_triggers(&[v], iff, &trigger_refs)

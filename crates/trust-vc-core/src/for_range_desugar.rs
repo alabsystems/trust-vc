@@ -6,8 +6,8 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 //!
-//!   for i in LO..HI  { BODY }  →  { let mut i = LO; while i <  HI { invariant!(LO <= i); BODY  i = i + 1; } }
-//!   for i in LO..=HI { BODY }  →  { let mut i = LO; while i <= HI { invariant!(LO <= i); BODY  i = i + 1; } }
+//!   for i in LO..HI  { BODY }  →  { let mut i = LO; while i <  HI { invariant!(LO <= i); invariant!(!(LO <= HI) || i <= HI);     BODY  i = i + 1; } }
+//!   for i in LO..=HI { BODY }  →  { let mut i = LO; while i <= HI { invariant!(LO <= i); invariant!(!(LO <= HI) || i <= HI + 1); BODY  i = i + 1; } }
 //!
 //! The rewrite FIRES ONLY when every one of these holds (else the `for` is left
 //! verbatim and keeps its current — fail-closed — behavior):
@@ -100,20 +100,29 @@ fn rewrite_for_loop(for_loop: &ExprForLoop) -> Option<Expr> {
         _ => return None,
     };
 
-    // (5) FLAT body — every statement a spec macro or pure-arith scalar assign.
-    if !for_loop.body.stmts.iter().all(stmt_is_flat) {
+    // (5) The body must not `continue` THIS loop: the counter increment is
+    // appended at the END of the `while` body, and a `continue` would skip it
+    // (an infinite loop the source does not have). Any other shape — `if`,
+    // `match`, nested loops, `break`, `return`, calls — is fine: the produced
+    // `while` is then handled by the ordinary loop machinery (exact lane when
+    // flat, havoc lane otherwise), never a false `Verified`. (Relaxed
+    // 2026-09-10 from "flat bodies only".)
+    if continues_this_loop(&for_loop.body, for_loop.label.as_ref()) {
         return None;
     }
 
-    // Idents assigned anywhere in the (flat) body.
-    let assigned = body_assigned_idents(&for_loop.body.stmts);
+    // Idents assigned ANYWHERE in the body (nested blocks/branches/loops
+    // included; a field/index write and a `&mut x` argument count for their
+    // root — conservative).
+    let assigned = assigned_idents_deep(&for_loop.body);
 
     // (3) body must not reassign the loop variable.
     if assigned.contains(&loop_var.to_string()) {
         return None;
     }
 
-    // (4) HI's identifier (if any) must not be assigned in the body.
+    // (4) HI's identifier (if any) must not be assigned in the body: Rust
+    // evaluates the range ONCE, while the `while` guard re-reads it.
     if let Some(hi_ident) = bound_ident(hi) {
         if assigned.contains(&hi_ident.to_string()) {
             return None;
@@ -123,6 +132,15 @@ fn rewrite_for_loop(for_loop: &ExprForLoop) -> Option<Expr> {
     // Auto-inject `LO <= i` only when LO's idents are disjoint from the
     // body-assigned set (else the lower bound is not stable).
     let inject_lower = ident_set(lo).is_disjoint(&assigned);
+    // Auto-inject the UPPER bound (2026-09-10, row 433) when both bounds are
+    // stable: `LO <= HI ==> i <= HI` for `..` and `LO <= HI ==> i <= HI + 1`
+    // for `..=`, written with `||`. Base case: a tautology at `i == LO`, so an
+    // empty range (`LO > HI`) never over-rejects. Step: from the guard alone
+    // (`i < HI ⊢ i + 1 <= HI`; `i <= HI ⊢ i + 1 <= HI + 1`). With the negated
+    // guard at exit this pins `i == HI` (resp. `HI + 1`) whenever `LO <= HI`,
+    // which is what an accumulator invariant needs after the loop — the
+    // Verus range iterator's `cur == end` fact.
+    let inject_upper = inject_lower && ident_set(hi).is_disjoint(&assigned);
 
     let guard: Expr = if inclusive {
         syn::parse_quote!(#loop_var <= #hi)
@@ -134,15 +152,135 @@ fn rewrite_for_loop(for_loop: &ExprForLoop) -> Option<Expr> {
     if inject_lower {
         while_body.push(syn::parse_quote!(trust_vc::invariant!(#lo <= #loop_var);));
     }
+    if inject_upper {
+        if inclusive {
+            while_body.push(
+                syn::parse_quote!(trust_vc::invariant!(!(#lo <= #hi) || #loop_var <= #hi + 1);),
+            );
+        } else {
+            while_body
+                .push(syn::parse_quote!(trust_vc::invariant!(!(#lo <= #hi) || #loop_var <= #hi);));
+        }
+    }
     while_body.extend(for_loop.body.stmts.iter().cloned());
     while_body.push(syn::parse_quote!(#loop_var = #loop_var + 1;));
 
+    // The loop's label (if any) moves onto the `while`, so a labeled `break`
+    // inside the body keeps its target.
+    let label = for_loop.label.clone();
     Some(syn::parse_quote!({
         let mut #loop_var = #lo;
-        while #guard {
+        #label while #guard {
             #(#while_body)*
         }
     }))
+}
+
+/// True when `body` contains a `continue` that targets the `for` loop being
+/// rewritten: an unlabeled `continue` outside any nested loop, or a labeled one
+/// naming the loop's own label. Closures and nested items are not descended.
+pub(crate) fn continues_this_loop(body: &syn::Block, label: Option<&syn::Label>) -> bool {
+    struct ContinueVisitor<'a> {
+        own_label: Option<&'a str>,
+        nested_loops: usize,
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for ContinueVisitor<'_> {
+        fn visit_expr_continue(&mut self, expr: &'ast syn::ExprContinue) {
+            match &expr.label {
+                None => {
+                    if self.nested_loops == 0 {
+                        self.found = true;
+                    }
+                }
+                Some(lifetime) => {
+                    if Some(lifetime.ident.to_string().as_str()) == self.own_label {
+                        self.found = true;
+                    }
+                }
+            }
+        }
+        fn visit_expr_while(&mut self, expr: &'ast syn::ExprWhile) {
+            self.nested_loops += 1;
+            syn::visit::visit_expr_while(self, expr);
+            self.nested_loops -= 1;
+        }
+        fn visit_expr_loop(&mut self, expr: &'ast syn::ExprLoop) {
+            self.nested_loops += 1;
+            syn::visit::visit_expr_loop(self, expr);
+            self.nested_loops -= 1;
+        }
+        fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+            self.nested_loops += 1;
+            syn::visit::visit_expr_for_loop(self, expr);
+            self.nested_loops -= 1;
+        }
+        fn visit_expr_closure(&mut self, _expr: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _item: &'ast syn::Item) {}
+    }
+    let own = label.map(|l| l.name.ident.to_string());
+    let mut visitor = ContinueVisitor {
+        own_label: own.as_deref(),
+        nested_loops: 0,
+        found: false,
+    };
+    syn::visit::Visit::visit_block(&mut visitor, body);
+    visitor.found
+}
+
+/// Every identifier that is the ROOT of an assignment target or of a `&mut`
+/// borrow anywhere in `block` (nested blocks, branches and loops included;
+/// closures and nested items excluded). Conservative: a field or index write
+/// counts for its root variable.
+pub(crate) fn assigned_idents_deep(block: &syn::Block) -> BTreeSet<String> {
+    struct AssignCollector {
+        idents: BTreeSet<String>,
+    }
+    fn root_ident(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Path(path) if path.qself.is_none() => {
+                path.path.get_ident().map(|ident| ident.to_string())
+            }
+            Expr::Field(field) => root_ident(&field.base),
+            Expr::Index(index) => root_ident(&index.expr),
+            Expr::Paren(paren) => root_ident(&paren.expr),
+            Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                root_ident(&unary.expr)
+            }
+            _ => None,
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for AssignCollector {
+        fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
+            if let Some(name) = root_ident(&expr.left) {
+                self.idents.insert(name);
+            }
+            syn::visit::visit_expr_assign(self, expr);
+        }
+        fn visit_expr_binary(&mut self, expr: &'ast syn::ExprBinary) {
+            if is_assignment_binop(&expr.op) {
+                if let Some(name) = root_ident(&expr.left) {
+                    self.idents.insert(name);
+                }
+            }
+            syn::visit::visit_expr_binary(self, expr);
+        }
+        fn visit_expr_reference(&mut self, expr: &'ast syn::ExprReference) {
+            if expr.mutability.is_some() {
+                if let Some(name) = root_ident(&expr.expr) {
+                    self.idents.insert(name);
+                }
+            }
+            syn::visit::visit_expr_reference(self, expr);
+        }
+        fn visit_expr_closure(&mut self, _expr: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _item: &'ast syn::Item) {}
+    }
+    let mut collector = AssignCollector {
+        idents: BTreeSet::new(),
+    };
+    syn::visit::Visit::visit_block(&mut collector, block);
+    collector.idents
 }
 
 /// The loop variable of a plain `Pat::Ident` pattern (no `ref`, no `mut`, no
@@ -179,46 +317,6 @@ fn bound_ident(expr: &Expr) -> Option<&Ident> {
     }
 }
 
-/// True iff `stmt` is FLAT: a spec-assertion macro, or a scalar/compound
-/// assignment whose right-hand side is pure arithmetic. A strict subset of
-/// `body_extract::loop_body_transition_is_exact` (the `push` accumulate forms are
-/// excluded here in v1).
-fn stmt_is_flat(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Macro(stmt_macro) => is_spec_assertion_macro(&stmt_macro.mac.path),
-        Stmt::Expr(expr, _) => match expr {
-            Expr::Assign(assign) => {
-                expr_is_ident(&assign.left) && expr_is_pure_arith(&assign.right)
-            }
-            Expr::Binary(binary) if is_assignment_binop(&binary.op) => {
-                expr_is_ident(&binary.left) && expr_is_pure_arith(&binary.right)
-            }
-            Expr::Macro(expr_macro) => is_spec_assertion_macro(&expr_macro.mac.path),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// The set of identifiers that are the target of an assignment in a flat body.
-/// Because the body is flat, every assignment target is a bare path-ident.
-fn body_assigned_idents(stmts: &[Stmt]) -> BTreeSet<String> {
-    let mut assigned = BTreeSet::new();
-    for stmt in stmts {
-        if let Stmt::Expr(expr, _) = stmt {
-            let target = match expr {
-                Expr::Assign(assign) => ident_of(&assign.left),
-                Expr::Binary(binary) if is_assignment_binop(&binary.op) => ident_of(&binary.left),
-                _ => None,
-            };
-            if let Some(name) = target {
-                assigned.insert(name);
-            }
-        }
-    }
-    assigned
-}
-
 /// Every identifier appearing in `expr` (used to test lower-bound stability).
 fn ident_set(expr: &Expr) -> BTreeSet<String> {
     struct IdentCollector {
@@ -236,20 +334,7 @@ fn ident_set(expr: &Expr) -> BTreeSet<String> {
     collector.idents
 }
 
-fn expr_is_ident(expr: &Expr) -> bool {
-    ident_of(expr).is_some()
-}
-
-fn ident_of(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Path(path) if path.qself.is_none() => {
-            path.path.get_ident().map(std::string::ToString::to_string)
-        }
-        _ => None,
-    }
-}
-
-fn is_assignment_binop(op: &syn::BinOp) -> bool {
+pub(crate) fn is_assignment_binop(op: &syn::BinOp) -> bool {
     matches!(
         op,
         syn::BinOp::AddAssign(_)
@@ -263,36 +348,4 @@ fn is_assignment_binop(op: &syn::BinOp) -> bool {
             | syn::BinOp::ShlAssign(_)
             | syn::BinOp::ShrAssign(_)
     )
-}
-
-/// Pure arithmetic: identifiers, literals, parens/grouping, unary/binary
-/// non-assignment operators, and numeric casts. Excludes calls, method calls,
-/// indexing, field access, references, blocks, closures, and control flow.
-fn expr_is_pure_arith(expr: &Expr) -> bool {
-    match expr {
-        Expr::Path(_) | Expr::Lit(_) => true,
-        Expr::Paren(inner) => expr_is_pure_arith(&inner.expr),
-        Expr::Group(inner) => expr_is_pure_arith(&inner.expr),
-        Expr::Unary(unary) => expr_is_pure_arith(&unary.expr),
-        Expr::Cast(cast) => expr_is_pure_arith(&cast.expr),
-        Expr::Binary(binary) if !is_assignment_binop(&binary.op) => {
-            expr_is_pure_arith(&binary.left) && expr_is_pure_arith(&binary.right)
-        }
-        _ => false,
-    }
-}
-
-/// A spec-assertion macro whose invocation never mutates an exec scalar (so it is
-/// admissible inside a flat body). Matches `body_extract::is_spec_assertion_macro_path`.
-fn is_spec_assertion_macro(path: &syn::Path) -> bool {
-    let Some(name) = path.segments.last().map(|seg| seg.ident.to_string()) else {
-        return false;
-    };
-    name == "invariant"
-        || name == "invariant_except_break"
-        || name == "assume"
-        || name == "assert"
-        || name == "loop_decreases"
-        || name == "loop_ensures"
-        || name.starts_with("assert_")
 }

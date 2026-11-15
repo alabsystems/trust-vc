@@ -1,0 +1,12 @@
+exit: 1
+outcome: "verus-rejected"
+diagnostics:
+  error - cannot call function `test_crate::lemma` with mode proof @[12]
+functions:
+  lemma rejected -
+  test rejected -
+vcir:
+proof fn test_crate::lemma() -> result: spec ()
+  return[#1]
+exec fn test_crate::test() -> result: exec ()
+  (no body)

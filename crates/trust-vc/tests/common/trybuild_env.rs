@@ -2,42 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
-//! Keep `-Ztrust-verify=off` pinned in trybuild scratch builds.
+//! Run trybuild scratch builds in targo's unverified lane.
 //!
-//! trybuild (1.0.116, `src/cargo.rs`) launches its scratch `cargo` with
-//! `--config=build.rustflags=[..]` and `--config=target.<triple>.rustflags=[..]`.
-//! Those CLI config overrides outrank this repo's committed
-//! `.cargo/config.toml` `[build] rustflags = ["-Ztrust-verify=off"]`, so the
-//! scratch build silently drops `-Ztrust-verify=off` and the Trust toolchain
-//! runs its verification pass over the scratch project's entire dependency
-//! graph — which can hang `trustc` at 100% CPU for hours on large deps.
+//! `rust-toolchain.toml` pins `channel = "trust"`, so `$CARGO` in a test
+//! process is Targo, and Targo refuses a lane-less compile ("`targo check`
+//! refuses to create an implicitly unverified artifact"). trybuild spawns
+//! `$CARGO check`/`build` directly with no way to inject a flag, and Targo's
+//! nested-lane broker does not cross the process boundary on this platform (it
+//! says so: "recursive `$CARGO` invocations must select their own lane"). So
+//! [`pin_no_trust_verify`] points `CARGO` at the committed
+//! `cargo_unverified_lane.sh` shim (`.bat` twin on Windows), which names the
+//! UNVERIFIED lane on compile subcommands and passes
+//! `metadata`/`clean`/`generate-lockfile` through untouched. These scratch
+//! builds are compile-diagnostic fixtures: they carry no proof claim, and the
+//! shim says so rather than leaving the lane implicit.
 //!
-//! Cargo's extra-rustflags precedence is (first match wins):
-//! `CARGO_ENCODED_RUSTFLAGS` > `RUSTFLAGS` > `target.<triple>.rustflags` >
-//! `build.rustflags`. trybuild `env_remove`s only `RUSTFLAGS` on the child
-//! cargo, so `CARGO_ENCODED_RUSTFLAGS` set in this test process is inherited
-//! by every scratch cargo invocation and outranks trybuild's `--config`
-//! overrides. The flag list below replicates trybuild's own rustflags exactly
-//! (`src/rustflags.rs` base set + the `--diagnostic-width=140` extra used on
-//! the stderr-compared `build_test`/`build_all_tests` legs) so expected-stderr
-//! fixtures stay byte-identical; the only addition is `-Ztrust-verify=off`.
-//!
-//! Rustflags alone are NOT enough: trybuild passes `--target <host-triple>`
-//! to its scratch cargo, and with `--target` set cargo applies NO extra
-//! rustflags (env or config) to HOST units — build scripts, proc macros, and
-//! their transitive deps. `trust_vc` is a proc-macro crate depending on
-//! `trust-vc-core` (the entire ay solver stack), so the whole solver graph
-//! compiles as HOST units and would still be verified (observed: `autocfg`
-//! alone >9 min at 100% CPU). `RUSTC_WRAPPER` is the one stable cargo
-//! mechanism that reaches EVERY rustc invocation on both sides, so
-//! [`pin_no_trust_verify`] additionally points it at the committed
-//! `rustc_no_trust_verify.sh` shim (`.bat` twin on Windows), which appends
-//! `-Ztrust-verify=off` to each compiler command line. `-Ztrust-verify=off` emits no diagnostics, so
-//! expected-stderr fixtures are unaffected.
+//! The lane is also what keeps the Trust verification pass off the scratch
+//! project's dependency graph (`trust_vc` is a proc macro over the whole ay
+//! solver stack, which verification can hold at 100% CPU for hours).
+//! `targo --unverified` passes `-Ztrust-verify=off` to every unit it compiles,
+//! host units (proc macros, build scripts) included, even under the
+//! `--target <host-triple>` that trybuild passes, where cargo applies no extra
+//! rustflags to host units. No `CARGO_ENCODED_RUSTFLAGS` or `RUSTC_WRAPPER`
+//! off-switch is needed on top, so trybuild keeps its own rustflags and the
+//! expected-stderr fixtures see exactly them.
 
-/// Pin `-Ztrust-verify=off` for trybuild scratch builds
-/// (`CARGO_ENCODED_RUSTFLAGS` for target units + `RUSTC_WRAPPER` shim so host
-/// units — proc macros, build scripts, and their deps — are covered too).
+/// Run the trybuild scratch builds that follow in targo's unverified lane,
+/// which switches Trust verification off for every scratch unit.
 ///
 /// Call this BEFORE constructing `trybuild::TestCases` in every trybuild
 /// harness. Only safe in single-`#[test]` harnesses (process-env mutation):
@@ -45,43 +36,43 @@
 /// that follow, so they route through the env choke point's
 /// `set_persistent_env_var` (serialized write, no restore) rather than a
 /// restore-on-drop guard.
+///
+/// Targo refuses a lane-less `check`/`build`, and trybuild spawns `$CARGO`
+/// with no way to pass `--unverified`. The shim re-spells the compile
+/// subcommands in the unverified lane and leaves `metadata`, `clean` and
+/// `generate-lockfile` alone, since `--unverified` is valid only on a
+/// compilation command. A `$CARGO` that already points at the shim is left as
+/// it is. A `$CARGO` that is not Targo is refused rather than passed through,
+/// so scratch builds never run on a stock cargo.
 pub fn pin_no_trust_verify() {
-    // trybuild's own flags, in trybuild's order (src/rustflags.rs, plus the
-    // build_test/build_all_tests `--diagnostic-width=140` from src/cargo.rs).
-    let mut flags: Vec<&str> = vec!["--cfg", "trybuild", "--verbose", "-A", "dead_code"];
-    // Faithful replication of trybuild's cargo-llvm-cov coverage passthrough.
-    let outer_rustflags = std::env::var_os("RUSTFLAGS").unwrap_or_default();
-    if outer_rustflags
-        .to_string_lossy()
-        .contains("-C instrument-coverage")
-    {
-        flags.extend(["-C", "instrument-coverage"]);
+    let cargo = std::env::var_os("CARGO")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("targo"));
+    let stem = cargo
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if stem == "cargo_unverified_lane" {
+        return;
     }
-    flags.push("--diagnostic-width=140");
-    // The one addition: keep the Trust toolchain's verification pass OFF for
-    // scratch builds, exactly as the committed `[build] rustflags` does for
-    // the main workspace build (trust-vc is the verifier, not a target).
-    flags.push("-Ztrust-verify=off");
-    trust_vc_core::env::set_persistent_env_var("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
+    assert!(
+        stem == "targo" || stem.starts_with("targo-"),
+        "$CARGO `{}` is not the Trust toolchain's targo; run trybuild harnesses with \
+         `targo --unverified test`",
+        cargo.display()
+    );
 
-    // Host units (proc macros, build scripts, and their deps) receive NO
-    // extra rustflags when trybuild passes `--target`, so pin the flag for
-    // them via a RUSTC_WRAPPER that appends it to every rustc invocation.
-    // Fail loudly if the shim is missing: silently proceeding would re-enable
-    // the Trust verification pass over the scratch host dependency graph.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // cargo spawns RUSTC_WRAPPER via std::process::Command, which on Windows
-    // can execute .bat/.cmd (through cmd.exe) but not POSIX shell scripts, so
-    // Windows uses the committed .bat twin of the .sh shim.
     let shim_name = if cfg!(windows) {
-        "rustc_no_trust_verify.bat"
+        "cargo_unverified_lane.bat"
     } else {
-        "rustc_no_trust_verify.sh"
+        "cargo_unverified_lane.sh"
     };
+    // Fail loudly if the shim is missing: proceeding would leave every
+    // trybuild scratch compile to die on Targo's lane refusal, and the
+    // harness would report that refusal as the fixture's diagnostic.
     let shim = [
-        // Included from crates/trust-vc harnesses.
         manifest_dir.join("tests/common").join(shim_name),
-        // Included via #[path] from sibling crates (e.g. trust-vc-core).
         manifest_dir
             .join("../trust-vc/tests/common")
             .join(shim_name),
@@ -92,14 +83,13 @@ pub fn pin_no_trust_verify() {
     let shim = shim
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize {shim_name} shim path: {e}"));
-    // canonicalize() on Windows yields a `\\?\`-verbatim path; cmd.exe (the
-    // interpreter std::process::Command uses to run .bat files) rejects that
-    // prefix, so strip it back to a plain drive path.
     #[cfg(windows)]
     let shim = std::path::PathBuf::from(
         shim.to_str()
             .expect("shim path is valid UTF-8")
             .trim_start_matches(r"\\?\"),
     );
-    trust_vc_core::env::set_persistent_env_var("RUSTC_WRAPPER", &shim);
+
+    trust_vc_core::env::set_persistent_env_var("TRUST_VC_NESTED_CARGO", &cargo);
+    trust_vc_core::env::set_persistent_env_var("CARGO", &shim);
 }

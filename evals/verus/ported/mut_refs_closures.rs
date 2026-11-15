@@ -130,10 +130,16 @@ pub const MUT_REFS_CLOSURES_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         0,
     ),
     (
-        "mut_refs_closure_mut_ref_current_capture_currently_errors",
+        "mut_refs_closure_mut_ref_current_capture_verified",
         "spec_capture_of_mut_ref",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_closure_mut_ref_current_capture_wrong_value_counterexample",
+        "spec_capture_of_mut_ref",
+        "counterexample",
+        1,
     ),
 ];
 
@@ -183,23 +189,7 @@ pub const MUT_REFS_CLOSURES_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     ),
     (
         "mut_refs_closure_has_resolved_capture_currently_errors",
-        &[
-            "has_resolved",
-            "unknown return type for function",
-            "standalone closure",
-        ],
-    ),
-    (
-        // Deref-assignment `*x = 5` is now SUPPORTED, so this surface no longer
-        // fails on the deref; it fails-closed later on the `mut_ref_current(P)`
-        // prophecy-intrinsic call form (unrecognized in obligation lowering).
-        // Both are sound fail-closed messages for this unsupported mut-ref-capture
-        // surface; accept either.
-        "mut_refs_closure_mut_ref_current_capture_currently_errors",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "unknown return type for function",
-        ],
+        &["has_resolved", "is refused", "standalone closure"],
     ),
 ];
 
@@ -414,12 +404,26 @@ fn mut_refs_closure_has_resolved_capture_currently_errors() {
     trust_vc::assert!(has_resolved(value));
 }
 
+// Upstream `spec_capture_of_mut_ref` is `Ok(())`: after `*x = 5` the CURRENT
+// value behind the captured `&mut` is 5, and a spec capture may read it. Pinned
+// in both directions -- the twin claims the pre-write value and must be refuted.
 #[trust_vc::ensures(true)]
-fn mut_refs_closure_mut_ref_current_capture_currently_errors(x: &mut u64) {
+fn mut_refs_closure_mut_ref_current_capture_verified(x: &mut u64) {
     *x = 5u64;
 
     let clos = || {
         trust_vc::assert!(mut_ref_current(x) == 5u64);
+    };
+
+    clos();
+}
+
+#[trust_vc::ensures(true)]
+fn mut_refs_closure_mut_ref_current_capture_wrong_value_counterexample(x: &mut u64) {
+    *x = 5u64;
+
+    let clos = || {
+        trust_vc::assert!(mut_ref_current(x) == 4u64);
     };
 
     clos();

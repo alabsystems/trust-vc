@@ -9,13 +9,14 @@
 //! equality (`call_requires%(f, q..) == R[q]`, `call_ensures%(f, q.., r) ==
 //! E[q, r]`) over a FRESH symbol that appears nowhere else. A definitional
 //! equality over a fresh symbol is a CONSERVATIVE EXTENSION:
-//!   * it can NEVER inject inconsistency — a `requires(false)` closure publishes
-//!     `call_requires%(f, q) == false` (the constant-false predicate), NOT the
-//!     bare hypothesis `false`, so it cannot rescue an unrelated obligation;
-//!   * it can NEVER let a caller read a false ensures as an ESTABLISHED fact —
-//!     the equality fixes the UF's VALUE, saying nothing about the closure's
-//!     actual behaviour. Direct application is deferred, so `call_ensures%`
-//!     never connects to a real return value.
+//! * it can NEVER inject inconsistency — a `requires(false)` closure publishes
+//!   `call_requires%(f, q) == false` (the constant-false predicate), NOT the
+//!   bare hypothesis `false`, so it cannot rescue an unrelated obligation;
+//! * it can NEVER let a caller read a false ensures as an ESTABLISHED fact —
+//!   the equality fixes the UF's VALUE, saying nothing about the closure's
+//!   actual behaviour. Direct application is deferred, so `call_ensures%`
+//!   never connects to a real return value.
+//!
 //! The INDEPENDENT def-side obligation (co-emitted, poison-probe-gated,
 //! isolated child context) forces the body to back the ensures, so a lying
 //! closure fails the whole function.
@@ -43,14 +44,11 @@ fn verdict(func: &str) -> VerifyResult {
 }
 
 fn assert_not_verified(func: &str) {
-    match verify_function_from_file(&repro_path(), func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("CLOSURE-REFLECTION FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (capture guard / deferred application) is a sound
-        // non-verify; a solver non-Verified verdict likewise.
-        _ => {}
+    if let Ok(VerifyResult::Verified) = verify_function_from_file(&repro_path(), func) {
+        panic!("CLOSURE-REFLECTION FALSE-VERIFY: `{func}` must not verify")
     }
+    // An extraction Err (capture guard / deferred application) is a sound
+    // non-verify; a solver non-Verified verdict likewise.
 }
 
 #[test]

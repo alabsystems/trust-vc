@@ -32,6 +32,7 @@ fn make_step(
             StepResultKind::Verified => VerifyResult::Verified,
             StepResultKind::Counterexample => VerifyResult::Counterexample {
                 obligation_name: label.to_string(),
+                location: None,
                 model: None,
                 bindings: Vec::new(),
             },
@@ -142,6 +143,7 @@ fn test_try_from_report_rejects_non_verified_reports() {
     let report = make_report(
         VerifyResult::Counterexample {
             obligation_name: "bad".to_string(),
+            location: None,
             model: None,
             bindings: Vec::new(),
         },

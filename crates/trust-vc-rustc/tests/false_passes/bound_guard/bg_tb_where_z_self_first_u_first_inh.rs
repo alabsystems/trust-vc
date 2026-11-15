@@ -1,0 +1,17 @@
+verus!{
+pub struct A { pub a: u8 }
+pub trait Tr {
+    spec fn lim(&self) -> u8;
+}
+pub trait U where Self: Tr {
+    open spec fn mm(&self) -> u8 { 2 }
+    fn z(&self) -> (r: u8) ensures r == self.mm();
+    fn dm(&self) { let _r = self.z(); }
+}
+impl U for A {
+    fn z(&self) -> (r: u8) { 2 }
+}
+impl Tr for A {
+    open spec fn lim(&self) -> u8 { 7 }
+}
+} // verus!

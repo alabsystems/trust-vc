@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 //
-// Run with: cargo test -p trust-vc-driver --features cache
+// Run with: targo --unverified test -p trust-vc-driver --features cache
 //
 // These tests demonstrate trust-vc's edge over Verus: because a `Verified`
 // result carries an ay UNSAT proof that `trust-vc-kernel` re-checks, the *same*

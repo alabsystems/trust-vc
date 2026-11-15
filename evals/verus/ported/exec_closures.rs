@@ -146,7 +146,7 @@ pub const EXEC_CLOSURES_RS_EXPECTED_CASES: &[ExecClosuresRsExpectedCase] = &[
     (
         "exec_closure_fn_trait_bound_application_is_deterministic_verified",
         "",
-        "verified",
+        "error",
         1,
     ),
     (
@@ -197,6 +197,10 @@ pub const EXEC_CLOSURES_RS_EXPECTED_ERROR_PATTERNS: &[ExecClosuresRsExpectedErro
     (
         "exec_closure_mutable_capture_application_currently_errors",
         &["unknown return type for function 'f'"],
+    ),
+    (
+        "exec_closure_fn_trait_bound_application_is_deterministic_verified",
+        &["bodiless call repeated"],
     ),
 ];
 
@@ -414,14 +418,18 @@ fn exec_closure_contract_macro_direct_application_currently_errors() {
     trust_vc::assert!(f(2u64) == 2u64);
 }
 
-// INCREMENT 1 (Fn-bound closure typing foundation) FLIP: an `F: Fn(u64) -> u64`
-// value parameter is typed as a first-class `SpecFn(u64, u64)`, so `f(3)` lowers
-// to the opaque, CONGRUENT `spec_fn_apply` UF. `Fn` captures immutably ⇒ it is
-// DETERMINISTIC across calls, so equal arguments give the equal result — a SOUND,
-// non-tautological property. The result stays otherwise unconstrained (a concrete
-// pin like `f(3) == 3` still counterexamples; `FnMut`/`FnOnce` stay fail-closed).
-// Formerly a fail-closed "Undefined function: f" error.
-#[trust_vc::ensures(true)]
+// An `F: Fn(u64) -> u64` value parameter is typed as a first-class
+// `SpecFn(u64, u64)`, so `f(3)` lowers to the opaque, CONGRUENT `spec_fn_apply`
+// UF and two calls with equal arguments are one term. An `Fn` closure can read
+// shared state (an atomic, a borrowed `Cell`), so `a == b` is false at run time
+// for a closure that returns a counter, and the `Verified` answer is refused
+// (`bodiless call repeated`). Upstream Verus does not prove it either: two calls
+// give two results, each constrained only by the closure's `ensures`.
+// Every application proves the closure's precondition, exactly as upstream
+// `pass_closure_via_typ_param`'s `f1` requires `t.requires((x,))` before
+// `t(3)`, so the applied `f.requires((3,))` is declared; without it the
+// call-site requires is refuted (`fn_bound_closure_typing_soundness.rs`).
+#[trust_vc::requires(f.requires((3u64,)))]
 fn exec_closure_fn_trait_bound_application_is_deterministic_verified<F: Fn(u64) -> u64>(f: F) {
     let a = f(3u64);
     let b = f(3u64);

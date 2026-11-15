@@ -13,7 +13,10 @@
 //! It cannot be RESOLVED — the expansion is not in the AST — so the shape is
 //! REFUSED, narrowly: see `reject_macro_shadowable_type_resolution`. The pins in
 //! the second half are what keep that from becoming "reject any file with a
-//! macro in it", which would be a large capability loss.
+//! macro in it". A macro that emits an impl or a trait, or declares a name the
+//! file already binds, is a separate hazard, refused file-wide by the
+//! unread-item rule; the pins whose macros declare only a fresh struct or
+//! function show the scope refusal's own reach.
 use trust_vc_core::{verify_function_from_file, VerifyResult};
 
 fn fx(n: &str) -> String {
@@ -102,27 +105,32 @@ fn true_method_claim_is_not_refuted_against_the_wrong_shape() {
 // `SourceTypeScopeIndex::macro_shadowable_binding`. Delete any condition and the
 // corresponding pin goes red.
 
-/// Condition 2, and in the SAME FILE as the reproducers: a use site outside the
-/// macro's module is unaffected. Without this the refusal would take the whole
-/// file, which is the regression `a10aea13` itself had to undo.
+/// A root use site in the SAME FILE as the reproducers. The scope refusal does
+/// not reach it (its macro's module is not on the root's walk path), but
+/// `decl_s!` also emits an `impl` and redeclares `S`, items this lane does not
+/// read, so the file refuses a `Verified` answer for every function: an impl
+/// applies crate-wide, whatever module the macro sits in. Conditions 2 and 3
+/// stay pinned below, in files whose macros emit no such item.
 #[test]
-fn use_site_outside_the_macro_module_still_verifies() {
+fn use_site_outside_the_macro_module_meets_the_unread_item_refusal() {
     let v = verify_function_from_file(&fx(SHADOW), "top_level_narrow_is_true");
     eprintln!("[RESB-PIN1] top_level_narrow_is_true => {v:?}");
     assert!(
-        matches!(v, Ok(VerifyResult::Verified)),
-        "NARROWNESS PIN: a root use site is enclosed by no module, so a macro \
-         inside one is not on its walk path; got {v:?}"
+        matches!(&v, Ok(VerifyResult::Error { message })
+            if message.starts_with("unread item") && message.contains("`decl_s!`")),
+        "the root use site must be refused by the unread-item rule, not by the \
+         scope walk; got {v:?}"
     );
 }
 
 #[test]
-fn use_site_outside_the_macro_module_still_verifies_in_either_order() {
+fn use_site_outside_the_macro_module_meets_the_unread_item_refusal_in_either_order() {
     let v = verify_function_from_file(&fx(ORDER_FLIP), "top_level_narrow_is_true");
     eprintln!("[RESB-PIN2] top_level_narrow_is_true (flip) => {v:?}");
     assert!(
-        matches!(v, Ok(VerifyResult::Verified)),
-        "NARROWNESS PIN: order must not affect the pin either; got {v:?}"
+        matches!(&v, Ok(VerifyResult::Error { message })
+            if message.starts_with("unread item") && message.contains("`decl_s!`")),
+        "order must not affect the pin either; got {v:?}"
     );
 }
 

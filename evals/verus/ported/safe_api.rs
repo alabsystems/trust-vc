@@ -95,10 +95,16 @@ pub const SAFE_API_RS_EXPECTED_CASES: &[SafeApiExpectedCase] = &[
         0,
     ),
     (
-        "safe_api_closure_smuggling_boundary_fails_closed",
+        "safe_api_closure_application_verified",
         "opaque_closure_type_returned",
-        "error",
-        0,
+        "verified",
+        3,
+    ),
+    (
+        "safe_api_closure_application_liar_counterexample",
+        "opaque_closure_type_returned",
+        "counterexample",
+        3,
     ),
     (
         "safe_api_fn_pointer_return_boundary_fails_closed",
@@ -112,10 +118,6 @@ pub const SAFE_API_RS_FAIL_CLOSED_ERROR_PATTERNS: &[SafeApiFailClosedErrorPatter
     (
         "safe_api_trait_impl_side_requires_currently_blocked",
         &["trait method implementation cannot declare requires"],
-    ),
-    (
-        "safe_api_closure_smuggling_boundary_fails_closed",
-        &["unknown return type for function 'f'"],
     ),
     (
         "safe_api_fn_pointer_return_boundary_fails_closed",
@@ -256,10 +258,18 @@ impl SafeApiTraitImplRequiresBoundary for SafeApiTraitImplRequiresBlocked {
 }
 
 #[trust_vc::ensures(true)]
-fn safe_api_closure_smuggling_boundary_fails_closed() {
+fn safe_api_closure_application_verified() {
     let f = |y: u32| y + 1u32;
     let observed = f(1u32);
     trust_vc::assert!(observed == 2u32);
+}
+
+// Liar twin (2026-09-11): the local closure adds one.
+#[trust_vc::ensures(true)]
+fn safe_api_closure_application_liar_counterexample() {
+    let f = |y: u32| y + 1u32;
+    let observed = f(1u32);
+    trust_vc::assert!(observed == 3u32);
 }
 
 #[trust_vc::requires(y > 0u32)]

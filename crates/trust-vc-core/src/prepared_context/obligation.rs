@@ -11,9 +11,9 @@ use super::expr_repair::fix_fn_call_return_types;
 use crate::encoder::datatype::variant_symbol_name;
 use crate::error::TrustVcError;
 use crate::expr_depth::validate_expr_depth;
-use crate::ir::{MatchPattern, TrustVcExpr, TrustVcType};
+use crate::ir::{CompareOp, MatchPattern, TrustVcExpr, TrustVcType};
 use crate::ir_expr_traversal::{fold_expr_children, free_root_names, TrustVcExprFolder};
-use crate::ir_lowering::{lower_syn_expr, TypeEnv};
+use crate::ir_lowering::{lower_syn_expr, IntBinding, TypeEnv};
 use crate::vc::{ConditionOrigin, ObligationKind, ProofObligation, ProofStepMeta, SolverMode};
 
 struct GroundConstructorMatchSimplifier;
@@ -391,6 +391,45 @@ impl PreparedObligation {
             }
         };
         let expr = simplify_ground_constructor_matches(expr);
+        // SPEC ARITHMETIC IS MATHEMATICAL (see `crate::spec_arith`). A
+        // `requires` clause is spec code in Verus, so its `+`/`-`/`*` are the
+        // operations on integers — and it has to read that way for BOTH roles
+        // of one call, the caller's `__call_requires_*` discharge and the
+        // callee's `precondition` assumption. This is the single boundary where
+        // both are built, which is why the rewrite lives here rather than at
+        // either encode site.
+        let expr = if crate::spec_arith::is_requires_channel(obligation.kind, &obligation.name) {
+            crate::spec_arith::to_math_int_spec_arith(&expr)
+        } else {
+            expr
+        };
+        if obligation.kind == ObligationKind::BroadcastAssume
+            && obligation.name.starts_with("__body_axiom_")
+        {
+            check_body_axiom_result_type(&expr).map_err(|detail| TrustVcError::Encoding {
+                context: "prepare obligation",
+                detail: format!(
+                    "Failed to admit definition '{}'{}: {}",
+                    obligation.name, loc, detail
+                ),
+            })?;
+        }
+        if obligation.name == "return_value"
+            && matches!(
+                obligation.kind,
+                ObligationKind::Assume | ObligationKind::PostLoopAssume
+            )
+        {
+            check_return_value_binding(&expr).map_err(|detail| TrustVcError::Encoding {
+                context: "prepare obligation",
+                detail: format!("Failed to bind the return value{}: {}", loc, detail),
+            })?;
+        }
+        let expr = if states_lane_identity(obligation.kind, &obligation.name) {
+            crate::float_identity::read_equations_as_identity(expr)
+        } else {
+            expr
+        };
 
         let prepared_triggers = obligation
             .trigger_patterns
@@ -454,10 +493,149 @@ impl PreparedObligation {
     }
 }
 
+/// A function's defining axiom `f(params) == body` (under an optional
+/// precondition guard) is admitted only when `body` is a value of `f`'s
+/// declared result type — for a fixed-width result `T`, a value of type `T`
+/// (or an untyped literal that fits it; `ir_lowering::int_binding`).
+///
+/// The axiom is universally quantified, so a body of another integer type
+/// makes it INCONSISTENT wherever that value leaves `T`: `fn mixsum(x: u8, y:
+/// i16) -> u8 { x + y }` (the integer -1 at `(0, -1)`) or `fn m() -> u8 { -1 }`
+/// equate a bit-vector with a value it cannot hold, and every VC mentioning
+/// the function came back `Verified` (`mixsum(0, -1) == 65535`, `> 1000`).
+/// Rust and Verus reject such a function; so does this. A `nat` result holds
+/// only non-negative values and is checked the same way (an unsigned or `nat`
+/// body, or a literal it holds): `spec fn gneg() -> nat { -1 }` verified
+/// `gneg() == -1` and refuted `gneg() >= 0`. An `int` result holds every
+/// integer the body denotes and is not checked here.
+fn check_body_axiom_result_type(expr: &TrustVcExpr) -> Result<(), String> {
+    let equation = match expr {
+        TrustVcExpr::Implies { conclusion, .. } => conclusion.as_ref(),
+        other => other,
+    };
+    let TrustVcExpr::Compare {
+        op: CompareOp::Eq,
+        left,
+        right,
+    } = equation
+    else {
+        return Ok(());
+    };
+    let (name, return_ty, body) = match (left.as_ref(), right.as_ref()) {
+        (
+            TrustVcExpr::FnCall {
+                name, return_ty, ..
+            },
+            body,
+        ) => (name, return_ty, body),
+        (
+            body,
+            TrustVcExpr::FnCall {
+                name, return_ty, ..
+            },
+        ) => (name, return_ty, body),
+        _ => return Ok(()),
+    };
+    if !crate::ir_lowering::is_integer_type(return_ty)
+        && crate::ir_lowering::type_holds_an_integer(return_ty)
+    {
+        // A COMPOSITE result holds the body's value at every integer position
+        // (`spec fn as_i8(s: Seq<u8>) -> Seq<i8> { s }` equated a `Seq<i8>`
+        // with the `Seq<u8>`'s bits, so `as_i8(s)[0] == -56` for `s[0] ==
+        // 200` was `Verified`).
+        let body_ty = crate::ir_lowering::infer_expr_type(body);
+        if !crate::ir_lowering::integer_positions_agree(&body_ty, return_ty) {
+            return Err(format!(
+                "`{name}` is declared to return `{}`, but its body is a value of type `{}`",
+                return_ty.to_type_string(),
+                body_ty.to_type_string()
+            ));
+        }
+        return Ok(());
+    }
+    if !crate::ir_lowering::is_fixed_width_int(return_ty) && *return_ty != TrustVcType::Nat {
+        return Ok(());
+    }
+    match crate::ir_lowering::int_binding(body, return_ty) {
+        IntBinding::Mismatch(body_ty) => Err(format!(
+            "`{name}` is declared to return `{}`, but its body is a value of type `{}`: the \
+             definition would equate a `{}` with values it cannot hold",
+            return_ty.to_type_string(),
+            body_ty.to_type_string(),
+            return_ty.to_type_string()
+        )),
+        IntBinding::Same
+        | IntBinding::Literal(_)
+        | IntBinding::LiftToInt
+        | IntBinding::NotInteger => Ok(()),
+    }
+}
+
+/// An exec function's return binding `result == value` (one per return path,
+/// or-ed) is admitted only when each `value` is a value of `result`'s declared
+/// type (`ir_lowering::int_binding`). It is ASSUMED, so a value the type cannot
+/// hold constrains the inputs instead of binding `result`: with `-> u8` and a
+/// body `if c { -1 } else { 0 }`, `result == -1` is unsatisfiable, the
+/// assumption forces `!c`, and `ensures c ==> result == 7` came back
+/// `Verified`; `x + y` (`y: i16`) did the same for `y == -1`. Rust rejects
+/// such a function; so does this.
+/// Whether the obligation is an equation the lane writes to say two terms are
+/// one value, which must not be read as IEEE equality over floats (see
+/// [`crate::float_identity`]): the binding of the return value, of a
+/// `closure!()` result to the closure body, and of a loop-modified local to its
+/// value at loop entry (`{invariant}__entry_{var}`), the definition of a
+/// function by its body, and of a spec function alias by the function it names.
+fn states_lane_identity(kind: ObligationKind, name: &str) -> bool {
+    match kind {
+        ObligationKind::Assume => {
+            name == "return_value" || name == "closure_def_side_result" || name.contains("__entry_")
+        }
+        ObligationKind::PostLoopAssume => name == "return_value",
+        ObligationKind::BroadcastAssume => {
+            name.starts_with("__body_axiom_") || name.starts_with("__alias_axiom_")
+        }
+        _ => false,
+    }
+}
+
+fn check_return_value_binding(expr: &TrustVcExpr) -> Result<(), String> {
+    match expr {
+        TrustVcExpr::Logic {
+            op: crate::ir_expr::LogicOp::Or,
+            left,
+            right,
+        } => {
+            check_return_value_binding(left)?;
+            check_return_value_binding(right)
+        }
+        TrustVcExpr::Compare {
+            op: CompareOp::Eq,
+            left,
+            right,
+        } => {
+            let TrustVcExpr::Var { name, ty } = left.as_ref() else {
+                return Ok(());
+            };
+            match crate::ir_lowering::int_binding(right, ty) {
+                IntBinding::Mismatch(value_ty) => Err(format!(
+                    "`{name}` has type `{}`, but the function returns a value of type `{}`",
+                    ty.to_type_string(),
+                    value_ty.to_type_string()
+                )),
+                IntBinding::Same
+                | IntBinding::Literal(_)
+                | IntBinding::LiftToInt
+                | IntBinding::NotInteger => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{CompareOp, MatchArm};
+    use crate::ir::MatchArm;
     use crate::ir_lowering::TypeEnv;
     use crate::vc::ObligationKind;
 

@@ -115,6 +115,7 @@ mod eval_compute;
 mod exists_trigger_witness;
 mod expressions;
 mod extended_timeout_retry;
+mod float_rem_fmod;
 #[cfg(feature = "expensive-tests")]
 mod function_body_axioms;
 mod ghost_collection_scope_resolution;
@@ -182,7 +183,14 @@ mod raii_guards;
 mod real_arithmetic;
 mod recommends;
 mod regression_corpus;
-mod result_oracles;
+// `pub(crate)` so the shared verdict oracles are reachable from the
+// `src/**/*_tests.rs` files that
+// `result_oracles::test_targeted_verification_tests_use_named_oracles` polices.
+// That gate tells a test author to "use named helpers from result_oracles.rs
+// instead" of a raw `matches!(VerifyResult::..)`; a private module made that
+// impossible outside `encoder/tests`. Test-only module (the whole `tests` tree
+// is `#[cfg(test)]`), so this widens no shipped surface.
+pub(crate) mod result_oracles;
 mod reveal_hide;
 mod rewrite;
 mod rewrite_variant_coverage;
@@ -193,6 +201,7 @@ mod seq_ext_eq_vacuous_quantifier;
 mod seq_from_fn;
 mod shift_soundness;
 mod signedness_and_coercion;
+mod solver_envelope;
 mod strategic_audit_p482;
 mod strategic_soundness_audit;
 mod struct_invariant;

@@ -61,11 +61,8 @@ fn assert_counterexample(file: &str, function: &str) {
 /// A fail-closed non-`Verified` verdict (Counterexample / NotProved / Unknown).
 /// `Verified` is the only unacceptable outcome.
 fn assert_not_verified(file: &str, function: &str) {
-    match verify(file, function) {
-        VerifyResult::Verified => {
-            panic!("SOUNDNESS BREACH: `{function}` must NOT verify")
-        }
-        _ => {}
+    if verify(file, function) == VerifyResult::Verified {
+        panic!("SOUNDNESS BREACH: `{function}` must NOT verify")
     }
 }
 

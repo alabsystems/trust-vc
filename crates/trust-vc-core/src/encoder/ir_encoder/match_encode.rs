@@ -11,6 +11,7 @@ use crate::encoder::binding_scope::SavedLocalBinding;
 use crate::encoder::datatype::{
     datatype_sort_for, field_sort_for, selector_symbol_name, variant_symbol_name,
 };
+use crate::encoder::width_coercion::ir_type_signedness;
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
 use crate::ir::{MatchPattern, TrustVcExpr, TrustVcType};
@@ -23,6 +24,25 @@ impl<'a> AstExpressionParser<'a> {
     /// Overflow checks from arm bodies are guarded behind their arm conditions
     /// so they only fire when the arm is actually taken. Fixes #2114.
     /// Parity: encode_ite overflow guard pattern (mod.rs:327-344).
+    ///
+    /// The match's type is DERIVED from its arms
+    /// (`ir_lowering::derive_arms_int_type`), like a conditional's: arms of
+    /// DIFFERENT fixed-width types (`0 => x_u8, _ => y_i16`) are each lifted to
+    /// the integer they denote, with their own sign. The match used to take
+    /// its declared type, widen the arms to the widest one and register the
+    /// result at the declared sign, so `y == -1` read as the `u8` 65535.
+    ///
+    /// When the derived type is ONE fixed-width type `T` (every arm's values
+    /// are values of `T`), EVERY ARM is widened to `T`'s width by ITS OWN
+    /// sign ([`crate::encoder::width_coercion::OwnSign`]) before the ite chain
+    /// is built, so the chain never widens anything. It used to widen the
+    /// accumulated LATER arms — an `ite` of several arms, which has no own
+    /// type — by the MATCH's sign: `match s { 0 => y_i16, _ => x_u8 }`
+    /// (typed `i16`, which holds every `u8`) sign-extended the `u8` 200 into
+    /// the `i16` -56, so `== -56` came back Verified and the true `== 200`
+    /// was refuted (spec fns, proof/exec ensures, lets and asserts, guarded
+    /// arms, enum scrutinees; `i128`/`u8` read 255 as -1). Arm order decided
+    /// it: the `u8`-first order is typed `int` and was right.
     #[allow(clippy::indexing_slicing)] // all_arm_conditions[0]/[1..] guarded by is_empty; overflow_checks[start..end] guarded by start < end
     pub(super) fn encode_match(
         &mut self,
@@ -40,6 +60,17 @@ impl<'a> AstExpressionParser<'a> {
         let constructor_patterns_are_exhaustive =
             constructor_patterns_cover_datatype(&scrutinee_ty, arms);
 
+        let bodies = arms.iter().map(|arm| &arm.body).collect::<Vec<_>>();
+        let (arm_types, derived) = crate::ir_lowering::derive_arms_int_type(&bodies, ty);
+        // Mixed fixed-width arms: every arm is lifted to the integer it denotes.
+        let lift_arms = matches!(derived, TrustVcType::MathInt | TrustVcType::Nat)
+            && arm_types.iter().any(crate::ir_lowering::is_fixed_width_int);
+        // One fixed-width type: every arm widened to its width, by its own sign.
+        let arm_width = derived
+            .bit_width()
+            .filter(|_| crate::ir_lowering::is_fixed_width_int(&derived));
+        let ty = &derived;
+
         crate::encoder::with_flag_unwind_safe!(self.use_int_arithmetic, {
             if ty.bit_width().is_some_and(|width| width > 0) {
                 // Datatype carriers are Sort::Int, but a match returning a Rust
@@ -49,12 +80,11 @@ impl<'a> AstExpressionParser<'a> {
             }
 
             let mut result: Option<Term> = None;
-            // Track the actual BV width after coercion. When arms have mixed
-            // widths (e.g. u8 vs u32), coerce_bv_widths widens to the max.
-            // We must register this actual width, not ty's declared width,
-            // so downstream coerce_bv_widths comparisons use the right size.
-            // Fixes: #2131 term_widths mismatch causing outer == sort panic.
-            let mut actual_width: Option<(u32, bool)> = None;
+            // The BV width every arm arrives at: the derived type's (all arms
+            // widened to it above), else the widest arm's for a match that is
+            // not one fixed-width integer type (arms of one non-integer sort
+            // never differ in width; a width difference there is refused).
+            let mut actual_width: Option<u32> = None;
 
             // Track wildcard overflow check range and all conditional arm
             // conditions for post-loop guarding. The wildcard arm's overflow
@@ -65,12 +95,30 @@ impl<'a> AstExpressionParser<'a> {
             let mut all_arm_conditions: Vec<Term> = Vec::new();
 
             // Process arms in reverse to build nested ITEs
-            for arm in arms.iter().rev() {
+            for (arm, arm_ty) in arms.iter().zip(arm_types.iter()).rev() {
                 let saved =
                     self.bind_match_pattern_locals(&arm.pattern, scrutinee_term, &scrutinee_ty)?;
 
                 let overflow_before = self.overflow_checks.len();
-                let body_result = self.encode_subexpr(&arm.body);
+                // An untyped-literal arm is encoded at the type it takes. Every
+                // arm is then lifted (mixed types) or widened to the match's
+                // width (one fixed-width type) by ITS OWN sign — the sign of
+                // this arm's body at the type it takes, never the match's.
+                let own = self.own_sign(&arm.body, Some(arm_ty));
+                let body_result = if crate::ir_lowering::is_untyped_literal(&arm.body) {
+                    self.encode_expr_with_integer_hint(&arm.body, Some(arm_ty))
+                } else {
+                    self.encode_subexpr(&arm.body)
+                }
+                .and_then(|term| {
+                    if lift_arms {
+                        self.lift_bv_operand_to_int(term, own)
+                    } else if let Some(width) = arm_width {
+                        self.widen_bv_to(term, width, own)
+                    } else {
+                        Ok(term)
+                    }
+                });
                 // The match guard references the arm's pattern bindings, so it must be
                 // encoded WHILE they are still in scope (before restore_locals). Its
                 // own partiality checks are tracked in a separate range so they can be
@@ -81,12 +129,8 @@ impl<'a> AstExpressionParser<'a> {
                 let body_term = body_result?;
                 let guard_term = guard_result.transpose()?;
 
-                // Track body width for actual_width computation
-                if let Some(&(bw, bs)) = self.term_widths.get(&body_term) {
-                    actual_width = Some(match actual_width {
-                        Some((aw, asig)) if aw >= bw => (aw, asig),
-                        _ => (bw, bs),
-                    });
+                if let Some(bw) = self.bv_term_width(body_term) {
+                    actual_width = Some(actual_width.map_or(bw, |aw| aw.max(bw)));
                 }
 
                 let pattern_cond =
@@ -133,14 +177,16 @@ impl<'a> AstExpressionParser<'a> {
 
                     match result {
                         Some(else_term) => {
-                            // Coerce branch widths before ITE to prevent ay sort
-                            // mismatch panics on mixed-width arms (e.g. u8 vs u32).
-                            // Parity: encode_ite (mod.rs:357). #2131.
-                            let (body_coerced, else_coerced) =
-                                self.coerce_bv_widths(body_term, else_term)?;
+                            // Every arm already arrived at the match's width
+                            // (widened by its own sign, above); the later arms'
+                            // chain has no own type, so it is NEVER widened
+                            // here. Arms of different widths that were not
+                            // widened (a match that is not one fixed-width
+                            // integer type) are refused by the solver's sort
+                            // check rather than guessed at.
                             result = Some(
                                 self.solver
-                                    .try_ite(cond, body_coerced, else_coerced)
+                                    .try_ite(cond, body_term, else_term)
                                     .map_err(|e| e.to_string())?,
                             );
                         }
@@ -228,25 +274,13 @@ impl<'a> AstExpressionParser<'a> {
                 match_term = self.bind_datatype_match_result(match_term, name, variants)?;
             }
 
-            // Register term_widths for the match result using the actual coerced
-            // width (max of all arm body widths), not the declared IR type.
-            // When arms have mixed widths (e.g. u8 vs u32), coerce_bv_widths
-            // widens to u32, but ty remains Uint{8} from IR lowering. Using ty
-            // would make downstream coerce_bv_widths see width=8 for a 32-bit
-            // term, causing double-extension and sort mismatches. #2131.
-            // Signedness: use ty's signedness (not arm-derived) to avoid
-            // order-dependent results when arms have mixed signedness. #2565.
-            let ty_signed = ty.bit_width().map(|_| !ty.is_unsigned());
-            let (reg_width, reg_signed) = actual_width
-                .map(|(w, arm_signed)| (w, ty_signed.unwrap_or(arm_signed)))
-                .or_else(|| {
-                    ty.bit_width()
-                        .filter(|&w| w > 0)
-                        .map(|w| (w, !ty.is_unsigned()))
-                })
-                .unwrap_or((0, false));
-            if reg_width > 0 {
-                self.term_widths.insert(match_term, (reg_width, reg_signed));
+            // Register the match result at its actual width and the DERIVED
+            // type's sign (every arm's value is a value of that type). A match
+            // whose type fixes no sign registers nothing: no sign is guessed
+            // from its arms. #2131, #2565.
+            let reg_width = actual_width.or_else(|| ty.bit_width().filter(|&w| w > 0));
+            if let Some((width, signed)) = reg_width.zip(ir_type_signedness(ty)) {
+                self.term_widths.insert(match_term, (width, signed));
             }
 
             Ok::<_, crate::error::TrustVcError>(match_term)
@@ -484,7 +518,45 @@ impl<'a> AstExpressionParser<'a> {
                 Ok(Some(cond))
             }
             MatchPattern::Lit(expr) => {
-                let lit_term = self.encode_subexpr(expr)?;
+                // A literal pattern is typed by the scrutinee it is compared
+                // with, where its value fits (§5b rule 2) — never narrowed to
+                // a "context width" guessed from the other variables in scope
+                // (`match s_u8 { 0 => y_i32, .. }` compared an 8-bit
+                // scrutinee with a 32-bit `0`: a sort error, so `Unknown`). A
+                // literal the scrutinee's type cannot hold is refused.
+                //
+                // The pattern is BOUND at the scrutinee's type by the one
+                // binding rule (`ir_lowering::bind_call_argument`, §5b rule
+                // 11): a literal of any suffix by its VALUE, which the
+                // scrutinee's type must hold; anything else only where that
+                // type holds every value of its own. Only the widths used to
+                // be compared, so a SUFFIXED literal of another type of the
+                // same width was compared by its bits: `match x_u8 { -1i8 =>
+                // 1, _ => 0 }` took the arm at 255, and `match y_i8 { 200u8
+                // => 1, .. }` at -56.
+                let bound = crate::ir_lowering::bind_call_argument(expr, scrutinee_ty).map_err(
+                    |pattern_ty| {
+                        format!(
+                            "a literal pattern of type `{}` against a scrutinee of type `{}`: \
+                             the scrutinee's type cannot hold its value",
+                            pattern_ty.to_type_string(),
+                            scrutinee_ty.to_type_string()
+                        )
+                    },
+                )?;
+                let lit_term = self.encode_expr_with_integer_hint(&bound, Some(scrutinee_ty))?;
+                if let (Some(sw), Some(lw)) =
+                    (self.bv_term_width(scrutinee), self.bv_term_width(lit_term))
+                {
+                    if sw != lw {
+                        return Err(format!(
+                            "a literal pattern of {lw} bits against a {sw}-bit scrutinee of type \
+                             `{}`: the scrutinee's type cannot hold it",
+                            scrutinee_ty.to_type_string()
+                        )
+                        .into());
+                    }
+                }
                 let eq = self
                     .solver
                     .try_eq(scrutinee, lit_term)
@@ -704,10 +776,14 @@ impl<'a> AstExpressionParser<'a> {
                     // earlier alternatives take precedence.
                     for entry in per_alt[..per_alt.len().saturating_sub(1)].iter().rev() {
                         if let Some(c) = entry.0 {
-                            let (left, right) = self.coerce_bv_widths(entry.1, merged)?;
+                            // Both are bindings of one name in two alternatives
+                            // of an or-pattern: of one type, so of one width.
+                            // Nothing is widened (the merged chain has no own
+                            // type); a width difference is refused by the
+                            // solver's sort check.
                             merged = self
                                 .solver
-                                .try_ite(c, left, right)
+                                .try_ite(c, entry.1, merged)
                                 .map_err(|e| e.to_string())?;
                         } else {
                             // Irrefutable sub-pattern - takes unconditionally.
@@ -715,9 +791,13 @@ impl<'a> AstExpressionParser<'a> {
                         }
                     }
 
-                    // Propagate BV width to the final merged ITE term.
-                    if let Some(&w) = self.term_widths.get(&per_alt[0].1) {
-                        self.term_widths.insert(merged, w);
+                    // Propagate BV width to the final merged ITE term: its
+                    // sort's width, the binding type's signedness.
+                    if let Some(info) = self
+                        .bv_term_width(merged)
+                        .zip(ir_type_signedness(&binding_ty))
+                    {
+                        self.term_widths.insert(merged, info);
                     }
 
                     saved.push(self.save_local_binding(name.clone(), merged, binding_ty));

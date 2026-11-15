@@ -72,12 +72,33 @@ impl PrunePlan {
         })
     }
 
-    /// Returns true if any trait method linked by this impl is reachable.
-    pub(super) fn is_trait_impl_reachable(&self, impl_decl: &TraitImplDecl) -> bool {
-        impl_decl.method_bindings.iter().any(|(trait_method, _)| {
+    /// Returns true if this query needs the impl's axioms.
+    ///
+    /// An impl speaks of `Trait__m(Box_T(..))`, with its own `Box_T`: a linking
+    /// axiom for each method it overrides, and a body axiom for each default it
+    /// inherits. It is needed when a method it overrides is reachable, or when
+    /// the query boxes a `T` receiver and a method of the trait is reachable,
+    /// which is how a call of an inherited default on a `T` receiver reads.
+    /// Leaving it out otherwise keeps `Box_T` out of the query: the impl's
+    /// axioms say nothing about any other receiver.
+    pub(super) fn is_trait_impl_reachable(
+        &self,
+        impl_decl: &TraitImplDecl,
+        trait_decls: &[TraitDecl],
+    ) -> bool {
+        let overridden_reachable = impl_decl.method_bindings.iter().any(|(trait_method, _)| {
             self.reachable_functions
                 .contains(&format!("{}__{}", impl_decl.trait_name, trait_method))
-        })
+        });
+        if overridden_reachable {
+            return true;
+        }
+        let box_fn = format!("Box_{}", impl_decl.concrete_type.to_type_string());
+        self.reachable_functions.contains(&box_fn)
+            && trait_decls
+                .iter()
+                .filter(|decl| decl.name == impl_decl.trait_name)
+                .any(|decl| self.is_trait_reachable(decl))
     }
 
     pub(super) fn current_state_slice(&self) -> Option<&CurrentStateSlice> {
@@ -626,15 +647,11 @@ impl TrustVcExprVisitor for ElementObservationDetector {
                     self.observed = true;
                 }
             }
-            TrustVcExpr::ProphecyNew { ty, .. } => {
-                if !ty_is_element_blind(ty) {
-                    self.observed = true;
-                }
+            TrustVcExpr::ProphecyNew { ty, .. } if !ty_is_element_blind(ty) => {
+                self.observed = true;
             }
-            TrustVcExpr::ProphecyResolve { value, .. } => {
-                if !operand_is_element_blind(value) {
-                    self.observed = true;
-                }
+            TrustVcExpr::ProphecyResolve { value, .. } if !operand_is_element_blind(value) => {
+                self.observed = true;
             }
             _ => {}
         }

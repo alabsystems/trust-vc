@@ -82,8 +82,9 @@ mod inner {
 // ---- NARROWNESS PIN: the use site OUTSIDE the macro's module is unaffected ----
 
 /// TRUE: this function is at the file root, so `inner`'s macro is not on its
-/// outward walk path and cannot bind anything it reads. It must still VERIFY,
-/// in the very same file as the reproducers above.
+/// outward walk path and cannot bind anything it reads. The scope refusal
+/// leaves it alone; the unread-item rule refuses it, because `decl_s!`
+/// redeclares `S` and emits an `impl`, which applies crate-wide.
 #[trust_vc::ensures(true)]
 fn top_level_narrow_is_true(s: S) -> u64 {
     trust_vc::assert!(s.x <= 255u8);

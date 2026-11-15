@@ -49,6 +49,12 @@ impl VerificationContext {
                 }
                 _ => obligation,
             })
+            // Located too. A scoped `requires` of an `assert ... by` is
+            // discharged as its own verification step and is reported under its
+            // own name (`assert_by_bit_vector_0_requires_0`), so without this it
+            // was a refutation the gate could not place — at the same line as
+            // the `assert ... by` statement it belongs to.
+            .map(|obligation| self.locate_obligation(obligation))
             .collect();
         self.assert_by_scopes
             .insert(name.clone(), scoped_obligations);
@@ -56,7 +62,12 @@ impl VerificationContext {
         if let Some(mode) = solver_mode {
             obligation = obligation.with_solver_mode(mode);
         }
-        self.obligations.push(obligation);
+        // Through `push_obligation`, not `obligations.push`: an `assert ... by`
+        // IS a statement of the body and must carry its line like any other
+        // assert. Pushing straight into the vector skipped the ambient-location
+        // stamp, and the corpus's `assert_by_bit_vector!` / `assert_forall_by!`
+        // refutations were the ones left unlocated.
+        self.push_obligation(obligation);
     }
 
     /// Associates a loop guard condition with the named invariant.
@@ -69,6 +80,13 @@ impl VerificationContext {
     pub fn set_loop_modified_vars(&mut self, invariant_name: &str, vars: Vec<String>) {
         self.loop_modified_vars
             .insert(invariant_name.to_owned(), vars);
+    }
+
+    /// Records which loop the named loop-lane obligation belongs to (see
+    /// `loop_invariant_groups`).
+    pub fn set_loop_group(&mut self, obligation_name: &str, group: usize) {
+        self.loop_invariant_groups
+            .insert(obligation_name.to_owned(), group);
     }
 
     /// Records the straight-line loop-body transition for the named invariant.
@@ -98,6 +116,14 @@ impl VerificationContext {
             .insert(invariant_name.to_owned(), entry_obligations);
     }
 
+    /// Marks the named invariant as belonging to a loop NESTED in another
+    /// loop's body (its base case must not see function-entry facts about the
+    /// vars the nested loop modifies — see `loop_nested_entry_invariants`).
+    pub fn mark_loop_nested_entry(&mut self, invariant_name: &str) {
+        self.loop_nested_entry_invariants
+            .insert(invariant_name.to_owned());
+    }
+
     /// Registers a helper function by name and return type string (deprecated).
     #[deprecated(since = "0.1.0", note = "use declare_helper_function_typed")]
     pub fn declare_helper_function(&mut self, name: &str, return_type: &str) {
@@ -114,8 +140,21 @@ impl VerificationContext {
         return_type: crate::ir::TrustVcType,
         params: Vec<(String, crate::ir::TrustVcType)>,
     ) {
+        self.helper_generic_params.remove(name);
         self.helper_functions_typed
             .insert(name.to_owned(), (return_type, params, vec![]));
+    }
+
+    /// H10: record the declaration-order type/const generic parameter names of
+    /// the helper `name`, which must already be declared. Call only after the
+    /// declaration passed `spec_function_catalog::check_generic_declaration`;
+    /// see [`VerificationContext::helper_generic_params`].
+    pub(crate) fn record_helper_generic_params(&mut self, name: &str, generic_params: Vec<String>) {
+        if generic_params.is_empty() || !self.helper_functions_typed.contains_key(name) {
+            return;
+        }
+        self.helper_generic_params
+            .insert(name.to_owned(), generic_params);
     }
 
     /// Register inherent-impl method metadata so that `recv.method(args)` in a
@@ -195,6 +234,7 @@ impl VerificationContext {
         params: Vec<(String, crate::ir::TrustVcType)>,
         trait_bounds: Vec<crate::ir::TraitBound>,
     ) {
+        self.helper_generic_params.remove(name);
         self.helper_functions_typed
             .insert(name.to_owned(), (return_type, params, trait_bounds));
     }
@@ -231,6 +271,9 @@ impl VerificationContext {
             existing
                 .inherent_shadowed_methods
                 .extend(decl.inherent_shadowed_methods);
+            // Same fail-closed union for the sibling-impl census: it exists to
+            // survive exactly this merge (`crate::trait_impl_groups`).
+            existing.impl_group.merge(decl.impl_group);
             return;
         }
         self.trait_impl_decls.push(decl);
@@ -247,8 +290,18 @@ impl VerificationContext {
     /// and `impl A2 for S` both mint `S__v` and this first-wins insert handed
     /// A1's body to A2's conformance obligation — every trait after the first
     /// counterexampled against a foreign body. See [`crate::ir::ImplMethodKey`].
-    /// First registration still wins, but the key is now genuinely unique, so
-    /// nothing but a literal duplicate declaration can reach that branch.
+    ///
+    /// First registration still wins, and the key is STILL NOT unique: it omits
+    /// the impl's trait type arguments, so `impl Wc<bool> for S` and
+    /// `impl Wc<u32> for S` both reach this insert under `(Wc, S__wc)` and the
+    /// second body is dropped. (An earlier revision of this comment claimed only
+    /// a literal duplicate declaration could reach the occupied branch; two impls
+    /// of one parameterized trait falsify it.) The conformance lane does not
+    /// trust this map for such impls — it refuses every impl whose
+    /// (trait, symbol) key is shared, fail closed
+    /// (`trait_conformance::shared_impl_method_symbols`), counting sibling impls
+    /// from source (`crate::trait_impl_groups`) because an erased-equal pair has
+    /// already merged into ONE decl by the time the walk runs.
     pub fn register_trait_impl_method_body(
         &mut self,
         key: crate::ir::ImplMethodKey,
@@ -260,9 +313,13 @@ impl VerificationContext {
     /// Records a trait-impl method's OWN declared `ensures` postconditions,
     /// keyed by its declaring TRAIT plus its concrete UF name (see
     /// [`Self::register_trait_impl_method_body`] for why the trait is
-    /// load-bearing). Only called for a non-exempt impl method whose body was
+    /// load-bearing, and why the key still collides across trait arguments).
+    /// Only called for a non-exempt method of a non-external impl whose body was
     /// ALSO captured, so the conformance pass can verify `body ⊨ impl_ensures`
-    /// before the strengthened postcondition is propagated to callers.
+    /// before the strengthened postcondition is propagated to callers. `ensures`
+    /// must already be in POSITIONAL canonical form (`__trust_vc_conf_arg_{i}`,
+    /// the captured body's numbering): both consumers bind those placeholders by
+    /// position and never by name.
     pub fn register_trait_impl_method_ensures(
         &mut self,
         key: crate::ir::ImplMethodKey,
@@ -381,6 +438,184 @@ impl VerificationContext {
     pub fn get_variable_type(&self, name: &str) -> Option<&crate::ir::TrustVcType> {
         let idx = *self.variable_index.get(name)?;
         self.variables.get(idx).map(|variable| &variable.ty)
+    }
+
+    /// Whether a declared variable's ORIGIN syn type was a `usize`-bounded EXEC
+    /// collection (`Vec`/slice/array) rather than a spec `Seq`.
+    ///
+    /// This is the ONLY place the Vec-vs-Seq provenance survives — both lower to
+    /// `TrustVcType::Seq` — so it is also the only thing that can tell a GHOST
+    /// receiver from an EXEC one at a higher-order collection call. Returns
+    /// `None` for an undeclared name, which every caller must treat as
+    /// UNRESOLVED (fail closed), never as "not bounded".
+    pub(crate) fn variable_is_bounded_len(&self, name: &str) -> Option<bool> {
+        let idx = *self.variable_index.get(name)?;
+        self.variables.get(idx).map(|variable| variable.bounded_len)
+    }
+
+    /// What a declared variable's ORIGIN syn spelling said about exec-container
+    /// vs spec-collection provenance.
+    ///
+    /// `bounded_len` above answers the Vec-vs-Seq question only; this answers it
+    /// for `Set`/`Multiset`/`Map` as well, which have no bounded-length bit of
+    /// their own — a `BTreeSet<u64>` and a `Set<int>` are the same
+    /// `TrustVcType::Set` after parsing. Returns `None` for an undeclared name;
+    /// every caller must treat `None` and
+    /// [`CollectionOrigin::Unknown`](super::CollectionOrigin::Unknown) alike as
+    /// UNRESOLVED (fail closed).
+    pub(crate) fn variable_collection_origin(&self, name: &str) -> Option<super::CollectionOrigin> {
+        if !self.variable_index.contains_key(name) {
+            return None;
+        }
+        Some(
+            self.collection_origins
+                .get(name)
+                .copied()
+                .unwrap_or_default(),
+        )
+    }
+
+    /// ROUND 10 — records that this SOURCE FILE defines an item of its own
+    /// under a spec-collection / spec-function name. Only the six names any
+    /// ghost reading keys on are recorded; anything else is not a collision and
+    /// is dropped here rather than at every reader.
+    pub(crate) fn register_shadowed_spec_name(&mut self, name: &str) {
+        if matches!(
+            name,
+            "Seq" | "Set" | "Map" | "Multiset" | "SpecFn" | "FnSpec"
+        ) {
+            self.shadowed_spec_names.insert(name.to_owned());
+        }
+    }
+
+    /// The recorded shadowing, for seeding a DERIVED context. A derived context
+    /// that drops it reads a shadowed `Seq<u64>` as the spec collection again —
+    /// unlike the origin side tables, dropping this one fails OPEN.
+    pub(crate) fn shadowed_spec_names_clone(&self) -> Vec<String> {
+        self.shadowed_spec_names.iter().cloned().collect()
+    }
+
+    /// Whether `name` is REDEFINED by an item of this source file, i.e. whether
+    /// a bare-name ghost reading of it is speaking for something it has not
+    /// measured. See [`Self::register_shadowed_spec_name`].
+    #[must_use]
+    pub(crate) fn spec_name_is_shadowed(&self, name: &str) -> bool {
+        self.shadowed_spec_names.contains(name)
+    }
+
+    /// Records the ORIGIN spelling provenance of ONE STRUCT FIELD, keyed by the
+    /// carrier datatype name and the field name. Called from the source-struct
+    /// registration seam, the only place a field's own syn spelling exists.
+    ///
+    /// POSITIVE-ONLY, like every other consumer of
+    /// [`CollectionOrigin`](super::CollectionOrigin): an `Unknown` reading
+    /// records NOTHING, so a missing entry and a recorded `Unknown` are the same
+    /// fail-closed answer and no caller can assert a provenance it did not
+    /// measure.
+    pub(crate) fn register_struct_field_collection_origin(
+        &mut self,
+        carrier: &str,
+        field: &str,
+        origin: super::CollectionOrigin,
+    ) {
+        if origin == super::CollectionOrigin::Unknown {
+            return;
+        }
+        let key = (carrier.to_owned(), field.to_owned());
+        // CONFLICT DEGRADES TO FAIL-CLOSED, never to last-writer-wins. Two
+        // source structs that share a NAME (different modules, a generic
+        // template re-registered) would otherwise have one spelling answer for
+        // the other — the same confusion the tuple table is binding-keyed to
+        // avoid. An explicitly stored `Unknown` reads identically to a missing
+        // entry, so the reader needs no extra case.
+        match self.struct_field_collection_origins.get(&key) {
+            Some(existing) if *existing != origin => {
+                self.struct_field_collection_origins
+                    .insert(key, super::CollectionOrigin::Unknown);
+            }
+            Some(_) => {}
+            None => {
+                self.struct_field_collection_origins.insert(key, origin);
+            }
+        }
+    }
+
+    /// What a STRUCT FIELD's origin syn spelling said about exec-container vs
+    /// spec-collection provenance. [`CollectionOrigin::Unknown`] for a field
+    /// this context never observed a spelling for — every caller must treat that
+    /// as UNRESOLVED (fail closed), never as "not exec".
+    pub(crate) fn struct_field_collection_origin(
+        &self,
+        carrier: &str,
+        field: &str,
+    ) -> super::CollectionOrigin {
+        self.struct_field_collection_origins
+            .get(&(carrier.to_owned(), field.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Every recorded struct-field provenance entry, for seeding a derived
+    /// context (`body_extract`'s dummy copies). A plain `register_struct_type`
+    /// carries the MODELED field types only and would silently drop this.
+    pub(crate) fn struct_field_collection_origins_clone(
+        &self,
+    ) -> Vec<((String, String), super::CollectionOrigin)> {
+        self.struct_field_collection_origins
+            .iter()
+            .map(|(key, origin)| (key.clone(), *origin))
+            .collect()
+    }
+
+    /// Records the ORIGIN spelling provenance of ONE TUPLE COMPONENT of a
+    /// declared binding (`t.0`), keyed by the variable name and the component
+    /// index as written. Positive-only, exactly as above.
+    pub(crate) fn register_binding_tuple_component_origin(
+        &mut self,
+        variable: &str,
+        index: &str,
+        origin: super::CollectionOrigin,
+    ) {
+        if origin == super::CollectionOrigin::Unknown {
+            return;
+        }
+        let key = (variable.to_owned(), index.to_owned());
+        // Same conflict rule as above: a name declared twice with disagreeing
+        // component spellings resolves to `Unknown`, which fails closed.
+        match self.binding_tuple_component_origins.get(&key) {
+            Some(existing) if *existing != origin => {
+                self.binding_tuple_component_origins
+                    .insert(key, super::CollectionOrigin::Unknown);
+            }
+            Some(_) => {}
+            None => {
+                self.binding_tuple_component_origins.insert(key, origin);
+            }
+        }
+    }
+
+    /// What a declared binding's TUPLE COMPONENT spelling said. `Unknown` for an
+    /// unobserved component — fail closed.
+    pub(crate) fn binding_tuple_component_origin(
+        &self,
+        variable: &str,
+        index: &str,
+    ) -> super::CollectionOrigin {
+        self.binding_tuple_component_origins
+            .get(&(variable.to_owned(), index.to_owned()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Every recorded tuple-component provenance entry, for seeding a derived
+    /// context.
+    pub(crate) fn binding_tuple_component_origins_clone(
+        &self,
+    ) -> Vec<((String, String), super::CollectionOrigin)> {
+        self.binding_tuple_component_origins
+            .iter()
+            .map(|(key, origin)| (key.clone(), *origin))
+            .collect()
     }
 
     /// Marks a declared variable as an erased immutable reference.
@@ -525,6 +760,28 @@ impl VerificationContext {
         ty: crate::ir::TrustVcType,
         bounded_len: bool,
     ) {
+        // A `bounded_len` origin IS an exec container by definition
+        // (`Vec`/slice/array), so deriving the provenance here is exact, not a
+        // guess. Everything else stays `Unknown` — the fail-closed default.
+        let origin = if bounded_len {
+            super::CollectionOrigin::Exec
+        } else {
+            super::CollectionOrigin::Unknown
+        };
+        self.declare_var_typed_origin(name, ty, bounded_len, origin);
+    }
+
+    /// Declares a variable recording BOTH origin readings: the `usize`-bounded
+    /// length bit and the exec-container-vs-spec-collection provenance. Used at
+    /// the parameter-typing seam, which is the only place that still holds the
+    /// origin syn spelling.
+    pub(crate) fn declare_var_typed_origin(
+        &mut self,
+        name: &str,
+        ty: crate::ir::TrustVcType,
+        bounded_len: bool,
+        collection_origin: super::CollectionOrigin,
+    ) {
         if self.variable_index.contains_key(name) {
             self.duplicate_var_error = Some(format!("Variable '{}' already declared", name));
             return;
@@ -540,6 +797,10 @@ impl VerificationContext {
             bounded_len,
         });
         self.variable_index.insert(name.to_owned(), idx);
+        if collection_origin != super::CollectionOrigin::Unknown {
+            self.collection_origins
+                .insert(name.to_owned(), collection_origin);
+        }
     }
 
     #[cfg(test)]
@@ -598,9 +859,16 @@ impl VerificationContext {
             .collect();
         let bound_var_names = decls.iter().map(|decl| decl.name.clone()).collect();
         self.forall_bound_vars.insert(name.clone(), decls);
+        // See `add_assert_by_with_solver_mode`: a scoped obligation is reported
+        // under its own name, so it needs the statement's line too.
+        let proof_block = proof_block
+            .into_iter()
+            .map(|obligation| self.locate_obligation(obligation))
+            .collect();
         self.assert_by_scopes.insert(name.clone(), proof_block);
-        self.obligations
-            .push(ProofObligation::assert_by(name, body).with_bound_vars(bound_var_names));
+        self.push_obligation(
+            ProofObligation::assert_by(name, body).with_bound_vars(bound_var_names),
+        );
     }
 
     /// Typed variant of `add_assert_forall_by`. Part of #2416.
@@ -641,13 +909,21 @@ impl VerificationContext {
             .collect();
         let bound_var_names = decls.iter().map(|decl| decl.name.clone()).collect();
         self.forall_bound_vars.insert(name.clone(), decls);
+        // See `add_assert_by_with_solver_mode`: a scoped obligation is reported
+        // under its own name, so it needs the statement's line too.
+        let proof_block = proof_block
+            .into_iter()
+            .map(|obligation| self.locate_obligation(obligation))
+            .collect();
         self.assert_by_scopes.insert(name.clone(), proof_block);
         let mut obligation =
             ProofObligation::assert_by(name, body).with_bound_vars(bound_var_names);
         if !trigger_patterns.is_empty() {
             obligation = obligation.with_trigger_patterns(trigger_patterns);
         }
-        self.obligations.push(obligation);
+        // See `add_assert_by_with_solver_mode`: the ambient-location stamp lives
+        // in `push_obligation`.
+        self.push_obligation(obligation);
     }
 
     /// Pushes a measure-decreases obligation with an optional source location.
@@ -661,7 +937,9 @@ impl VerificationContext {
         if let Some(loc) = location {
             obligation = obligation.with_location(loc);
         }
-        self.obligations.push(obligation);
+        // `push_obligation` leaves an explicit `location` alone and only fills
+        // in the ambient one where the caller supplied none.
+        self.push_obligation(obligation);
     }
 
     /// Returns whether this context contains any checkable assertions.
@@ -720,7 +998,7 @@ impl VerificationContext {
 
     /// Adds a non-negativity obligation for a termination measure.
     pub fn add_measure_nonneg(&mut self, measure_name: &str) {
-        self.obligations.push(ProofObligation::measure_non_negative(
+        self.push_obligation(ProofObligation::measure_non_negative(
             format!("{}_nonneg", measure_name),
             format!("{} >= 0", measure_name),
         ));
@@ -730,7 +1008,7 @@ impl VerificationContext {
     pub fn add_measure_decreases(&mut self, measure_name: &str, old_value: &str, new_value: &str) {
         let condition =
             crate::decreases_lex::lexicographic_decreases_condition(old_value, new_value);
-        self.obligations.push(ProofObligation::measure_decreases(
+        self.push_obligation(ProofObligation::measure_decreases(
             format!("{}_decreases", measure_name),
             condition,
         ));

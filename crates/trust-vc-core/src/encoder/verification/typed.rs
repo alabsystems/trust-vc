@@ -32,7 +32,7 @@ use crate::prepared_context::validation::{
     validate_prepared_context, ValidatedPreparedContext, ValidationError, VerificationPlan,
 };
 use crate::prepared_context::{PreparedObligation, PreparedVerificationContext};
-use crate::vc::{ObligationKind, SolverMode};
+use crate::vc::{is_closure_scoped_obligation_name, ObligationKind, SolverMode};
 use crate::verification_report::{self, VerificationPhase};
 
 /// Converts a `ValidationError` into the public `VerifyResult`.
@@ -129,6 +129,44 @@ fn recover_assert_by_incompleteness_via_compute(
         return Ok(AssertionOutcome::Verified);
     }
     Ok(outcome)
+}
+/// Suffix of the fresh ENTRY symbol a rebound variable's earlier facts are
+/// renamed to in a loop invariant's base case (see the entry-rename block).
+const LOOP_ENTRY_SUFFIX: &str = "__loop_entry";
+
+/// The variable an entry-scope binding `x == value` rebinds, if the obligation
+/// has that shape (over floats, the identity form of
+/// [`crate::float_identity::identity_equation`]).
+fn entry_binding_target(obligation: &PreparedObligation) -> Option<&str> {
+    match crate::float_identity::identity_equation_sides(&obligation.expr)? {
+        (crate::ir::TrustVcExpr::Var { name, .. }, _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// The loop invariants of `goal`'s OWN loop, `goal` itself excluded (2026-09-11).
+/// A loop-lane obligation with no registered group (not produced by the
+/// file-path extractor) gets no peer hypotheses — sound, possibly incomplete.
+fn same_loop_invariants<'a>(
+    groups: &std::collections::HashMap<String, usize>,
+    invariants: &[&'a PreparedObligation],
+    goal: &PreparedObligation,
+) -> Vec<&'a PreparedObligation> {
+    let Some(group) = groups.get(&goal.name) else {
+        return Vec::new();
+    };
+    invariants
+        .iter()
+        .copied()
+        .filter(|inv| inv.name != goal.name && groups.get(&inv.name) == Some(group))
+        .collect()
+}
+
+/// The extractor's "code after an infinite loop is unreachable" fact:
+/// `post_loop_assumption_pp{N}_unreachable` (see body_extract.rs
+/// `add_unreachable_after_infinite_loop`).
+fn unreachable_after_infinite_loop_marker(name: &str) -> bool {
+    name.starts_with("post_loop_assumption_pp") && name.ends_with("_unreachable")
 }
 
 fn scoped_proof_assumption(obligation: &PreparedObligation) -> bool {
@@ -230,6 +268,7 @@ fn verify_compute_mode_obligation(
         Some(true) => Some(AssertionOutcome::Verified),
         Some(false) => Some(AssertionOutcome::Counterexample {
             obligation_name: assertion.name.clone(),
+            location: assertion.location.clone(),
             model: Some("by(compute): expression evaluates to false".to_string()),
             bindings: Vec::new(),
         }),
@@ -267,33 +306,14 @@ impl AYEncoder {
         let plan = &validated.plan;
         let mut vacuous_precheck_diagnostics = EncodingDiagnostics::default();
 
-        let vacuous_step = verification_report::begin_step(
-            VerificationPhase::VacuousPrecheck,
-            "vacuous truth precheck",
-            None,
-        );
-        let vacuous_start = Instant::now();
-        let vacuous_result = check_vacuous_truth(
-            ctx,
-            &plan.assumptions,
-            &plan.broadcast_assumptions,
-            &mut vacuous_precheck_diagnostics,
-        );
-        match vacuous_result.as_ref() {
-            Some(result) => verification_report::end_step_with_verify_result(
-                vacuous_step,
-                result,
-                vacuous_start.elapsed(),
-            ),
-            None => verification_report::end_step_skipped(vacuous_step, vacuous_start.elapsed()),
-        }
-        if let Some(result) = vacuous_result {
-            return result;
-        }
-
         // Loop invariants
         let mut verified_invariant_obligations: Vec<&PreparedObligation> = Vec::new();
         for invariant in &plan.loop_invariants {
+            // The invariants of THIS loop (all of them, itself excluded — the
+            // step adds the goal at the pre-state itself): the only
+            // pre-state hypotheses of the base case and the inductive step.
+            let loop_peers =
+                same_loop_invariants(&ctx.loop_invariant_groups, &plan.loop_invariants, invariant);
             // Base case: typed path (current-state assumptions, no post-loop framing)
             let step = verification_report::begin_obligation_step(
                 VerificationPhase::LoopInvariant,
@@ -328,40 +348,143 @@ impl AYEncoder {
             // facts from the base check. Fail-closed and cannot over-reject a
             // genuine invariant: the excluded fact is not yet true at entry, so
             // dropping it only makes the establishment obligation stricter.
-            let base_assumptions: Vec<&PreparedObligation> = plan
+            // NESTED ENTRY (2026-09-10): the base case of a loop nested in
+            // another loop's body runs at an ARBITRARY head of the enclosing
+            // loop. A plan assumption about a var this loop modifies (a
+            // `requires` on a `mut` param, say) speaks of the FUNCTION entry,
+            // not this entry — kept, it let an inner invariant that holds only
+            // on the first enclosing iteration verify (`requires(total == 0)`
+            // + `invariant!(total <= 5)` with `total` growing outside). The
+            // entry scope binds the var to its site value over the enclosing
+            // head instead, and the predicate carries the enclosing guard ∧
+            // invariants, so dropping those assumptions loses nothing true.
+            let nested_modified: Option<HashSet<String>> = ctx
+                .loop_nested_entry_invariants
+                .contains(&invariant.name)
+                .then(|| {
+                    ctx.loop_modified_vars
+                        .get(&invariant.name)
+                        .map(|vars| vars.iter().cloned().collect())
+                        .unwrap_or_default()
+                });
+            // ENTRY RENAME (2026-09-11, `tests/preloop_assignment_declared_var_soundness.rs`):
+            // a var the entry scope REBINDS (`x == <pre-loop value>`, a declared
+            // var assigned before the loop, or an inner-modified var bound to its
+            // site value) has ONE symbol for two states — the bare name is the
+            // loop-head value in the binding and the goal, but every earlier plan
+            // fact (`requires(x == 5)`, a call's ensures) speaks of the FUNCTION
+            // entry. Kept as written those facts contradict the binding
+            // (`x == 5 ∧ x == 0`; `x == x + 1`) and the base case verified
+            // VACUOUSLY (two measured false-verifies). So, in the base case only,
+            // every rebound var (and every var of a nested loop's modified set —
+            // formerly DROPPED) is renamed to a fresh entry symbol
+            // `x__loop_entry` in those facts AND in the bindings' right-hand
+            // sides: the facts now describe the entry value, the binding
+            // connects the head value to it (`x == x__loop_entry + 1`), and
+            // nothing true is lost.
+            let mut rename_targets: HashSet<String> = nested_modified.clone().unwrap_or_default();
+            for obligation in &entry_scoped_assumptions {
+                if let Some(name) = entry_binding_target(obligation) {
+                    rename_targets.insert(name.to_string());
+                }
+            }
+            let rename_refs: HashSet<&str> = rename_targets.iter().map(String::as_str).collect();
+            let renamed_base: Vec<PreparedObligation> = plan
                 .assumptions
                 .iter()
                 .copied()
                 .filter(|obligation| !obligation.name.starts_with("post_loop_assumption"))
+                .map(|obligation| {
+                    if rename_refs.is_empty() {
+                        return obligation.clone();
+                    }
+                    let referenced =
+                        super::invariants::frame_condition::collect_referenced_var_names(
+                            &obligation.expr,
+                        );
+                    if !referenced.iter().any(|name| rename_targets.contains(name)) {
+                        return obligation.clone();
+                    }
+                    let mut renamed = obligation.clone();
+                    renamed.expr = super::rewrite::rename_vars_with_suffix_typed(
+                        &obligation.expr,
+                        &rename_refs,
+                        LOOP_ENTRY_SUFFIX,
+                    );
+                    renamed
+                })
+                .collect();
+            let base_assumptions: Vec<&PreparedObligation> = renamed_base.iter().collect();
+            let renamed_entry_scope: Vec<PreparedObligation> = entry_scoped_assumptions
+                .iter()
+                .map(|obligation| {
+                    if rename_refs.is_empty() {
+                        return (*obligation).clone();
+                    }
+                    let mut renamed = (*obligation).clone();
+                    let binding = entry_binding_target(obligation).and_then(|_| {
+                        crate::float_identity::identity_equation_sides(&obligation.expr)
+                    });
+                    renamed.expr = match binding {
+                        // `x == value`: the head value `x` stays, the value is
+                        // over the entry symbols.
+                        Some((left, right)) => crate::float_identity::identity_equation(
+                            left.clone(),
+                            super::rewrite::rename_vars_with_suffix_typed(
+                                right,
+                                &rename_refs,
+                                LOOP_ENTRY_SUFFIX,
+                            ),
+                        ),
+                        None => super::rewrite::rename_vars_with_suffix_typed(
+                            &obligation.expr,
+                            &rename_refs,
+                            LOOP_ENTRY_SUFFIX,
+                        ),
+                    };
+                    renamed
+                })
+                .collect();
+            let entry_scope_refs: Vec<&PreparedObligation> = renamed_entry_scope.iter().collect();
+            let entry_variables: Vec<crate::vc::VariableDecl> = ctx
+                .variables
+                .iter()
+                .filter(|decl| rename_targets.contains(&decl.name))
+                .map(|decl| {
+                    crate::vc::VariableDecl::new(
+                        format!("{}{}", decl.name, LOOP_ENTRY_SUFFIX),
+                        decl.ty.clone(),
+                    )
+                })
                 .collect();
             let slices = VerificationSlices::new(
                 ctx,
                 &base_assumptions,
                 &plan.broadcast_assumptions,
-                &verified_invariant_obligations,
+                &loop_peers,
                 &[],
-                &entry_scoped_assumptions,
+                &entry_scope_refs,
             );
             if let Some(result) = finish_reported_typed_step(
                 step,
                 start,
-                Self::verify_typed_step(&slices, &[], invariant, None),
+                Self::verify_typed_step(&slices, &entry_variables, invariant, None),
             ) {
                 return result;
             }
-            // Inductive step: typed path (no legacy bridge).
-            // Pass previously verified invariants so inter-dependent invariants
-            // can use earlier ones as assumptions in the inductive step.
+            // Inductive step: typed path (no legacy bridge). The pre-state
+            // hypotheses are the invariants of the SAME loop (2026-09-11) —
+            // before, every previously verified invariant of the FUNCTION was
+            // assumed, so an earlier loop's `x == 10` reached a later loop's
+            // head and "preserved" a false `x <= 11` there (measured
+            // false-verify, `tests/loop_invariant_scope_soundness.rs`).
             let step = verification_report::begin_obligation_step(
                 VerificationPhase::LoopInvariantInductiveStep,
                 invariant,
             );
             let start = Instant::now();
-            let inductive_result = Self::verify_invariant_inductive_step_typed(
-                ctx,
-                invariant,
-                &verified_invariant_obligations,
-            );
+            let inductive_result =
+                Self::verify_invariant_inductive_step_typed(ctx, invariant, &loop_peers);
             verification_report::end_step_with_assertion_result(
                 step,
                 &inductive_result,
@@ -372,13 +495,10 @@ impl AYEncoder {
                 Ok(AssertionOutcome::Counterexample {
                     model, bindings, ..
                 }) => {
-                    let display = invariant.display_name();
-                    let obligation_name = match &invariant.location {
-                        Some(loc) => format!("{} (inductive step, at {})", display, loc),
-                        None => format!("{} (inductive step)", display),
-                    };
+                    let obligation_name = format!("{} (inductive step)", invariant.display_name());
                     return VerifyResult::Counterexample {
                         obligation_name,
+                        location: invariant.location.clone(),
                         model,
                         bindings,
                     };
@@ -425,15 +545,14 @@ impl AYEncoder {
         // fails closed as a Counterexample. Part of the file-path `loop_decreases!`
         // wiring.
         for measure in &plan.loop_measures {
+            let measure_peers =
+                same_loop_invariants(&ctx.loop_invariant_groups, &plan.loop_invariants, measure);
             match measure.kind {
                 ObligationKind::MeasureNonNegative => {
                     // WF1: non-negativity floor, direct single-state entailment.
-                    if let Some(result) = Self::verify_measure_nonneg_floor(
-                        ctx,
-                        plan,
-                        measure,
-                        &verified_invariant_obligations,
-                    ) {
+                    if let Some(result) =
+                        Self::verify_measure_nonneg_floor(ctx, plan, measure, &measure_peers)
+                    {
                         return result;
                     }
                 }
@@ -458,11 +577,8 @@ impl AYEncoder {
                         measure,
                     );
                     let start = Instant::now();
-                    let inductive_result = Self::verify_invariant_inductive_step_typed(
-                        ctx,
-                        measure,
-                        &verified_invariant_obligations,
-                    );
+                    let inductive_result =
+                        Self::verify_invariant_inductive_step_typed(ctx, measure, &measure_peers);
                     verification_report::end_step_with_assertion_result(
                         step,
                         &inductive_result,
@@ -473,13 +589,10 @@ impl AYEncoder {
                         Ok(AssertionOutcome::Counterexample {
                             model, bindings, ..
                         }) => {
-                            let display = measure.display_name();
-                            let obligation_name = match &measure.location {
-                                Some(loc) => format!("{} (decreases, at {})", display, loc),
-                                None => format!("{} (decreases)", display),
-                            };
+                            let obligation_name = format!("{} (decreases)", measure.display_name());
                             return VerifyResult::Counterexample {
                                 obligation_name,
+                                location: measure.location.clone(),
                                 model,
                                 bindings,
                             };
@@ -503,9 +616,24 @@ impl AYEncoder {
         // unconditionally after the loop; InvariantExceptBreak facts are only
         // available on the normal-exit path (guard becomes false). For post-loop
         // assertions we use only always_available. Part of #2417.
+        //
+        // SOUNDNESS-CRITICAL (H7 review round 2): a `closure_scoped__` invariant
+        // belongs to a loop inside a CLOSURE LITERAL's body that modifies a
+        // symbol the enclosing function also names. Its base case was discharged
+        // from closure-local state (`|| { x = 0; while x < 10 { invariant!(x <=
+        // 10); .. } }`), and the closure need never run, so the verified
+        // predicate must NOT become a function-wide post-loop fact — it reached
+        // the postcondition lane, which reads a by-value `mut` parameter's bare
+        // symbol and cannot be protected by the after-the-closure capture havoc
+        // (measured `Verified` on `3fab140f`). It is still CHECKED in full and
+        // still contributes its modified variables to `post_loop_modified_vars`
+        // below, so this only ever removes a hypothesis.
         let always_available_invariants: Vec<&PreparedObligation> = verified_invariant_obligations
             .iter()
-            .filter(|o| o.kind == ObligationKind::LoopInvariant)
+            .filter(|o| {
+                o.kind == ObligationKind::LoopInvariant
+                    && !is_closure_scoped_obligation_name(&o.name)
+            })
             .copied()
             .collect();
 
@@ -564,18 +692,124 @@ impl AYEncoder {
         // prove other loop_ensures, but following proof steps may use them.
         let mut verified_loop_ensures: Vec<&PreparedObligation> = Vec::new();
         for ensures_ob in &plan.loop_ensures {
+            let ensures_peers = same_loop_invariants(
+                &ctx.loop_invariant_groups,
+                &plan.loop_invariants,
+                ensures_ob,
+            );
+            // EXIT-SITE form (audit rows 430/431): a `loop_ensures` registered in
+            // `loop_modified_vars` is a break-site check emitted by the file-path
+            // extractor — "from any loop head satisfying the invariants and the
+            // loop guard, if the body runs to this break site and its condition
+            // holds, the predicate holds there". It is verified as a
+            // frame-condition inductive step under its OWN metadata (guard
+            // `head ∧ cond_site`, site transition) and has NO base case: an
+            // `ensures` need not hold at loop entry. The verified predicate is a
+            // post-loop fact exactly like the normal-exit form below.
+            if ctx.loop_modified_vars.contains_key(&ensures_ob.name) {
+                let step = verification_report::begin_obligation_step(
+                    VerificationPhase::LoopEnsures,
+                    ensures_ob,
+                );
+                let start = Instant::now();
+                let inductive_result =
+                    Self::verify_exit_check_step_typed(ctx, ensures_ob, &ensures_peers);
+                verification_report::end_step_with_assertion_result(
+                    step,
+                    &inductive_result,
+                    start.elapsed(),
+                );
+                match inductive_result {
+                    Ok(AssertionOutcome::Verified) => {}
+                    Ok(AssertionOutcome::Counterexample {
+                        model, bindings, ..
+                    }) => {
+                        let obligation_name =
+                            format!("{} (at break exit)", ensures_ob.display_name());
+                        return VerifyResult::Counterexample {
+                            obligation_name,
+                            location: ensures_ob.location.clone(),
+                            model,
+                            bindings,
+                        };
+                    }
+                    Ok(AssertionOutcome::Unknown {
+                        reason, category, ..
+                    }) => {
+                        return VerifyResult::unknown(reason, category);
+                    }
+                    Ok(AssertionOutcome::Error { message }) => {
+                        return VerifyResult::Error { message };
+                    }
+                    Err(err) => return VerifyResult::from(err),
+                }
+                // A CONTINUE-site check proves the predicate on a path back to
+                // the head, not at an exit: it is not a post-loop fact (an
+                // except-break invariant proven at a `continue` must not
+                // survive a later `break`).
+                // A `closure_scoped__` exit-site copy belongs to a loop inside
+                // a closure literal's body that modifies an outer-nameable
+                // symbol: same channel, same suppression (H7 review round 2).
+                if !ensures_ob.name.starts_with("loop_continue_check_")
+                    && !is_closure_scoped_obligation_name(&ensures_ob.name)
+                {
+                    verified_loop_ensures.push(ensures_ob);
+                }
+                continue;
+            }
             let step = verification_report::begin_obligation_step(
                 VerificationPhase::LoopEnsures,
                 ensures_ob,
             );
             let start = Instant::now();
+            // NORMAL-EXIT GUARD, FILE PATH (2026-09-11): the extractor stores a
+            // loop's guard as a STRING in `ctx.loop_guards` under the ensures'
+            // own name (no `LoopGuard` obligation reaches `plan.loop_guards`),
+            // and for a loop that also `break`s it withholds the global
+            // normal-exit fact — rightly, the post-loop state may come from a
+            // break. The normal-exit copy of a `loop_ensures` is nevertheless
+            // "invariants ∧ ¬guard ⊢ ensures", so lower `!(guard)` here as a
+            // lane-local scoped assumption for THIS obligation only.
+            let file_path_normal_exit = if normal_exit_guard.is_none() {
+                ctx.loop_guards
+                    .get(&ensures_ob.name)
+                    .and_then(|condition| {
+                        Self::lower_measure_guard(ctx, condition).map(|expr| (condition, expr))
+                    })
+                    .map(|(condition, expr)| PreparedObligation {
+                        name: format!("{}_normal_exit", ensures_ob.name),
+                        kind: ObligationKind::Assume,
+                        location: ensures_ob.location.clone(),
+                        condition_origin: crate::vc::ConditionOrigin::LoweredFromCondition,
+                        bound_vars: None,
+                        trigger_patterns: None,
+                        prepared_triggers: None,
+                        solver_mode: None,
+                        is_opaque: false,
+                        is_inline: false,
+                        broadcast_group: None,
+                        condition: format!("!({condition})"),
+                        expr: crate::ir::TrustVcExpr::Not(Box::new(expr)),
+                        invariant_namespace: None,
+                        trigger_inference_mode: None,
+                        broadcast_guard: None,
+                        raw_broadcast_guard_count: 0,
+                        step_meta: None,
+                    })
+            } else {
+                None
+            };
+            let mut ensures_scope: Vec<&PreparedObligation> = normal_exit_assumptions.clone();
+            if let Some(ref guard) = file_path_normal_exit {
+                ensures_scope.push(guard);
+            }
             let slices = VerificationSlices::new(
                 ctx,
                 &plan.assumptions,
                 &plan.broadcast_assumptions,
-                &verified_invariant_obligations,
+                &ensures_peers,
                 &[],
-                &normal_exit_assumptions,
+                &ensures_scope,
             );
             if let Some(result) = finish_reported_typed_step(
                 step,
@@ -588,6 +822,65 @@ impl AYEncoder {
         }
 
         // Assert_by
+        // VACUITY PRECHECK — run AFTER the loop lanes (moved 2026-09-10) and
+        // BEFORE every assertion lane. The loop lanes prove their goals under
+        // their own assumption subsets (the base case excludes post-loop facts,
+        // the frame-condition steps exclude `PostLoopAssume` entirely), so a
+        // context that is contradictory only through a loop's exit fact — a
+        // `while` whose guard can never fail, upstream loop_decreases2 test3 —
+        // still surfaces its genuine loop failure (the measure's descent) as a
+        // Counterexample, as Verus reports it, instead of a blanket vacuity
+        // Unknown. Nothing is reported Verified before this check runs: a
+        // contradictory `requires` makes the loop lanes vacuous (never refuted)
+        // and the precheck then returns exactly the Unknown it always returned.
+        let vacuous_step = verification_report::begin_step(
+            VerificationPhase::VacuousPrecheck,
+            "vacuous truth precheck",
+            None,
+        );
+        let vacuous_start = Instant::now();
+        // Frame the precheck like the post-loop lanes (see `run_vacuous_precheck`):
+        // the union of every loop invariant's modified set, `None` when the
+        // function has no loop metadata (then the precheck is unchanged).
+        let precheck_modified_vars: Option<HashSet<String>> = {
+            let vars: HashSet<String> = plan
+                .loop_invariants
+                .iter()
+                .filter_map(|inv| ctx.loop_modified_vars.get(&inv.name))
+                .flat_map(|vars| vars.iter().cloned())
+                .collect();
+            (!vars.is_empty()).then_some(vars)
+        };
+        // A bare `loop {}` with no exit marks the code after it unreachable
+        // with the post-loop fact `false` (`…_unreachable`, body_extract.rs
+        // `add_unreachable_after_infinite_loop`). That is a deliberate
+        // divergence, not a contradictory precondition, so the precheck skips
+        // the marker; every other lane treats it exactly like a normal-exit fact.
+        let precheck_assumptions: Vec<&PreparedObligation> = plan
+            .assumptions
+            .iter()
+            .copied()
+            .filter(|obligation| !unreachable_after_infinite_loop_marker(&obligation.name))
+            .collect();
+        let vacuous_result = check_vacuous_truth(
+            ctx,
+            &precheck_assumptions,
+            &plan.broadcast_assumptions,
+            precheck_modified_vars.as_ref(),
+            &mut vacuous_precheck_diagnostics,
+        );
+        match vacuous_result.as_ref() {
+            Some(result) => verification_report::end_step_with_verify_result(
+                vacuous_step,
+                result,
+                vacuous_start.elapsed(),
+            ),
+            None => verification_report::end_step_skipped(vacuous_step, vacuous_start.elapsed()),
+        }
+        if let Some(result) = vacuous_result {
+            return result;
+        }
+
         let mut verified_assert_by: Vec<&PreparedObligation> = Vec::new();
         for assert_by in &plan.assert_by {
             // ── SCOPED REVEAL (#34, upstream assert_forall_by.rs) ─────────────
@@ -1078,13 +1371,10 @@ impl AYEncoder {
             Ok(AssertionOutcome::Counterexample {
                 model, bindings, ..
             }) => {
-                let display = measure.display_name();
-                let obligation_name = match &measure.location {
-                    Some(loc) => format!("{} (non-negative, at {})", display, loc),
-                    None => format!("{} (non-negative)", display),
-                };
+                let obligation_name = format!("{} (non-negative)", measure.display_name());
                 Some(VerifyResult::Counterexample {
                     obligation_name,
+                    location: measure.location.clone(),
                     model,
                     bindings,
                 })

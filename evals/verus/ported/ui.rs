@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
-fn regression_114_get_bool() -> bool {
+fn get_bool() -> bool {
     true
 }
 
-fn regression_114_require_false() -> bool {
+fn require_false() -> bool {
     false
 }
 
@@ -14,11 +14,11 @@ fn regression_114_require_false() -> bool {
 fn regression_114_unrelated_precondition() {
     let x = 6i32;
 
-    if !regression_114_get_bool() {
-        let _ = regression_114_require_false(); // INCORRECT CONTEXT
+    if !get_bool() {
+        require_false(); // INCORRECT CONTEXT
     }
 
-    trust_vc::assert!(x == 7i32);
+    trust_vc::assert!(x == 7i32); // FAILS
 }
 
 // The upstream harness checks that the reported diagnostic context excludes the

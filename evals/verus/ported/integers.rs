@@ -99,6 +99,30 @@ pub const INTEGERS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         4,
     ),
     ("test_bool_to_int", "test_bool_to_int", "verified", 5),
+    (
+        "test_enum_to_int_discriminant_constants",
+        "test_enum_to_int",
+        "verified",
+        4,
+    ),
+    (
+        "test_enum_to_int_discriminant_liar_counterexample",
+        "test_enum_to_int",
+        "counterexample",
+        2,
+    ),
+    (
+        "test_enum_to_int_symbolic_return",
+        "test_enum_to_int",
+        "verified",
+        3,
+    ),
+    (
+        "test_enum_to_int_symbolic_return_liar_counterexample",
+        "test_enum_to_int",
+        "counterexample",
+        2,
+    ),
     ("test_finite_unsigned_to_nat_casts", "test1", "verified", 6),
     (
         "test_nat_to_finite_cast_wrap_constant",
@@ -331,6 +355,18 @@ fn test_enum_to_int_discriminant_constants() {
 #[trust_vc::ensures(result == v as usize)]
 #[trust_vc::ensures(result == 0 || result == 255 || result == 256)]
 fn test_enum_to_int_symbolic_return(v: IntegerCastEnum) -> usize {
+    v as usize
+}
+
+// Liar twins of upstream `test_enum_to_int` (2026-09-11): `C` is the implicit
+// successor discriminant 256, and the symbolic cast ranges over all three.
+#[trust_vc::ensures(true)]
+fn test_enum_to_int_discriminant_liar_counterexample() {
+    trust_vc::assert!(IntegerCastEnum::C as usize == 255);
+}
+
+#[trust_vc::ensures(result == 0 || result == 255)]
+fn test_enum_to_int_symbolic_return_liar_counterexample(v: IntegerCastEnum) -> usize {
     v as usize
 }
 

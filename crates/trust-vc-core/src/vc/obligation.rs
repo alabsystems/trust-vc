@@ -4,6 +4,37 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
+/// SOUNDNESS-CRITICAL (H7 review round 2). Name prefix stamped by
+/// `body_extract` onto a loop obligation emitted INSIDE a closure literal's
+/// body whose loop modifies a variable that was already declared when the body
+/// visit began — i.e. a symbol the ENCLOSING function can also name.
+///
+/// The typed lane publishes every VERIFIED `LoopInvariant` (and every verified
+/// exit-site `LoopEnsures` copy) as a function-wide post-loop fact over the
+/// BARE symbol of each modified variable. For a loop inside a closure body that
+/// fact was established over CLOSURE-LOCAL state — the closure need never run —
+/// so it must not reach a goal outside the body. The base-case argument that
+/// keeps an ordinary in-branch invariant sound ("the enclosing function already
+/// implies it") fails exactly here: `|| { x = 0; while x < 10 { invariant!(x <=
+/// 10); x += 1 } }` discharges its base case from the closure's own `x = 0`,
+/// while the published fact speaks about the outer `x`. Measured `Verified` on
+/// `3fab140f` through the postcondition lane, which reads a by-value `mut`
+/// parameter's bare symbol and therefore cannot be protected by the
+/// after-the-closure capture havoc.
+///
+/// Suppressing the publication is a pure HYPOTHESIS REMOVAL: the obligation is
+/// still checked, in full and unguarded, so nothing can newly verify. The
+/// closure's own post-loop reads keep the fact, because a loop whose modified
+/// set is entirely closure-local is not stamped (see
+/// `ctrl_closure_invariant_used_inside`).
+pub(crate) const CLOSURE_SCOPED_OBLIGATION_PREFIX: &str = "closure_scoped__";
+
+/// True for an obligation whose verified predicate must NOT become a
+/// function-wide post-loop fact. See `CLOSURE_SCOPED_OBLIGATION_PREFIX`.
+pub(crate) fn is_closure_scoped_obligation_name(name: &str) -> bool {
+    name.starts_with(CLOSURE_SCOPED_OBLIGATION_PREFIX)
+}
+
 /// Proof-step metadata separating internal scope keys from display labels.
 ///
 /// `key` is used for scope-map lookups (`assert_by_scopes`, `forall_bound_vars`).
@@ -79,8 +110,21 @@ pub struct ProofObligation {
     /// prepared-context lowering consumes this expression directly instead of
     /// reparsing source text.
     pub(crate) typed_expr: Option<crate::ir::TrustVcExpr>,
-    /// Source location (file:line:col)
+    /// Source location (file:line:col), RENDERED.
+    ///
+    /// Kept as the diagnostic string channel every existing consumer already
+    /// reads. When `source_location` is set this is its
+    /// [`crate::SourceLocation::render`] output and the two can never disagree:
+    /// [`ProofObligation::with_source_location`] writes both.
     pub(crate) location: Option<String>,
+    /// Source location, STRUCTURED — the authority behind `location`.
+    ///
+    /// The file-context lane (`verify_function_from_file` and everything the
+    /// corpus runs through) records this as each obligation is raised, so a
+    /// refuted obligation can answer WHERE, not only WHICH. Consumers that need
+    /// the line as a NUMBER (the evidence gate's upstream `FAILS`-marker
+    /// cross-check) must read this rather than re-parsing the string.
+    pub(crate) source_location: Option<crate::SourceLocation>,
     /// Whether this is an assertion (must verify) or assumption (trusted)
     pub(crate) kind: ObligationKind,
     pub(crate) bound_vars: Option<Vec<String>>,
@@ -128,6 +172,7 @@ pub struct TypedProofObligation {
     expr: crate::ir::TrustVcExpr,
     kind: ObligationKind,
     location: Option<String>,
+    source_location: Option<crate::SourceLocation>,
     solver_mode: Option<SolverMode>,
 }
 
@@ -143,6 +188,7 @@ impl TypedProofObligation {
             expr,
             kind,
             location: None,
+            source_location: None,
             solver_mode: None,
         }
     }
@@ -175,6 +221,13 @@ impl TypedProofObligation {
     /// Attaches a source location string (file:line:col) for diagnostics.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
+        self
+    }
+
+    /// Attaches a STRUCTURED source location, and the string rendering with it.
+    pub fn with_source_location(mut self, location: crate::SourceLocation) -> Self {
+        self.location = Some(location.render());
+        self.source_location = Some(location);
         self
     }
 
@@ -216,7 +269,9 @@ impl TypedProofObligation {
 
     pub(crate) fn into_proof_obligation(self) -> ProofObligation {
         let mut obligation = ProofObligation::new_typed(self.name, self.expr, self.kind);
-        if let Some(location) = self.location {
+        if let Some(location) = self.source_location {
+            obligation = obligation.with_source_location(location);
+        } else if let Some(location) = self.location {
             obligation = obligation.with_location(location);
         }
         if let Some(mode) = self.solver_mode {
@@ -327,6 +382,7 @@ impl ProofObligation {
             condition: condition.into(),
             typed_expr: None,
             location: None,
+            source_location: None,
             kind,
             bound_vars: None,
             trigger_patterns: None,
@@ -356,6 +412,7 @@ impl ProofObligation {
             typed_expr: Some(expr),
             name,
             location: None,
+            source_location: None,
             kind,
             bound_vars: None,
             trigger_patterns: None,
@@ -443,6 +500,7 @@ impl ProofObligation {
             condition: String::new(),
             typed_expr: None,
             location: None,
+            source_location: None,
             kind: ObligationKind::Reveal,
             bound_vars: None,
             trigger_patterns: None,
@@ -468,6 +526,7 @@ impl ProofObligation {
             condition: String::new(),
             typed_expr: None,
             location: None,
+            source_location: None,
             kind: ObligationKind::Hide,
             bound_vars: None,
             trigger_patterns: None,
@@ -498,6 +557,7 @@ impl ProofObligation {
             condition: String::new(),
             typed_expr: None,
             location: None,
+            source_location: None,
             kind: ObligationKind::BroadcastUse,
             bound_vars: None,
             trigger_patterns: None,
@@ -525,9 +585,33 @@ impl ProofObligation {
         self
     }
     /// Attaches a source location string (file:line:col) for diagnostics.
+    ///
+    /// The UNSTRUCTURED channel, kept for callers that already hold a rendered
+    /// string (the trust-engine adapter, the proc-macro lane). Prefer
+    /// [`Self::with_source_location`], whose line is readable back as a number.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
         self
+    }
+    /// Attaches a STRUCTURED source location, and the string rendering with it.
+    ///
+    /// Both fields are written together so [`Self::location`] and
+    /// [`Self::source_location`] can never name different lines.
+    pub fn with_source_location(mut self, location: crate::SourceLocation) -> Self {
+        self.location = Some(location.render());
+        self.source_location = Some(location);
+        self
+    }
+    /// Attaches `location` only if this obligation carries none.
+    ///
+    /// This is how the file lane's AMBIENT location is stamped on by
+    /// `VerificationContext::push_obligation`: an emission site that already
+    /// pinned a more precise span keeps it.
+    pub fn or_source_location(self, location: crate::SourceLocation) -> Self {
+        if self.location.is_some() || self.source_location.is_some() {
+            return self;
+        }
+        self.with_source_location(location)
     }
     /// Sets the universally quantified bound variables for this obligation.
     pub fn with_bound_vars(mut self, vars: Vec<String>) -> Self {
@@ -619,6 +703,29 @@ impl ProofObligation {
     #[must_use]
     pub fn location(&self) -> Option<&str> {
         self.location.as_deref()
+    }
+
+    /// A copy of this obligation with BOTH location channels cleared.
+    ///
+    /// For callers that must compare or key on an obligation's SOLVER INPUT:
+    /// where an obligation was raised is diagnostic and never changes the query
+    /// (`VerificationContext::isolated_query_key`).
+    #[must_use = "this returns a copy and does not modify the original obligation"]
+    pub fn without_source_location(&self) -> Self {
+        let mut copy = self.clone();
+        copy.location = None;
+        copy.source_location = None;
+        copy
+    }
+
+    /// Returns the STRUCTURED source location, when one was recorded.
+    ///
+    /// Read this, not [`Self::location`], whenever the LINE is wanted as a
+    /// number — string surgery on the rendering is how a colon-bearing path
+    /// silently becomes "no location".
+    #[must_use]
+    pub fn source_location(&self) -> Option<&crate::SourceLocation> {
+        self.source_location.as_ref()
     }
 
     /// Returns the kind of this obligation (assert, assume, requires, etc.).

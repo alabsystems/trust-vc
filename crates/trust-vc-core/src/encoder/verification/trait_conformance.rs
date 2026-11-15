@@ -22,7 +22,7 @@ use contracts::{
     build_contract_obligations, build_default_contract_obligations,
     build_impl_body_definition_obligation, build_impl_ensures_assert_obligations,
     clone_base_conformance_obligations, collect_helper_function_contexts,
-    conformance_obligation_name, instantiate_current_body_axioms,
+    conformance_obligation_name, conformance_trait_display, instantiate_current_body_axioms,
     instantiate_referenced_body_axioms, normalize_conformance_result,
     referenced_body_axiom_broadcasts,
 };
@@ -155,7 +155,11 @@ fn verify_trait_conformance_inner(
     base: &PreparedVerificationContext,
     walk: &mut ConformanceWalk<'_>,
 ) -> VerifyResult {
-    for impl_decl in &base.trait_impl_decls {
+    // Computed ONCE per walk from the decls alone, so `List` and `VerifyOne`
+    // refuse exactly the same impls and the listed set stays the checked set.
+    let shared_symbols = shared_impl_method_symbols(&base.trait_impl_decls);
+    for (impl_decl, shared_symbol) in base.trait_impl_decls.iter().zip(&shared_symbols) {
+        let shared_symbol = shared_symbol.as_deref();
         // `#[trust_vc::external]` impl: the Verus external_trait_specification
         // trust model — the impl's method bodies are TRUSTED, not verified, so
         // body conformance must not run (a deliberately-divergent external body
@@ -195,7 +199,13 @@ fn verify_trait_conformance_inner(
         // (round-8 trait findings 18/19). Check each method's effective body
         // against the trait `ensures` on an abstract (`Poly`) self instead.
         if impl_decl.concrete_type.contains_opaque() {
-            let result = verify_generic_struct_impl_conformance(base, trait_decl, impl_decl, walk);
+            let result = verify_generic_struct_impl_conformance(
+                base,
+                trait_decl,
+                impl_decl,
+                shared_symbol,
+                walk,
+            );
             if !matches!(result, VerifyResult::Verified) {
                 return result;
             }
@@ -227,6 +237,32 @@ fn verify_trait_conformance_inner(
             });
             if method.ensures.is_empty() && !impl_declares_ensures {
                 continue;
+            }
+
+            // TRAIT-ARGUMENT COLLISION: fail CLOSED before anything below can
+            // read a registry keyed without the impl's trait arguments. The
+            // captured body and impl `ensures` (`ImplMethodKey`, first
+            // registration wins), the function context (bare `S__m`) and the
+            // exempt set (bare `S__m`) all answer for whichever sibling impl
+            // registered first, so building this obligation would check the
+            // WRONG body: `impl Wc<bool> for S { 1 }` answered for
+            // `impl Wc<u32> for S { 2 }` against `ensures(result == 1)` and both
+            // rows Verified. `select` still runs FIRST, so the refused
+            // obligation is listed and the file cannot report green. The emission
+            // gate above is conservative for a collided group: any member's
+            // registered impl `ensures` populate the shared key, so every member
+            // that binds it emits.
+            if let Some(shared_symbol) = shared_symbol {
+                let obligation_name = conformance_obligation_name(trait_decl, method, impl_decl);
+                if !walk.select(&obligation_name) {
+                    continue;
+                }
+                return shared_symbol_refusal(
+                    &obligation_name,
+                    trait_decl,
+                    impl_decl,
+                    shared_symbol,
+                );
             }
 
             // Non-overridden default method: VERIFY that the default body
@@ -460,6 +496,97 @@ fn verify_implless_trait_defaults(
     VerifyResult::Verified
 }
 
+/// For each entry of `impl_decls` (same order), the first concrete method
+/// symbol it shares with ANOTHER impl decl of the SAME trait, or `None`.
+///
+/// SOUNDNESS-CRITICAL. Every per-impl registry the conformance lane reads is
+/// keyed without the impl's trait type arguments: `parse_trait_impl_decl` mints
+/// `format!("{type}__{method}")`, [`crate::ir::ImplMethodKey`] is (trait name,
+/// that symbol) and keys the captured bodies and impl `ensures` first-
+/// registration-wins, and `resolve_function_context` and
+/// `conformance_exempt_methods` look up the bare symbol. So `impl Wc<bool> for
+/// S` and `impl Wc<u32> for S` are ONE impl to all of them, and checking the
+/// second impl read the first impl's body — a non-conforming second impl
+/// Verified and its trait postcondition axiom was published unjustified.
+///
+/// A second decl claiming the same (trait, symbol) pair is a genuinely different
+/// impl: other trait arguments, or a same-spelled self type. But the decl list
+/// UNDER-counts: `register_trait_impl` merges decls whose ERASED fields compare
+/// equal, so `impl Wc<u8> for S` and `impl<'x> Wc<&'x u8> for S` (and
+/// `impl Tm for S` / `impl Tm for &S`) reach this walk as ONE decl — measured, a
+/// single Verified row while the `&u8` impl returned 2 against
+/// `ensures(result == 1)`. The source census carried on the decl
+/// (`ImplGroupCensus::shared_method_names`, `crate::trait_impl_groups`) is taken
+/// before that merge and is consulted as well. External decls COUNT as
+/// claimants — their bodies are captured under the same key — even though they
+/// emit no obligation of their own. Impls that share no symbol (a
+/// default beside an override, all-defaults impls, the same trait for another
+/// self type, a different trait with a same-named method) are untouched: their
+/// checks read only their own keys.
+fn shared_impl_method_symbols(impl_decls: &[TraitImplDecl]) -> Vec<Option<String>> {
+    let mut claimants: HashMap<(&str, &str), usize> = HashMap::new();
+    for impl_decl in impl_decls {
+        let symbols: HashSet<&str> = impl_decl
+            .method_bindings
+            .iter()
+            .map(|(_, concrete_fn)| concrete_fn.as_str())
+            .collect();
+        for symbol in symbols {
+            *claimants
+                .entry((impl_decl.trait_name.as_str(), symbol))
+                .or_default() += 1;
+        }
+    }
+    impl_decls
+        .iter()
+        .map(|impl_decl| {
+            impl_decl
+                .method_bindings
+                .iter()
+                .find(|(trait_method, concrete_fn)| {
+                    claimants
+                        .get(&(impl_decl.trait_name.as_str(), concrete_fn.as_str()))
+                        .is_some_and(|count| *count > 1)
+                        // The SOURCE census (`crate::trait_impl_groups`): a
+                        // sibling impl of this trait for this self type declares
+                        // the same method, even when the two decls merged
+                        // before this walk could count them.
+                        || impl_decl
+                            .impl_group
+                            .shared_method_names
+                            .contains(trait_method)
+                })
+                .map(|(_, concrete_fn)| concrete_fn.clone())
+        })
+        .collect()
+}
+
+/// The fail-CLOSED verdict for a conformance obligation of an impl that shares
+/// its (trait, concrete symbol) key with another impl
+/// (see [`shared_impl_method_symbols`]). `Incompleteness` is surfaced as a
+/// verification FAILURE: the impl was not checked, so it must not read as a
+/// pass. A conforming collided impl is over-rejected until the registries are
+/// keyed by trait arguments.
+fn shared_symbol_refusal(
+    obligation_name: &str,
+    trait_decl: &TraitDecl,
+    impl_decl: &TraitImplDecl,
+    shared_symbol: &str,
+) -> VerifyResult {
+    VerifyResult::unknown(
+        format!(
+            "{obligation_name}: `{}` is implemented for `{}` by more than one impl sharing the \
+             concrete method symbol `{shared_symbol}`; captured bodies, impl ensures and the \
+             function context are keyed by trait name and that symbol without the impl's trait \
+             arguments, so they cannot tell these impls apart and this impl's conformance is \
+             not modelled",
+            trait_decl.name,
+            impl_decl.concrete_type.to_type_string()
+        ),
+        Some(crate::encoder::UnknownCategory::Incompleteness),
+    )
+}
+
 fn implless_default_obligation_name(trait_decl: &TraitDecl, method: &TraitMethodDecl) -> String {
     format!(
         "trait default conformance {}::{} (no impl)",
@@ -477,8 +604,9 @@ fn implless_default_obligation_name(trait_decl: &TraitDecl, method: &TraitMethod
 /// wholesale, leaving the global trait postcondition axiom published-but-checked
 /// against no body and a generic-bounded caller false-Verifying (round-8 trait
 /// findings 18/19). For each trait method with an `ensures`:
-///   * an OVERRIDDEN method is checked against its CAPTURED impl body;
-///   * a non-overridden method is checked against its inherited DEFAULT body.
+/// * an OVERRIDDEN method is checked against its CAPTURED impl body;
+/// * a non-overridden method is checked against its inherited DEFAULT body.
+///
 /// Both bind `result == (<body>)` on a `Poly` self and assert the trait
 /// `ensures`, inlining non-overridden sibling defaults exactly as the impl-absent
 /// path does (an OVERRIDDEN sibling is left as its trait UF — checked modularly
@@ -498,6 +626,7 @@ fn verify_generic_struct_impl_conformance(
     base: &PreparedVerificationContext,
     trait_decl: &TraitDecl,
     impl_decl: &TraitImplDecl,
+    shared_symbol: Option<&str>,
     walk: &mut ConformanceWalk<'_>,
 ) -> VerifyResult {
     // Abstract `Poly` self standing for an arbitrary monomorphization of the
@@ -509,6 +638,20 @@ fn verify_generic_struct_impl_conformance(
     for method in &trait_decl.methods {
         if method.ensures.is_empty() {
             continue;
+        }
+
+        // TRAIT-ARGUMENT COLLISION: refuse BEFORE the exempt skip and the
+        // body-capture `continue`s below — those run ahead of `select`, so a
+        // collided impl reaching them could silently vanish from the listing,
+        // and the captured body they read belongs to whichever sibling
+        // registered first (`impl<P> Wc<bool> for G<P> { 1 }` answered for
+        // `impl<P> Wc<u32> for G<P> { 2 }`). Same rule as the concrete path.
+        if let Some(shared_symbol) = shared_symbol {
+            let obligation_name = generic_struct_obligation_name(trait_decl, method, impl_decl);
+            if !walk.select(&obligation_name) {
+                continue;
+            }
+            return shared_symbol_refusal(&obligation_name, trait_decl, impl_decl, shared_symbol);
         }
 
         let binding = impl_decl
@@ -605,7 +748,7 @@ fn generic_struct_obligation_name(
 ) -> String {
     format!(
         "trait impl conformance {}::{} for {} (generic struct)",
-        trait_decl.name,
+        conformance_trait_display(trait_decl, impl_decl),
         method.name,
         impl_decl.concrete_type.to_type_string()
     )
@@ -810,10 +953,15 @@ fn build_impl_conformance_context(
     // body value and this assert genuinely checks `body ⊨ impl_ensures`. A
     // violating body Counterexamples here, which is the sole justification that
     // makes the caller-side propagation axiom sound.
+    //
+    // The clauses are POSITIONAL (`__trust_vc_conf_arg_{i}`, the captured body's
+    // numbering), so they are bound through that body's arity; a missing body or
+    // an arity disagreement is an Err (fail closed), never a trait-name reading.
     let impl_method_key = crate::ir::ImplMethodKey::new(&impl_decl.trait_name, concrete_fn_name);
     let impl_ensures_obligations = match base.trait_impl_method_ensures.get(&impl_method_key) {
         Some(impl_ensures) if !impl_ensures.is_empty() => build_impl_ensures_assert_obligations(
             impl_ensures,
+            base.trait_impl_method_bodies.get(&impl_method_key),
             obligation_name,
             &bindings,
             &env,
@@ -1389,6 +1537,12 @@ fn register_trait_bound_methods_for_bounds(
                     box_receiver: None,
                 },
             )?;
+            // H10 (method half): see `ir_lowering::dispatch::methods`.
+            env.insert_method_generic_params(
+                bound.type_param.clone(),
+                method.name.clone(),
+                method.generic_params.clone(),
+            );
         }
     }
 
@@ -1443,6 +1597,12 @@ fn register_impl_method_metadata(
                 box_receiver: None,
             },
         )?;
+        // H10 (method half): see `ir_lowering::dispatch::methods`.
+        env.insert_method_generic_params(
+            receiver_type_name.clone(),
+            trait_method_name.clone(),
+            method.generic_params.clone(),
+        );
     }
 
     Ok(())

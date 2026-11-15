@@ -34,11 +34,8 @@ fn assert_verified(func: &str) {
 /// FALSE or non-instantiable facts must never verify. A hard extraction error
 /// is acceptable here (fail-closed), but `Verified` is a cardinal false-verify.
 fn assert_not_verified(func: &str) {
-    match verify_function_from_file(&repro_path(), func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("TRAIT-GENERIC FALSE-VERIFY: `{func}` must not verify")
-        }
-        Ok(_) | Err(_) => {}
+    if let Ok(VerifyResult::Verified) = verify_function_from_file(&repro_path(), func) {
+        panic!("TRAIT-GENERIC FALSE-VERIFY: `{func}` must not verify")
     }
 }
 

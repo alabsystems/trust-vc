@@ -59,6 +59,14 @@ pub(crate) fn expand_invariant(tokens: proc_macro2::TokenStream) -> proc_macro2:
         }
     };
 
+    let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+        &normalized_tokens,
+        trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+        quote! {
+            assert!(#normalized_tokens, "trust_vc loop invariant failed");
+        },
+    );
+
     quote! {
         {
             #[cfg(test)]
@@ -72,7 +80,7 @@ pub(crate) fn expand_invariant(tokens: proc_macro2::TokenStream) -> proc_macro2:
             }
             #[cfg(all(not(trust_mc), not(test)))]
             {
-                assert!(#normalized_tokens, "trust_vc loop invariant failed");
+                #runtime_check
             }
             #[cfg(all(not(trust_mc), test))]
             {
@@ -128,6 +136,14 @@ pub(crate) fn expand_invariant_except_break(
         }
     };
 
+    let runtime_check = trust_vc_core::runtime_check_or_typecheck(
+        &normalized_tokens,
+        trust_vc_core::ClauseArithmetic::FixedWidthChecked,
+        quote! {
+            assert!(#normalized_tokens, "trust_vc invariant_except_break failed");
+        },
+    );
+
     quote! {
         {
             #[cfg(test)]
@@ -141,7 +157,7 @@ pub(crate) fn expand_invariant_except_break(
             }
             #[cfg(all(not(trust_mc), not(test)))]
             {
-                assert!(#normalized_tokens, "trust_vc invariant_except_break failed");
+                #runtime_check
             }
             #[cfg(all(not(trust_mc), test))]
             {
@@ -228,6 +244,11 @@ pub(crate) fn expand_loop_ensures(tokens: proc_macro2::TokenStream) -> proc_macr
 pub(crate) fn expand_loop_decreases(tokens: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let support_root = trust_vc_core::macro_support_root();
     let measure_string = tokens.to_string();
+    let runtime_evaluation = trust_vc_core::runtime_check_or_typecheck(
+        &tokens,
+        trust_vc_core::ClauseArithmetic::Integer,
+        quote! { let _ = { #tokens }; },
+    );
 
     quote! {
         {
@@ -245,7 +266,7 @@ pub(crate) fn expand_loop_decreases(tokens: proc_macro2::TokenStream) -> proc_ma
             }
             #[cfg(not(trust_mc))]
             {
-                let _ = { #tokens };
+                #runtime_evaluation
             }
         }
     }

@@ -6,11 +6,12 @@
 //! existing opaque, congruent `spec_fn_apply` UF
 //! (`ir_lowering/dispatch/calls.rs`).
 //!
-//! WHY THIS IS SOUND AND NON-TRIVIAL:
-//! * `Fn` captures immutably ⇒ DETERMINISTIC across calls, so one congruent UF is
-//!   sound: equal arguments give the equal result. Reflexivity (`f(3) == f(3)`)
-//!   AND determinism (two calls, same args) VERIFY — the latter is the real,
-//!   non-tautological capability the typing delivers.
+//! WHAT THE TYPING GIVES:
+//! * Reflexivity of one call (`let o = f(3); o == o`) VERIFIES.
+//! * Two calls with the same arguments are one term of the congruent UF, but an
+//!   `Fn` closure can read shared state (an atomic, a borrowed `Cell`), so
+//!   `f(3) == f(3)` is false at run time. `bodiless_call_repeat` refuses the
+//!   `Verified` answer of a function that evaluates a callable parameter twice.
 //! * The result is otherwise UNCONSTRAINED: `f(3) == 3` (pinning a concrete
 //!   value) and `f(3) == f(4)` (different args) COUNTEREXAMPLE. A `Verified` on
 //!   either would be inventing behaviour = UNSOUND.
@@ -26,6 +27,13 @@
 //! weakened — a def-side-less parameter never enters the registered/assumed lane.
 //! The traps below (Counterexample, NOT "Undefined function" error) are the
 //! load-bearing witness that the term is modeled yet unconstrained.
+//!
+//! H6: every application PROVES `f.requires((args,))` (Verus/vstd
+//! semantics), so the positive fixtures declare the requires they apply under
+//! and each has a requires-free `*_no_requires_cx` twin that counterexamples on
+//! the call-site `__call_requires_pp*_f_*` obligation; the traps are pinned to
+//! the ASSERTION (the requires is discharged), and FnMut / FnOnce applications
+//! fail closed at extraction with a "function value" diagnostic.
 //!
 //! CACHE DISCIPLINE (mandatory): every verdict is recomputed cache-off
 //! (`TRUST_VC_DISABLE_VC_CACHE=1`) so a stale `Verified` can never mask a
@@ -59,7 +67,7 @@ fn assert_verified(func: &str) {
     let v = verdict(func);
     assert!(
         matches!(v, VerifyResult::Verified),
-        "`{func}` should VERIFY (sound `Fn` determinism / reflexivity); got {v:?}"
+        "`{func}` should VERIFY (reflexivity of one call); got {v:?}"
     );
 }
 
@@ -76,15 +84,43 @@ fn assert_counterexample(func: &str) {
     );
 }
 
-fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("FN-BOUND FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (deferred / fail-closed lowering) or any solver
-        // non-Verified verdict (incl. Unknown) is a sound non-verify.
-        _ => {}
+/// Assert the refusal of a `Verified` answer for a callable parameter evaluated
+/// more than once. Only a `Verified` answer produces it.
+fn assert_refused(func: &str) {
+    let v = verdict(func);
+    assert!(
+        matches!(
+            &v,
+            VerifyResult::Error { message } if message.starts_with("bodiless call repeated")
+        ),
+        "`{func}` should be REFUSED (a callable parameter evaluated twice); got {v:?}"
+    );
+}
+
+/// A Counterexample on an obligation whose name starts with `prefix`.
+fn assert_cx_on(func: &str, prefix: &str) {
+    let v = verdict(func);
+    match &v {
+        VerifyResult::Counterexample {
+            obligation_name, ..
+        } if obligation_name.starts_with(prefix) => {}
+        _ => panic!("`{func}` should COUNTEREXAMPLE on a `{prefix}*` obligation; got {v:?}"),
     }
+}
+
+/// H6: an application of an unmodelled function value fails closed at
+/// extraction with the "function value" diagnostic (never a lowering error that
+/// an unused result would skip).
+fn assert_function_value_fail_closed(func: &str) {
+    let message = match verify(func) {
+        Err(err) => err.to_string(),
+        Ok(VerifyResult::Error { message }) => message,
+        Ok(other) => panic!("FN-BOUND: `{func}` should fail closed at extraction; got {other:?}"),
+    };
+    assert!(
+        message.contains("function value"),
+        "`{func}` failed closed without the \"function value\" diagnostic: {message}"
+    );
 }
 
 #[test]
@@ -97,16 +133,36 @@ fn t1_reflexive_verified() {
 }
 
 #[test]
-fn t2_determinism_verified() {
-    // DETERMINISM (non-tautological, SOUND): two calls with EQUAL arguments give
-    // the EQUAL result via congruence. The genuine capability of Increment 1.
-    assert_verified("fnbound_determinism_verified");
+fn t1b_reflexive_no_requires_cx() {
+    // H6: the same read without `requires f.requires((3,))` is refuted on the
+    // call-site requires.
+    assert_cx_on("fnbound_reflexive_no_requires_cx", "__call_requires_pp");
 }
 
 #[test]
-fn t3_determinism_where_clause_verified() {
+fn t2_determinism_refused() {
+    // Two calls with EQUAL arguments are one congruent term, but a stateful `Fn`
+    // closure returns two values, so the `Verified` answer is refused.
+    assert_refused("fnbound_determinism_refused");
+}
+
+#[test]
+fn t2b_determinism_no_requires_cx() {
+    assert_cx_on("fnbound_determinism_no_requires_cx", "__call_requires_pp");
+}
+
+#[test]
+fn t3_determinism_where_clause_refused() {
     // Same, via the `where F: Fn(..)` spelling (where-predicate recognition path).
-    assert_verified("fnbound_determinism_where_clause_verified");
+    assert_refused("fnbound_determinism_where_clause_refused");
+}
+
+#[test]
+fn t3b_determinism_where_clause_no_requires_cx() {
+    assert_cx_on(
+        "fnbound_determinism_where_clause_no_requires_cx",
+        "__call_requires_pp",
+    );
 }
 
 #[test]
@@ -114,15 +170,17 @@ fn t4_pins_concrete_result_counterexample() {
     // FALSE-VERIFY TRAP #1: the result is UNCONSTRAINED; `f(3) == 3` is not
     // provable. A `Verified` here = inventing behaviour = UNSOUND. Must be a
     // Counterexample (NOT an "Undefined function" error), proving the typing is
-    // load-bearing.
+    // load-bearing. The requires is discharged, so it lands on the ASSERTION.
     assert_counterexample("fnbound_pins_concrete_result_cx");
+    assert_cx_on("fnbound_pins_concrete_result_cx", "assertion_");
 }
 
 #[test]
 fn t5_distinct_args_counterexample() {
     // FALSE-VERIFY TRAP #2: DIFFERENT arguments — congruence gives nothing, so
-    // `f(3) == f(4)` counterexamples.
+    // `f(3) == f(4)` counterexamples — on the ASSERTION.
     assert_counterexample("fnbound_distinct_args_cx");
+    assert_cx_on("fnbound_distinct_args_cx", "assertion_");
 }
 
 #[test]
@@ -131,12 +189,12 @@ fn t6_fnmut_determinism_must_not_verify() {
     // `f(3) == f(3)` must NOT be provable. `FnMut` is not typed as a congruent
     // `SpecFn`; the call stays fail-closed. A `Verified` = congruence leaked to
     // `FnMut` = UNSOUND.
-    assert_not_verified("fnmut_determinism_must_not_verify");
+    assert_function_value_fail_closed("fnmut_determinism_must_not_verify");
 }
 
 #[test]
 fn t7_fnonce_reflexive_must_not_verify() {
     // FnOnce companion: also excluded from the congruent `SpecFn` typing, so even
     // the reflexive shape stays fail-closed (the call does not lower).
-    assert_not_verified("fnonce_reflexive_must_not_verify");
+    assert_function_value_fail_closed("fnonce_reflexive_must_not_verify");
 }

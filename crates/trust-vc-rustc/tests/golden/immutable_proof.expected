@@ -1,0 +1,10 @@
+exit: 1
+outcome: "verus-rejected"
+diagnostics:
+  error - variable `x` is not marked mutable @[5]
+functions:
+  test rejected -
+vcir:
+proof fn test_crate::test(x: spec u64) -> result: spec ()
+  x := 5u64
+  return[#1]

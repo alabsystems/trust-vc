@@ -1,0 +1,20 @@
+pub trait Sub: Q { }
+verus!{
+pub trait Tr { }
+impl<X: Q> U for S<X> {
+    open spec fn mm(&self) -> u8 { 2 }
+}
+pub trait Q { }
+pub struct S<X> { pub x: X }
+pub struct Z { pub z: u8 }
+pub trait U {
+    spec fn mm(&self) -> u8;
+}
+pub struct W0<X> { pub w: S<X> }
+impl<X: Sub> W0<X> {
+    pub proof fn f0(&self) ensures self.w.mm() == 2 { }
+}
+pub trait V1 {
+    proof fn f1<X: Sub>(s: S<X>) ensures s.mm() == 2 { }
+}
+} // verus!

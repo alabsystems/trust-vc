@@ -1,0 +1,5 @@
+error: `final(..)` is a `&mut` two-state contract op resolved by the verification path (`cargo trust-vc check`), and has no runtime meaning to expand into an obligation. It is supported in a function contract clause over a supported scalar `&mut` parameter (`final`/`mut_ref_future` in `ensures`; `mut_ref_current`/`old` in either). Write the postcondition over the bare `&mut` parameter (which already denotes its final value there), or verify this function through the verification path
+ --> tests/compile-fail/mut_ref_final_requires.rs:8:15
+  |
+8 |     requires!(*final(x) == 5u64);
+  |               ^

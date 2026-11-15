@@ -16,7 +16,7 @@ description = "Verification condition generation for Verus-style proofs"
 [features]
 default = []
 trust_mc = []
-ty = ["dep:tla-core", "dep:tla-check"]
+ty = ["dep:serde_json"]  # the protocol lane: runs the `ty` binary, reads its JSON
 proof-certificates = ["dep:trust-vc-kernel"]  # Opt-in UNSAT proof extraction (#2654)
 named-assertions = []    # Opt-in UNSAT core attribution via named assertions (#2706)
 expensive-tests = []  # Gate slow solver-bound test modules (#2644)
@@ -24,8 +24,10 @@ native-seq = []       # Use ay's native Seq(T) sort instead of Array(BV,T) (#268
 native-strings = []  # Use ay's native String sort for direct string reasoning (#2680 Slice 3)
 
 [dependencies]
+trust-vc-bitvector = { workspace = true }
 ay-core = { workspace = true }
 ay-dpll = { workspace = true }
+ay-frontend = { workspace = true }
 ay-sys = { workspace = true }
 num-bigint = { workspace = true }
 thiserror = { workspace = true }
@@ -36,8 +38,7 @@ proc-macro-crate = { workspace = true }
 tracing = { workspace = true }
 stacker = { workspace = true }
 sha2 = { workspace = true }
-tla-core = { workspace = true, optional = true }
-tla-check = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 trust-vc-kernel = { workspace = true, optional = true }
 inventory = { workspace = true }
 trust-vc-merge-contract = { workspace = true }

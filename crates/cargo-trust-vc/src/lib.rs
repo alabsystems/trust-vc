@@ -92,6 +92,13 @@ use trust_vc_core::proven_facts;
 const TRUST_VC_VERUS_PATH_ENV: &str = "TRUST_VC_VERUS_PATH";
 const VERUS_PATH_ENV: &str = "VERUS_PATH";
 const TRUST_VC_METADATA_CARGO_ENV: &str = "TRUST_VC_METADATA_CARGO";
+/// The lane flag every nested `targo` compile names. `targo` refuses a
+/// lane-less `check`/`build`/`test` ("refuses to create an implicitly unverified
+/// artifact"), and a stock cargo rejects the flag outright, so naming it is also
+/// what keeps a non-Trust cargo from running silently.
+pub(crate) const TARGO_UNVERIFIED_LANE: &str = "--unverified";
+/// Program spawned when `$CARGO` is unset: the Trust toolchain's Cargo frontend.
+const TARGO_PROGRAM: &str = "targo";
 const CARGO_DEFAULT_LIB_METADATA_ENV: &str = "__CARGO_DEFAULT_LIB_METADATA";
 const RUSTC_WRAPPER_ENV: &str = "RUSTC_WRAPPER";
 const VERUS_DRIVER_ARGS_ENV: &str = " __VERUS_DRIVER_ARGS__";
@@ -113,11 +120,13 @@ const TRUST_VC_DEPENDENCY_FACTS_ENV: &str = "__TRUST_VC_DEPENDENCY_FACTS__";
 /// Opt-in frontend selection propagated into the per-crate RUSTC_WRAPPER
 /// subprocess. Absent, or any value other than `driver`, means the trusted syn
 /// path alone runs (the unchanged default). `driver` additionally runs the
-/// nightly rustc-driver bin as a *parallel, non-authoritative* VC producer and
+/// rustc-driver bin as a *parallel, non-authoritative* VC producer and
 /// emits a driver-vs-syn parity witness.
 const TRUST_VC_FRONTEND_ENV: &str = "__TRUST_VC_FRONTEND__";
-/// Path to the prebuilt nightly `trust-vc-driver` bin and its runtime dylib
-/// search path (both printed by `scripts/build-trust-vc-driver.sh bin`). The
+/// Path to the prebuilt `trust-vc-driver` bin (`targo --unverified build -p
+/// trust-vc-driver --features rustc-driver --bin trust-vc-driver`) and an
+/// optional runtime dylib search path (the bin carries an rpath to its
+/// compiler's lib dir, so this is only needed for a bin built otherwise). The
 /// `--frontend=driver` parity path activates only when `TRUST_VC_DRIVER_BIN` is
 /// present; otherwise it is silently skipped so default behavior is unchanged.
 const TRUST_VC_DRIVER_BIN_ENV: &str = "TRUST_VC_DRIVER_BIN";
@@ -329,6 +338,27 @@ struct EvidenceCliArgs {
     #[arg(long = "refresh-trust-vc-corpus-evidence")]
     refresh_trust_vc_corpus_evidence: bool,
 
+    /// Re-pin ONE accepted entry's obligation_fingerprints after a proven
+    /// RENDERING-ONLY drift (repeatable; value is the entry's upstream_path).
+    ///
+    /// `--refresh-trust-vc-corpus-evidence` demands a corpus run that PASSES,
+    /// which it can never get when the reason to re-pin is that the engine
+    /// changed how it renders a condition: the stale pins are themselves what
+    /// makes the run fail. This narrow mode breaks that circle WITHOUT
+    /// weakening the pin. It refuses unless the named entry's ONLY corpus
+    /// failures are obligation-fingerprint mismatches, every declared verdict
+    /// still matches, and the fingerprint COUNT is unchanged; it writes only
+    /// `obligation_fingerprints`, never `min_obligations`, never a verdict,
+    /// never a classification, and never another entry.
+    ///
+    /// Deciding that a drift is rendering-only is the OPERATOR's judgement and
+    /// this flag records it; it is not a way to make a red case green.
+    #[arg(
+        long = "repin-obligation-rendering-drift",
+        value_name = "UPSTREAM_PATH"
+    )]
+    repin_obligation_rendering_drift: Vec<String>,
+
     /// Print a deterministic manifest triage summary and skip replacement gates.
     #[arg(long = "corpus-triage-report")]
     corpus_triage_report: bool,
@@ -478,6 +508,9 @@ fn finalize_evidence_args(args: EvidenceCliArgs) -> Result<evidence::EvidenceArg
         if args.refresh_trust_vc_corpus_evidence {
             incompatible.push("--refresh-trust-vc-corpus-evidence");
         }
+        if !args.repin_obligation_rendering_drift.is_empty() {
+            incompatible.push("--repin-obligation-rendering-drift");
+        }
         if args.corpus_triage_report {
             incompatible.push("--corpus-triage-report");
         }
@@ -511,9 +544,33 @@ fn finalize_evidence_args(args: EvidenceCliArgs) -> Result<evidence::EvidenceArg
         if args.trust_vc_corpus_command.is_some() {
             incompatible.push("--trust-vc-corpus-command");
         }
+        if !args.repin_obligation_rendering_drift.is_empty() {
+            incompatible.push("--repin-obligation-rendering-drift");
+        }
         if !incompatible.is_empty() {
             return Err(format!(
                 "--refresh-trust-vc-corpus-evidence rewrites manifest evidence pins from a passing corpus run and cannot proceed with {}",
+                incompatible.join(", ")
+            ));
+        }
+    }
+    if !args.repin_obligation_rendering_drift.is_empty() {
+        let mut incompatible = Vec::new();
+        if !args.run_trust_vc_corpus {
+            incompatible.push("missing --run-trust-vc-corpus");
+        }
+        if args.update_verus_tests_manifest {
+            incompatible.push("--update-verus-tests-manifest");
+        }
+        if args.corpus_triage_report {
+            incompatible.push("--corpus-triage-report");
+        }
+        if args.trust_vc_corpus_command.is_some() {
+            incompatible.push("--trust-vc-corpus-command");
+        }
+        if !incompatible.is_empty() {
+            return Err(format!(
+                "--repin-obligation-rendering-drift re-pins manifest fingerprints from THIS run's observed conditions and cannot proceed with {}",
                 incompatible.join(", ")
             ));
         }
@@ -545,6 +602,7 @@ fn finalize_evidence_args(args: EvidenceCliArgs) -> Result<evidence::EvidenceArg
         port_manifest_only: args.port_manifest_only,
         update_verus_tests_manifest: args.update_verus_tests_manifest,
         refresh_trust_vc_corpus_evidence: args.refresh_trust_vc_corpus_evidence,
+        repin_obligation_rendering_drift: args.repin_obligation_rendering_drift,
         corpus_triage_report: args.corpus_triage_report,
         scaffold_verus_port_stubs: args.scaffold_verus_port_stubs,
         verus_command: args.verus_command,
@@ -553,6 +611,18 @@ fn finalize_evidence_args(args: EvidenceCliArgs) -> Result<evidence::EvidenceArg
 
 fn default_cargo_command() -> String {
     select_default_cargo_command(default_cargo_candidates())
+}
+
+/// The Cargo frontend every nested build of this binary spawns: `$CARGO` (which
+/// `targo` exports to `targo trust-vc …` and to test processes), else `targo`
+/// from PATH. Owner directive 2026-09-28: there is no stock-cargo fallback; the
+/// compile verbs always carry [`TARGO_UNVERIFIED_LANE`], which a cargo that is
+/// not targo rejects.
+pub(crate) fn trust_cargo_command() -> String {
+    std::env::var("CARGO")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| TARGO_PROGRAM.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,24 +688,37 @@ fn normalize_verus_checkout_root(canonical: PathBuf) -> PathBuf {
     }
 }
 
+/// Default Cargo for the evidence lane (`--cargo-command` overrides it).
+///
+/// The evidence lane scopes Trust verification PER UNIT through
+/// `-Zprofile-rustflags --config profile.*.rustflags=[…]` (see
+/// `evidence::trust_per_unit_scope_args`), which is upstream-Cargo semantics
+/// that `targo` does not serve: measured 2026-09-28 on 321aaeda7, `targo trust
+/// check` with those flags refuses ("profile rustflags cannot set
+/// rustc-equivalent `-Ztrust_policy` during a verified Targo invocation"), and
+/// `targo --unverified` compiles with verification off ("0 obligations
+/// checked"), dropping the advisory scope the lane exists to apply. So the lane
+/// keeps the Cargo that rustup resolves for this repo's pinned `trust` channel,
+/// `$HOME/.cargo/bin/cargo`, whose provenance `collect_cargo_evidence` proves.
+///
+/// The stock system candidates that stood here (`/opt/homebrew/bin/cargo`,
+/// `/usr/local/bin/cargo`, `/usr/bin/cargo`) and the bare-`cargo` fallback are
+/// gone (owner directive 2026-09-28): when the rustup proxy is absent its path
+/// is still returned, so provenance and every command fail loudly on it rather
+/// than resolving another cargo from PATH.
 fn default_cargo_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/opt/homebrew/bin/cargo"),
-        PathBuf::from("/usr/local/bin/cargo"),
-        PathBuf::from("/usr/bin/cargo"),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".cargo").join("bin").join("cargo"));
-    }
-    candidates
+    std::env::var_os("HOME")
+        .map(|home| vec![PathBuf::from(home).join(".cargo").join("bin").join("cargo")])
+        .unwrap_or_default()
 }
 
 fn select_default_cargo_command(candidates: Vec<PathBuf>) -> String {
     candidates
         .iter()
         .find(|path| path.exists())
+        .or_else(|| candidates.first())
         .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cargo".to_string())
+        .unwrap_or_else(|| TARGO_PROGRAM.to_string())
 }
 
 #[cfg(test)]
@@ -1457,6 +1540,15 @@ impl CargoVerusCompatSubcommand {
         }
     }
 
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::Focus => "focus",
+            Self::Build => "build",
+            Self::Check => "check",
+        }
+    }
+
     fn default_forwarding_selector(self) -> VerusArgForwardingSelector {
         match self {
             Self::Verify | Self::Build | Self::Check => VerusArgForwardingSelector::All,
@@ -1468,7 +1560,7 @@ impl CargoVerusCompatSubcommand {
 /// Which verification front end the cargo-verus forwarding path drives.
 ///
 /// `Syn` (default) is the trusted, authoritative source-scanning path. `Driver`
-/// additionally runs the nightly rustc-driver bin as a *parallel,
+/// additionally runs the rustc-driver bin as a *parallel,
 /// non-authoritative* VC producer and emits a driver-vs-syn parity witness. It
 /// never changes the pass/fail verdict (syn stays authoritative) and hard-errors
 /// if the driver ever reports Verified where syn does not (the unsound
@@ -1683,7 +1775,7 @@ fn run_trust_vc_rustc_wrapper_verification(
 
     // Opt-in, NON-authoritative driver-vs-syn parity witness. The trusted syn
     // path above is authoritative for pass/fail; this additionally runs the
-    // nightly rustc-driver bin as a parallel VC producer and compares per
+    // rustc-driver bin as a parallel VC producer and compares per
     // function. It is env-gated (frontend=driver AND `TRUST_VC_DRIVER_BIN`
     // present) so the default path is byte-unchanged. Run it while the
     // dependency-facts env is still in place, so the parity re-scan sees the
@@ -1718,7 +1810,7 @@ fn trust_vc_frontend() -> TrustVcFrontend {
     }
 }
 
-/// Runs the nightly `trust-vc-driver` bin on the *same* real rustc arg vector,
+/// Runs the `trust-vc-driver` bin on the *same* real rustc arg vector,
 /// then compares its per-function verdicts against the trusted syn path and
 /// emits a distinct parity witness. Returns `Err` iff the driver reported
 /// `Verified` for a function where syn did not (the unsound direction).
@@ -1733,9 +1825,12 @@ fn run_driver_syn_parity_witness(
 }
 
 /// Spawns the prebuilt driver bin with the same rustc argv (argv[0] is ignored
-/// by `rustc_driver`, exactly like `rustc`), supplying the bootstrap escape
-/// hatch + runtime dylib search path the nightly bin needs, and parses its
-/// machine `TRUST_VC_DRIVER_RESULT` records off stdout. Driver rustc diagnostics
+/// by `rustc_driver`, exactly like `rustc`), plus an optional runtime dylib
+/// search path, and parses its machine `TRUST_VC_DRIVER_RESULT` records off
+/// stdout. No `RUSTC_BOOTSTRAP`: the bin links the Trust compiler, a dev
+/// channel that accepts `-Z` flags and features without the stable escape hatch
+/// (measured 2026-09-28: the driver tests run the bin and `driver::run` with no
+/// `RUSTC_BOOTSTRAP` in the environment). Driver rustc diagnostics
 /// (stderr) and its fail-closed exit status are intentionally not propagated —
 /// only the parsed verdicts and the soundness comparison matter here.
 fn run_trust_vc_driver_bin(
@@ -1744,7 +1839,6 @@ fn run_trust_vc_driver_bin(
 ) -> Result<BTreeMap<String, String>, String> {
     let mut command = process::Command::new(driver_bin);
     command.args(rustc_args);
-    command.env("RUSTC_BOOTSTRAP", "1");
     if let Some(dyld) = std::env::var_os(TRUST_VC_DRIVER_DYLD_ENV) {
         if !dyld.is_empty() {
             command.env("DYLD_FALLBACK_LIBRARY_PATH", dyld);
@@ -3531,8 +3625,25 @@ fn run_cargo_verus_arg_forwarding(args: CargoVerusArgForwardingArgs) -> Result<i
     let env_overrides =
         make_cargo_verus_forwarding_env(&metadata, &packages_to_process, &root_packages, &args)?;
 
-    let mut command = process::Command::new(final_cargo_command());
+    let cargo = final_cargo_command();
+    // The forwarded compile is a tool build: trust-vc's own verification runs
+    // in the RUSTC_WRAPPER set below, not in trustc's pipeline, so it names the
+    // unverified lane (a verified `targo trust` run refuses a RUSTC_WRAPPER).
+    // That lane flag is targo's: prove `$CARGO` is targo first, so upstream
+    // cargo gets a refusal naming targo rather than its own usage error, and
+    // nothing falls back to a stock build.
+    let verb = args.subcommand.verb();
+    gate::probe_targo(
+        &cargo,
+        &args.current_dir,
+        &format!(
+            "`trust-vc {verb}` forwards the build to the Trust toolchain's `targo` \
+             (run it as `targo trust-vc {verb}`)"
+        ),
+    )?;
+    let mut command = process::Command::new(&cargo);
     command.current_dir(&args.current_dir);
+    command.arg(TARGO_UNVERIFIED_LANE);
     command.arg(args.subcommand.cargo_subcommand());
     command.args(final_cargo_args(&metadata, &args));
     command.envs(env_overrides.iter());
@@ -3724,11 +3835,11 @@ fn load_cargo_metadata(
 }
 
 fn metadata_cargo_command() -> String {
-    std::env::var(TRUST_VC_METADATA_CARGO_ENV).unwrap_or_else(|_| default_cargo_command())
+    std::env::var(TRUST_VC_METADATA_CARGO_ENV).unwrap_or_else(|_| trust_cargo_command())
 }
 
 fn final_cargo_command() -> String {
-    std::env::var("CARGO").unwrap_or_else(|_| default_cargo_command())
+    trust_cargo_command()
 }
 
 fn metadata_passthrough_args(cargo_args: &[String]) -> Vec<String> {
@@ -4027,7 +4138,7 @@ fn make_cargo_verus_forwarding_env(
     );
 
     // Opt-in `--frontend=driver`: propagate the selection plus the prebuilt
-    // nightly driver bin + its runtime dylib path into the per-crate
+    // driver bin + its runtime dylib path into the per-crate
     // RUSTC_WRAPPER subprocess. The parity path activates only when
     // `TRUST_VC_DRIVER_BIN` is present, so this is a no-op (default behavior)
     // when the driver bin has not been built/exported.
@@ -4475,11 +4586,26 @@ mod tests {
     }
 
     #[test]
-    fn test_select_default_cargo_command_falls_back_to_cargo() {
+    fn test_select_default_cargo_command_never_falls_back_to_a_bare_cargo() {
         let root = make_temp_crate_root("default_cargo_fallback");
-        let selected = select_default_cargo_command(vec![root.join("missing-cargo")]);
+        let missing = root.join("missing-cargo");
+        let selected = select_default_cargo_command(vec![missing.clone()]);
 
-        assert_eq!(selected, "cargo");
+        // An absent rustup proxy stays the (absolute, failing) selection rather
+        // than a PATH lookup that could land on some other cargo.
+        assert_eq!(selected, missing.to_string_lossy());
+        assert_eq!(select_default_cargo_command(Vec::new()), TARGO_PROGRAM);
+    }
+
+    #[test]
+    fn test_default_cargo_candidates_are_only_the_rustup_proxy() {
+        for candidate in default_cargo_candidates() {
+            assert!(
+                candidate.ends_with(Path::new(".cargo").join("bin").join("cargo")),
+                "{}",
+                candidate.display()
+            );
+        }
     }
 
     fn write_synthetic_crate(root: &Path, function_count: usize) {
@@ -4720,6 +4846,7 @@ mod tests {
             port_manifest_only: false,
             update_verus_tests_manifest: false,
             refresh_trust_vc_corpus_evidence: false,
+            repin_obligation_rendering_drift: Vec::new(),
             corpus_triage_report: false,
             scaffold_verus_port_stubs: false,
             port_output_dir: None,

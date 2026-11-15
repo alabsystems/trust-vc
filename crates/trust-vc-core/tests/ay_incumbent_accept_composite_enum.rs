@@ -18,10 +18,11 @@
 // `encoder/verification/solve.rs` (#enum-incremental) and the pinned divergence
 // in `tests/repro_enum_incremental.rs`.
 //
-// Companion to `ay_incumbent_accept_composite.rs` (the STRUCT form). Runs on the
-// STOCK homebrew toolchain (the trust-vc verification ENGINE has no
-// rustc_private dependency); see `scripts/stock-harness.sh`. Override the
-// fixture with `AY_PB_PROOF_SRC`.
+// Companion to `ay_incumbent_accept_composite.rs` (the STRUCT form). The
+// trust-vc verification ENGINE has no rustc_private dependency, so this runs on
+// the Trust toolchain's unverified lane:
+// `targo --unverified test --locked -p trust-vc-core --test ay_incumbent_accept_composite_enum`.
+// Override the fixture with `AY_PB_PROOF_SRC`.
 
 use trust_vc_core::verify_function_from_file;
 use trust_vc_core::VerifyResult;

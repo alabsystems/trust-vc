@@ -7,6 +7,7 @@ use crate::vc::{ProofObligation, SolverMode, VerificationContext};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::{Expr, FnArg, Ident, Lit, Pat, Signature, Token, Type};
 
 const SPEC_RETURNS_ERROR: &str = "spec functions cannot have `returns` clause";
@@ -722,7 +723,7 @@ fn with_ambient_solver_mode(
 ///
 /// Adding a name here is a soundness decision: do it only when the attribute is
 /// genuinely honoured by some pass.
-const KNOWN_TRUST_VC_ATTRIBUTES: &[&str] = &[
+pub(super) const KNOWN_TRUST_VC_ATTRIBUTES: &[&str] = &[
     // --- clause attributes consumed by this pass ---
     "requires",
     "ensures",
@@ -768,6 +769,33 @@ const KNOWN_TRUST_VC_ATTRIBUTES: &[&str] = &[
     "uninterp",
 ];
 
+/// True when the item carries a TRUSTED-BOUNDARY marker —
+/// `#[trust_vc::external_body]` or `#[trust_vc::external]` (and the
+/// `#[verifier::…]` spellings, matched here on the last segment).
+///
+/// SOUNDNESS-CRITICAL (H14, a trust-boundary breach). The braces of such an item
+/// hold a PLACEHOLDER: the real implementation is foreign, or lives elsewhere,
+/// and the text only exists so the item compiles. Trust's unified compilation is
+/// what makes an ORDINARY exec callee's body legitimately visible to its caller,
+/// and definitional exec bodies stay the default here — but no amount of
+/// whole-program visibility makes a stub the thing that runs. So every
+/// `__body_axiom_*` publisher consults this predicate and declines: the callee is
+/// left as an opaque UF carrying its DECLARED contract (`#[requires]` /
+/// `#[ensures]`), which is what a trusted declaration promises and the only thing
+/// a caller may assume about it.
+///
+/// Last-segment matching is deliberately WIDE: `#[verifier::external_body]` and
+/// any other namespace spelling also decline. Over-declining costs completeness
+/// on the callee's body; under-declining publishes a placeholder as a fact.
+pub(crate) fn has_external_trusted_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "external" || segment.ident == "external_body")
+    })
+}
+
 /// True when `path` explicitly names the `trust_vc` namespace ahead of its
 /// final segment — `#[trust_vc::foo]`, `#[::trust_vc::foo]`,
 /// `#[crate::trust_vc::foo]`.
@@ -790,7 +818,7 @@ fn is_trust_vc_namespaced(path: &syn::Path) -> bool {
 
 /// Reject an unrecognized `trust_vc::`-namespaced attribute instead of dropping
 /// it. See [`KNOWN_TRUST_VC_ATTRIBUTES`] for why silence is unsound here.
-fn reject_unknown_trust_vc_attribute(attr: &syn::Attribute) -> TrustVcResult<()> {
+pub(crate) fn reject_unknown_trust_vc_attribute(attr: &syn::Attribute) -> TrustVcResult<()> {
     if !is_trust_vc_namespaced(attr.path()) {
         return Ok(());
     }
@@ -819,8 +847,27 @@ pub(super) fn extract_contract_attributes(
 ) -> TrustVcResult<()> {
     reject_returns_on_spec(attrs)?;
 
+    // Every obligation raised below belongs to the CLAUSE ATTRIBUTE it is read
+    // from, not to any statement: upstream Verus marks a failing postcondition
+    // on the `ensures` line itself (`#[trust_vc::ensures(x * z < y * z)] //
+    // FAILS`), so that is the line this lane must report. Parked as the ambient
+    // location per attribute and cleared on the way out, so nothing raised
+    // after this loop inherits the last clause's line.
+    let enclosing = vc.ambient_source_location().cloned();
+    let result = extract_contract_attributes_located(attrs, vc, ambient_solver_mode, sig);
+    vc.replace_ambient_source_location(enclosing);
+    result
+}
+
+fn extract_contract_attributes_located(
+    attrs: &[syn::Attribute],
+    vc: &mut VerificationContext,
+    ambient_solver_mode: Option<SolverMode>,
+    sig: Option<&Signature>,
+) -> TrustVcResult<()> {
     for attr in attrs {
         let attr_name = super::path_last_segment(attr.path());
+        vc.replace_ambient_source_location(crate::SourceLocation::from_span(attr.span()));
 
         match attr_name.as_deref() {
             Some("requires") => {

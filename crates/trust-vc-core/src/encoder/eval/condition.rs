@@ -65,6 +65,50 @@ impl AYEncoder {
             })
     }
 
+    /// Refuse a root whose typing disagrees anywhere
+    /// (`ir_lowering::validate_ir_typing`, design-trust-proof-backend.md §5b
+    /// rule 13), so both frontends' IR passes the one validator.
+    pub(in super::super) fn validate_ir_typing(
+        &self,
+        expr: &crate::ir::TrustVcExpr,
+        locals: Option<&std::collections::HashMap<String, crate::ir::TrustVcType>>,
+    ) -> TrustVcResult<()> {
+        let scope = crate::ir_lowering::TypingScope {
+            variables: Some(&self.var_types),
+            locals,
+            functions: Some(&self.fn_ctx.return_types),
+            parameters: Some(&self.fn_ctx.param_types),
+        };
+        crate::ir_lowering::validate_ir_typing(expr, &scope).map_err(|detail| {
+            TrustVcError::Encoding {
+                context: "validate IR typing",
+                detail,
+            }
+        })
+    }
+
+    /// The tree a root is ENCODED as: `expr` with every inline spec-function
+    /// call replaced by its body (`substitute_inline_calls`), validated as a
+    /// whole (§5b rule 13). The validator runs on the tree the encoder reads,
+    /// so a claim inside an inline body — never itself encoded as an axiom —
+    /// is checked where the body lands, at the argument types it lands at
+    /// (with `s: Seq<u8>`, an inline body `p[0]` declared `i8` made `f(s) ==
+    /// -56` `Verified` for `s[0] == 200`). The root as given is validated
+    /// too: a call node that substitution replaces carries its own result
+    /// claim.
+    pub(in super::super) fn prepare_root<'e>(
+        &self,
+        expr: &'e crate::ir::TrustVcExpr,
+    ) -> TrustVcResult<std::borrow::Cow<'e, crate::ir::TrustVcExpr>> {
+        self.validate_ir_typing(expr, None)?;
+        if self.state.inline_bodies.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(expr));
+        }
+        let substituted = super::substitute_inline_calls(expr, &self.state.inline_bodies);
+        self.validate_ir_typing(&substituted, None)?;
+        Ok(std::borrow::Cow::Owned(substituted))
+    }
+
     // encode_trust_vc_expr dispatch lives in encoder/ir_encoder/mod.rs (Part of #1865).
 
     /// Encodes a `TrustVcExpr` into a ay `Term` using the typed IR encoder.
@@ -84,18 +128,9 @@ impl AYEncoder {
         if super::super::verification::test_hooks::take_forced_encode_condition_panic() {
             panic!("forced encode_condition_typed panic");
         }
-
-        // Expand inline spec function calls before any further processing.
-        // Inline functions have their body substituted at call sites instead
-        // of using UF + body axiom. Part of #2488.
-        let expr = if !self.state.inline_bodies.is_empty() {
-            std::borrow::Cow::Owned(super::substitute_inline_calls(
-                expr,
-                &self.state.inline_bodies,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(expr)
-        };
+        // Inline spec functions have their body substituted at call sites
+        // instead of using UF + body axiom (#2488); the result is validated.
+        let expr = self.prepare_root(expr)?;
 
         // Substitute assumed equalities and normalize arithmetic before encoding.
         // Equality bindings like `y == d * q2` are substituted into the
@@ -121,11 +156,17 @@ impl AYEncoder {
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
+        ast_parser.seq_contains_quantified_memo = Some(&mut self.seq_contains_quantified_memo);
         ast_parser.poly_context = Some(&mut self.registries.poly_context);
         ast_parser.ground_pool = Some(&mut self.state.ground_pool);
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        // An assumption encoded here DROPS the obligations it pushes (a spec
+        // function's defining axiom, a broadcast, a ground re-encoding); so does
+        // a demand-inline retry (rule 9).
+        ast_parser.obligations_unchecked =
+            self.state.demand_inlined_bodies || self.state.in_assumption_context;
         ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
@@ -153,12 +194,16 @@ impl AYEncoder {
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
         ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
+        ast_parser.demand_inline_overrides_active = self.state.demand_inline_overrides_active;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
         ast_parser
             .pure_collection_cache
             .clone_from(&self.state.pure_collection_cache);
+        ast_parser
+            .projected_collection_meta
+            .clone_from(&self.state.projected_collection_meta);
         let result = ast_parser.encode_trust_vc_expr(&normalized);
         self.state.diagnostics.merge(&ast_parser.diagnostics);
         // Persist any new ground element aliases back to encoder state.
@@ -181,6 +226,12 @@ impl AYEncoder {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v)),
         );
+        self.state.projected_collection_meta.extend(
+            ast_parser
+                .projected_collection_meta
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
         result
     }
 
@@ -194,14 +245,7 @@ impl AYEncoder {
         &mut self,
         expr: &crate::ir::TrustVcExpr,
     ) -> TrustVcResult<Term> {
-        let expr = if !self.state.inline_bodies.is_empty() {
-            std::borrow::Cow::Owned(super::substitute_inline_calls(
-                expr,
-                &self.state.inline_bodies,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(expr)
-        };
+        let expr = self.prepare_root(expr)?;
 
         let normalized = if !self.state.equality_assumptions.is_empty() {
             super::super::ir_encoder::normalize::substitute_and_normalize(
@@ -221,11 +265,14 @@ impl AYEncoder {
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
+        ast_parser.seq_contains_quantified_memo = Some(&mut self.seq_contains_quantified_memo);
         ast_parser.poly_context = Some(&mut self.registries.poly_context);
         ast_parser.ground_pool = Some(&mut self.state.ground_pool);
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        ast_parser.obligations_unchecked =
+            self.state.demand_inlined_bodies || self.state.in_assumption_context;
         ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
@@ -245,12 +292,16 @@ impl AYEncoder {
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
         ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
+        ast_parser.demand_inline_overrides_active = self.state.demand_inline_overrides_active;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
         ast_parser
             .pure_collection_cache
             .clone_from(&self.state.pure_collection_cache);
+        ast_parser
+            .projected_collection_meta
+            .clone_from(&self.state.projected_collection_meta);
         let result = ast_parser.encode_refutation_expr(&normalized);
         self.state.diagnostics.merge(&ast_parser.diagnostics);
         #[cfg(feature = "native-seq")]
@@ -271,6 +322,12 @@ impl AYEncoder {
                 .pure_collection_cache
                 .iter()
                 .map(|(k, v)| (k.clone(), *v)),
+        );
+        self.state.projected_collection_meta.extend(
+            ast_parser
+                .projected_collection_meta
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
         );
         result
     }
@@ -296,6 +353,7 @@ impl AYEncoder {
         expr: &crate::ir::TrustVcExpr,
         bindings: &[(&str, Term)],
     ) -> TrustVcResult<Term> {
+        self.validate_ir_typing(expr, None)?;
         let mut ast_parser = AstExpressionParser::new(
             &mut self.solver,
             &self.variables,
@@ -306,9 +364,11 @@ impl AYEncoder {
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
+        ast_parser.seq_contains_quantified_memo = Some(&mut self.seq_contains_quantified_memo);
         ast_parser.poly_context = Some(&mut self.registries.poly_context);
         ast_parser.ground_pool = Some(&mut self.state.ground_pool);
         ast_parser.in_assumption_context = true;
+        ast_parser.obligations_unchecked = true;
         ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         ast_parser.preserve_assumption_quantifier_sorts =
             self.state.preserve_assumption_quantifier_sorts;
@@ -328,12 +388,16 @@ impl AYEncoder {
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
         ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
+        ast_parser.demand_inline_overrides_active = self.state.demand_inline_overrides_active;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
         ast_parser
             .pure_collection_cache
             .clone_from(&self.state.pure_collection_cache);
+        ast_parser
+            .projected_collection_meta
+            .clone_from(&self.state.projected_collection_meta);
         for (name, term) in bindings {
             let ty = self
                 .var_types
@@ -366,6 +430,12 @@ impl AYEncoder {
                 .pure_collection_cache
                 .iter()
                 .map(|(k, v)| (k.clone(), *v)),
+        );
+        self.state.projected_collection_meta.extend(
+            ast_parser
+                .projected_collection_meta
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
         );
         result
     }
@@ -408,20 +478,11 @@ impl AYEncoder {
         if super::super::verification::test_hooks::take_forced_encode_condition_panic() {
             panic!("forced encode_condition_typed panic");
         }
-
-        // Expand inline spec-function calls before overflow-aware encoding, the
-        // same way `encode_condition_typed`/`encode_refutation_condition_typed`
-        // do. An `#[trust_vc::inline]` function is call-site-substituted and is
-        // therefore NOT declared as a backend UF, so encoding an un-substituted
-        // `f(args)` here would fail with "Undefined function: f". Part of #2777.
-        let expr = if !self.state.inline_bodies.is_empty() {
-            std::borrow::Cow::Owned(super::substitute_inline_calls(
-                expr,
-                &self.state.inline_bodies,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(expr)
-        };
+        // Inline spec-function calls are expanded before overflow-aware
+        // encoding too: an `#[trust_vc::inline]` function is not declared as a
+        // backend UF, so an un-substituted `f(args)` would fail with
+        // "Undefined function: f" (#2777).
+        let expr = self.prepare_root(expr)?;
         let expr: &crate::ir::TrustVcExpr = &expr;
 
         let overflow_behavior = if check_overflow {
@@ -443,11 +504,14 @@ impl AYEncoder {
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
+        ast_parser.seq_contains_quantified_memo = Some(&mut self.seq_contains_quantified_memo);
         ast_parser.poly_context = Some(&mut self.registries.poly_context);
         ast_parser.ground_pool = Some(&mut self.state.ground_pool);
         ast_parser.choose_registry = Some(&mut self.registries.choose_registry);
         ast_parser.prophecy_registry = Some(&mut self.registries.prophecy_registry);
         ast_parser.in_assumption_context = self.state.in_assumption_context;
+        // The obligations are returned to the caller, which checks them.
+        ast_parser.obligations_unchecked = self.state.demand_inlined_bodies;
         ast_parser.pending_universal_closure = self.state.pending_universal_closure;
         // Assumption path only: eager-Skolemize a top-level positive assumption
         // existential (never threaded into the refutation/goal path, so a
@@ -472,12 +536,16 @@ impl AYEncoder {
             .clone_from(&self.state.nat_cast_aliases);
         ast_parser.map_subset_seen = self.state.map_subset_seen;
         ast_parser.seq_element_model_demanded = self.state.seq_element_model_demanded;
+        ast_parser.demand_inline_overrides_active = self.state.demand_inline_overrides_active;
         ast_parser
             .map_dom_bridges
             .clone_from(&self.state.map_dom_bridges);
         ast_parser
             .pure_collection_cache
             .clone_from(&self.state.pure_collection_cache);
+        ast_parser
+            .projected_collection_meta
+            .clone_from(&self.state.projected_collection_meta);
         let result = ast_parser.encode_trust_vc_expr(expr);
         self.state.diagnostics.merge(&ast_parser.diagnostics);
         #[cfg(feature = "native-seq")]
@@ -498,6 +566,12 @@ impl AYEncoder {
                 .pure_collection_cache
                 .iter()
                 .map(|(k, v)| (k.clone(), *v)),
+        );
+        self.state.projected_collection_meta.extend(
+            ast_parser
+                .projected_collection_meta
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
         );
         let term = result?;
         let overflow_checks = ast_parser.take_overflow_checks();

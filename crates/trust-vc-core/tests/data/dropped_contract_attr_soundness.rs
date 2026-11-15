@@ -46,15 +46,16 @@ fn correct_clause_still_verifies(x: u64) -> u64 {
 }
 
 // NARROWNESS PIN 2: non-`trust_vc::` attributes must stay silently ignored.
-// `#[must_use]`, `#[allow(..)]`, `#[cfg_attr(..)]`, doc comments (which lower
-// to `#[doc = ".."]`) and a FOREIGN namespaced path (`#[some_crate::widget]`,
-// two segments but not `trust_vc`) are ordinary Rust and carry no verification
-// meaning here. The gate must not widen to any of them.
+// `#[must_use]`, `#[allow(..)]`, `#[cfg_attr(..)]` and doc comments (which
+// lower to `#[doc = ".."]`) are ordinary Rust and carry no verification
+// meaning here. The gate must not widen to any of them. A FOREIGN namespaced
+// path (`#[some_crate::widget]`) is pinned in
+// `dropped_contract_attr_foreign.rs`: it can be an attribute macro, which
+// refuses its whole file.
 /// A doc comment must not trip the gate.
 #[must_use]
 #[allow(dead_code)]
 #[cfg_attr(test, allow(unused_variables))]
-#[some_crate::widget(anything)]
 #[trust_vc::ensures(result == 1u64)]
 fn foreign_attributes_still_ignored(x: u64) -> u64 {
     trust_vc::assert!(1u64 == 1u64);

@@ -92,15 +92,35 @@ fn substitute_inline_calls_bounded(
         } => {
             let expanded_args = rec_vec(args);
             if let Some((param_names, param_types, body)) = inline_bodies.get(name) {
+                // Every argument is BOUND at its parameter's type, exactly as
+                // a non-inline call binds it (`ir_lowering::bind_call_argument`,
+                // §5b rule 11): the body reads the parameter at its declared
+                // type, so a `u8` argument of an `int` parameter lands as the
+                // integer it denotes. An argument the parameter's type cannot
+                // hold leaves the call unexpanded — the dispatch refuses it
+                // (`fid(q: u8) -> u8 { q }` applied to `y: i8 == -56`
+                // substituted `y` bare: `fid(y) < 0` was `Verified`).
+                let bound_args = if param_types.len() == expanded_args.len() {
+                    param_types
+                        .iter()
+                        .zip(&expanded_args)
+                        .map(|(param_ty, arg)| {
+                            crate::ir_lowering::bind_call_argument(arg, param_ty).ok()
+                        })
+                        .collect::<Option<Vec<_>>>()
+                } else {
+                    None
+                };
                 // Stop before exceeding the expansion bound: leave the residual
                 // call uninterpreted rather than recurse into a non-terminating
                 // (recursive) inline body and overflow the stack.
-                if expansion_depth < MAX_INLINE_EXPANSION_DEPTH
-                    && param_names.len() == expanded_args.len()
-                    && !active_calls.iter().any(|(active_name, active_args)| {
-                        active_name == name && active_args == &expanded_args
-                    })
-                {
+                if let Some(bound_args) = bound_args.filter(|_| {
+                    expansion_depth < MAX_INLINE_EXPANSION_DEPTH
+                        && param_names.len() == expanded_args.len()
+                        && !active_calls.iter().any(|(active_name, active_args)| {
+                            active_name == name && active_args == &expanded_args
+                        })
+                }) {
                     // Monomorphize the (possibly generic) inline body to the
                     // concrete instantiation implied by the call-site argument
                     // types (#2777, upstream inline.rs `inline_poly`). Unify each
@@ -135,7 +155,7 @@ fn substitute_inline_calls_bounded(
 
                     let subst: std::collections::HashMap<&str, &TrustVcExpr> = param_names
                         .iter()
-                        .zip(expanded_args.iter())
+                        .zip(bound_args.iter())
                         .map(|(p, a)| (p.as_str(), a))
                         .collect();
                     let substituted = super::vars::substitute_vars_in_expr(body, &subst);
@@ -308,7 +328,7 @@ fn substitute_inline_calls_bounded(
                     body: rec(&arm.body),
                     // Substitute inside the guard too — an inlined guarded match whose
                     // guard was dropped would become unconditional (false-verify).
-                    guard: arm.guard.as_ref().map(|g| rec(g)),
+                    guard: arm.guard.as_ref().map(rec),
                 })
                 .collect(),
             ty: ty.clone(),
@@ -836,7 +856,7 @@ mod tests {
             "f".to_string(),
             (
                 vec!["x".to_string()],
-                vec![],
+                vec![int_ty()],
                 add(call("f", vec![var("x")]), int_lit(1)),
             ),
         );
@@ -862,7 +882,7 @@ mod tests {
             "a".to_string(),
             (
                 vec!["x".to_string()],
-                vec![],
+                vec![int_ty()],
                 add(call("b", vec![var("x")]), int_lit(1)),
             ),
         );
@@ -870,7 +890,7 @@ mod tests {
             "b".to_string(),
             (
                 vec!["x".to_string()],
-                vec![],
+                vec![int_ty()],
                 add(call("a", vec![var("x")]), int_lit(1)),
             ),
         );
@@ -959,6 +979,52 @@ mod tests {
         assert_eq!(statically_decided_inline_condition(&condition), None);
     }
 
+    /// An inline call's argument is BOUND at its parameter's type before the
+    /// body lands (§5b rule 11): a `u8` argument of an `int` parameter is the
+    /// integer it denotes, and an `i8` argument of a `u8` parameter leaves the
+    /// call unexpanded, for the dispatch to refuse (substituted bare, `fid(q:
+    /// u8) -> u8 { q }` at `y: i8 == -56` made `fid(y) < 0` `Verified`).
+    #[test]
+    fn an_inline_argument_is_bound_at_its_parameter_type() {
+        let u8_ty = TrustVcType::Uint { width: 8 };
+        let i8_ty = TrustVcType::Int { width: 8 };
+        let typed_var = |name: &str, ty: &TrustVcType| TrustVcExpr::Var {
+            name: name.to_string(),
+            ty: ty.clone(),
+        };
+        let mut bodies: InlineBodyMap = HashMap::new();
+        bodies.insert(
+            "fid".to_string(),
+            (
+                vec!["q".to_string()],
+                vec![u8_ty.clone()],
+                typed_var("q", &u8_ty),
+            ),
+        );
+        bodies.insert(
+            "fint".to_string(),
+            (
+                vec!["q".to_string()],
+                vec![TrustVcType::MathInt],
+                typed_var("q", &TrustVcType::MathInt),
+            ),
+        );
+        let refused = substitute_inline_calls(&call("fid", vec![typed_var("y", &i8_ty)]), &bodies);
+        assert_eq!(
+            count_calls(&refused, "fid"),
+            1,
+            "an i8 argument of a u8 parameter: {refused:?}"
+        );
+        let lifted = substitute_inline_calls(&call("fint", vec![typed_var("x", &u8_ty)]), &bodies);
+        assert!(
+            matches!(
+                &lifted,
+                TrustVcExpr::Cast { from_ty, to_ty: TrustVcType::MathInt, .. } if *from_ty == u8_ty
+            ),
+            "a u8 argument of an int parameter is lifted: {lifted:?}"
+        );
+    }
+
     /// A non-recursive inline chain shorter than the bound is fully expanded:
     /// the depth counter only advances on body expansion, so legitimate inlining
     /// is never truncated.
@@ -968,13 +1034,17 @@ mod tests {
         // g(x) == x + 1 ; h(x) == g(x) + 1  -> h(0) == (0 + 1) + 1, no residual.
         bodies.insert(
             "g".to_string(),
-            (vec!["x".to_string()], vec![], add(var("x"), int_lit(1))),
+            (
+                vec!["x".to_string()],
+                vec![int_ty()],
+                add(var("x"), int_lit(1)),
+            ),
         );
         bodies.insert(
             "h".to_string(),
             (
                 vec!["x".to_string()],
-                vec![],
+                vec![int_ty()],
                 add(call("g", vec![var("x")]), int_lit(1)),
             ),
         );

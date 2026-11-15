@@ -72,13 +72,10 @@ fn assert_counterexample(func: &str) {
 }
 
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("RETURN-FLOW FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (fail-closed / Ambiguous lowering) or any solver
-        // non-Verified verdict (incl. Unknown) is a sound non-verify.
-        _ => {}
+    // An extraction Err (fail-closed / Ambiguous lowering) or any solver
+    // non-Verified verdict (incl. Unknown) is a sound non-verify.
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("RETURN-FLOW FALSE-VERIFY: `{func}` must not verify")
     }
 }
 

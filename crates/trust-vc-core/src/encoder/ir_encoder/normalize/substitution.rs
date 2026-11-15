@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use crate::ir::TrustVcType;
 use crate::ir_expr::{CompareOp, TrustVcExpr};
 
 use super::arith::normalize_int_expr;
@@ -16,6 +17,10 @@ use super::arith::normalize_int_expr;
 /// Detects patterns like `var == expr` or `expr == var` and returns
 /// `Some((var_name, rhs_expr))`. Only extracts simple `Var` on one side;
 /// var-var equalities are skipped (no clear substitution direction).
+///
+/// A float variable is never bound: IEEE `==` holds between `0.0` and `-0.0`,
+/// which are different values (`1.0 / x` tells them apart), so `x == 0.0`
+/// does not make `x` the value `0.0`. The equality is still asserted.
 pub(crate) fn extract_equality_binding(expr: &TrustVcExpr) -> Option<(String, TrustVcExpr)> {
     if let TrustVcExpr::Compare {
         op: CompareOp::Eq,
@@ -24,19 +29,23 @@ pub(crate) fn extract_equality_binding(expr: &TrustVcExpr) -> Option<(String, Tr
     } = expr
     {
         // var == expr (non-var RHS)
-        if let TrustVcExpr::Var { name, .. } = left.as_ref() {
+        if let TrustVcExpr::Var { name, ty } = left.as_ref() {
             if !matches!(right.as_ref(), TrustVcExpr::Var { .. }) {
-                return Some((name.clone(), *right.clone()));
+                return (!is_float(ty)).then(|| (name.clone(), *right.clone()));
             }
         }
         // expr == var (non-var LHS)
-        if let TrustVcExpr::Var { name, .. } = right.as_ref() {
+        if let TrustVcExpr::Var { name, ty } = right.as_ref() {
             if !matches!(left.as_ref(), TrustVcExpr::Var { .. }) {
-                return Some((name.clone(), *left.clone()));
+                return (!is_float(ty)).then(|| (name.clone(), *left.clone()));
             }
         }
     }
     None
+}
+
+fn is_float(ty: &TrustVcType) -> bool {
+    matches!(ty, TrustVcType::Float { .. })
 }
 
 /// Substitute variables in a TrustVcExpr tree using provided bindings.
@@ -53,18 +62,59 @@ pub(crate) fn substitute_vars(
     substitute_vars_inner(expr, bindings)
 }
 
+/// The expression that may stand for a variable of type `var_ty` pinned to
+/// `replacement`, or `None` when substituting would change what the variable
+/// denotes (the variable is then kept; its equality is still asserted, so
+/// nothing is lost but the rewrite).
+///
+/// For an integer-typed variable the replacement must BE a value of that type:
+///
+/// * an untyped literal form (`ir_lowering::is_untyped_literal`) is retyped to
+///   the variable's type when every literal in it fits
+///   (`ir_lowering::untyped_literal_at_peer`). For `i32` that retyping is the
+///   identity — `i32` literals ARE the untyped placeholder — so the value is
+///   pinned to `i32` by an identity cast instead. Substituted bare,
+///   `x0: i32 == -128` made `-x0` the untyped `-(-128)`, which the `i8` peer
+///   of `-x0 < z` then typed as the `i8` negation of `-128` (Verified, false),
+///   and closed `x0 - x1` into an untyped tree a peer re-typed;
+/// * any other replacement must have the variable's own (derived) type: an
+///   expression of another type would retype every use of the variable.
+///
+/// Variables of every other type are substituted as before.
+fn replacement_for(var_ty: &TrustVcType, replacement: &TrustVcExpr) -> Option<TrustVcExpr> {
+    let integer_var = matches!(
+        var_ty,
+        TrustVcType::Int { .. }
+            | TrustVcType::Uint { .. }
+            | TrustVcType::MathInt
+            | TrustVcType::Nat
+    );
+    if !integer_var {
+        return Some(replacement.clone());
+    }
+    if crate::ir_lowering::is_untyped_literal(replacement) {
+        let typed = crate::ir_lowering::untyped_literal_at_peer(replacement, var_ty)?;
+        if !matches!(var_ty, TrustVcType::Int { width: 32 }) {
+            return Some(typed);
+        }
+        return Some(TrustVcExpr::Cast {
+            expr: Box::new(typed),
+            from_ty: var_ty.clone(),
+            to_ty: var_ty.clone(),
+        });
+    }
+    (crate::ir_lowering::infer_expr_type(replacement) == *var_ty).then(|| replacement.clone())
+}
+
 fn substitute_vars_inner(
     expr: &TrustVcExpr,
     bindings: &HashMap<String, TrustVcExpr>,
 ) -> TrustVcExpr {
     match expr {
-        TrustVcExpr::Var { name, .. } => {
-            if let Some(replacement) = bindings.get(name) {
-                replacement.clone()
-            } else {
-                expr.clone()
-            }
-        }
+        TrustVcExpr::Var { name, ty } => bindings
+            .get(name)
+            .and_then(|replacement| replacement_for(ty, replacement))
+            .unwrap_or_else(|| expr.clone()),
 
         TrustVcExpr::Arith {
             op,

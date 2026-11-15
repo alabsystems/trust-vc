@@ -24,3 +24,9 @@ pub(super) use methods::{lower_field_access, lower_method_call, lower_struct_lit
 // with structural recursion and tuple-carrier renormalization, and NO arbitrary
 // datatype-carrier renaming (unlike `TrustVcType::monomorphize`).
 pub(crate) use methods::substitute_type_params;
+// The extractor-synthesized unwrap-family precondition markers (H3): emitted by
+// `vc_extraction::body_extract`, lowered only on `Option` / `Result` receivers.
+pub(crate) use methods::{UNWRAP_ERR_REQUIRES_MARKER, UNWRAP_REQUIRES_MARKER};
+
+// The one collection-result typing rule, re-read by the IR typing validator.
+pub(super) use collections::infer_collection_op_type;

@@ -66,7 +66,15 @@ impl DownstreamFixture {
     }
 
     fn build_bin(&self, name: &str) -> Output {
-        Command::new("cargo")
+        // The Trust toolchain's targo (`$CARGO` under `targo --unverified test`,
+        // else `targo` from PATH), in the unverified lane: this downstream build
+        // audits the proc-macro surface and carries no proof claim. targo
+        // refuses a lane-less `build`, and a stock cargo rejects the flag.
+        let cargo = env::var_os("CARGO")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "targo".into());
+        Command::new(cargo)
+            .arg("--unverified")
             .arg("build")
             .arg("--quiet")
             .arg("--bin")
@@ -298,4 +306,226 @@ fn main() {
         "early_return_fail",
         "trust_vc postcondition failed",
     );
+}
+
+/// A clause the lane reads as ghost code is never evaluated at run time where
+/// its value there can differ from that reading.
+///
+/// Outside a verification build a spec function's body is
+/// `loop { unreachable!(..) }`, the lane reads a `requires` over the
+/// mathematical integers, and it only warns about a broken `recommends`. So
+/// each program below is `Verified` by the lane, and each panicked on its
+/// first run when the macros checked every clause with `assert!`: the
+/// postcondition, precondition, assertion and invariant that call `inc`, the
+/// precondition `z + 1u32 > z` at `u32::MAX`, and the `recommends` a caller
+/// breaks. `call_free_ensures`, the backlog program with `inc(x)` written
+/// out, keeps its run-time check and still runs; the twins' clauses call
+/// nothing either, so their checks stay and still catch the broken clause.
+#[test]
+fn test_a_clause_read_as_ghost_code_is_not_evaluated_at_run_time() {
+    const INC: &str = r#"
+#[trust_vc::spec]
+pub fn inc(x: u64) -> u64 {
+    x + 1u64
+}
+"#;
+    let verified_programs: [(&str, String, &str, &str); 7] = [
+        (
+            "call_free_ensures",
+            "
+#[trust_vc::contract(requires(x < 100u64), ensures(r == x + 1u64), returns(r))]
+fn t1(x: u64) -> u64 {
+    x + 1u64
+}
+"
+            .to_string(),
+            "t1",
+            "t1(5u64)",
+        ),
+        (
+            "ghost_ensures",
+            format!(
+                "{INC}
+#[trust_vc::contract(requires(x < 100u64), ensures(r == inc(x)), returns(r))]
+fn t1(x: u64) -> u64 {{
+    x + 1u64
+}}
+"
+            ),
+            "t1",
+            "t1(5u64)",
+        ),
+        (
+            "ghost_assert",
+            format!(
+                "{INC}
+#[trust_vc::contract(requires(x < 100u64), ensures(r == 0u64), returns(r))]
+fn t4(x: u64) -> u64 {{
+    trust_vc::assert!(inc(x) > x);
+    0u64
+}}
+"
+            ),
+            "t4",
+            "t4(5u64)",
+        ),
+        (
+            "ghost_requires",
+            format!(
+                "{INC}
+#[trust_vc::contract(requires(inc(x) > 5u64), ensures(r == 0u64), returns(r))]
+fn t9(x: u64) -> u64 {{
+    0u64
+}}
+
+#[trust_vc::contract(ensures(r == 0u64), returns(r))]
+fn c9() -> u64 {{
+    t9(10u64)
+}}
+"
+            ),
+            "c9",
+            "c9()",
+        ),
+        (
+            "ghost_invariant",
+            format!(
+                "{INC}
+#[trust_vc::contract(ensures(r == 3u64), returns(r))]
+fn inv() -> u64 {{
+    let mut i = 0u64;
+    while i < 3u64 {{
+        trust_vc::invariant!(i <= 3u64 && inc(i) > i);
+        i += 1u64;
+    }}
+    i
+}}
+"
+            ),
+            "inv",
+            "inv()",
+        ),
+        (
+            "integer_requires",
+            "
+#[trust_vc::contract(requires(z + 1u32 > z), ensures(r == 7u32), returns(r))]
+fn g(z: u32) -> u32 {
+    7u32
+}
+
+#[trust_vc::contract(ensures(r == 0u32), returns(r))]
+fn f2() -> u32 {
+    let _k = g(u32::MAX);
+    0u32
+}
+"
+            .to_string(),
+            "f2",
+            "f2()",
+        ),
+        (
+            "broken_recommends",
+            "
+#[trust_vc::contract(recommends(x > 0u64), ensures(r == 0u64), returns(r))]
+fn h(x: u64) -> u64 {
+    0u64
+}
+
+#[trust_vc::contract(ensures(r == 0u64), returns(r))]
+fn hc() -> u64 {
+    h(0u64)
+}
+"
+            .to_string(),
+            "hc",
+            "hc()",
+        ),
+    ];
+    let twins: [(&str, &str, &str); 3] = [
+        (
+            "twin_requires",
+            "
+#[trust_vc::contract(requires(x < 100u64), ensures(r == 0u64), returns(r))]
+fn tw(x: u64) -> u64 {
+    0u64
+}
+
+fn main() {
+    let _ = tw(200u64);
+}
+",
+            "trust_vc precondition failed",
+        ),
+        (
+            "twin_assert",
+            "
+#[trust_vc::contract(ensures(r == 0u64), returns(r))]
+fn tw(x: u64) -> u64 {
+    trust_vc::assert!(x > 5u64);
+    0u64
+}
+
+fn main() {
+    let _ = tw(1u64);
+}
+",
+            "trust_vc assertion failed",
+        ),
+        (
+            "twin_ensures",
+            "
+#[trust_vc::contract(ensures(r == x + 1u64), returns(r))]
+fn tw(x: u64) -> u64 {
+    x
+}
+
+fn main() {
+    let _ = tw(1u64);
+}
+",
+            "trust_vc postcondition failed",
+        ),
+    ];
+
+    let lane_dir = env::temp_dir().join(format!(
+        "trust_vc_ghost_clause_lane_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&lane_dir).expect("should create lane fixture dir");
+    for (name, program, func, _) in &verified_programs {
+        let path = lane_dir.join(format!("{name}.rs"));
+        fs::write(&path, program).expect("should write lane fixture");
+        let result = trust_vc_core::verify_function_from_file(
+            path.to_str().expect("utf-8 fixture path"),
+            func,
+        )
+        .unwrap_or_else(|err| panic!("{name}: `{func}` should extract: {err}"));
+        assert!(
+            matches!(result, trust_vc_core::VerifyResult::Verified),
+            "{name}: the lane should verify `{func}`, got {result:?}\n{program}"
+        );
+    }
+    let _ = fs::remove_dir_all(&lane_dir);
+
+    let fixture = DownstreamFixture::new("ghost_clause");
+    for (name, program, _, call) in &verified_programs {
+        fixture.write_bin(
+            name,
+            &format!("{program}\nfn main() {{\n    let _ = {call};\n}}\n"),
+        );
+        let build = fixture.build_bin(name);
+        assert_build_succeeds(&build, name);
+        let run = fixture.run_bin(name);
+        assert_run_succeeds(&run, name);
+    }
+    for (name, program, needle) in twins {
+        fixture.write_bin(name, program);
+        let build = fixture.build_bin(name);
+        assert_build_succeeds(&build, name);
+        let run = fixture.run_bin(name);
+        assert_run_fails_with_stderr(&run, name, needle);
+    }
 }

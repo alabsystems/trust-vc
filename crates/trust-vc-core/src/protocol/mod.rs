@@ -1,14 +1,13 @@
-//! Protocol verification via ty model checking.
+//! Protocol verification by the `ty` model checker, across a process
+//! boundary.
 //!
 //! Copyright 2026 Andrew Yates
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 //!
 //! This module adds concurrent protocol verification to trust_vc by
-//! dispatching `ProtocolObligation`s to the ty model checker.
-//! Sequential obligations continue through the existing ay path.
-//!
-//! # Architecture
+//! dispatching `ProtocolObligation`s to the `ty` binary. Sequential
+//! obligations continue through the existing ay path.
 //!
 //! ```text
 //! trust_vc verification pipeline
@@ -16,15 +15,31 @@
 //!     │   ProofObligation → AYEncoder → ay-dpll → VerifyResult
 //!     │
 //!     └── ty path (this module): concurrent protocol properties
-//!         ProtocolObligation → TyEncoder → tla-check → VerifyResult
+//!         ProtocolObligation → `ty check --output json` → VerifyResult
 //! ```
+//!
+//! No ty crate is linked. Each obligation is checked by one run of the
+//! binary [`binary`] resolves (`TRUST_VC_TY_BIN`, else `ty` on `PATH`),
+//! in a private directory with the environment cleared ([`run`]), and its
+//! JSON document is read by the fields ty freezes under
+//! `check-json-contract-v2` ([`document`]). The document must advertise
+//! every capability in [`document::REQUIRED_CAPABILITIES`]: they carry what
+//! this lane used to check itself on ty's AST, that ty read the spec exactly
+//! as written and decides `ENABLED` by its contract. The interface, from
+//! both sides, is ty's `docs/design/2026-10-08-machine-interface-for-trust-vc.md`.
 
-pub(crate) mod result;
+mod binary;
+mod config;
+mod document;
+mod run;
+mod rust_expr;
 pub(crate) mod translate;
+
+pub use binary::BIN_VAR;
 
 use crate::VerifyResult;
 
-/// A protocol verification obligation dispatched to the ty model checker.
+/// A protocol verification obligation dispatched to the `ty` model checker.
 ///
 /// Unlike `ProofObligation` (which encodes first-order SMT formulas for ay),
 /// protocol obligations describe state machines with transitions and invariants
@@ -33,11 +48,24 @@ use crate::VerifyResult;
 pub struct ProtocolObligation {
     /// Human-readable name for the protocol.
     pub name: String,
-    /// TY spec text to be parsed and model-checked.
-    /// Generated from `#[protocol]`/`#[action]`/`#[safety]` annotations.
+    /// TLA+ module text to be model-checked: exactly one module, which may
+    /// extend only ty's standard modules.
     pub spec: String,
-    /// TY configuration text (INIT, NEXT, INVARIANT, PROPERTY lines).
+    /// TLC configuration text: `INIT`, `NEXT`, `INVARIANT`, `PROPERTY` and
+    /// `CHECK_DEADLOCK` lines, one name each; anything else is refused.
     pub config: String,
+    /// What the module declares and defines, when it was generated: `None`
+    /// for a raw obligation, the emitted variables and operators for a
+    /// `#[protocol]` one, which must then be all the module holds.
+    pub shape: Option<ProtocolShape>,
+}
+
+/// The variables (in order) and operators (each without parameters) a
+/// generated module was emitted with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolShape {
+    pub variables: Vec<String>,
+    pub operators: Vec<String>,
 }
 
 /// Encoder that dispatches protocol obligations to ty.
@@ -46,9 +74,9 @@ pub(crate) struct TyEncoder;
 impl TyEncoder {
     /// Verify a set of protocol obligations via ty model checking.
     ///
-    /// Each obligation is parsed, lowered, and model-checked independently.
-    /// The first failure (Counterexample, Error, or Unknown) is returned;
-    /// if all pass, returns `VerifyResult::Verified`.
+    /// Each obligation is model-checked by its own run of `ty`. The first
+    /// failure (Counterexample, Error, or Unknown) is returned; if all pass,
+    /// returns `VerifyResult::Verified`.
     pub(crate) fn verify_protocol(obligations: &[ProtocolObligation]) -> VerifyResult {
         for obligation in obligations {
             let r = Self::verify_one(obligation);
@@ -60,44 +88,33 @@ impl TyEncoder {
     }
 
     fn verify_one(obligation: &ProtocolObligation) -> VerifyResult {
-        // 1. Parse TY spec text
-        let tree = tla_core::parse_to_syntax_tree(&obligation.spec);
-        let lowered = tla_core::lower(tla_core::FileId(0), &tree);
-        let module = match lowered.module {
-            Some(m) => m,
-            None => {
-                return VerifyResult::Error {
-                    message: format!(
-                        "ty parse/lower failed for protocol '{}': {:?}",
-                        obligation.name, lowered.errors
-                    ),
-                }
-            }
+        let refuse = |what: &str, detail: String| VerifyResult::Error {
+            message: format!("ty {what} for protocol '{}': {detail}", obligation.name),
         };
-
-        // 2. Parse TY config
-        let mut config = match tla_check::Config::parse(&obligation.config) {
-            Ok(c) => c,
-            Err(e) => {
-                return VerifyResult::Error {
-                    message: format!(
-                        "ty config parse failed for protocol '{}': {:?}",
-                        obligation.name, e
-                    ),
-                }
-            }
+        let request = match config::Request::parse(&obligation.config) {
+            Ok(request) => request,
+            Err(detail) => return refuse("config refused", detail),
         };
-        // TrustVc-generated protocol obligations are currently small safety/liveness
-        // witnesses where correctness is more important than state-space reduction.
-        // ty auto-enables POR by default, and that path can prune visible actions for
-        // these generated specs, masking invariant violations.
-        config.auto_por = Some(false);
-        config.por_enabled = false;
-
-        // 3. Model check
-        let check_result = tla_check::check_module(&module, &config);
-
-        // 4. Map result
-        result::check_result_to_verify_result(check_result)
+        let bin = match binary::resolve() {
+            Ok(bin) => bin,
+            Err(detail) => return refuse("binary not found", detail),
+        };
+        let run = match run::check(&bin, &obligation.spec, &request.canonical()) {
+            Ok(run) => run,
+            Err(detail) => return refuse("run failed", detail),
+        };
+        document::judge(
+            &document::Expected {
+                name: &obligation.name,
+                spec: &obligation.spec,
+                request: &request,
+                shape: obligation.shape.as_ref(),
+            },
+            &run,
+        )
     }
 }
+
+#[cfg(test)]
+#[path = "verify_tests.rs"]
+mod verify_tests;

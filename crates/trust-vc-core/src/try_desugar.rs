@@ -240,7 +240,7 @@ fn canonical_try_type(ty: &Type, func: &ItemFn, file: &File) -> Option<ProvenTry
 /// the whole parsed file; rejecting an unrelated collision is preferable to
 /// attributing semantics to a shadowed name. The common prelude-only spelling
 /// remains accepted.
-fn source_may_shadow_namespace_name(file: &File, func: &ItemFn, target: &str) -> bool {
+pub(crate) fn source_may_shadow_namespace_name(file: &File, func: &ItemFn, target: &str) -> bool {
     if target == "Option" || target == "Result" {
         struct PreludeAttrFinder {
             found: bool,
@@ -711,7 +711,7 @@ fn top_level_let_tries_are_plain(block: &Block) -> bool {
     block
         .stmts
         .iter()
-        .all(|stmt| stmt_let_try(stmt).map_or(true, |(_, _, has_diverge)| !has_diverge))
+        .all(|stmt| stmt_let_try(stmt).is_none_or(|(_, _, has_diverge)| !has_diverge))
 }
 
 /// Rewrites a statement sequence: the first `let PAT = E?;` becomes a tail
@@ -943,7 +943,7 @@ fn sequence_preserves_try_order<'a>(
         if has_try && !expr_try_rewrite_preserves_order(child, context) {
             return false;
         }
-        if !expr_is_reorder_inert_modulo_try(child, context) {
+        if !expr_is_reorder_inert_modulo_try(child) {
             preceding_non_inert = true;
         }
     }
@@ -955,44 +955,38 @@ fn sequence_preserves_try_order<'a>(
 /// calls and potentially trapping operators even when the verifier currently
 /// models a particular instance as pure/safe: the desugar boundary must be
 /// correct from source shape alone.
-fn expr_is_reorder_inert_modulo_try(expr: &Expr, context: &TryOrderContext<'_>) -> bool {
+fn expr_is_reorder_inert_modulo_try(expr: &Expr) -> bool {
     match expr {
         // A value path may perform an implicit move/reborrow when consumed by
         // its parent call. Without a full Copy/borrow proof it is not inert.
         Expr::Path(_) => false,
         Expr::Lit(_) | Expr::Infer(_) => true,
         Expr::Try(expr_try) => expr_try.attrs.is_empty() && expr_try_count(&expr_try.expr) == 0,
-        Expr::Paren(paren) => expr_is_reorder_inert_modulo_try(&paren.expr, context),
-        Expr::Group(group) => expr_is_reorder_inert_modulo_try(&group.expr, context),
-        Expr::Field(field) => expr_is_reorder_inert_modulo_try(&field.base, context),
-        Expr::Reference(reference) => expr_is_reorder_inert_modulo_try(&reference.expr, context),
-        Expr::RawAddr(raw_addr) => expr_is_reorder_inert_modulo_try(&raw_addr.expr, context),
-        Expr::Cast(cast) => expr_is_reorder_inert_modulo_try(&cast.expr, context),
-        Expr::Array(array) => array
-            .elems
-            .iter()
-            .all(|expr| expr_is_reorder_inert_modulo_try(expr, context)),
-        Expr::Tuple(tuple) => tuple
-            .elems
-            .iter()
-            .all(|expr| expr_is_reorder_inert_modulo_try(expr, context)),
+        Expr::Paren(paren) => expr_is_reorder_inert_modulo_try(&paren.expr),
+        Expr::Group(group) => expr_is_reorder_inert_modulo_try(&group.expr),
+        Expr::Field(field) => expr_is_reorder_inert_modulo_try(&field.base),
+        Expr::Reference(reference) => expr_is_reorder_inert_modulo_try(&reference.expr),
+        Expr::RawAddr(raw_addr) => expr_is_reorder_inert_modulo_try(&raw_addr.expr),
+        Expr::Cast(cast) => expr_is_reorder_inert_modulo_try(&cast.expr),
+        Expr::Array(array) => array.elems.iter().all(expr_is_reorder_inert_modulo_try),
+        Expr::Tuple(tuple) => tuple.elems.iter().all(expr_is_reorder_inert_modulo_try),
         Expr::Range(range) => range
             .start
             .iter()
             .map(Box::as_ref)
             .chain(range.end.iter().map(Box::as_ref))
-            .all(|expr| expr_is_reorder_inert_modulo_try(expr, context)),
+            .all(expr_is_reorder_inert_modulo_try),
         Expr::Struct(expr_struct) => {
             expr_struct
                 .fields
                 .iter()
                 .map(|field| &field.expr)
-                .all(|expr| expr_is_reorder_inert_modulo_try(expr, context))
+                .all(expr_is_reorder_inert_modulo_try)
                 && expr_struct
                     .rest
                     .iter()
                     .map(|rest| rest.as_ref())
-                    .all(|expr| expr_is_reorder_inert_modulo_try(expr, context))
+                    .all(expr_is_reorder_inert_modulo_try)
         }
         _ => false,
     }

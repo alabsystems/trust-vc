@@ -2,8 +2,6 @@
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 // Licensed under the Apache License, Version 2.0
 
-use crate::runtime_boundary::variant_accessor_panic;
-
 /// Spec-only binary tree for structural induction.
 ///
 /// `Tree<T>` is a recursive algebraic datatype for tree-structured
@@ -46,30 +44,42 @@ impl<T> Tree<T> {
         matches!(self, Tree::Branch(_, _))
     }
 
-    /// Returns the leaf value. Panics on `Branch`.
+    /// Returns the leaf value, or `None` on `Branch`.
+    ///
+    /// Total: a selector that panicked on the wrong variant was a reachable
+    /// panic the verifier refuted, and Trust's contract language cannot yet
+    /// state a variant precondition on `&self`, so the wrong variant is `None`.
     #[must_use]
-    pub fn value(&self) -> &T {
+    pub fn value(&self) -> Option<&T> {
         match self {
-            Tree::Leaf(v) => v,
-            Tree::Branch(_, _) => variant_accessor_panic("Tree", "value", "Branch"),
+            Tree::Leaf(v) => Some(v),
+            Tree::Branch(_, _) => None,
         }
     }
 
-    /// Returns the left child. Panics on `Leaf`.
+    /// Returns the left child, or `None` on `Leaf`.
+    ///
+    /// Total: a selector that panicked on the wrong variant was a reachable
+    /// panic the verifier refuted, and Trust's contract language cannot yet
+    /// state a variant precondition on `&self`, so the wrong variant is `None`.
     #[must_use]
-    pub fn left(&self) -> &Tree<T> {
+    pub fn left(&self) -> Option<&Tree<T>> {
         match self {
-            Tree::Branch(l, _) => l,
-            Tree::Leaf(_) => variant_accessor_panic("Tree", "left", "Leaf"),
+            Tree::Branch(l, _) => Some(l),
+            Tree::Leaf(_) => None,
         }
     }
 
-    /// Returns the right child. Panics on `Leaf`.
+    /// Returns the right child, or `None` on `Leaf`.
+    ///
+    /// Total: a selector that panicked on the wrong variant was a reachable
+    /// panic the verifier refuted, and Trust's contract language cannot yet
+    /// state a variant precondition on `&self`, so the wrong variant is `None`.
     #[must_use]
-    pub fn right(&self) -> &Tree<T> {
+    pub fn right(&self) -> Option<&Tree<T>> {
         match self {
-            Tree::Branch(_, r) => r,
-            Tree::Leaf(_) => variant_accessor_panic("Tree", "right", "Leaf"),
+            Tree::Branch(_, r) => Some(r),
+            Tree::Leaf(_) => None,
         }
     }
 
@@ -92,7 +102,7 @@ mod tests {
         let tree = Tree::Leaf(42);
         assert!(tree.is_leaf());
         assert!(!tree.is_branch());
-        assert_eq!(*tree.value(), 42);
+        assert_eq!(tree.value(), Some(&42));
         assert_eq!(tree.depth(), 0);
     }
 
@@ -102,8 +112,8 @@ mod tests {
         assert!(tree.is_branch());
         assert!(!tree.is_leaf());
         assert_eq!(tree.depth(), 1);
-        assert!(tree.left().is_leaf());
-        assert!(tree.right().is_leaf());
+        assert_eq!(tree.left().and_then(Tree::value), Some(&1));
+        assert_eq!(tree.right().and_then(Tree::value), Some(&2));
     }
 
     #[test]
@@ -118,17 +128,18 @@ mod tests {
         assert_eq!(tree.depth(), 2);
     }
 
+    /// Regression: the selectors are total; the wrong variant gives `None`
+    /// (they used to panic, a reachable panic the verifier refuted).
     #[test]
-    #[should_panic(expected = "Tree::value called on Branch")]
-    fn test_tree_value_panics_on_branch() {
+    fn test_tree_value_on_branch_is_none() {
         let tree = Tree::Branch(Box::new(Tree::Leaf(1)), Box::new(Tree::Leaf(2)));
-        let _ = tree.value();
+        assert_eq!(tree.value(), None);
     }
 
     #[test]
-    #[should_panic(expected = "Tree::left called on Leaf")]
-    fn test_tree_left_panics_on_leaf() {
+    fn test_tree_children_on_leaf_are_none() {
         let tree = Tree::Leaf(42);
-        let _ = tree.left();
+        assert!(tree.left().is_none());
+        assert!(tree.right().is_none());
     }
 }

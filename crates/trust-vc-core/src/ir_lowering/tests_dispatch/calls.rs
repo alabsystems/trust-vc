@@ -457,9 +457,13 @@ fn lower_fn_call_coerces_unsuffixed_literal_arg_to_param_type() {
     }
 }
 
-/// Non-default-width suffixed literals must NOT be coerced.
+/// A suffixed literal argument is bound at the parameter's type by its VALUE
+/// (design-trust-proof-backend.md §5b rule 11): `42u16` for a `u8` parameter
+/// is the `u8` 42 — never re-read — and a value the parameter type cannot
+/// hold (`300u16`) is refused. It used to be passed as the `u16` it was
+/// spelled, unbound, to a `u8` parameter.
 #[test]
-fn lower_fn_call_preserves_non_default_suffixed_literal_arg() {
+fn lower_fn_call_binds_suffixed_literal_arg_by_value() {
     let expr: syn::Expr = syn::parse_str("check(42u16)").unwrap();
     let mut env = env_with(&[]);
     env.insert_fn("check".to_string(), TrustVcType::Bool);
@@ -471,13 +475,18 @@ fn lower_fn_call_preserves_non_default_suffixed_literal_arg() {
                 args[0],
                 TrustVcExpr::IntLit {
                     value: 42,
-                    ty: TrustVcType::Uint { width: 16 }
+                    ty: TrustVcType::Uint { width: 8 }
                 },
-                "suffixed literal 42u16 must NOT be coerced to u8"
+                "suffixed literal 42u16 is bound at the u8 parameter by its value"
             );
         }
         other => panic!("expected FnCall, got {:?}", other),
     }
+    let refused: syn::Expr = syn::parse_str("check(300u16)").unwrap();
+    assert!(
+        lower_syn_expr(&refused, &env).is_err(),
+        "300u16 cannot be bound at a u8 parameter"
+    );
 }
 
 /// When no param types are registered, args pass through unchanged.

@@ -153,6 +153,10 @@ pub enum MemorySafetyFactKind {
 }
 
 /// Evidence submitted to native full verification.
+// Keep the public tuple-variant payload source-compatible: boxing
+// `RawObligation` would force every external constructor and pattern match to
+// change for an internal enum-layout optimization.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum FullVerificationEvidence {

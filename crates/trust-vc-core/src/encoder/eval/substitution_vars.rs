@@ -3,8 +3,13 @@
 // Licensed under the Apache License, Version 2.0
 
 /// Substitutes variable references in an expression with replacement expressions.
-/// Used by inline body substitution to replace formal params with actual args.
-/// Migrated to scope-aware folder as part of #2641.
+/// Used by inline body substitution to replace formal params with actual args,
+/// and by every axiom-instantiation path (`witness_sort`). Migrated to
+/// scope-aware folder as part of #2641.
+///
+/// A replacement keeps the replaced variable's type
+/// (`ir_lowering::pin_substituted_value`): an untyped literal standing for an
+/// `i32` binder is pinned, never left to be typed by its new peers.
 pub(in crate::encoder) fn substitute_vars_in_expr(
     expr: &crate::ir::TrustVcExpr,
     subst: &std::collections::HashMap<&str, &crate::ir::TrustVcExpr>,
@@ -18,10 +23,10 @@ pub(in crate::encoder) fn substitute_vars_in_expr(
     }
     impl ScopeAwareTrustVcExprFolder for Substitutor<'_> {
         fn fold_expr_scoped(&mut self, expr: TrustVcExpr, bound: &HashSet<&str>) -> TrustVcExpr {
-            if let TrustVcExpr::Var { ref name, .. } = expr {
+            if let TrustVcExpr::Var { ref name, ref ty } = expr {
                 if !bound.contains(name.as_str()) {
                     if let Some(replacement) = self.subst.get(name.as_str()) {
-                        return (*replacement).clone();
+                        return crate::ir_lowering::pin_substituted_value(ty, replacement);
                     }
                 }
                 return expr;

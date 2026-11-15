@@ -100,7 +100,8 @@ const FAR_OUT_TIMEOUT_LABEL: &str =
 /// `by(nonlinear_arith)` obligations (ay's NIA/SOS lane — count-bounded
 /// search, not exponential ground bit-blasting). For these, the external
 /// watchdog must be a far-out hang backstop sitting beyond ay's own
-/// (backstopped) deadline: a tight wall-clock kill here re-creates the
+/// (backstopped — the opt-in `AYEncoder::with_limits` installs, since ay
+/// 6226726f3 left it OFF by default) deadline: a tight wall-clock kill here re-creates the
 /// machine-load Verified<->Unknown flip the deterministic budgets exist to
 /// prevent (the calc.rs seq-chain flake; nonlinear.rs test5 under load).
 ///
@@ -153,12 +154,12 @@ fn watchdog_budget(
     }
 }
 
-struct WatchdogResult<T> {
-    result: std::thread::Result<T>,
-    timed_out: bool,
+pub(super) struct WatchdogResult<T> {
+    pub(super) result: std::thread::Result<T>,
+    pub(super) timed_out: bool,
 }
 
-fn run_with_timeout_watchdog<T>(
+pub(super) fn run_with_timeout_watchdog<T>(
     interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
     timeout: Duration,
     _force_scope_pop_failure: bool,
@@ -236,8 +237,9 @@ fn map_solver_panic(
 ///
 /// Deterministic-budget-governed obligations (see
 /// `deterministic_budget_governed`) get the far-out watchdog instead of
-/// `base_timeout`: ay's own (nominal, possibly quantified-entry-backstopped)
-/// deadline governs termination and the watchdog is pure hang protection.
+/// `base_timeout`: ay's own (nominal, possibly quantified-entry-backstopped —
+/// the opt-in `AYEncoder::with_limits` installs) deadline governs termination
+/// and the watchdog is pure hang protection.
 /// The solver-internal nominal deadline is deliberately NOT raised —
 /// ay keeps ground-phase deadlines at the exact nominal by design
 /// ("caller retry ladders stay prompt", ay 62695cfe04), and a caller-side
@@ -403,7 +405,7 @@ pub(in crate::encoder) fn verify_assertion_with_timeout_reuse(
             if is_watchdog_interrupted_timeout(&outcome, watchdog_result.timed_out) {
                 return Ok(ReuseAttempt::TimedOut);
             }
-            if encoder.state.reusable_after_scope {
+            if encoder.state.reusable_after_scope && encoder.state.solver_panic.is_none() {
                 Ok(ReuseAttempt::Completed { encoder, outcome })
             } else {
                 Ok(ReuseAttempt::NonReusable { outcome })

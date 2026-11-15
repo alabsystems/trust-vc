@@ -133,20 +133,94 @@ pub(in crate::encoder) const DEFAULT_CONFLICT_BUDGET_CONFLICTS: u64 = 400_000;
 /// certificate minting rather than conflicts. Closing that properly needs a
 /// deterministic bound on THAT work — an ay-side concern — not a bigger
 /// number here.
-pub(in crate::encoder) const DEFAULT_SOLVER_WALL_BACKSTOP_MS: u64 = 30_000;
+///
+/// RE-READ 2026-09-15 (ay pin 4cadc2bf, sibling 0dc8f8f0). Part of what the
+/// paragraphs above measured was NOT this wall's size but WHO applied it:
+/// ay 6226726f3 (2026-08-22, an ancestor of every 0.26.0 pin) made the
+/// quantified far-out backstop (`install_quantifier_deadline_backstop`,
+/// mirrored by [`far_out_watchdog_timeout`] below) an OPT-IN that is OFF by
+/// default, and `AYEncoder::with_limits` did not opt in until 2026-09-15. So
+/// from the 0.26.0 pin (2026-09-11) a quantified solve here had exactly this
+/// 30 s of wall, while the far-out watchdog kept mirroring an extension ay
+/// was not applying — the two same-index read-back controls the retired
+/// ay-pin quarantine held were timing out on that bare wall under load.
+/// `with_limits` now opts in (the effective quantified wall is `30 s +
+/// min(90 s, 180 s)` = 120 s, the number the watchdog was already derived
+/// from); the measured effect on those two controls is in the ledger row of
+/// that date. The constant itself is unchanged.
+/// RE-MEASURED 2026-09-15 (later the same day, ay pin `4cadc2bf`, sibling
+/// `0dc8f8f0`) — **the value moves to 120 s and the opt-in above is
+/// WITHDRAWN, because the two were an incoherent envelope.** The backstop
+/// widens ay's SEARCH wall and nothing else; ay keeps TWO deadline cells and
+/// only one of them is widened:
+///
+/// * `Solver::install_solve_controls` -> `Executor::set_solve_controls`
+///   (`api/solving/check.rs:434`, `executor/check_sat.rs:2949-2958`) sets
+///   BOTH `solve_deadline` AND `certification_deadline` to `now + nominal`.
+/// * `install_quantifier_deadline_backstop` (`check_sat.rs:3125-3172`)
+///   extends `solve_deadline` ALONE — the write is
+///   `self.solve_deadline.set(Some(backstop))` — so the search may run to
+///   `nominal + min(3 x nominal, 180 s)` while the certification envelope
+///   still expires at `nominal`.
+/// * `restore_timeout_deadline_after_call` (`check_sat.rs:3174-3187`, called
+///   from `check_sat` at `:1616`) then puts the ALREADY-EXPIRED nominal
+///   deadline back before the funnel runs.
+/// * `certify_unsat_for_publication` (`check.rs:575`) polls
+///   `certification_deadline` (`executor/unsat_cert.rs` `resources_live`,
+///   `TrustClauseDischargeControls::deadline`) and refuses a correct UNSAT
+///   with "step tN uses unverified trust rule"; then
+///   `finish_verified_result` -> `decline_definite_publication_on_external_stop`
+///   (`executor/lifecycle/unknown_publication.rs:107-115`) reads the restored
+///   `solve_deadline` through `should_abort_theory_loop`
+///   (`check_sat.rs:3220-3243`) and REVOKES any definite verdict as
+///   `Unknown(Timeout)`.
+///
+/// NET, with a 30 s nominal and the backstop on: a quantified solve that
+/// takes more than ~30 s of wall CANNOT publish a definite answer by either
+/// route, however well the search went. That is not a hypothesis — ay records
+/// the same skew from the other side, on this repo's own obligation, at
+/// `check_sat.rs:2862-2886`: "Measured on trust-vc's `push_appends_entailed`
+/// obligation: `certification_deadline_remaining_ms=0` beside
+/// `solve_deadline_remaining_ms=11094`".
+///
+/// MEASURED CONSEQUENCE (25 runs at `3287a67f`, the commit that turned the
+/// opt-in on): `floor_push_appends_entailed_verified` run alone was RED 4 of
+/// 5 — including at 1-minute load average 6.77 — and 3 of 3 under load;
+/// `replay_push_appends_entailed_verified` 1 of 3 alone and 3 of 3 under
+/// load. 8 of the 14 reds were `Timeout` (the publication revocation) and 3
+/// were `ConfirmationDisagree` (the certification refusal, reached through
+/// the confirm solve). Both categories are the SAME boundary with two exit
+/// doors, which is why the opt-in "closed the timeout half" and did not.
+///
+/// THE FIX IS TO ASK FOR THE WALL WE ACTUALLY WANT. `set_timeout` is the one
+/// control that moves BOTH cells, so the nominal becomes 120 s — exactly the
+/// envelope the backstop was buying at 30 s — and the widener is switched
+/// off in [`crate::encoder::AYEncoder::with_limits`]. Search budget: the same
+/// 120 s. Certification and publication: now the same 120 s instead of an
+/// expired 30 s. Worst-case latency: 120 s instead of 300 s (the backstop
+/// would have extended a 120 s nominal to 120 + 180). The external watchdog
+/// is unchanged at 130 s because it now derives from a nominal that needs no
+/// mirror (see [`far_out_watchdog_timeout`]).
+///
+/// AND THE NULL ABOVE IS NOT EVIDENCE AGAINST THIS. That 180 s experiment
+/// predates both the backstop opt-in and ay's `certification_deadline` split
+/// (`f704330f29`, 2026-09-01): it raised the search wall while the funnel
+/// that refuses late UNSATs did not exist yet in the form measured here. The
+/// number changed for a mechanism, not as a guess; the measurement that
+/// justifies it is the loaded repro rate recorded in the ledger row of this
+/// date.
+pub(in crate::encoder) const DEFAULT_SOLVER_WALL_BACKSTOP_MS: u64 = 120_000;
 
-/// Scale factor ay applies to the REMAINING nominal budget at the quantified
-/// entry (`install_quantifier_deadline_backstop`, ay 62695cfe04): the solver's
-/// own deadline is extended by `remaining × (FACTOR - 1)`, capped at
-/// `+MAX_EXTRA`. Mirrored here so the external watchdog for deterministic-
-/// budget-governed solves sits *beyond* ay's own worst-case deadline.
-const AY_QUANTIFIED_BACKSTOP_FACTOR: u32 = 4;
-
-/// Absolute cap on ay's backstop extension (mirror of
-/// `QUANTIFIED_BACKSTOP_MAX_EXTRA` in ay's
-/// `install_quantifier_deadline_backstop`, ay 62695cfe04).
-const AY_QUANTIFIED_BACKSTOP_MAX_EXTRA: Duration = Duration::from_secs(180);
-
+/// ay's quantified deadline backstop used to be mirrored here with its own
+/// `FACTOR`/`MAX_EXTRA` constants, so the external watchdog could sit beyond
+/// the widened SEARCH deadline. The mirror is gone with the widener:
+/// `AYEncoder::with_limits` no longer opts in (it widens `solve_deadline`
+/// only, leaving `certification_deadline` at the nominal — see
+/// [`DEFAULT_SOLVER_WALL_BACKSTOP_MS`]), so ay's own deadline for a
+/// trust-vc solve IS the nominal wall and the watchdog derives from it
+/// directly. Re-adding a mirror here without re-reading that note would
+/// re-create the skew.
+///
 /// Grace period added on top of ay's worst-case internal deadline so the
 /// watchdog only fires when ay has genuinely failed to honor its own budget
 /// (a hang), never in a race with ay's own truthfully-attributed stop.
@@ -161,37 +235,41 @@ const FAR_OUT_WATCHDOG_GRACE: Duration = Duration::from_secs(10);
 /// exponential DPLL search. Quantified / collection-axiom / nonlinear-hinted
 /// obligations are different: since ay 62695cfe04 their termination is
 /// PRIMARILY the deterministic instantiation/round/count budgets (identical
-/// work on any machine), with ay's own wall clock relaxed to a far-out
-/// backstop (`nominal + min(3 × nominal, 180s)`) precisely so machine load
-/// cannot truncate a converging proof mid-pipeline. A flat 10s external
-/// watchdog re-introduced the wall clock as the PRIMARY truncation and made
-/// ported-gate verdicts flip with CPU load (the calc.rs seq-chain flake, and
-/// the nonlinear.rs test5 flip under a loaded suite run). For these
-/// obligations the external watchdog is therefore derived from the nominal
-/// solver budget the encoder actually configured (`with_limits`, see
-/// `DEFAULT_SOLVER_NOMINAL_TIMEOUT_MS`), mirrored through ay's own backstop
-/// formula, plus a grace period: it can only fire when ay has failed to honor
-/// its own deadline — true hang protection, never a verdict boundary.
+/// work on any machine), and a flat 10s external watchdog re-introduced the
+/// wall clock as the PRIMARY truncation and made ported-gate verdicts flip
+/// with CPU load (the calc.rs seq-chain flake, and the nonlinear.rs test5
+/// flip under a loaded suite run). For these obligations the external
+/// watchdog is therefore derived from the nominal solver budget the encoder
+/// actually configured (`with_limits`, see
+/// [`DEFAULT_SOLVER_WALL_BACKSTOP_MS`]) plus a grace period: it can only fire
+/// when ay has failed to honor its own deadline — true hang protection, never
+/// a verdict boundary.
 ///
-/// With the defaults this is 30s + 90s + 10s = 130s. It scales with an
-/// explicit `rlimit_ms` exactly like ay's own backstop scales with the
-/// caller's `set_timeout`.
+/// THE DERIVATION IS NOW DIRECT (2026-09-15, later the same day). It used to
+/// mirror ay's quantified backstop formula (`nominal + min(3 x nominal,
+/// 180s)`) because `with_limits` opted in to that widener. It no longer does:
+/// the widener moves ay's SEARCH deadline without moving its CERTIFICATION
+/// deadline, so trust-vc asks for the wall it wants through `set_timeout`
+/// (which moves both) and ay's deadline for a trust-vc solve is exactly the
+/// nominal. See [`DEFAULT_SOLVER_WALL_BACKSTOP_MS`] for the ay call chain and
+/// the measurement.
+///
+/// With the defaults this is 120s + 10s = 130s — the same external ceiling as
+/// the mirrored form it replaces. It scales with an explicit `rlimit_ms`
+/// exactly like ay's own `set_timeout` deadline does.
 pub(in crate::encoder) fn far_out_watchdog_timeout(rlimit_ms: Option<u64>) -> Duration {
     far_out_nominal_timeout(rlimit_ms) + FAR_OUT_WATCHDOG_GRACE
 }
 
-/// The backstopped SOLVER-INTERNAL deadline ay's
-/// `install_quantifier_deadline_backstop` (ay 62695cfe04) can extend a
-/// deterministic-budget-governed solve to: `nominal + min(3 × nominal, 180s)`
-/// (120s with the defaults). The external watchdog adds
-/// `FAR_OUT_WATCHDOG_GRACE` on top so it can only fire when ay has failed to
-/// honor its own (possibly extended) deadline.
+/// The SOLVER-INTERNAL deadline ay applies to a trust-vc solve: the nominal
+/// wall `AYEncoder::with_limits` installed through `Solver::set_timeout`,
+/// which ay copies into BOTH its `solve_deadline` and its
+/// `certification_deadline` (`executor/check_sat.rs:2949-2958`). No widener
+/// is opted in, so there is nothing else to mirror. The external watchdog
+/// adds `FAR_OUT_WATCHDOG_GRACE` on top so it can only fire when ay has
+/// failed to honor that deadline.
 fn far_out_nominal_timeout(rlimit_ms: Option<u64>) -> Duration {
-    let nominal = Duration::from_millis(rlimit_ms.unwrap_or(DEFAULT_SOLVER_WALL_BACKSTOP_MS));
-    let backstop_extra = nominal
-        .saturating_mul(AY_QUANTIFIED_BACKSTOP_FACTOR.saturating_sub(1))
-        .min(AY_QUANTIFIED_BACKSTOP_MAX_EXTRA);
-    nominal + backstop_extra
+    Duration::from_millis(rlimit_ms.unwrap_or(DEFAULT_SOLVER_WALL_BACKSTOP_MS))
 }
 
 /// Compute the effective BV hard timeout, respecting an optional per-function
@@ -559,10 +637,12 @@ mod tests {
         });
     }
 
-    /// Far-out watchdog formula: `nominal + min(3 × nominal, 180s) + 10s
-    /// grace`, mirroring ay's `install_quantifier_deadline_backstop`
-    /// (ay 62695cfe04) so the external watchdog sits beyond ay's own
-    /// worst-case deadline for deterministic-budget-governed solves.
+    /// Far-out watchdog formula: `nominal + 10s grace`. ay's deadline for a
+    /// trust-vc solve is the nominal wall `with_limits` installed (no widener
+    /// is opted in — see `DEFAULT_SOLVER_WALL_BACKSTOP_MS`), so the external
+    /// watchdog sits just beyond it and can only fire on a genuine hang.
+    /// 130s here is the same external ceiling as the mirrored 30+90+10 form
+    /// it replaces.
     #[test]
     fn test_far_out_watchdog_default_is_130s() {
         assert_eq!(far_out_watchdog_timeout(None), Duration::from_secs(130));
@@ -594,8 +674,10 @@ mod tests {
     fn conflict_budget_keeps_three_orders_of_magnitude_over_measured_worst() {
         // Measured ceiling over the calibration harness: 317 conflicts.
         const MEASURED_WORST_CONFLICTS: u64 = 317;
+        let configured_budget = std::hint::black_box(DEFAULT_CONFLICT_BUDGET_CONFLICTS);
+        let measured_worst = std::hint::black_box(MEASURED_WORST_CONFLICTS);
         assert!(
-            DEFAULT_CONFLICT_BUDGET_CONFLICTS >= 100 * MEASURED_WORST_CONFLICTS,
+            configured_budget >= 100 * measured_worst,
             "conflict budget {DEFAULT_CONFLICT_BUDGET_CONFLICTS} leaves less \
              than 100x margin over the measured {MEASURED_WORST_CONFLICTS}-conflict \
              worst case"
@@ -604,19 +686,24 @@ mod tests {
 
     #[test]
     fn test_far_out_watchdog_scales_with_small_rlimit() {
-        // 1s nominal -> 1 + 3 + 10 = 14s.
+        // 1s nominal -> 1 + 10 = 11s. An explicit `#[verifier::rlimit]` wall
+        // is the whole envelope, exactly as the default one is.
         assert_eq!(
             far_out_watchdog_timeout(Some(1_000)),
-            Duration::from_secs(14)
+            Duration::from_secs(11)
         );
     }
 
+    /// A generous explicit wall is not multiplied. Under the withdrawn
+    /// mirror a 200s `rlimit_ms` produced a 390s external deadline, because
+    /// ay's widener could have extended the search that far — while ay's
+    /// certification envelope stayed at 200s. With one envelope the watchdog
+    /// is 210s and every gate reads the same 200s.
     #[test]
-    fn test_far_out_watchdog_caps_backstop_extra_at_180s() {
-        // 200s nominal -> extra capped at 180s -> 200 + 180 + 10 = 390s.
+    fn far_out_watchdog_does_not_multiply_an_explicit_wall() {
         assert_eq!(
             far_out_watchdog_timeout(Some(200_000)),
-            Duration::from_secs(390)
+            Duration::from_secs(210)
         );
     }
 

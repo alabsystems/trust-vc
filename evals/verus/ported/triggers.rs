@@ -34,20 +34,26 @@ pub const TRIGGERS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
+        "quantifier_level_trigger_syntax_verified",
+        "test_multiple_triggers",
+        "verified",
+        1,
+    ),
+    (
         "trigger_adjacent_quantifier_counterexample",
         "test_arith_function_trigger_fail",
         "counterexample",
         1,
     ),
     (
-        "trigger_without_bound_var_fails_closed",
-        "test_fails_single_trigger",
-        "error",
-        0,
+        "quantifier_level_trigger_false_universal_counterexample",
+        "test_multiple_triggers",
+        "counterexample",
+        1,
     ),
     (
-        "quantifier_level_trigger_syntax_fails_closed",
-        "test_multiple_triggers",
+        "trigger_without_bound_var_fails_closed",
+        "test_fails_single_trigger",
         "error",
         0,
     ),
@@ -62,10 +68,6 @@ pub const TRIGGERS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     (
         "trigger_without_bound_var_fails_closed",
         &["does not reference any bound variable"],
-    ),
-    (
-        "quantifier_level_trigger_syntax_fails_closed",
-        &["Failed to parse assert_forall_by!() expression"],
     ),
 ];
 
@@ -114,8 +116,18 @@ fn trigger_without_bound_var_fails_closed() {
 
 #[trust_vc::ensures(true)]
 #[rustfmt::skip]
-fn quantifier_level_trigger_syntax_fails_closed() {
+fn quantifier_level_trigger_syntax_verified() {
     trust_vc::assert_forall_by!(|i: int| #![trigger (i + 0)] i == i, {
+        trust_vc::assume!(i == i);
+    });
+}
+
+// Liar twin (2026-09-11): the quantifier-level `#![trigger …]` syntax parses,
+// and a false universal under it is refuted (`i = -1`).
+#[trust_vc::ensures(true)]
+#[rustfmt::skip]
+fn quantifier_level_trigger_false_universal_counterexample() {
+    trust_vc::assert_forall_by!(|i: int| #![trigger (i + 0)] i == 0, {
         trust_vc::assume!(i == i);
     });
 }

@@ -171,35 +171,31 @@ fn test_negative_literal_uses_context_width() {
     );
 }
 
-/// Discriminating regression test for #1671: verifies width hint propagation
-/// through Unary(Neg) by exploiting BV wrapping at different widths.
+/// `x + (-1)` with `x: u8 == 0` is the integer -1, never the `u8` 255.
 ///
-/// Key insight: `0 + (-1)` wraps differently at BV8 vs BV32.
-/// - BV8:  0 + (-1) = 255  (wraps at 2^8)
-/// - BV32: 0 + (-1) = 4294967295 (wraps at 2^32)
-///
-/// Without the Neg hint fix, `-1` becomes BV32(-1) in i32-majority context.
-/// The u8 variable `x` is zero-extended to BV32, and `BV32(0) + BV32(-1)`
-/// yields BV32(4294967295), which != BV32(255). The assertion FAILS.
-///
-/// With the fix, `-1` gets hint (8, false) from the u8 variable, producing
-/// BV8(-1) = BV8(255). `BV8(0) + BV8(255) = BV8(255)`. Assertion verifies.
+/// This test used to pin the opposite (#1671): the unsuffixed `-1` took the
+/// `u8` operand's type, i.e. became the `u8` negation of 1, and `x + (-1) ==
+/// 255` verified. A negative literal has no `u8` reading, so it keeps its own
+/// type, the addition is mixed-type and therefore exact
+/// (design-trust-proof-backend.md §5b) — whatever the context's majority
+/// width (two `i32` variables here).
 #[test]
 fn test_neg_hint_discriminates_via_unsigned_wrapping() {
-    let mut ctx = VerificationContext::new();
-    ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("u8"));
-    ctx.declare_var_typed("a", crate::ir::TrustVcType::parse_or_opaque("i32"));
-    ctx.declare_var_typed("b", crate::ir::TrustVcType::parse_or_opaque("i32"));
-    ctx.push_obligation(ProofObligation::assume("zero", "x == 0"));
-    ctx.push_obligation(ProofObligation::assume("a_val", "a == 0"));
-    ctx.push_obligation(ProofObligation::assume("b_val", "b == 0"));
-    // u8 wrapping: 0 + (-1) == 255. Only verifies if -1 is BV8, not BV32.
-    ctx.push_obligation(ProofObligation::assert("wrap_check", "x + (-1) == 255"));
-
-    let result = AYEncoder::verify(&ctx);
-    expect_verified(
-        &result,
-        "u8 wrapping: 0 + (-1) should equal 255 in BV8 arithmetic",
+    let run = |goal: &str| {
+        let mut ctx = VerificationContext::new();
+        ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("u8"));
+        ctx.declare_var_typed("a", crate::ir::TrustVcType::parse_or_opaque("i32"));
+        ctx.declare_var_typed("b", crate::ir::TrustVcType::parse_or_opaque("i32"));
+        ctx.push_obligation(ProofObligation::assume("zero", "x == 0"));
+        ctx.push_obligation(ProofObligation::assume("a_val", "a == 0"));
+        ctx.push_obligation(ProofObligation::assume("b_val", "b == 0"));
+        ctx.push_obligation(ProofObligation::assert("wrap_check", goal));
+        AYEncoder::verify(&ctx)
+    };
+    expect_verified(&run("x + (-1) == -1"), "0u8 + (-1) is the integer -1");
+    expect_counterexample(
+        &run("x + (-1) == 255"),
+        "0u8 + (-1) must not read as the u8 255",
     );
 }
 

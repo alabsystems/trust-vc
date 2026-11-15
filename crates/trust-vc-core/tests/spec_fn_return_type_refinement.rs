@@ -63,8 +63,9 @@ fn nat_not_pinned(f: SpecFn<int, nat>, x: int) {
 const PREFIX_SRC: &str = r#"
 use trust_vc_types::{int, nat};
 // A source function can legally use the old internal-looking prefix. Its body
-// axiom pins the result to -1, so adding an opaque-closure nat range assertion
-// here would make the query contradictory and false-verify the assertion.
+// would pin the result to -1, so adding an opaque-closure nat range assertion
+// here would make the query contradictory and false-verify the assertion (the
+// body is now refused: a `nat` result cannot hold -1).
 #[trust_vc::spec]
 fn __trust_vc_spec_fn_apply_int_to_nat(x: int) -> nat { -1 }
 #[trust_vc::ensures(true)]
@@ -180,13 +181,21 @@ fn nat_apply_is_refined_not_pinned() {
     );
 }
 
+/// A source function named with the internal apply prefix whose body is a
+/// value its `nat` result cannot hold. It used to be a counterexample (its body
+/// axiom admitted, no codomain axiom borrowed); the body axiom is now refused
+/// before either can matter (design-trust-proof-backend.md §5b rule 6: a
+/// `nat` result binds only a value a `nat` holds), and a well-typed `nat` body
+/// satisfies the codomain range, so no borrowed range can contradict it.
 #[test]
 fn source_function_prefix_cannot_borrow_opaque_apply_refinement() {
     let result = verify("s", "source_prefix_is_not_opaque_apply", PREFIX_SRC);
     assert!(
-        counterexample(&result),
+        matches!(&result, VerifyResult::Error { message }
+            if message.contains("declared to return `nat`, but its body is a value of type")),
         "CARDINAL: a named spec function with an internal-looking prefix must not \
-         receive the opaque SpecFn codomain axiom or verify by contradiction, got {result:?}"
+         receive the opaque SpecFn codomain axiom or verify by contradiction; its `-1` body \
+         at a `nat` result is refused, got {result:?}"
     );
 }
 

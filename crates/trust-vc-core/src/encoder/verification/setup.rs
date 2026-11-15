@@ -447,6 +447,7 @@ fn bootstrap_prepared_encoder_with_prune_plan(
     // Demand-inline overrides: promote non-inline body axioms to inline for
     // this encoder only. The override is attempt-local — it does not mutate
     // the source obligation. Part of #2655.
+    encoder.state.demand_inline_overrides_active = !inline_overrides.is_empty();
     if !inline_overrides.is_empty() {
         for broadcast in active_broadcasts {
             if let Some(body_axiom) = super::body_support::extracted_body_axiom(broadcast) {
@@ -464,6 +465,7 @@ fn bootstrap_prepared_encoder_with_prune_plan(
                             body_axiom.body,
                         ),
                     );
+                    encoder.state.demand_inlined_bodies = true;
                 }
             }
         }
@@ -741,10 +743,23 @@ fn bootstrap_prepared_encoder_with_prune_plan(
     // and after function contexts (which provide concrete impl functions).
     // Skip impls with opaque concrete types — these are struct types that the
     // encoder has no ay representation for. Part of #2425.
-    for impl_decl in &ctx.trait_impl_decls {
+    let collided_groups = crate::trait_impl_groups::collided_group_members(&ctx.trait_impl_decls);
+    for (impl_decl, collided) in ctx.trait_impl_decls.iter().zip(collided_groups) {
         if impl_decl.concrete_type.contains_opaque()
-            || (prune_traits && !prune_plan.is_trait_impl_reachable(impl_decl))
+            || (prune_traits && !prune_plan.is_trait_impl_reachable(impl_decl, &ctx.trait_decls))
         {
+            continue;
+        }
+        // SIBLING-IMPL GROUP (`crate::trait_impl_groups`): another impl of this
+        // trait exists for this self type, and every axiom below is keyed by
+        // (trait, erased self type) — `Tr__m(Box_S(s))`, `S__m` — with no way to
+        // say WHICH impl it describes. Publishing them lets one impl's body,
+        // default or impl `ensures` answer a call to its sibling, or asserts two
+        // incompatible definitions of one term. Publish NOTHING for the group;
+        // the trait's own postcondition axioms (justified per impl by
+        // conformance) are untouched, and concrete-receiver resolution for the
+        // group is withheld in lockstep (`prepared_context::type_env`).
+        if collided {
             continue;
         }
         encoder.register_trait_impl(impl_decl).map_err(|err| {
@@ -759,10 +774,18 @@ fn bootstrap_prepared_encoder_with_prune_plan(
         // Propagate the impl methods' OWN declared `ensures` to concrete/UFCS
         // callers as a `Box_S`-guarded postcondition axiom. Sound only because the
         // conformance-extension (which runs after the main verification) proves
-        // `body ⊨ impl_ensures`. The boxed-self guard discriminates impls, so no
-        // single-impl gating is needed.
+        // `body ⊨ impl_ensures` — so never for an external impl, which that pass
+        // skips. The clauses are positional (`__trust_vc_conf_arg_{i}`), bound by
+        // the captured bodies' arity. The boxed-self guard discriminates impls of
+        // DIFFERENT self types only: `Box_S` carries neither the trait arguments
+        // nor the self type's references, which is why a sibling-impl group was
+        // skipped above; for every other impl no single-impl gating is needed.
         encoder
-            .assert_impl_postcondition_axioms(impl_decl, &ctx.trait_impl_method_ensures)
+            .assert_impl_postcondition_axioms(
+                impl_decl,
+                &ctx.trait_impl_method_ensures,
+                &ctx.trait_impl_method_bodies,
+            )
             .map_err(|err| {
                 setup_encoding_error(format!(
                     "Failed to propagate impl ensures for '{}' on {}: {}",
@@ -1137,6 +1160,17 @@ impl AYEncoder {
             // conditions (`i == n` after `for i in 0..n`). Part of #2502.
             let pre_state_targets = super::rewrite::collect_pre_state_target_names(&ctx.variables);
             for assumption in slices.assumptions {
+                // THE READING GATE (see `arith_reading`).
+                match super::arith_reading::fact_admission_for(assumption, use_int_for_measures) {
+                    super::arith_reading::FactAdmission::AsIs => {}
+                    super::arith_reading::FactAdmission::Guarded => {
+                        // Pre-state rewriting and a conditional fact do not
+                        // compose (the guard would speak of the post state), so
+                        // the post-loop lane drops rather than guards.
+                        continue;
+                    }
+                    super::arith_reading::FactAdmission::Drop => continue,
+                }
                 if assumption.kind == ObligationKind::PostLoopAssume {
                     // Current-state: no pre-state rewriting.
                     encoder.add_typed_assumption_with_solver_mode(
@@ -1175,6 +1209,20 @@ impl AYEncoder {
                 slices.assumptions,
                 current_state_slice.map(|slice| slice.selected_regular_assumptions.as_slice()),
                 |encoder, assumption| {
+                    // THE READING GATE (see `arith_reading`).
+                    match super::arith_reading::fact_admission_for(assumption, use_int_for_measures)
+                    {
+                        super::arith_reading::FactAdmission::AsIs => {}
+                        super::arith_reading::FactAdmission::Guarded => {
+                            return encoder.add_cross_reading_guarded_assumption(
+                                &assumption.name,
+                                &assumption.expr,
+                                assumption.solver_mode,
+                                use_int_for_measures,
+                            );
+                        }
+                        super::arith_reading::FactAdmission::Drop => return Ok(()),
+                    }
                     encoder.add_typed_assumption_with_solver_mode(
                         &assumption.name,
                         &assumption.expr,
@@ -1193,6 +1241,7 @@ impl AYEncoder {
             prune_plan,
             &var_terms,
             assertion_focus,
+            use_int_for_measures,
         )?;
 
         // Seed ground select terms at index 0 for collection variables so
@@ -1205,6 +1254,19 @@ impl AYEncoder {
             slices.verified_invariants,
             current_state_slice.map(|slice| slice.selected_verified_invariants.as_slice()),
             |encoder, inv| {
+                // THE READING GATE (see `arith_reading`).
+                match super::arith_reading::fact_admission_for(inv, use_int_for_measures) {
+                    super::arith_reading::FactAdmission::AsIs => {}
+                    super::arith_reading::FactAdmission::Guarded => {
+                        return encoder.add_cross_reading_guarded_assumption(
+                            &inv.name,
+                            &inv.expr,
+                            inv.solver_mode,
+                            use_int_for_measures,
+                        );
+                    }
+                    super::arith_reading::FactAdmission::Drop => return Ok(()),
+                }
                 encoder.add_typed_assumption_with_solver_mode(
                     &inv.name,
                     &inv.expr,
@@ -1218,6 +1280,23 @@ impl AYEncoder {
             slices.verified_assert_by,
             current_state_slice.map(|slice| slice.selected_verified_assert_by.as_slice()),
             |encoder, ab| {
+                // THE READING GATE (see `arith_reading`). This is the site the
+                // eight measured false-`Verified`s came through: a
+                // `by(nonlinear_arith)` conclusion proved over unbounded `Int`
+                // was asserted, unchanged, into the next obligation's
+                // fixed-width solve.
+                match super::arith_reading::fact_admission_for(ab, use_int_for_measures) {
+                    super::arith_reading::FactAdmission::AsIs => {}
+                    super::arith_reading::FactAdmission::Guarded => {
+                        return encoder.add_cross_reading_guarded_assumption(
+                            &ab.name,
+                            &ab.expr,
+                            ab.solver_mode,
+                            use_int_for_measures,
+                        );
+                    }
+                    super::arith_reading::FactAdmission::Drop => return Ok(()),
+                }
                 if let Some(bound_vars) = ctx
                     .forall_bound_vars
                     .get(&ab.name)
@@ -1260,6 +1339,19 @@ impl AYEncoder {
             slices.scoped_assumptions,
             current_state_slice.map(|slice| slice.selected_scoped_assumptions.as_slice()),
             |encoder, scoped| {
+                // THE READING GATE (see `arith_reading`).
+                match super::arith_reading::fact_admission_for(scoped, use_int_for_measures) {
+                    super::arith_reading::FactAdmission::AsIs => {}
+                    super::arith_reading::FactAdmission::Guarded => {
+                        return encoder.add_cross_reading_guarded_assumption(
+                            &scoped.name,
+                            &scoped.expr,
+                            scoped.solver_mode,
+                            use_int_for_measures,
+                        );
+                    }
+                    super::arith_reading::FactAdmission::Drop => return Ok(()),
+                }
                 encoder.add_typed_assumption_with_solver_mode(
                     &scoped.name,
                     &scoped.expr,

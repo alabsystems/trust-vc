@@ -1,0 +1,9 @@
+exit: 1
+outcome: "refused"
+diagnostics:
+  error - trust-vc refused: field-mode: field `a` has mode Spec @[11]
+  error - trust-vc refused: type: field `inner` has type `Inner` @[6]
+  error - trust-vc refused: type: parameter `o` has type `Outer` @[15]
+functions:
+  test refused type
+vcir:

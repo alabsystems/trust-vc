@@ -49,7 +49,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn write_package(root: &std::path::Path, name: &str) {
@@ -417,7 +419,7 @@ fn z_flag_with_space_is_accepted() {
         "z_flag_with_space",
         "",
         &["-Z", "unstable-options"],
-        &["check", "-Z", "unstable-options"],
+        &["--unverified", "check", "-Z", "unstable-options"],
     );
 }
 
@@ -427,7 +429,7 @@ fn package_before_release_is_ok() {
         "package_before_release",
         "",
         &["--package=foo", "--release"],
-        &["check", "--package", "foo", "--release"],
+        &["--unverified", "check", "--package", "foo", "--release"],
     );
 }
 
@@ -437,7 +439,13 @@ fn features_before_release_is_ok() {
         "features_before_release",
         "[features]\ndefault = []\n\n",
         &["--features=default", "--release"],
-        &["check", "--features", "default", "--release"],
+        &[
+            "--unverified",
+            "check",
+            "--features",
+            "default",
+            "--release",
+        ],
     );
 }
 
@@ -447,7 +455,13 @@ fn locked_offline_before_release_are_forwarded_to_metadata_and_cargo() {
         "locked_offline_before_release",
         "",
         &["--locked", "--offline", "--release"],
-        &["check", "--locked", "--offline", "--release"],
+        &[
+            "--unverified",
+            "check",
+            "--locked",
+            "--offline",
+            "--release",
+        ],
         &["metadata", "--format-version", "1", "--locked", "--offline"],
     );
 }

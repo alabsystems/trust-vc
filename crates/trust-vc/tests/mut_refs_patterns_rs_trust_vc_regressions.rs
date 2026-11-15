@@ -515,10 +515,16 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
         0,
     ),
     (
-        "mut_refs_patterns_mut_ref_current_currently_blocked",
+        "mut_refs_patterns_mut_ref_current_local_borrow_verified",
         "mut_ref_current resolution helper boundary",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_mut_ref_current_local_borrow_wrong_value_counterexample",
+        "mut_ref_current resolution helper boundary",
+        "counterexample",
+        1,
     ),
     (
         "mut_refs_patterns_mut_ref_future_currently_blocked",
@@ -549,6 +555,36 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
         "mut_ref_tracked_binder_forbidden tracked-mode diagnostic",
         "error",
         0,
+    ),
+    (
+        "mut_refs_patterns_side_effects_add1_two_state_verified",
+        "side_effects_in_match_arg::add1 two-state mut_ref_current/mut_ref_future contract",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_statement_call_verified",
+        "side_effects_in_match_arg statement-position call applies the two-state ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_call_verified",
+        "side_effects_in_match_arg::test3 tuple-destructured call result",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_false_counterexample",
+        "side_effects_in_match_arg::test3_fails tuple-destructured call result",
+        "counterexample",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_wrong_value_counterexample",
+        "side_effects_in_match_arg::test3 tuple-destructured call result, wrong post value",
+        "counterexample",
+        1,
     ),
 ];
 
@@ -713,10 +749,6 @@ const FAIL_CLOSED_FRAGMENTS: &[(&str, &[&str])] = &[
     (
         "mut_refs_patterns_has_resolved_currently_blocked",
         &["has_resolved", "unknown return type"],
-    ),
-    (
-        "mut_refs_patterns_mut_ref_current_currently_blocked",
-        &["mut_ref_current", "unknown return type"],
     ),
     (
         "mut_refs_patterns_mut_ref_future_currently_blocked",

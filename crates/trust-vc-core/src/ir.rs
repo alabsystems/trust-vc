@@ -387,6 +387,11 @@ fn tokens_mention_pointer_width(tokens: proc_macro2::TokenStream) -> bool {
     false
 }
 
+/// The integer-typing surface of [`TrustVcExpr`] as data: every variant with
+/// its integer role, from one exhaustive match (see the module doc).
+#[path = "ir_integer_surface.rs"]
+pub mod integer_surface;
+
 // Phase 3 compatibility surface: expression IR is currently defined in
 // `ir_expr.rs` but exported here to keep typed IR consumers on `crate::ir::*`.
 pub use crate::ir_expr::{
@@ -526,6 +531,18 @@ pub struct TraitMethodDecl {
     /// Extra postconditions the trait DEFAULT BODY must establish; checked at
     /// the decl site. NOT yet published to callers.
     pub default_ensures: Vec<String>,
+    /// H10 (method half): the declaration-order names of the method's OWN type
+    /// and const generic parameters (`fn k<P>(&self)` → `["P"]`; lifetimes
+    /// skipped). EMPTY for a non-generic method, and deliberately NOT the
+    /// trait's own parameters (`trait Own<A>`), which an impl instantiates
+    /// positionally through [`TraitImplDecl::trait_type_args`].
+    ///
+    /// The method's UF `Trait__k` is keyed by name and ARGUMENTS only, so a
+    /// parameter no argument carries collapses every instantiation into one
+    /// term. The lowering consults this list at the CALL site
+    /// (`ir_lowering::dispatch::methods`) to refuse such a call, and to map a
+    /// method-level turbofish onto the carrying positions.
+    pub generic_params: Vec<String>,
 }
 
 impl TraitMethodDecl {
@@ -549,6 +566,7 @@ impl TraitMethodDecl {
             has_default,
             default_body,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }
     }
 
@@ -559,6 +577,15 @@ impl TraitMethodDecl {
     #[must_use]
     pub fn with_default_ensures(mut self, default_ensures: Vec<String>) -> Self {
         self.default_ensures = default_ensures;
+        self
+    }
+
+    /// Sets the declaration-order names of the method's OWN type and const
+    /// generic parameters (builder style; H10 method half). See
+    /// [`TraitMethodDecl::generic_params`].
+    #[must_use]
+    pub fn with_generic_params(mut self, generic_params: Vec<String>) -> Self {
+        self.generic_params = generic_params;
         self
     }
 }
@@ -614,6 +641,75 @@ pub struct TraitImplDecl {
     /// competing declarations; empty elsewhere, which is exactly today's
     /// behaviour for a single-item expansion.
     pub inherent_shadowed_methods: std::collections::BTreeSet<String>,
+    /// Whether the source declares ANOTHER impl of this impl's trait for the
+    /// same self type — see [`ImplGroupCensus`]. Merged metadata, like
+    /// [`Self::inherent_shadowed_methods`]: the dedup in
+    /// `VerificationContext::register_trait_impl` ignores it for identity and
+    /// UNIONS it, so the census survives the very merge it exists to see
+    /// through.
+    pub impl_group: ImplGroupCensus,
+}
+
+/// Source census of the OTHER impls that implement one trait for one self type.
+///
+/// SOUNDNESS-CRITICAL, and it has to be taken from SOURCE, before any decl is
+/// deduplicated. Every registry and encoding the engine keeps for an impl is
+/// keyed by (trait name, self type) with the impl's trait ARGUMENTS and the
+/// self type's references erased: the per-trait UF `Tr__m` carries no trait
+/// arguments, the `Box_S` bridge and the concrete-receiver method metadata are
+/// keyed by the erased self type, and the concrete symbol `S__m`, the captured
+/// bodies and the impl `ensures` are keyed by `(trait, S__m)`. Two impls of one
+/// trait for one self type (`impl Wc<bool> for S` beside `impl Wc<u32> for S`,
+/// `impl Tm for S` beside `impl Tm for &S`) are therefore ONE function to the
+/// engine: one impl's body answered the other impl's conformance check, and one
+/// impl's linking, default-body and impl-`ensures` axioms answered calls to the
+/// other impl. Measured: `impl Wc<u8> for S { 1 }` beside
+/// `impl<'x> Wc<&'x u8> for S { 2 }` against `ensures(result == 1)` listed ONE
+/// Verified conformance row (the two decls had merged, because both trait
+/// arguments lower to `u8`), and `Dm::<u32>::d(&s) == 2` VERIFIED for a
+/// `Dm<u32>` override returning 1 beside a `Dm<bool>` impl inheriting a default
+/// returning 2.
+///
+/// The census is computed by the producers that can see every declaration
+/// (`trait_impl_groups::impl_group_census`), so it counts impls that the
+/// decl-level dedup would merge. Consumers fail CLOSED on a member of such a
+/// group: its conformance obligations that could read a sibling's registry are
+/// refused, and no linking / default-body / impl-`ensures` axiom and no
+/// concrete-receiver method resolution is published for the group, so a call
+/// into it does not resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImplGroupCensus {
+    /// Another impl of the same (resolved) trait for the same self type exists.
+    pub has_sibling_impl: bool,
+    /// Method names this impl declares that a sibling minting the SAME concrete
+    /// symbol prefix also declares. Those are the methods whose captured body /
+    /// impl `ensures` / concrete-symbol registrations cannot tell the two impls
+    /// apart.
+    pub shared_method_names: std::collections::BTreeSet<String>,
+}
+
+impl ImplGroupCensus {
+    /// Fail-closed merge of two producers' censuses of the SAME impl: a sibling
+    /// either producer saw stays seen.
+    pub fn merge(&mut self, other: Self) {
+        self.has_sibling_impl |= other.has_sibling_impl;
+        self.shared_method_names.extend(other.shared_method_names);
+    }
+
+    /// Records one sibling impl declaring `sibling_method_names`, given this
+    /// impl's own `method_names`.
+    pub fn record_sibling<'a>(
+        &mut self,
+        method_names: impl IntoIterator<Item = &'a str>,
+        sibling_method_names: &std::collections::BTreeSet<String>,
+    ) {
+        self.has_sibling_impl = true;
+        for name in method_names {
+            if sibling_method_names.contains(name) {
+                self.shared_method_names.insert(name.to_owned());
+            }
+        }
+    }
 }
 
 impl TraitImplDecl {
@@ -632,7 +728,15 @@ impl TraitImplDecl {
             is_external: false,
             trait_type_args: Vec::new(),
             inherent_shadowed_methods: std::collections::BTreeSet::new(),
+            impl_group: ImplGroupCensus::default(),
         }
+    }
+
+    /// Attaches the source census of sibling impls (see [`ImplGroupCensus`]).
+    #[must_use]
+    pub fn with_impl_group(mut self, impl_group: ImplGroupCensus) -> Self {
+        self.impl_group = impl_group;
+        self
     }
 
     /// Records the trait-method names whose shared concrete symbol this impl may
@@ -665,6 +769,7 @@ impl TraitImplDecl {
             is_external,
             trait_type_args,
             inherent_shadowed_methods: _,
+            impl_group: _,
         } = self;
         *trait_name == other.trait_name
             && *concrete_type == other.concrete_type
@@ -828,6 +933,11 @@ fn parse_qualified_projection(name: &str) -> Option<(&str, &str, &str)> {
 /// otherwise, in which case the conformance check keeps its prior body-axiom
 /// path. The captured text being the method's true return value is the soundness
 /// linchpin: a wrong body would assume a false definitional fact.
+///
+/// The SAME numbering spells the impl method's own registered `ensures`
+/// (`canonicalize_impl_method_ensures`), so `param_count` is the positional
+/// anchor both of that clause's consumers check before binding placeholder `i`
+/// to argument `i`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConformanceMethodBody {
@@ -867,10 +977,23 @@ impl ConformanceMethodBody {
 /// captured body answered A2's and A3's conformance obligations. Fail-closed in
 /// direction, but it makes multi-trait code unverifiable.
 ///
-/// Carrying the trait makes the collision unrepresentable rather than merely
-/// detected. There is deliberately no `Default` and no field-by-field literal
-/// constructor: [`Self::new`] is the only way to build one, so a caller cannot
-/// forget the trait and silently re-create the trait-erased key.
+/// Carrying the trait makes the TRAIT-vs-trait collision unrepresentable. There
+/// is deliberately no `Default` and no field-by-field literal constructor:
+/// [`Self::new`] is the only way to build one, so a caller cannot forget the
+/// trait and silently re-create the trait-erased key.
+///
+/// STILL NOT AN IDENTITY: the key carries neither the impl's trait type
+/// arguments nor a self-type path, so `impl Wc<bool> for S` and
+/// `impl Wc<u32> for S` both key as `(Wc, S__wc)`, and the first registration
+/// answered for both. Measured before the fix, cache off, with the `Wc<u32>` impl
+/// returning 2 against the trait's `ensures(result == 1)`: both conformance rows
+/// Verified and the CLI exited 0. The conformance lane now DETECTS that case and
+/// fails the collided impls closed (`trait_conformance::shared_impl_method_symbols`)
+/// — from the decl list AND from the source census on the decl
+/// ([`ImplGroupCensus`]), because an erased-equal pair (`Wc<u8>` / `Wc<&u8>`)
+/// merges into one decl before the list can show two claimants. Re-keying by
+/// trait arguments, so conforming collided impls verify, is the open follow-up.
+/// Pinned by `tests/trait_args_impl_conformance_collision_soundness.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImplMethodKey {
     trait_name: String,
@@ -1008,6 +1131,11 @@ pub enum TrustVcType {
     /// spurious proofs (#1926). Preserves the original type name for
     /// diagnostics. Fixes #1917.
     Opaque(String),
+    /// A named uninterpreted carrier with no constructor, selector, layout,
+    /// refinement or private representation. The query API admits it only
+    /// through its explicit nominal-sort registry. This is distinct from a
+    /// recursive edge inside a datatype and from an unrecognized `Opaque`.
+    NamedCarrier(String),
 }
 
 impl TrustVcType {

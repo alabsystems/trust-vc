@@ -2,23 +2,44 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
-// Faithful 1:1 executable TrustVc port of upstream
+// Faithful 1:1 executable TrustVc port of the SINGLE-BINDER half of upstream
 // rust_verify_test/tests/choose.rs.
 //
-// Every one of the 17 upstream harness cases is reproduced here (with the
-// two multi-subproof cases test1 and test1_tuple split into their upstream
-// subproofs), for a total of 20 executable TrustVc functions:
-//   * 7 spec fns (f, f2, cnatf, cintf, cnatf2, cintf2, less_than) mirror the
-//     upstream `spec fn` declarations,
+// WHY THE PORT IS TWO FILES. Upstream's file is a sequence of
+// `test_verify_one_file!` blocks, and each block is its OWN compilation unit.
+// Three helper names are therefore declared more than once upstream at
+// DIFFERENT ARITIES: `f` is 1-ary in the `test1*` blocks and 2-ary in the
+// `test1_tuple*` blocks, and `cnatf`/`cintf` are 1-ary in the `test_refine*`
+// blocks and 2-ary in the `test_refine*_tuple` blocks. They are not renames of
+// each other. Flattening every block into one Rust file collided those names,
+// and the port resolved the collision by RENAMING the 2-ary ones to `f2`,
+// `cnatf2` and `cintf2`.
+//
+// That rename is a spelling upstream never writes, and the corpus gate compares
+// a refuted statement against upstream's own `// FAILS` line: the renamed
+// `cintf2` made `test_refine_fail1_tuple` correspond to no upstream statement.
+// A module wrapper does not fix it either — the claim canonicalizer strips a
+// literal `trust_vc::` prefix and a turbofish and nothing else, so `m::cintf(..)`
+// does not reduce to upstream's `cintf(..)`, and a general path-prefix
+// reduction would wrongly equate `Seq::empty()` with `Set::empty()`
+// (pinned by `path_qualified_call_is_not_the_bare_call` in
+// crates/cargo-trust-vc/src/evidence.rs).
+//
+// The honest repair is to give the port the SAME compilation-unit boundary
+// upstream has, so each helper keeps upstream's own name at upstream's own
+// arity. The 2-ary half lives in `choose_tuple.rs`; nothing about what any case
+// CLAIMS or which obligation FAILS changed.
+//
+// This file reproduces the 7 single-binder upstream harness cases (test1,
+// test1_fails1, test1_fails2, test1_fails3, test_refine, test_refine_fail1,
+// test_refine2), with the multi-subproof case `test1` split into its upstream
+// subproofs, for a total of 9 executable TrustVc functions:
+//   * 3 spec fns (f, cnatf, cintf) mirror the upstream `spec fn` declarations
+//     at upstream's own names and arities,
 //   * `trust_vc::choose!(|x: T| ...)` and source-style `choose|x: T| ...` cover
-//     single- and multi-binder witness extraction,
-//   * `choose_tuple::<(..), _>(|..| ..)` covers the tuple-projection refinement
-//     cases,
-//   * casts (`n as int`), tuple destructuring, and nat/int binders mirror the
-//     upstream refinement shapes,
-//   * the two malformed inputs (`choose(|i, j| ..)` parenthesized closure and
-//     the wrong-type `choose_tuple` ascription) reproduce the upstream compile
-//     errors verbatim via the general frontend diagnostics.
+//     single-binder witness extraction,
+//   * casts (`n as int`) and nat/int binders mirror the upstream refinement
+//     shapes.
 //
 // CHOOSE_RS_EXPECTED_CASES maps each port fn to its upstream harness case id and
 // the verdict TrustVc must reproduce. The manifest row keeps the identical
@@ -38,37 +59,6 @@ pub const CHOOSE_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     ("test_refine", "test_refine", "verified", 3),
     ("test_refine_fail1", "test_refine_fail1", "counterexample", 3),
     ("test_refine2", "test_refine2", "verified", 3),
-    (
-        "test1_choose_with_closure_illegal",
-        "test1_choose_with_closure_illegal",
-        "error",
-        0,
-    ),
-    ("test1_tuple_choose", "test1_tuple", "verified", 3),
-    ("test1_tuple_choose_eq", "test1_tuple", "verified", 3),
-    ("test1_fails1_tuple", "test1_fails1_tuple", "counterexample", 2),
-    ("test1_fails2_tuple", "test1_fails2_tuple", "counterexample", 3),
-    ("test1_fails3_tuple", "test1_fails3_tuple", "counterexample", 2),
-    ("test_refine_tuple", "test_refine_tuple", "verified", 3),
-    (
-        "test_refine_fail1_tuple",
-        "test_refine_fail1_tuple",
-        "counterexample",
-        3,
-    ),
-    ("test_refine2_tuple", "test_refine2_tuple", "verified", 3),
-    (
-        "test1_choose_tuple_wrong_type",
-        "test1_choose_tuple_wrong_type",
-        "error",
-        0,
-    ),
-    (
-        "test1_choose_tuple_no_ascription_regression_1183",
-        "test1_choose_tuple_no_ascription_regression_1183",
-        "verified",
-        3,
-    ),
 ];
 
 pub fn choose_rs_expected_cases() -> &'static [(&'static str, &'static str, &'static str, usize)] {
@@ -81,11 +71,6 @@ fn f(i: int) -> bool {
 }
 
 #[trust_vc::spec]
-fn f2(i: int, j: int) -> bool {
-    i <= j
-}
-
-#[trust_vc::spec]
 fn cnatf(n: nat) -> bool {
     true
 }
@@ -93,21 +78,6 @@ fn cnatf(n: nat) -> bool {
 #[trust_vc::spec]
 fn cintf(n: int) -> bool {
     true
-}
-
-#[trust_vc::spec]
-fn cnatf2(m: nat, n: nat) -> bool {
-    true
-}
-
-#[trust_vc::spec]
-fn cintf2(m: int, n: int) -> bool {
-    true
-}
-
-#[trust_vc::spec]
-fn less_than(x: int, y: int) -> bool {
-    x < y
 }
 
 // ---- test1 (3 subproofs) => Ok ----
@@ -164,77 +134,4 @@ fn test_refine_fail1() {
 fn test_refine2() {
     trust_vc::assert!(cnatf(10));
     trust_vc::assert!((choose|n: nat| cnatf(n) && n >= 10) >= 10);
-}
-
-// ---- test1_choose_with_closure_illegal => Err (parens) ----
-#[trust_vc::ensures(true)]
-fn test1_choose_with_closure_illegal() {
-    let (i, j): (int, int) = choose(|i: int, j: int| f2(i, j));
-    trust_vc::assert!(f2(7, 8));
-    trust_vc::assert!(i <= j);
-}
-
-// ---- test1_tuple (2 subproofs) => Ok ----
-#[trust_vc::ensures(true)]
-fn test1_tuple_choose() {
-    let (i, j): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j));
-    trust_vc::assert!(f2(7, 8));
-    trust_vc::assert!(i <= j);
-}
-#[trust_vc::ensures(true)]
-fn test1_tuple_choose_eq() {
-    let (i1, j1): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j) && (1 + 1 == 2));
-    let (i2, j2): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j) && (2 + 2 == 4));
-    trust_vc::assert!(i1 == i2);
-    trust_vc::assert!(j1 == j2);
-}
-
-// ---- tuple fails => CE ----
-#[trust_vc::ensures(true)]
-fn test1_fails1_tuple() {
-    let (i, j): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j));
-    trust_vc::assert!(i <= j); // FAILS
-}
-#[trust_vc::ensures(true)]
-fn test1_fails2_tuple() {
-    let (i, j): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j));
-    trust_vc::assert!(f2(7, 8));
-    trust_vc::assert!(i == 7); // FAILS
-}
-#[trust_vc::ensures(true)]
-fn test1_fails3_tuple() {
-    let (i1, j1): (int, int) = trust_vc::choose!(|i: int, j: int| f2(i, j) && (2 + 2 == 4));
-    let (i2, j2): (int, int) = trust_vc::choose!(|i: int, j: int| (2 + 2 == 4) && f2(i, j));
-    trust_vc::assert!(i1 == i2); // FAILS
-}
-
-// ---- test_refine_tuple / fail1_tuple / refine2_tuple ----
-#[trust_vc::ensures(true)]
-fn test_refine_tuple() {
-    trust_vc::assert!(choose_tuple::<(nat, nat), _>(|m: nat, n: nat| cnatf2(m, n)).0 >= 0);
-    trust_vc::assert!(choose_tuple::<(nat, nat), _>(|m: nat, n: nat| cintf2(m as int, n as int) && m < 0 && n < 0).0 >= 0);
-}
-#[trust_vc::ensures(true)]
-fn test_refine_fail1_tuple() {
-    trust_vc::assert!(cintf2(-10, -10));
-    trust_vc::assert!(choose_tuple::<(nat, nat), _>(|m: nat, n: nat| cintf2(m as int, n as int) && m < 0 && n < 0).0 < 0); // FAILS
-}
-#[trust_vc::ensures(true)]
-fn test_refine2_tuple() {
-    trust_vc::assert!(cnatf2(10, 10));
-    trust_vc::assert!(choose_tuple::<(nat, nat), _>(|m: nat, n: nat| cnatf2(m, n) && m >= 10 && n >= 10).0 >= 10);
-}
-
-// ---- test1_choose_tuple_wrong_type => Err ----
-#[trust_vc::ensures(true)]
-fn test1_choose_tuple_wrong_type() {
-    let (i, j): (int, nat) = choose_tuple(|i: int, j: int| f2(i, j));
-}
-
-// ---- test1_choose_tuple_no_ascription_regression_1183 => Ok ----
-#[trust_vc::ensures(true)]
-fn test1_choose_tuple_no_ascription_regression_1183() {
-    trust_vc::assert!(less_than(3, 7));
-    let (x, y) = trust_vc::choose!(|i: int, j: int| less_than(i, j));
-    trust_vc::assert!(x < y);
 }

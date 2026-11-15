@@ -54,11 +54,8 @@ fn assert_verified(function: &str) {
 /// A fail-closed non-`Verified` verdict (Counterexample / NotProved / Unknown).
 /// `Verified` is the only unacceptable outcome.
 fn assert_not_verified(function: &str) {
-    match verify(function) {
-        VerifyResult::Verified => {
-            panic!("SOUNDNESS BREACH: `{function}` must NOT verify (non-terminating / bad measure)")
-        }
-        _ => {}
+    if verify(function) == VerifyResult::Verified {
+        panic!("SOUNDNESS BREACH: `{function}` must NOT verify (non-terminating / bad measure)")
     }
 }
 
@@ -112,12 +109,11 @@ fn measure_goes_negative_is_counterexample() {
 /// `Verified` here is the cardinal false-verify the lane was quarantined for.
 #[test]
 fn unbounded_negative_measure_never_verifies() {
-    match verify("unbounded_negative_measure") {
-        VerifyResult::Verified => panic!(
+    if verify("unbounded_negative_measure") == VerifyResult::Verified {
+        panic!(
             "CARDINAL FALSE-VERIFY: `unbounded_negative_measure` decreases forever below zero \
-             but was accepted as terminating"
-        ),
-        _ => {}
+         but was accepted as terminating"
+        )
     }
 }
 
@@ -159,8 +155,18 @@ fn continue_skips_measure_fails_closed() {
 }
 
 #[test]
-fn break_interior_non_flat_fails_closed() {
-    // `if { break }` makes the body non-flat ⇒ `capture_transitions == false` ⇒
-    // no measure metadata registered ⇒ free entry variable ⇒ fails closed.
-    assert_not_verified("break_interior_non_flat");
+fn break_interior_body_verifies_its_genuine_measure() {
+    // Rows 430/431 (2026-09-10): a break-only `if cond { break; }` no longer
+    // makes the body non-flat. The measure is registered (WF1 under the
+    // invariant, WF2 under `guard ∧ ¬cond` with the exact transition) and the
+    // genuinely terminating loop verifies — previously pinned as an
+    // under-verifying Counterexample.
+    assert_verified("break_interior_non_flat");
+}
+
+#[test]
+fn break_interior_bad_measure_fails_closed() {
+    // Same shape with a GROWING measure: WF2 must refute it; the break site
+    // exempts nothing about the measure.
+    assert_not_verified("break_interior_bad_measure");
 }

@@ -6,9 +6,11 @@
 //! can now USE the closure's spec through the OPAQUE reflection UFs
 //! `call_requires%` / `call_ensures%`.
 //!
-//! THE SOUND MODEL (a conditional assume over opaque UFs, reusing the
-//! `add_helper_contract_obligations` drop discipline):
+//! THE SOUND MODEL (a proven precondition plus a conditional assume over opaque
+//! UFs, reusing the `add_helper_contract_obligations` drop discipline; the PROVE
+//! is H6 — Verus/vstd call semantics):
 //!
+//!     PROVE   call_requires%(f, a)
 //!     ASSUME  call_requires%(f, a)  ==>  call_ensures%(f, a, f(a))
 //!
 //! binding the REAL returned `spec_fn_apply(f, a)` term. This is the closure's
@@ -25,8 +27,10 @@
 //!   claim about the result (`assert!(f(a) == 5)`) is not provable (TRAP #1). The
 //!   callee never invents a def-side for the def-side-less parameter, so the
 //!   direct-application cardinal invariant is not weakened.
-//! * The Increment-1 congruent term is untouched: determinism (`f(3) == f(3)`)
-//!   still verifies from congruence alone with NO obligation to discharge, and a
+//! * The Increment-1 congruent term is untouched: `f(3) == f(3)` is still proved
+//!   from congruence once `requires f.requires((3,))` is declared (its
+//!   `Verified` answer is refused, since a stateful `Fn` closure returns two
+//!   values; its requires-free twin is refuted on the call-site requires), and a
 //!   concrete pin (`f(3) == 3`) still counterexamples. FnMut/FnOnce stay
 //!   fail-closed.
 //!
@@ -55,6 +59,20 @@ fn verdict(func: &str) -> VerifyResult {
     verify(func).unwrap_or_else(|e| panic!("extract+verify `{func}` failed: {e:?}"))
 }
 
+/// Assert the refusal of a `Verified` answer for a callable parameter evaluated
+/// more than once. Only a `Verified` answer produces it, so a refutation here
+/// still fails the assertion.
+fn assert_refused(func: &str) {
+    let v = verdict(func);
+    assert!(
+        matches!(
+            &v,
+            VerifyResult::Error { message } if message.starts_with("bodiless call repeated")
+        ),
+        "`{func}` should be REFUSED (a callable parameter evaluated twice); got {v:?}"
+    );
+}
+
 fn assert_verified(func: &str) {
     let v = verdict(func);
     assert!(
@@ -75,14 +93,22 @@ fn assert_counterexample(func: &str) {
     );
 }
 
+/// A Counterexample on an obligation whose name starts with `prefix`.
+fn assert_cx_on(func: &str, prefix: &str) {
+    let v = verdict(func);
+    match &v {
+        VerifyResult::Counterexample {
+            obligation_name, ..
+        } if obligation_name.starts_with(prefix) => {}
+        _ => panic!("`{func}` should COUNTEREXAMPLE on a `{prefix}*` obligation; got {v:?}"),
+    }
+}
+
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("FN-BOUND OBLIGATION FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (deferred / fail-closed lowering) or any solver
-        // non-Verified verdict (incl. Unknown) is a sound non-verify.
-        _ => {}
+    // An extraction Err (deferred / fail-closed lowering) or any solver
+    // non-Verified verdict (incl. Unknown) is a sound non-verify.
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("FN-BOUND OBLIGATION FALSE-VERIFY: `{func}` must not verify")
     }
 }
 
@@ -122,37 +148,59 @@ fn t4_missing_requires_counterexample() {
     // FALSE-VERIFY TRAP #2 (the crux): USES `f.ensures` as the postcondition but
     // declares NO `requires f.requires`. `call_requires%` is unconstrained, so the
     // conditional assume cannot fire and the ensures is underivable. A `Verified`
-    // = using the ensures without discharging the requires = UNSOUND.
+    // = using the ensures without discharging the requires = UNSOUND. Since H6 the
+    // tail application also emits its own unprovable call-site prove-requires;
+    // the measured first refuted obligation is the `postcondition`.
     assert_counterexample("fnbound_obligation_missing_requires_cx");
 }
 
 #[test]
 fn t5_missing_requires_assert_counterexample() {
     // TRAP #2 companion (assert form): `assert!(f.ensures((a,), r))` without a
-    // declared requires. Same gate — the ensures is underivable.
-    assert_counterexample("fnbound_obligation_missing_requires_assert_cx");
+    // declared requires. Same gate — the ensures is underivable, and (H6) the
+    // application's call-site requires is refuted first.
+    assert_cx_on(
+        "fnbound_obligation_missing_requires_assert_cx",
+        "__call_requires_pp",
+    );
 }
 
 #[test]
-fn t6_determinism_still_verified() {
-    // REGRESSION (Increment 1 intact): determinism WITHOUT a requires clause still
-    // verifies from the congruent term alone. The seam adds ONLY a conditional
-    // assume (inert, result unused), NO standalone obligation a requires-free call
-    // could fail. A Counterexample here = the seam over-constrained the term.
-    assert_verified("fnbound_obligation_determinism_verified");
+fn t6_determinism_refused_not_refuted() {
+    // REGRESSION (Increment 1 intact): two calls WITHOUT a requires clause are
+    // still proved equal from the congruent term alone, and that `Verified`
+    // answer is refused. The seam adds ONLY a conditional assume (inert, result
+    // unused), NO standalone obligation a requires-free call could fail. A
+    // Counterexample here = the seam over-constrained the term.
+    assert_refused("fnbound_obligation_determinism_refused");
+}
+
+#[test]
+fn t6b_determinism_no_requires_counterexample() {
+    // H6: requires-free determinism was a whole-program false verify (the
+    // requires was only an assumed antecedent). The call-site prove-requires is
+    // now emitted and refuted.
+    assert_cx_on(
+        "fnbound_obligation_determinism_no_requires_cx",
+        "__call_requires_pp",
+    );
 }
 
 #[test]
 fn t7_pins_concrete_no_requires_counterexample() {
     // REGRESSION: a concrete pin `f(3) == 3` still counterexamples (unconstrained
-    // result, no matching ensures to derive a value).
-    assert_counterexample("fnbound_obligation_pins_concrete_no_requires_cx");
+    // result, no matching ensures to derive a value). With no requires declared,
+    // H6's call-site prove-requires is the refuted obligation.
+    assert_cx_on(
+        "fnbound_obligation_pins_concrete_no_requires_cx",
+        "__call_requires_pp",
+    );
 }
 
 #[test]
 fn t8_fnmut_fail_closed() {
-    // REGRESSION: `FnMut` stays fail-closed (not typed `SpecFn`; the call does not
-    // lower, no obligation is emitted).
+    // REGRESSION: `FnMut` stays fail-closed (not typed `SpecFn`; H6 rejects the
+    // application at extraction with a "function value" diagnostic).
     assert_not_verified("fnbound_obligation_fnmut_fail_closed");
 }
 

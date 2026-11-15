@@ -306,6 +306,7 @@ pub fn consumes_proof_step_lemma(k: u64) -> u64 { psf(k) }
 /// which is exactly the kind of fixture that goes flaky across an ay pin — so it
 /// is deliberately not attempted here. Treat the ordering/assert-not-assume
 /// semantics as reviewed-by-construction, and this test as the admission guard.
+#[test]
 fn a_lemma_that_proves_its_ensures_in_the_body_still_publishes() {
     let result = verify("proofstep", "consumes_proof_step_lemma", PROOF_STEP_LEMMA);
     assert!(

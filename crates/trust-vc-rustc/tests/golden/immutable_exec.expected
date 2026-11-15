@@ -1,0 +1,11 @@
+exit: 1
+outcome: "erase-rejected"
+diagnostics:
+  error E0384 cannot assign twice to immutable variable `x` @[6:first assignment to `x`, 7:cannot assign twice to immutable variable]
+functions:
+  test rejected -
+vcir:
+exec fn test_crate::test() -> result: exec ()
+  let x: exec u64 = 10u64
+  x := 20u64
+  return[#1]

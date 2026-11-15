@@ -184,8 +184,14 @@ pub const RETURN_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     (
         "return_from_let_else_contract",
         "test1",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "return_from_let_else_contract_payload_counterexample",
+        "test1",
+        "counterexample",
+        1,
     ),
     (
         "return_from_call_argument_contract",
@@ -300,10 +306,6 @@ pub const RETURN_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
 pub const RETURN_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     (
         "return_from_if_let_expression_contract",
-        &["fail closed without solver Unknown evidence"],
-    ),
-    (
-        "return_from_let_else_contract",
         &["fail closed without solver Unknown evidence"],
     ),
     (
@@ -478,11 +480,27 @@ fn return_from_if_let_no_binding_contract_fails(value: u64) -> u64 {
     }
 }
 
+// Port-author extension (upstream return.rs has no let-else case): the
+// `else` arm returns 13 and the `Some` arm returns the payload, so the
+// contract must admit any `Some` payload.
+#[trust_vc::contract(
+    ensures(maybe.is_some() || result == 13u64),
+    returns(result),
+)]
+fn return_from_let_else_contract(maybe: Option<u64>) -> u64 {
+    let Some(value) = maybe else {
+        return 13u64;
+    };
+    value
+}
+
+// LIAR (genuine): the `Some` payload is unconstrained, so `result == 11 ||
+// result == 13` is false (witness: `Some(0x800000000000000d)`).
 #[trust_vc::contract(
     ensures(result == 11u64 || result == 13u64),
     returns(result),
 )]
-fn return_from_let_else_contract(maybe: Option<u64>) -> u64 {
+fn return_from_let_else_contract_payload_counterexample(maybe: Option<u64>) -> u64 {
     let Some(value) = maybe else {
         return 13u64;
     };

@@ -383,6 +383,38 @@ pub(in crate::encoder) use super::assertion_bv_reuse::{
     can_use_shared_bv_fast_path, verify_assertion_with_shared_bv_encoder, SharedBvFastPathAttempt,
 };
 
+/// May the int-mode TIMEOUT retry (`verify_main_attempt_with_retries` step 1)
+/// run for this assertion? Three conditions, each disqualifying on its own:
+///
+/// * the goal's own no-overflow predicates must have been CHECKED first
+///   (`arith_overflow_enabled`); with no overflow the fixed-width and the
+///   `Int` reading of the goal are the same statement, and without that check
+///   they need not be;
+/// * a `by(nonlinear_arith)` goal is ALREADY solved in the integers, so the
+///   retry would be the identical query;
+/// * every fact the solve holds must reach the `Int` reading UNCHANGED —
+///   `arith_reading::every_fact_crosses_into`, which owns that reason (the
+///   `Guarded` rewrite's guard is incomplete for a unary `-` that DOMINATES
+///   the bounded node — a `-` sitting UNDER the bound is already covered, by
+///   the homomorphism argument recorded there).
+///
+/// Named and unit-pinned rather than written inline at the call site: this
+/// predicate can only ever suppress a TIMEOUT → `Verified` upgrade, so no
+/// end-to-end fixture can distinguish it from `true` and without pins it is
+/// code nothing measures.
+fn int_fallback_allowed(
+    slices: &VerificationSlices<'_>,
+    is_nonlinear_arith: bool,
+    arith_overflow_enabled: bool,
+) -> bool {
+    arith_overflow_enabled
+        && !is_nonlinear_arith
+        && super::arith_reading::every_fact_crosses_into(
+            slices,
+            super::arith_reading::ArithReading::MathInt,
+        )
+}
+
 /// Run a single assertion attempt with the full timeout retry cascade.
 ///
 /// 1. BV attempt (or forced timeout if test hook active)
@@ -572,7 +604,7 @@ pub(super) fn apply_collection_confirmation(
     // determinism guarantee than a second solver run.  Skip the
     // confirmation re-check when one is available.
     #[cfg(feature = "proof-certificates")]
-    if crate::verification_report::current_proof_is_strict() {
+    if crate::verification_report::current_proof_is_strict(&assertion.name) {
         tracing::debug!(
             assertion = %assertion.name,
             "skipping collection confirmation — strict proof certificate available"
@@ -594,36 +626,78 @@ pub(super) fn apply_collection_confirmation(
         });
     }
 
-    let bv_mode = assertion
-        .solver_mode
-        .is_some_and(|m| m == crate::vc::SolverMode::BitVector);
     let confirm_result = verify_main_attempt_with_retries(
         slices,
         assertion,
         effective_int_mode,
-        ctx.check_overflow()
-            && !effective_int_mode
-            && !bv_mode
-            && !obligation_carries_spec_arithmetic(assertion),
+        // The fourth copy of the same predicate, now reading the one gate. The
+        // `!effective_int_mode` conjunct is this site's own (an int-mode run has
+        // no BV overflow to fall back from); the rest is
+        // `exec_arith_overflow_in_scope`.
+        exec_arith_overflow_in_scope(ctx.check_overflow() && !effective_int_mode, assertion),
         post_loop_modified_vars,
         extra_variables,
         cached_prune_plan,
     )?;
     Ok(match confirm_result.outcome {
         AssertionOutcome::Verified => outcome,
-        _ => {
+        // FAIL CLOSED, and SAY WHAT HAPPENED. The primary attempt is not
+        // republished: whatever the confirmation returned, this obligation
+        // does not come back `Verified`. What changed 2026-09-15 is the
+        // message. This arm used to assert "possible ay-dpll non-determinism
+        // (#2241)" and throw the confirmation's own outcome away
+        // (`detail: None`), so a confirmation that merely TIMED OUT, or whose
+        // correct UNSAT ay refused to publish because the certification
+        // envelope had expired, was reported as a solver disagreeing with
+        // itself. That is how a deadline skew (see
+        // `verification::timeout::DEFAULT_SOLVER_WALL_BACKSTOP_MS`) spent a
+        // day looking like a non-determinism bug. The category stays
+        // `ConfirmationDisagree` — it is the one fact this site actually
+        // knows, "the second solve did not confirm" — and the confirmation's
+        // real outcome now travels with it.
+        confirm => {
             crate::verification_report::record_used_assumptions(&[]);
             AssertionOutcome::Unknown {
                 reason: format!(
-                    "Confirmation check disagreed for '{}' — \
-                     possible ay-dpll non-determinism (#2241)",
-                    assertion.name
+                    "Confirmation check disagreed for '{}': the re-solve \
+                     returned {}. Fail-closed — the primary `Verified` is not \
+                     published. A re-solve that does not confirm can be a \
+                     genuine solver disagreement (ay #2241), a timeout, or ay \
+                     declining to publish a computed result whose envelope \
+                     expired; read the outcome above before attributing it",
+                    assertion.name,
+                    describe_confirmation_outcome(&confirm),
                 ),
                 category: Some(UnknownCategory::ConfirmationDisagree),
                 detail: None,
             }
         }
     })
+}
+
+/// One-line rendering of what a confirmation re-solve actually returned, for
+/// the message above. Deliberately includes ay's own unknown reason when there
+/// is one: that string is what distinguishes "solver disagreed", "timeout" and
+/// "certification declined to publish".
+fn describe_confirmation_outcome(outcome: &AssertionOutcome) -> String {
+    match outcome {
+        AssertionOutcome::Verified => "Verified".to_string(),
+        AssertionOutcome::Counterexample { .. } => "a Counterexample".to_string(),
+        AssertionOutcome::Error { message } => format!("Error ({message})"),
+        AssertionOutcome::Unknown {
+            reason,
+            category,
+            detail,
+        } => {
+            let category = category
+                .map(|c| format!("{c:?}"))
+                .unwrap_or_else(|| "Unknown".to_string());
+            match detail {
+                Some(detail) => format!("Unknown/{category} ({reason}; ay detail: {detail:?})"),
+                None => format!("Unknown/{category} ({reason})"),
+            }
+        }
+    }
 }
 
 /// Dispatch gate for the nonlinear-real certificate pre-pass.
@@ -637,7 +711,7 @@ pub(super) fn apply_collection_confirmation(
 /// keep the NRA pre-pass switched off so a hint-free goal falls through to the
 /// ordinary solver. A leak here would silently prove `real_nonlinear2` and
 /// diverge from Verus.
-fn is_nonlinear_arith_mode(mode: Option<crate::vc::SolverMode>) -> bool {
+pub(super) fn is_nonlinear_arith_mode(mode: Option<crate::vc::SolverMode>) -> bool {
     mode.is_some_and(|m| m == crate::vc::SolverMode::NonlinearArith)
 }
 
@@ -667,6 +741,51 @@ pub(super) fn obligation_carries_spec_arithmetic(
                 | ObligationKind::LoopEnsures
                 | ObligationKind::Recommends
         )
+}
+
+/// THE ONE GATE for this obligation's exec-arith no-overflow predicates.
+///
+/// SOUNDNESS-CRITICAL, and it exists because the two halves DISAGREED.
+/// `verify_assertion_typed` (`solve.rs`) re-encodes the goal's own no-overflow
+/// predicates and ASSERTS them into the solver — the "Assert+Assume" pattern
+/// (#2516) — on the strength of a comment that says they "were already verified
+/// in a separate encoder". They were verified only when the CHECK ran, and the
+/// check is deliberately suppressed for three families:
+///
+/// * `by(bit_vector)` — the assertion is bit-vector math, which WRAPS, so there
+///   is no no-overflow property to rely on and none is checked;
+/// * `by(nonlinear_arith)` — solved in the integers, where the `+`/`-`/`*`
+///   no-overflow predicates are not emitted at all (`encode_int_arith` takes
+///   `wrap_ctx = None` under `use_int_arithmetic`) and the CHECK that would
+///   justify assuming any of the rest is skipped outright by the separate
+///   `!is_nonlinear_arith &&` guard on the check-emitting block below. NOT a
+///   vacuous conjunct: the `Div`/`Rem` arms and the collection encoders still
+///   push predicates in that lane, so without this row the assume site would
+///   assert an unproven `b != 0`. Pinned by
+///   `the_exec_arith_overflow_gate_is_closed_for_a_nonlinear_arith_goal` and
+///   its non-vacuity twin;
+/// * spec-predicate obligations ([`obligation_carries_spec_arithmetic`]) —
+///   mathematical `int` in Verus, never overflow-checked.
+///
+/// For exactly those obligations the assume site was injecting an UNPROVEN and,
+/// at the witness point, FALSE fact. With `y: u32` pinned to `u32::MAX`, the
+/// assumed `y + 1 <= u32::MAX` contradicts the hypothesis, and EVERY goal that
+/// mentions `y + 1u32` becomes vacuously true — measured:
+/// `assert_by_bit_vector!(y + 1u32 == 7u32)` VERIFIED, and a caller-side
+/// `requires(z + 1u32 == 0u32 && 1u32 == 2u32)` VERIFIED. The check site and the
+/// assume site now read the SAME predicate, so "assume only what was checked"
+/// is a structural property rather than a convention two files have to keep.
+pub(in crate::encoder) fn exec_arith_overflow_in_scope(
+    context_checks_overflow: bool,
+    assertion: &crate::prepared_context::PreparedObligation,
+) -> bool {
+    context_checks_overflow
+        && !matches!(
+            assertion.solver_mode,
+            Some(crate::vc::SolverMode::BitVector)
+        )
+        && !is_nonlinear_arith_mode(assertion.solver_mode)
+        && !obligation_carries_spec_arithmetic(assertion)
 }
 
 /// Inner typed single-assertion verification.
@@ -779,11 +898,9 @@ fn verify_single_assertion_typed_inner(
     // BitVector mode (`assert by(bit_vector)`): the expression is interpreted
     // with wrapping bit-vector semantics, so arithmetic carries no overflow
     // obligation (matches Verus). Collection-precondition checks still run.
-    let is_bit_vector = assertion
-        .solver_mode
-        .is_some_and(|m| m == crate::vc::SolverMode::BitVector);
-    let arith_overflow_enabled =
-        ctx.check_overflow() && !is_bit_vector && !obligation_carries_spec_arithmetic(assertion);
+    // The SAME gate decides whether `solve.rs` may ASSUME those predicates —
+    // see `exec_arith_overflow_in_scope`.
+    let arith_overflow_enabled = exec_arith_overflow_in_scope(ctx.check_overflow(), assertion);
 
     let use_int_for_measures = is_nonlinear_arith
         || matches!(
@@ -894,7 +1011,7 @@ fn verify_single_assertion_typed_inner(
         slices,
         assertion,
         use_int_for_measures,
-        arith_overflow_enabled && !is_nonlinear_arith,
+        int_fallback_allowed(slices, is_nonlinear_arith, arith_overflow_enabled),
         post_loop_modified_vars,
         extra_variables,
         Some(&assertion_prune_plan),

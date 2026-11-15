@@ -1,12 +1,13 @@
 // Copyright 2026 Andrew Yates
 // SPDX-License-Identifier: Apache-2.0
 //! Adversarial soundness regression for Phase C part 2 DIRECT APPLICATION
-//! `f(arg)` of a KNOWN LOCAL `trust_vc::closure!` literal (unary, over modelable
-//! value sorts). The call lowers to the OPAQUE, DISJOINT `spec_fn_apply` UF the
-//! `.call` method path already uses; the extraction seam
-//! `record_closure_application_obligations` PROVES `f.requires(arg)` (an
-//! obligation) and ASSUMES `f.ensures(arg, f(arg))` binding the REAL returned
-//! term.
+//! `f(args..)` of a KNOWN LOCAL `trust_vc::closure!` literal (any arity since H6,
+//! over modelable value sorts). The call lowers to the OPAQUE, DISJOINT
+//! `spec_fn_apply` UF the `.call` method path already uses; the extraction seam
+//! `record_closure_application_obligations` PROVES `f.requires(args..)` (an
+//! obligation) and ASSUMES `f.ensures(args.., f(args..))` binding the REAL
+//! returned term. The H6 companion `closure_application_requires_soundness.rs`
+//! pins the unused-result and every-other-value-callee shapes.
 //!
 //! CARDINAL INVARIANT: the assumed ensures is ONLY ever the def-side-CHECKED
 //! written clause. A closure is `SpecFn`-typed AND registered iff
@@ -26,7 +27,7 @@
 //! (including `Unknown`) as a sound non-verify; acceptance probes require exactly
 //! `Verified` (an `Unknown` is a FAILURE).
 //!
-//! See `dispatch/calls.rs` (unary SpecFn application guard),
+//! See `dispatch/calls.rs` (N-ary SpecFn application lowering),
 //! `vc_extraction/body_extract.rs::record_closure_application_obligations`, and
 //! the reflection / def-side companion suites `closure_reflection_soundness.rs`,
 //! `closure_spec_soundness.rs`.
@@ -56,13 +57,10 @@ fn verdict(func: &str) -> VerifyResult {
 }
 
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("DIRECT-APPLICATION FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (capture guard / deferred application) is a sound
-        // non-verify; a solver non-Verified verdict (incl Unknown) likewise.
-        _ => {}
+    // An extraction Err (capture guard / deferred application) is a sound
+    // non-verify; a solver non-Verified verdict (incl Unknown) likewise.
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("DIRECT-APPLICATION FALSE-VERIFY: `{func}` must not verify")
     }
 }
 
@@ -192,14 +190,64 @@ fn d8_loop_body_drop_fails_closed() {
     assert_not_verified("d8_loop_body_drop_fails_closed");
 }
 
-#[test]
-fn d9a_zero_arg_application_deferred() {
-    assert_not_verified("d9a_zero_arg_application_deferred");
+/// A Counterexample whose obligation name starts with `prefix`.
+fn assert_cx_on(func: &str, prefix: &str) {
+    let v = verdict(func);
+    match &v {
+        VerifyResult::Counterexample {
+            obligation_name, ..
+        } if obligation_name.starts_with(prefix) => {}
+        _ => panic!("`{func}` should COUNTEREXAMPLE on a `{prefix}*` obligation; got {v:?}"),
+    }
 }
 
 #[test]
-fn d9b_two_arg_application_deferred() {
-    assert_not_verified("d9b_two_arg_application_deferred");
+fn d9a_zero_arg_application_verified() {
+    // H6 flip (was `d9a_zero_arg_application_deferred`, not verified): the seam
+    // proves the zero-arg requires and assumes the def-side-checked ensures.
+    let v = verdict("d9a_zero_arg_application_verified");
+    assert!(
+        matches!(v, VerifyResult::Verified),
+        "a zero-arg application of a def-side-valid closure should verify; got {v:?}"
+    );
+}
+
+#[test]
+fn d9a_zero_arg_liar_cx() {
+    assert_cx_on("d9a_zero_arg_liar_cx", "assertion_");
+}
+
+#[test]
+fn d9a_zero_arg_requires_false_cx() {
+    assert!(
+        obligation_count("d9a_zero_arg_requires_false_cx") >= 2,
+        "the zero-arg application must emit its prove-requires obligation"
+    );
+    assert_cx_on("d9a_zero_arg_requires_false_cx", "__call_requires_pp");
+}
+
+#[test]
+fn d9b_two_arg_application_verified() {
+    // H6 flip (was `d9b_two_arg_application_deferred`, not verified).
+    let v = verdict("d9b_two_arg_application_verified");
+    assert!(
+        matches!(v, VerifyResult::Verified),
+        "a two-arg application of a def-side-valid closure should verify; got {v:?}"
+    );
+}
+
+#[test]
+fn d9b_two_arg_liar_cx() {
+    assert_cx_on("d9b_two_arg_liar_cx", "assertion_");
+}
+
+#[test]
+fn d9b_two_arg_bad_requires_cx() {
+    assert!(
+        obligation_count("d9b_two_arg_bad_requires_cx") >= 2,
+        "the two-arg application must emit its prove-requires obligation"
+    );
+    assert_cx_on("d9b_two_arg_bad_requires_cx", "__call_requires_pp");
 }
 
 #[test]

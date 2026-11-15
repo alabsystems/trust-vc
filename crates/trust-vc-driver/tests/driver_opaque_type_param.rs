@@ -39,8 +39,8 @@
 // Unknown-inducing encoding. Field PROJECTION + EUF equality over the opaque sort
 // (the rest of Slice 3c) is unaffected and fully supported here.
 //
-// Feature-gated: empty on the default (stable) build. Run via
-// `scripts/build-trust-vc-driver.sh test`.
+// Feature-gated: empty on the default build. Run via
+// `targo --unverified test -p trust-vc-driver --features rustc-driver`.
 #![cfg(feature = "rustc-driver")]
 #![cfg_attr(feature = "rustc-driver", feature(rustc_private))]
 
@@ -152,16 +152,9 @@ fn run_driver() -> Vec<DriverResult> {
     let path = dir.join("opaque_src.rs");
     std::fs::write(&path, SOURCE).expect("write source");
 
-    let sysroot = {
-        let out = std::process::Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .expect("run rustc --print sysroot");
-        String::from_utf8(out.stdout)
-            .expect("utf8 sysroot")
-            .trim()
-            .to_string()
-    };
+    // The sysroot of the compiler this driver links (baked in by build.rs),
+    // not whatever `rustc` PATH carries.
+    let sysroot = env!("VC_DRIVER_COMPILER_SYSROOT").to_string();
 
     let args = vec![
         "trust-vc-driver".to_string(),

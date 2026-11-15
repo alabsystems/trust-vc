@@ -128,26 +128,37 @@ fn collided_short_name_struct_does_not_verify() {
 
 // ---- NARROWNESS PIN: a signature's own generic still erases ----------------
 
+/// The tag of the type-name rule's refusal. That rule turns only a `Verified`
+/// answer into an `Error` carrying it, so the tag shows the solver answered
+/// `Verified`.
+const TYPE_NAME_REFUSAL: &str = "type-name rebinding";
+
 /// A struct named `T` must NOT capture a spec fn that declares its own generic
 /// `T`. This pin is load-bearing and observable: dropping the
 /// `!sig_type_params.contains(&name)` guard monomorphizes `always<T>` to the
 /// struct carrier, and this `u64` call site then fails to encode.
+///
+/// The file declares a generic spelled like one of its types, so the
+/// type-name rule refuses the `Verified` answer. The pin therefore expects
+/// that refusal, which only a `Verified` answer can produce; a failure to
+/// encode is some other error.
 #[test]
 fn signature_generic_shadows_a_same_named_struct() {
     let v = verify_function_from_file(&fx(SHADOWED), "generic_shadowed_by_struct");
     eprintln!("[PIN-SHADOW] generic_shadowed_by_struct => {v:?}");
     assert!(
-        matches!(v, Ok(VerifyResult::Verified)),
+        matches!(&v, Ok(VerifyResult::Error { message }) if message.starts_with(TYPE_NAME_REFUSAL)),
         "`fn always<T>(x: T)` declares its own `T`, which shadows `struct T`; \
-         pinning it to the struct carrier breaks the u64 call site. got {v:?}"
+         pinning it to the struct carrier breaks the u64 call site, and the \
+         answer it reaches is refused by the type-name rule. got {v:?}"
     );
 }
 
 /// UNSHADOWED CONTROL: byte-identical but for the absent `struct T`. Comparing
 /// the two is what makes the pin above a statement about shadowing rather than
-/// about generics in general.
+/// about generics in general: without the struct the same program verifies.
 #[test]
-fn generic_verdict_is_independent_of_a_same_named_struct() {
+fn generic_verdict_differs_only_by_the_type_name_refusal() {
     let shadowed = verify_function_from_file(&fx(SHADOWED), "generic_shadowed_by_struct");
     let unshadowed = verify_function_from_file(&fx(UNSHADOWED), "generic_shadowed_by_struct");
     eprintln!("[PIN-CTRL] shadowed => {shadowed:?} / unshadowed => {unshadowed:?}");
@@ -155,10 +166,9 @@ fn generic_verdict_is_independent_of_a_same_named_struct() {
         matches!(unshadowed, Ok(VerifyResult::Verified)),
         "control: the generic spec fn verifies with no struct in scope; got {unshadowed:?}"
     );
-    assert_eq!(
-        format!("{shadowed:?}"),
-        format!("{unshadowed:?}"),
-        "the presence of a same-named struct must not change a generic \
-         parameter's verdict"
+    assert!(
+        matches!(&shadowed, Ok(VerifyResult::Error { message }) if message.starts_with(TYPE_NAME_REFUSAL)),
+        "with the same-named struct the only change must be the refusal of the \
+         `Verified` answer; got {shadowed:?}"
     );
 }

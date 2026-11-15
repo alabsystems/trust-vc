@@ -5,7 +5,7 @@
 //! Two-state semantics for scalar `&mut` parameters in postconditions.
 //!
 //! A *bare* `&mut` scalar parameter `P` (or `*P`) in a postcondition denotes its
-//! FINAL (post-body) value, matching Verus and `design-new-mut-ref.md`. The
+//! FINAL (post-body) value, matching Verus and `docs/archive/design-new-mut-ref.md`. The
 //! catastrophic bug these tests pin: the string body model used to resolve `P`
 //! to the ENTRY snapshot, so a postcondition a body mutation falsifies would
 //! wrongly `Verified`. The non-negotiable invariant is that **no false `&mut`
@@ -277,6 +277,7 @@ fn resolver_finals(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn old_rewrite_is_entry_symbol_and_never_resubstituted() {
     let outcome = rewrite_mut_ref_postcondition(
         "x == old(x) + 1u64",
+        TwoStateClause::Ensures,
         &resolver_params(&["x"]),
         &resolver_finals(&[("x", "x + 1u64")]),
     )
@@ -294,6 +295,7 @@ fn old_rewrite_is_entry_symbol_and_never_resubstituted() {
 fn old_only_reference_bypasses_final_value_bookkeeping() {
     let outcome = rewrite_mut_ref_postcondition(
         "old(x) < 100u64",
+        TwoStateClause::Ensures,
         &resolver_params(&["x"]),
         &resolver_finals(&[("x", "5u64")]),
     )
@@ -312,6 +314,7 @@ fn deref_old_spellings_resolve_to_bare_entry_symbol() {
     for condition in ["*old(x) == 5u64", "old(*x) == 5u64", "*old(*x) == 5u64"] {
         let outcome = rewrite_mut_ref_postcondition(
             condition,
+            TwoStateClause::Ensures,
             &resolver_params(&["x"]),
             &resolver_finals(&[("x", "7u64")]),
         )
@@ -328,6 +331,7 @@ fn deref_old_spellings_resolve_to_bare_entry_symbol() {
 fn old_over_non_mut_ref_param_is_hard_error() {
     let err = match rewrite_mut_ref_postcondition(
         "old(y) == 1u64",
+        TwoStateClause::Ensures,
         &resolver_params(&["x"]),
         &resolver_finals(&[]),
     ) {
@@ -356,6 +360,7 @@ fn old_with_non_bare_argument_is_hard_error() {
     ] {
         match rewrite_mut_ref_postcondition(
             condition,
+            TwoStateClause::Ensures,
             &resolver_params(&["x"]),
             &resolver_finals(&[]),
         ) {

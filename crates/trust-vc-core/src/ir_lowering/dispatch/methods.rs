@@ -18,6 +18,7 @@ use super::collections::{
     invalid_collection_receiver_error, lowered_receiver_name, match_collection_op,
     unsupported_collection_op_error, CollectionSurface,
 };
+use super::macros::seq_literal_empty_constructor_name;
 use super::option_closure::{parse_option_closure_arg, OptionClosureArg};
 use super::spec_closure::lower_spec_fn_arg;
 use crate::encoder::datatype::{selector_symbol_name, tester_symbol_name, variant_symbol_name};
@@ -185,6 +186,23 @@ pub(in crate::ir_lowering) fn lower_method_call(
                 if !collection_op_supported(&receiver_ty, &op) {
                     return Err(unsupported_collection_op_error(&op, &receiver_ty));
                 }
+                // `contains` on a `Vec`, array or slice calls the elements'
+                // `PartialEq`, while `CollectionOp::Contains` is structural
+                // membership.
+                if op == CollectionOp::Contains {
+                    if let TrustVcType::Seq(elem) | TrustVcType::Array(elem, _) = &receiver_ty {
+                        if let Some(reason) =
+                            crate::ir_lowering::operators::element_equality_not_structural(
+                                elem, env,
+                            )
+                        {
+                            return Err(LoweringError::UnsupportedMethod(format!(
+                                "contains() on '{}' is not structural membership: {reason}",
+                                receiver_ty.to_type_string()
+                            )));
+                        }
+                    }
+                }
                 // The combinator ops carry their spec predicate/mapping closure
                 // at a fixed argument index. Normalize a bare closure there into
                 // an implicit `SpecFn::new(...)`, inferring untyped binder types
@@ -308,6 +326,10 @@ pub(in crate::ir_lowering) fn lower_method_call(
     }
     let type_name = receiver_ty.to_type_string();
     let mut method_meta = env.lookup_method(&type_name, &method);
+    // The key the metadata was actually found under — the H10 method-carriage
+    // record is keyed identically, so a base-name retry must look the record up
+    // under the SAME key it found the metadata under.
+    let mut meta_key = type_name.clone();
     if method_meta.is_none() {
         // A generic datatype receiver's type string carries its type arguments
         // (`S1<i32, i32>`), but the auto-generated accessor methods (field
@@ -320,6 +342,9 @@ pub(in crate::ir_lowering) fn lower_method_call(
         let base_name = type_name.split('<').next().unwrap_or(&type_name).trim();
         if base_name != type_name.as_str() {
             method_meta = env.lookup_method(base_name, &method);
+            if method_meta.is_some() {
+                meta_key = base_name.to_string();
+            }
         }
     }
     if let Some(meta) = method_meta {
@@ -342,11 +367,25 @@ pub(in crate::ir_lowering) fn lower_method_call(
         for (index, arg) in mc.args.iter().enumerate() {
             let lowered = lower_syn_expr_with_depth(arg, env, depth)?;
             if let Some(param_ty) = meta.param_types.get(index) {
-                args.push(coerce_unsuffixed_literal(lowered, param_ty));
+                // Bound at the parameter's type, as every call argument is
+                // (`ir_lowering::bind_call_argument`, §5b rule 6).
+                let bound = crate::ir_lowering::bind_call_argument(&lowered, param_ty).map_err(
+                    |arg_ty| {
+                        LoweringError::TypeInference(format!(
+                            "call to `{method}` passes a value of type `{}` for parameter \
+                             {index} of type `{}`, which cannot hold it",
+                            arg_ty.to_type_string(),
+                            param_ty.to_type_string()
+                        ))
+                    },
+                )?;
+                args.push(bound);
             } else {
                 args.push(lowered);
             }
         }
+        let args =
+            enforce_method_generic_instantiation_carrier(&method, mc, &meta_key, meta, args, env)?;
         return Ok(TrustVcExpr::FnCall {
             name: meta.uf_name.clone(),
             args,
@@ -369,6 +408,169 @@ pub(in crate::ir_lowering) fn lower_method_call(
     Err(LoweringError::UnsupportedMethod(format!(
         "{method}() on type `{type_name}` — this method is not available in specification context"
     )))
+}
+
+/// H10 (method half): a METHOD call may lower only when its solver term
+/// determines the instantiation of every generic parameter the METHOD itself
+/// declares.
+///
+/// A registered method call lowers to `uf_name(receiver, args…)` — name and
+/// arguments, exactly like a free-function call — and `mc.turbofish` was read by
+/// nothing at all. So `t.k::<u8>()` and `t.k::<u64>()` for
+/// `#[trust_vc::trait_spec] trait Tr { fn k<P>(&self) -> u64; }` produced the
+/// SAME term and the engine Verified `a == b`, which every impl that reads `P`
+/// refutes (measured: an impl returning `size_of::<P>()` prints `a=1 b=8`, and
+/// the `arr[b as usize]` path it makes "unreachable" panics on a `[u8; 4]`).
+/// The same collapse rides an unsuffixed literal at a CARRIED position:
+/// `t.m::<u8>(0)` and `t.m::<u16>(0)` both lower `0` as `i32` and box it
+/// identically.
+///
+/// The rule mirrors the free-function one
+/// (`ir_lowering::dispatch::calls::enforce_generic_instantiation_carrier`), and
+/// is enforced here — at the CALL — rather than at the declaration: a trait
+/// method's UF and its quantified postcondition axiom are shared by every impl
+/// and published whether or not anything calls it, so refusing the declaration
+/// would poison files whose generic method is never used. A refusal here fails
+/// exactly the obligations that would have consumed the collapsed term.
+///
+/// * a method whose registration recorded NO generic parameters accepts no
+///   explicit turbofish (nothing maps its arguments onto positions), and is
+///   otherwise unchanged;
+/// * every generic parameter the method declares must be the exact registered
+///   type of one of its value parameters — the only per-instantiation carrier
+///   the encoder has (the type-keyed `Box_P` it wraps around that argument).
+///   A parameter no argument carries (`fn k<P>(&self) -> u64`, a return-only
+///   `fn mk<P>(&self) -> P`, a const generic) fails the call closed, with or
+///   without a turbofish: without one, Rust's inference still picks the
+///   instantiation the term cannot show;
+/// * with a turbofish, each explicit argument is mapped onto its declared
+///   parameter in declaration order and, at every position carrying that
+///   parameter, an unsuffixed literal is coerced to the instantiation while an
+///   argument of any other lowered type fails closed. `_` defers to inference.
+///
+/// The method's TRAIT-level parameters (`trait Own<A>`) are deliberately not
+/// checked here: an impl instantiates those positionally
+/// (`TraitImplDecl::trait_type_args`), which is a different mechanism with its
+/// own gates.
+fn enforce_method_generic_instantiation_carrier(
+    method: &str,
+    mc: &syn::ExprMethodCall,
+    receiver_key: &str,
+    meta: &crate::ir_lowering::env::MethodMeta,
+    mut args: Vec<TrustVcExpr>,
+    env: &TypeEnv,
+) -> Result<Vec<TrustVcExpr>, LoweringError> {
+    let explicit: Vec<&syn::GenericArgument> = mc
+        .turbofish
+        .as_ref()
+        .map(|turbofish| {
+            turbofish
+                .args
+                .iter()
+                .filter(|arg| {
+                    matches!(
+                        arg,
+                        syn::GenericArgument::Type(_) | syn::GenericArgument::Const(_)
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let refuse = |why: String| {
+        LoweringError::UnsupportedExpr(format!(
+            "generic instantiation not carried: method call `{method}` {why}; TrustVc fails \
+             closed instead of guessing which solver term carries the instantiation"
+        ))
+    };
+
+    let Some(declared) = env.lookup_method_generic_params(receiver_key, method) else {
+        // An accessor, an inherent method, or any other registration that does
+        // not carry its declaration's generics. Nothing maps a turbofish onto
+        // its positions, so an explicit one fails closed; a call without one is
+        // lowered exactly as before.
+        if explicit.is_empty() {
+            return Ok(args);
+        }
+        return Err(refuse(format!(
+            "supplies {} explicit generic argument(s), and its registration recorded no generic \
+             declaration order, so they cannot be mapped onto the carrying positions",
+            explicit.len()
+        )));
+    };
+
+    let carried: Vec<&str> = meta
+        .param_types
+        .iter()
+        .filter_map(|param_ty| match param_ty {
+            TrustVcType::TypeParam(param) => Some(param.as_str()),
+            _ => None,
+        })
+        .collect();
+    let uncarried: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|param| !carried.contains(param))
+        .collect();
+    if !uncarried.is_empty() {
+        return Err(refuse(format!(
+            "declares generic parameter(s) {} that no value parameter carries into its solver \
+             term, so calls at different instantiations would collapse into one uninterpreted \
+             application",
+            uncarried
+                .iter()
+                .map(|param| format!("`{param}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if explicit.is_empty() {
+        // Every declared parameter is carried, so the argument types ARE the
+        // instantiation Rust inferred.
+        return Ok(args);
+    }
+    if explicit.len() != declared.len() {
+        return Err(refuse(format!(
+            "supplies {} explicit generic argument(s) to a method declaring {} type/const \
+             generic parameter(s)",
+            explicit.len(),
+            declared.len()
+        )));
+    }
+
+    for (param, arg) in declared.iter().zip(explicit) {
+        let carried_ty = TrustVcType::TypeParam(param.clone());
+        let instantiation = match arg {
+            syn::GenericArgument::Type(syn::Type::Infer(_)) => continue,
+            syn::GenericArgument::Type(ty) => env.resolve_syn_type(ty)?,
+            _ => {
+                return Err(refuse(format!(
+                    "supplies a const generic argument for the carried type parameter `{param}`"
+                )))
+            }
+        };
+        for (index, param_ty) in meta.param_types.iter().enumerate() {
+            if *param_ty != carried_ty {
+                continue;
+            }
+            // `args[0]` is the lowered receiver; `meta.param_types` indexes the
+            // explicit parameters only.
+            let Some(slot) = args.get_mut(index + 1) else {
+                continue;
+            };
+            let lowered = std::mem::replace(slot, TrustVcExpr::BoolLit(false));
+            let coerced = coerce_unsuffixed_literal(lowered, &instantiation);
+            let actual = infer_expr_type(&coerced);
+            if actual.to_type_string() != instantiation.to_type_string() {
+                return Err(refuse(format!(
+                    "passes an argument of type `{}` at the position carrying `{param}` = `{}`",
+                    actual.to_type_string(),
+                    instantiation.to_type_string()
+                )));
+            }
+            *slot = coerced;
+        }
+    }
+    Ok(args)
 }
 
 /// Lower `seq.all(|x| p(x))` / `seq.any(|x| p(x))` over a `Seq` to a bounded
@@ -626,6 +828,11 @@ pub(in crate::ir_lowering) fn lower_struct_literal(
     let meta = env.lookup_constructor(&type_name).ok_or_else(|| {
         LoweringError::UnsupportedExpr(format!("struct literal for unknown type '{}'", type_name))
     })?;
+    crate::ir_lowering::entry::refuse_unsuffixed_float_fields(
+        expr.fields.iter(),
+        &meta.fields,
+        "a struct field",
+    )?;
 
     let rest = expr
         .rest
@@ -754,6 +961,11 @@ fn lower_variant_struct_literal(
         )));
     }
 
+    crate::ir_lowering::entry::refuse_unsuffixed_float_fields(
+        expr.fields.iter(),
+        &meta.fields,
+        "an enum-variant field",
+    )?;
     let args = lower_explicit_constructor_fields(
         &format!("{}::{}", meta.datatype_name, meta.variant_name),
         &meta.fields,
@@ -1071,6 +1283,22 @@ fn lower_option_method_call(
                 None => option_tester_call(&option, "None", receiver),
             }
         }
+        // SOUNDNESS-CRITICAL (H3, exec unwrap-family panic-freedom): the
+        // extractor-synthesized precondition of `Option::{unwrap, expect}` —
+        // vstd's `requires option is Some` — lowered EXACTLY like `is_some`.
+        // The marker is emitted only by
+        // `emit_exec_unwrap_precondition_checks_in_expr`; the receiver-type
+        // decision is made HERE, so a receiver that is not an `Option` falls
+        // through to the unsupported-method error (fail closed), never to a
+        // vacuous `true`.
+        UNWRAP_REQUIRES_MARKER => {
+            expect_arg_count(method, mc.args.len(), 0)?;
+            match known.as_ref().map(|meta| &meta.state) {
+                Some(OptionBindingState::Some { .. }) => TrustVcExpr::BoolLit(true),
+                Some(OptionBindingState::None) => TrustVcExpr::BoolLit(false),
+                None => option_tester_call(&option, "Some", receiver),
+            }
+        }
         "unwrap" => {
             expect_arg_count(method, mc.args.len(), 0)?;
             if is_erased_ghost_option_view_receiver(&mc.receiver, env) {
@@ -1114,6 +1342,10 @@ fn lower_option_method_call(
                 }
             }
         }
+        "as_slice" => {
+            expect_arg_count(method, mc.args.len(), 0)?;
+            lower_option_as_slice_view(&option, known.as_ref())?
+        }
         "cloned" => {
             expect_arg_count(method, mc.args.len(), 0)?;
             receiver
@@ -1124,10 +1356,134 @@ fn lower_option_method_call(
     Ok(Some(lowered))
 }
 
+/// The extractor-synthesized `Option::{unwrap, expect}` / `Result::{unwrap,
+/// expect}` precondition (`is Some` / `is Ok`). Never user-spellable in a
+/// meaningful way: it lowers only on an `Option` or `Result` receiver.
+pub(crate) const UNWRAP_REQUIRES_MARKER: &str = "__trust_vc_unwrap_requires";
+/// The extractor-synthesized `Result::{unwrap_err, expect_err}` precondition
+/// (`is Err`).
+pub(crate) const UNWRAP_ERR_REQUIRES_MARKER: &str = "__trust_vc_unwrap_err_requires";
+
+/// `Option::<T>::as_slice(&self) -> &[T]` as a pure `Seq<T>` view of a receiver
+/// whose state is KNOWN at the call (2026-09-16, mut_refs_libs
+/// `test_options_as_mut_slice::test_as_slice_none/some`).
+///
+/// `None.as_slice() == []` lowers to the empty `Seq<T>` constructor that
+/// `seq![]` / `vec![]` root their push chains at, and `Some(v).as_slice() ==
+/// [v]` lowers to the one-element push chain `Push(empty, v)` — byte-for-byte
+/// the term `lower_seq_literal_values` builds for `vec![v]`, so `.len()`, `[i]`
+/// (with the existing Seq index bounds obligation) and `==` take the push-chain
+/// length axioms the encoder already tracks. The result is a value SNAPSHOT of
+/// the receiver at the call: the receiver itself stays poisoned by the
+/// extractor's method-receiver treatment, so no later read of it is answered
+/// from a stale value.
+///
+/// Everything adjacent fails closed: an unknown state (a parameter, a havoced
+/// local) or a `Some` whose payload is not a lowered value gets no `ite` form
+/// here — an `ite`-shaped `Seq` length is not a shape the encoder's
+/// length-representability predicate has been argued for — and a payload
+/// that is not `bool` or a primitive integer is refused before the state is
+/// consulted. `as_mut_slice` is deliberately NOT an Option method: it keeps
+/// the generic "not available in specification context" refusal.
+///
+/// An `i32` payload is refused WHOLESALE (review narrowing, 2026-09-16): the
+/// extractor records `let x: Option<u8> = Some(200);` as `Option<i32>` — the
+/// `let` annotation is carried only for a bare primitive-integer binding
+/// (`vc_extraction.rs`, `primitive_int_suffix(&pat_type.ty)`), so the
+/// unsuffixed payload keeps the i32 default and the receiver's inferred type
+/// follows it. A `Seq<i32>` view of what is a `u8` at runtime would then
+/// discharge element arithmetic at 32 bits (`s[0usize] + 100u8` verified while
+/// the program panics on u8 overflow). Because a defaulted literal, a
+/// computed payload over defaulted literals (`Some(100 + 100)`) and a genuine
+/// `i32` are indistinguishable at this point, every `Option<i32>` receiver
+/// fails closed here; a suffixed payload (`Some(200u8)`) types the receiver
+/// exactly and takes the view. That over-refuses a true `i32` payload, which
+/// is the accepted cost of not widening the model.
+fn lower_option_as_slice_view(
+    option: &OptionTypeInfo,
+    known: Option<&OptionBindingMeta>,
+) -> Result<TrustVcExpr, LoweringError> {
+    let value_ty = &option.value_ty;
+    if !matches!(
+        value_ty,
+        TrustVcType::Bool | TrustVcType::Int { .. } | TrustVcType::Uint { .. }
+    ) {
+        return Err(LoweringError::UnsupportedMethod(format!(
+            "Option::as_slice is modeled only for bool/integer payloads; got `{}`",
+            value_ty.to_type_string()
+        )));
+    }
+    if matches!(value_ty, TrustVcType::Int { width: 32 }) {
+        return Err(LoweringError::UnsupportedMethod(
+            OPTION_AS_SLICE_I32_PAYLOAD_REFUSAL.to_string(),
+        ));
+    }
+    let seq_ty = TrustVcType::Seq(Box::new(value_ty.clone()));
+    let empty_name = seq_literal_empty_constructor_name(value_ty);
+    let empty = TrustVcExpr::FnCall {
+        name: empty_name.clone(),
+        args: vec![],
+        return_ty: seq_ty.clone(),
+    };
+    match known.map(|meta| &meta.state) {
+        Some(OptionBindingState::None) => Ok(empty),
+        Some(OptionBindingState::Some { value: Some(value) }) => {
+            let value = coerce_unsuffixed_literal(value.clone(), value_ty);
+            let payload_ty = infer_expr_type(&value);
+            if payload_ty != *value_ty {
+                return Err(LoweringError::TypeInference(format!(
+                    "Option::as_slice payload type mismatch: expected '{}', got '{}'",
+                    value_ty.to_type_string(),
+                    payload_ty.to_type_string()
+                )));
+            }
+            Ok(TrustVcExpr::CollectionOp {
+                op: CollectionOp::Push,
+                receiver: Box::new(empty),
+                receiver_name: Some(empty_name),
+                args: vec![value],
+                ty: seq_ty,
+            })
+        }
+        Some(OptionBindingState::Some { value: None }) | None => {
+            Err(LoweringError::UnsupportedMethod(
+                "Option::as_slice requires a receiver with a known None or Some(<payload>) \
+                 binding; unknown or partially known state fails closed"
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+/// Pinned refusal text for an `Option<i32>` receiver of `as_slice`; see
+/// [`lower_option_as_slice_view`].
+///
+/// NARROWED IN EFFECT, 2026-09-18, by the `let` annotation width carry
+/// (`vc_extraction::declared_width`) — the refusal itself is UNCHANGED, and
+/// deliberately so. A declared `let x: Option<uN> = Some(<unsuffixed literal>)`
+/// no longer REACHES this arm: the ascription now carries `uN` into the
+/// payload, the receiver arrives as `Option<uN>` and takes the view. What is
+/// left here is exactly the residue the text describes — a payload whose width
+/// nothing decided (`let x = Some(200);`, an `i32` parameter, a computed
+/// payload that the carry's wall refused upstream). Six of this lane's gated
+/// cases became controls on that basis
+/// (`option_as_slice_view_capability.rs`, c25-c28 + l25); g19 / g21 / g22 /
+/// g24 stay refused because they are the H1b backward-inference class, which
+/// the carry does not touch. Telling a DECIDED `i32` from an undecided one
+/// would need the source suffix to survive lowering — `200i32` and `200` are
+/// the same `IntLit { ty: Int { width: 32 } }` here — so the further narrowing
+/// needs a type channel this increment deliberately did not build.
+pub(crate) const OPTION_AS_SLICE_I32_PAYLOAD_REFUSAL: &str = "Option::as_slice does not model an \
+     `i32` payload: a declared `let x: Option<uN> = Some(<unsuffixed literal>)` is recorded as \
+     `Option<i32>` (the annotation is not carried into the literal), so an i32-typed payload \
+     cannot be told apart from a defaulted literal under a dropped annotation and fails closed; \
+     suffix the payload (`Some(7u8)`) or use a non-i32 payload type";
+
 fn is_option_method(method: &str) -> bool {
     matches!(
         method,
-        "is_some"
+        UNWRAP_REQUIRES_MARKER
+            | "is_some"
             | "is_none"
             | "unwrap"
             | "expect"
@@ -1136,6 +1492,7 @@ fn is_option_method(method: &str) -> bool {
             | "ok_or_else"
             | "and_then"
             | "as_mut"
+            | "as_slice"
             | "cloned"
     )
 }
@@ -1392,7 +1749,13 @@ fn lower_result_method_call(
 ) -> Result<Option<TrustVcExpr>, LoweringError> {
     if !matches!(
         method,
-        "is_ok" | "is_err" | "unwrap" | "expect" | "unwrap_err"
+        "is_ok"
+            | "is_err"
+            | "unwrap"
+            | "expect"
+            | "unwrap_err"
+            | UNWRAP_REQUIRES_MARKER
+            | UNWRAP_ERR_REQUIRES_MARKER
     ) {
         return Ok(None);
     }
@@ -1400,7 +1763,9 @@ fn lower_result_method_call(
         return Ok(None);
     };
     match method {
-        "is_ok" | "is_err" => expect_arg_count(method, mc.args.len(), 0)?,
+        "is_ok" | "is_err" | UNWRAP_REQUIRES_MARKER | UNWRAP_ERR_REQUIRES_MARKER => {
+            expect_arg_count(method, mc.args.len(), 0)?
+        }
         "unwrap" => expect_arg_count(method, mc.args.len(), 0)?,
         "expect" => expect_arg_count(method, mc.args.len(), 1)?,
         "unwrap_err" => expect_arg_count(method, mc.args.len(), 0)?,
@@ -1408,12 +1773,16 @@ fn lower_result_method_call(
     }
     let known = known_result_binding(&receiver, receiver_name.as_deref(), receiver_ty, env);
     let lowered = match method {
-        "is_ok" => match known.as_ref().map(|meta| &meta.state) {
+        // SOUNDNESS-CRITICAL (H3): the synthesized `Result::{unwrap, expect}`
+        // precondition lowers exactly like `is_ok`, and the
+        // `Result::{unwrap_err, expect_err}` one exactly like `is_err` (see
+        // `UNWRAP_REQUIRES_MARKER`).
+        "is_ok" | UNWRAP_REQUIRES_MARKER => match known.as_ref().map(|meta| &meta.state) {
             Some(ResultBindingState::Ok { .. }) => TrustVcExpr::BoolLit(true),
             Some(ResultBindingState::Err { .. }) => TrustVcExpr::BoolLit(false),
             None => result_tester_call(&result, "Ok", receiver),
         },
-        "is_err" => match known.as_ref().map(|meta| &meta.state) {
+        "is_err" | UNWRAP_ERR_REQUIRES_MARKER => match known.as_ref().map(|meta| &meta.state) {
             Some(ResultBindingState::Ok { .. }) => TrustVcExpr::BoolLit(false),
             Some(ResultBindingState::Err { .. }) => TrustVcExpr::BoolLit(true),
             None => result_tester_call(&result, "Err", receiver),
@@ -2020,6 +2389,16 @@ fn match_wrapping_method(m: &str) -> Option<(WrappingMode, ArithOp)> {
     })
 }
 
+/// `x.add(e)`, `x.shl(n)` and `x.shr(n)` on a primitive integer, lowered to the
+/// checked `x + e`, `x << n` and `x >> n`. The exec extractor pins every
+/// evaluated call of these in a reflexive obligation
+/// (`collect_value_position_arith_exprs`), so the operator's overflow and
+/// shift-amount checks hold for a discarded result too.
+///
+/// None of `Add`, `Shl` and `Shr` is in the prelude, so the call is the std
+/// operator only where a `use` brings the trait into scope. Anywhere else it
+/// compiles only because another trait gives the integer a method of that
+/// name, whose body the lane does not read, so the call is refused.
 fn lower_primitive_integer_trait_method_call(
     method: &str,
     mc: &syn::ExprMethodCall,
@@ -2044,6 +2423,7 @@ fn lower_primitive_integer_trait_method_call(
         if !receiver_ty.is_integer() {
             return Ok(None);
         }
+        refuse_operator_method_without_std_trait(method, receiver_ty, env)?;
         if mc.args.len() != 1 {
             return Err(LoweringError::UnsupportedMethod(format!(
                 "{method} expects 1 arg, got {}",
@@ -2088,6 +2468,7 @@ fn lower_primitive_integer_trait_method_call(
     if !receiver_ty.is_integer() {
         return Ok(None);
     }
+    refuse_operator_method_without_std_trait(method, receiver_ty, env)?;
 
     let Some(arg) = mc.args.first() else {
         unreachable!("guarded: len == 1")
@@ -2108,6 +2489,30 @@ fn lower_primitive_integer_trait_method_call(
         receiver,
         lowered_arg,
         receiver_ty.clone(),
+    )))
+}
+
+/// Refuses `x.method(..)` on the primitive integer type `receiver_ty` unless
+/// the std trait that supplies `method` is in scope at every call of it in
+/// the source file (see [`lower_primitive_integer_trait_method_call`]).
+fn refuse_operator_method_without_std_trait(
+    method: &str,
+    receiver_ty: &TrustVcType,
+    env: &TypeEnv,
+) -> Result<(), LoweringError> {
+    if env.reads_std_operator_method(method) {
+        return Ok(());
+    }
+    let trait_name = match method {
+        "add" => "Add",
+        "shl" => "Shl",
+        _ => "Shr",
+    };
+    Err(LoweringError::UnsupportedMethod(format!(
+        "{method}() on `{}` is the std operator only where `std::ops::{trait_name}` is in scope; \
+         not every call of {method}() in this file sits where the trait is imported, so the call \
+         may be another trait's {method}()",
+        receiver_ty.to_type_string()
     )))
 }
 
@@ -2416,9 +2821,11 @@ fn lower_partial_eq_method_call(
 /// * `a.min(b)  === if a <= b { a } else { b }`
 /// * `x.abs()   === if x < 0 { 0 - x } else { x }` — for finite-width signed `x`
 ///   this is total only when `x != MIN` (Rust panics / is UB-on-overflow at
-///   `MIN`); we therefore fail closed for the panicking case via the
-///   already-overflow-checked `Sub` encoding, so an `abs` that could overflow
-///   does not verify (more conservative than Rust, never less).
+///   `MIN`); the negation is the overflow-checked `Sub`, so an obligation
+///   that lowers an `abs` that could overflow does not verify. The exec
+///   extractor pins every evaluated `abs` call in a reflexive obligation
+///   (`collect_value_position_arith_exprs`), so this holds for a discarded
+///   result too.
 /// * `x.saturating_abs()` matches Rust precisely, including the `i128::MIN`
 ///   corner: `if x == MIN { MAX } else if x < 0 { 0 - x } else { x }`. For
 ///   `x != MIN`, `0 - x` cannot overflow, so the plain `Sub` is total here.
@@ -3144,5 +3551,204 @@ mod structural_eq_type_tests {
             )],
         };
         assert!(!is_structural_eq_type(&noncanonical_fields, &env));
+    }
+}
+
+#[cfg(test)]
+mod option_as_slice_view_tests {
+    use super::{is_option_method, lower_method_call, seq_literal_empty_constructor_name};
+    use crate::ir::TrustVcType;
+    use crate::ir_expr::{CollectionOp, TrustVcExpr};
+    use crate::ir_lowering::env::{OptionBindingMeta, OptionBindingState};
+    use crate::ir_lowering::{lower_syn_expr_with_depth, LoweringError, TypeEnv};
+
+    fn u64_ty() -> TrustVcType {
+        TrustVcType::Uint { width: 64 }
+    }
+
+    fn option_u64_ty() -> TrustVcType {
+        super::option_type(u64_ty())
+    }
+
+    fn lower_call(src: &str, env: &TypeEnv) -> Result<TrustVcExpr, LoweringError> {
+        let syn::Expr::MethodCall(mc) = syn::parse_str::<syn::Expr>(src).expect("parse") else {
+            panic!("{src} should parse as a method call");
+        };
+        lower_method_call(&mc, env, 0)
+    }
+
+    #[test]
+    fn known_none_lowers_to_the_empty_seq_constructor() {
+        let env = TypeEnv::new();
+        let lowered = lower_call("Option::<u64>::None.as_slice()", &env).expect("lowered");
+        assert_eq!(
+            lowered,
+            TrustVcExpr::FnCall {
+                name: seq_literal_empty_constructor_name(&u64_ty()),
+                args: vec![],
+                return_ty: TrustVcType::Seq(Box::new(u64_ty())),
+            }
+        );
+    }
+
+    #[test]
+    fn known_some_lowers_to_the_vec_literal_push_chain() {
+        let env = TypeEnv::new();
+        let lowered = lower_call("Some(20u64).as_slice()", &env).expect("lowered");
+        let empty_name = seq_literal_empty_constructor_name(&u64_ty());
+        let seq_ty = TrustVcType::Seq(Box::new(u64_ty()));
+        assert_eq!(
+            lowered,
+            TrustVcExpr::CollectionOp {
+                op: CollectionOp::Push,
+                receiver: Box::new(TrustVcExpr::FnCall {
+                    name: empty_name.clone(),
+                    args: vec![],
+                    return_ty: seq_ty.clone(),
+                }),
+                receiver_name: Some(empty_name),
+                args: vec![TrustVcExpr::IntLit {
+                    value: 20,
+                    ty: u64_ty(),
+                }],
+                ty: seq_ty,
+            }
+        );
+        let vec_literal = syn::parse_str::<syn::Expr>("vec![20u64]").expect("parse");
+        let vec_lowered = lower_syn_expr_with_depth(&vec_literal, &env, 0).expect("vec literal");
+        assert_eq!(lowered, vec_lowered);
+    }
+
+    #[test]
+    fn unknown_state_receiver_fails_closed() {
+        let mut env = TypeEnv::new();
+        env.insert("x".to_string(), option_u64_ty());
+        let err = lower_call("x.as_slice()", &env).expect_err("unknown state must refuse");
+        assert!(
+            err.to_string().contains(
+                "Option::as_slice requires a receiver with a known None or Some(<payload>) \
+                 binding; unknown or partially known state fails closed"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn partially_known_some_receiver_fails_closed() {
+        let mut env = TypeEnv::new();
+        env.insert("x".to_string(), option_u64_ty());
+        env.insert_option_binding(
+            "x".to_string(),
+            OptionBindingMeta {
+                ty: option_u64_ty(),
+                state: OptionBindingState::Some { value: None },
+            },
+        );
+        let err = lower_call("x.as_slice()", &env).expect_err("partial state must refuse");
+        assert!(
+            err.to_string()
+                .contains("unknown or partially known state fails closed"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn named_known_none_binding_lowers_to_the_empty_seq_constructor() {
+        let mut env = TypeEnv::new();
+        env.insert("x".to_string(), option_u64_ty());
+        env.insert_option_binding(
+            "x".to_string(),
+            OptionBindingMeta {
+                ty: option_u64_ty(),
+                state: OptionBindingState::None,
+            },
+        );
+        let lowered = lower_call("x.as_slice()", &env).expect("lowered");
+        assert!(matches!(
+            lowered,
+            TrustVcExpr::FnCall { ref name, .. } if *name == seq_literal_empty_constructor_name(&u64_ty())
+        ));
+    }
+
+    #[test]
+    fn non_scalar_payload_fails_closed_before_the_state_is_consulted() {
+        let env = TypeEnv::new();
+        let err = lower_call("Some(Some(1u64)).as_slice()", &env).expect_err("nested payload");
+        assert!(
+            err.to_string().contains(
+                "Option::as_slice is modeled only for bool/integer payloads; got `Option<u64>`"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn i32_payload_fails_closed_wholesale() {
+        let env = TypeEnv::new();
+        for src in [
+            "Some(7).as_slice()",
+            "Some(7i32).as_slice()",
+            "Some(100 + 100).as_slice()",
+            "Option::<i32>::None.as_slice()",
+        ] {
+            let err = lower_call(src, &env).expect_err("i32 payload must refuse");
+            assert!(
+                err.to_string()
+                    .contains(super::OPTION_AS_SLICE_I32_PAYLOAD_REFUSAL),
+                "{src}: got: {err}"
+            );
+        }
+        // A named binding whose recorded type is `Option<i32>` (the extractor's
+        // shape for `let x: Option<u8> = Some(200);`) is refused even though
+        // its state is fully known.
+        let mut env = TypeEnv::new();
+        let opt_i32 = super::option_type(TrustVcType::Int { width: 32 });
+        env.insert("x".to_string(), opt_i32.clone());
+        env.insert_option_binding(
+            "x".to_string(),
+            OptionBindingMeta {
+                ty: opt_i32,
+                state: OptionBindingState::Some {
+                    value: Some(TrustVcExpr::IntLit {
+                        value: 200,
+                        ty: TrustVcType::Int { width: 32 },
+                    }),
+                },
+            },
+        );
+        let err = lower_call("x.as_slice()", &env).expect_err("known Option<i32> must refuse");
+        assert!(
+            err.to_string()
+                .contains(super::OPTION_AS_SLICE_I32_PAYLOAD_REFUSAL),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn as_slice_with_an_argument_fails_closed() {
+        let env = TypeEnv::new();
+        let err = lower_call("Some(1u64).as_slice(0u64)", &env).expect_err("arity");
+        assert!(
+            err.to_string().contains("as_slice expects 0 arg(s), got 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn as_mut_slice_keeps_the_generic_refusal() {
+        let env = TypeEnv::new();
+        let err = lower_call("Some(1u64).as_mut_slice()", &env).expect_err("as_mut_slice");
+        let text = err.to_string();
+        assert!(
+            text.contains("as_mut_slice() on type `Option<u64>`")
+                && text.contains("this method is not available in specification context"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn as_slice_is_an_option_method_and_as_mut_slice_is_not() {
+        assert!(is_option_method("as_slice"));
+        assert!(!is_option_method("as_mut_slice"));
     }
 }

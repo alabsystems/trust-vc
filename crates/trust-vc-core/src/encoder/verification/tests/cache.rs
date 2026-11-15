@@ -437,6 +437,7 @@ fn test_store_cache_skips_non_verified_results() {
     let non_verified_results = [
         VerifyResult::Counterexample {
             obligation_name: "test".to_string(),
+            location: None,
             model: None,
             bindings: vec![],
         },
@@ -882,12 +883,14 @@ fn make_trait_impl_body_context(concrete_fn: &str, body_text: &str) -> Verificat
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
     });
     ctx.register_trait_impl(TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "CacheValued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), concrete_fn.to_string())],
@@ -1266,7 +1269,11 @@ fn a_forged_cache_entry_for_a_reflexive_disequality_cannot_mint_verified() {
         &replayed,
         "the reflexive short-circuit must refute `x != x`; the forged entry must be unreachable",
     );
-    assert_eq!(cache_hit_count(), 0, "forged entry must never register as a hit");
+    assert_eq!(
+        cache_hit_count(),
+        0,
+        "forged entry must never register as a hit"
+    );
 }
 
 /// SOUNDNESS: session authority is for one exact cache path, not merely one

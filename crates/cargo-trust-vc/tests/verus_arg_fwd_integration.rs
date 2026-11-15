@@ -26,6 +26,13 @@ fn temp_dir(label: &str) -> PathBuf {
     ))
 }
 
+/// The Trust compiler for helper binaries: `$RUSTC` when set, else `trustc`.
+/// targo exports only `$CARGO` to test processes, so a bare `rustc` fallback
+/// would resolve whatever `rustc` PATH carries.
+fn trust_rustc() -> String {
+    std::env::var("RUSTC").unwrap_or_else(|_| "trustc".to_string())
+}
+
 fn cargo_trust_vc_bin() -> PathBuf {
     for key in [
         "CARGO_BIN_EXE_cargo-trust-vc",
@@ -52,7 +59,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn write_workspace(root: &Path) {
@@ -175,7 +184,7 @@ fn main() {
     )
     .expect("fake cargo source should be writable");
 
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let rustc = trust_rustc();
     let output = Command::new(rustc)
         .arg("-Ztrust-verify=off")
         .arg(&source)
@@ -269,7 +278,7 @@ fn main() {
     )
     .expect("fake metadata cargo source should be writable");
 
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let rustc = trust_rustc();
     let output = Command::new(rustc)
         .arg("-Ztrust-verify=off")
         .arg(&source)
@@ -342,7 +351,7 @@ fn assert_forwarding_selector(
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -382,7 +391,10 @@ fn assert_forwarding_selector(
         .iter()
         .map(|arg| arg.as_str().expect("cargo arg should be a string"))
         .collect();
-    let mut expected_args = vec![expected_cargo_subcommand.to_string()];
+    let mut expected_args = vec![
+        "--unverified".to_string(),
+        expected_cargo_subcommand.to_string(),
+    ];
     if subcommand == "focus" {
         expected_args.push("--target-dir".to_string());
         expected_args.push(
@@ -491,7 +503,7 @@ fn verify_short_equals_package_selector_preserves_dependency_closure() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -511,7 +523,10 @@ fn verify_short_equals_package_selector_preserves_dependency_closure() {
     );
 
     let record = read_record(&record_path);
-    assert_eq!(record_args(&record), vec!["check", "-p=hasdeps"]);
+    assert_eq!(
+        record_args(&record),
+        vec!["--unverified", "check", "-p=hasdeps"]
+    );
 
     let hasdeps_id = package_env_id(&workspace, "hasdeps");
     let optin_id = package_env_id(&workspace, "optin");
@@ -578,6 +593,7 @@ fn verify_propagates_target_features_config_and_target_dir_to_cargo_layers() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--target",
             "wasm32-unknown-unknown",
@@ -634,7 +650,7 @@ fn verify_fake_cargo_record_contains_wrapper_env_contract() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -655,7 +671,10 @@ fn verify_fake_cargo_record_contains_wrapper_env_contract() {
     );
 
     let record = read_record(&record_path);
-    assert_eq!(record_args(&record), vec!["check", "--package", "hasdeps"]);
+    assert_eq!(
+        record_args(&record),
+        vec!["--unverified", "check", "--package", "hasdeps"]
+    );
     assert!(
         env_value(&record, "RUSTC_WRAPPER").is_some(),
         "fake cargo should observe the wrapper executable env: {record:#?}"
@@ -683,7 +702,7 @@ fn build_adds_own_lib_import_driver_arg_for_verified_lib_package() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -704,7 +723,10 @@ fn build_adds_own_lib_import_driver_arg_for_verified_lib_package() {
     );
 
     let record = read_record(&record_path);
-    assert_eq!(record_args(&record), vec!["build", "--package", "hasdeps"]);
+    assert_eq!(
+        record_args(&record),
+        vec!["--unverified", "build", "--package", "hasdeps"]
+    );
 
     let hasdeps_id = package_env_id(&workspace, "hasdeps");
     assert!(
@@ -744,7 +766,7 @@ fn build_roots_forwarding_selector_preserves_dependency_import_hints() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -768,7 +790,10 @@ fn build_roots_forwarding_selector_preserves_dependency_import_hints() {
     );
 
     let record = read_record(&record_path);
-    assert_eq!(record_args(&record), vec!["build", "--package", "hasdeps"]);
+    assert_eq!(
+        record_args(&record),
+        vec!["--unverified", "build", "--package", "hasdeps"]
+    );
 
     let forwarded = "--verify-module=bar";
     let hasdeps_id = package_env_id(&workspace, "hasdeps");
@@ -819,7 +844,7 @@ fn focus_uses_partial_target_dir_and_disables_verification_for_selected_deps() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -854,6 +879,7 @@ fn focus_uses_partial_target_dir_and_disables_verification_for_selected_deps() {
     assert_eq!(
         args,
         vec![
+            "--unverified",
             "check",
             "--target-dir",
             target_dir
@@ -893,7 +919,7 @@ fn focus_workspace_selection_covers_all_members_not_default_members() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -927,6 +953,7 @@ fn focus_workspace_selection_covers_all_members_not_default_members() {
     assert_eq!(
         args,
         vec![
+            "--unverified",
             "check",
             "--workspace",
             "--target-dir",
@@ -957,7 +984,7 @@ fn verify_member_manifest_selects_that_package_and_dependency_closure() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -980,7 +1007,12 @@ fn verify_member_manifest_selects_that_package_and_dependency_closure() {
     let record = read_record(&record_path);
     assert_eq!(
         record_args(&record),
-        vec!["check", "--manifest-path", "hasdeps/Cargo.toml"]
+        vec![
+            "--unverified",
+            "check",
+            "--manifest-path",
+            "hasdeps/Cargo.toml"
+        ]
     );
 
     let hasdeps_id = package_env_id(&workspace, "hasdeps");
@@ -1013,7 +1045,7 @@ fn focus_member_manifest_uses_partial_target_and_disables_verified_deps() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
     let manifest_path = workspace.join("hasdeps").join("Cargo.toml");
 
     let output = Command::new(cargo_trust_vc_bin())
@@ -1039,6 +1071,7 @@ fn focus_member_manifest_uses_partial_target_and_disables_verified_deps() {
     assert_eq!(
         record_args(&record),
         vec![
+            "--unverified",
             "check",
             "--manifest-path",
             manifest_path
@@ -1090,7 +1123,7 @@ fn workspace_exclude_removes_root_but_preserves_dependency_closure() {
         .expect("workspace path should canonicalize");
     let fake_cargo = build_fake_cargo_recorder(&workspace);
     let record_path = workspace.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(&workspace)
@@ -1118,7 +1151,7 @@ fn workspace_exclude_removes_root_but_preserves_dependency_closure() {
     let record = read_record(&record_path);
     assert_eq!(
         record_args(&record),
-        vec!["check", "--workspace", "--exclude", "optin"]
+        vec!["--unverified", "check", "--workspace", "--exclude", "optin"]
     );
 
     let forwarded = "--verify-module=bar";
@@ -1153,4 +1186,116 @@ fn workspace_exclude_removes_root_but_preserves_dependency_closure() {
     );
 
     std::fs::remove_dir_all(workspace).ok();
+}
+
+/// Upstream cargo answers targo's lane flag with a usage error. Forwarding must
+/// refuse before it spawns the build, name targo, and never fall back to a stock
+/// build of its own.
+#[cfg(unix)]
+#[test]
+fn verify_refuses_a_cargo_that_is_not_targo_before_forwarding() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = temp_dir("not_targo");
+    write_workspace(&workspace);
+    let workspace = workspace
+        .canonicalize()
+        .expect("workspace path should canonicalize");
+    let stock_cargo = workspace.join("cargo");
+    std::fs::write(
+        &stock_cargo,
+        "#!/bin/sh\nif [ \"$1\" = --unverified ]; then echo \"error: unexpected argument '--unverified' found\" >&2; exit 1; fi\ntouch \"$(dirname \"$0\")/ran-a-build\"\n",
+    )
+    .expect("stock cargo stand-in should be writable");
+    std::fs::set_permissions(&stock_cargo, std::fs::Permissions::from_mode(0o755))
+        .expect("stock cargo stand-in should be executable");
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
+
+    let output = Command::new(cargo_trust_vc_bin())
+        .current_dir(&workspace)
+        .env("CARGO", &stock_cargo)
+        .env("TRUST_VC_METADATA_CARGO", real_cargo)
+        .arg("verify")
+        .arg("--package")
+        .arg("optin")
+        .output()
+        .expect("cargo-trust-vc should execute");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("run it as `targo trust-vc verify`"),
+        "the refusal must name targo: {stderr}"
+    );
+    assert!(
+        stderr.contains("unexpected argument '--unverified'"),
+        "the refusal must carry the discriminator's answer: {stderr}"
+    );
+    assert!(
+        !workspace.join("ran-a-build").exists(),
+        "a cargo that is not targo must not run the forwarded build"
+    );
+
+    std::fs::remove_dir_all(workspace).ok();
+}
+
+/// The one forwarding test that runs the real toolchain: `$CARGO` (targo, as
+/// targo exports it to this test) takes `--unverified check`, runs this binary
+/// as the RUSTC_WRAPPER, and trust-vc reports on the crate. Every other
+/// forwarding test records the spawn with a fake cargo instead.
+#[test]
+fn verify_runs_the_real_targo_unverified_lane_through_the_trust_vc_wrapper() {
+    let targo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
+    let probe = Command::new(&targo)
+        .args(["--unverified", "--version"])
+        .output()
+        .expect("$CARGO (or targo) should launch");
+    assert!(
+        probe.status.success(),
+        "`{targo} --unverified --version` failed: this test needs the Trust toolchain's \
+         targo (run it under `targo --unverified test`)\nstderr={}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+
+    let root = temp_dir("real_targo");
+    std::fs::create_dir_all(root.join("src")).expect("crate src dir should exist");
+    let root = root.canonicalize().expect("crate path should canonicalize");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"e2e_optin\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n[package.metadata.verus]\nverify = true\n\n[workspace]\n",
+    )
+    .expect("crate manifest should be writable");
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn add_one(x: u32) -> u32 {\n    if x < u32::MAX { x + 1 } else { x }\n}\n",
+    )
+    .expect("crate source should be writable");
+
+    let output = Command::new(cargo_trust_vc_bin())
+        .current_dir(&root)
+        .env("CARGO", &targo)
+        .env_remove("TRUST_VC_METADATA_CARGO")
+        // A private target dir: the outer test run holds the lock on its own.
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .arg("verify")
+        .output()
+        .expect("cargo-trust-vc should execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "real targo forwarding should succeed\nstdout={stdout}\nstderr={stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("UNVERIFIED: `targo check`"),
+        "targo itself must have run the forwarded check in the unverified lane: {combined}"
+    );
+    assert!(
+        combined.contains("trust_vc check: 1 function found") && combined.contains("add_one"),
+        "the trust-vc wrapper must have analyzed the crate: {combined}"
+    );
+
+    std::fs::remove_dir_all(root).ok();
 }

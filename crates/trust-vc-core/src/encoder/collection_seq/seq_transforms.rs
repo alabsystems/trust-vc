@@ -18,6 +18,7 @@ impl<'a> AstExpressionParser<'a> {
         source: Term,
         offset64: Term,
         idx: Term,
+        guard: Option<Term>,
     ) -> TrustVcResult<()> {
         let shifted = self
             .solver
@@ -35,6 +36,13 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_eq(r_elem, s_elem)
             .map_err(|e| e.to_string())?;
+        let inst = match guard {
+            Some(guard) => self
+                .solver
+                .try_implies(guard, inst)
+                .map_err(|e| e.to_string())?,
+            None => inst,
+        };
         self.solver
             .try_assert_term(inst)
             .map_err(|e| e.to_string())?;
@@ -138,13 +146,26 @@ impl<'a> AstExpressionParser<'a> {
     /// is stored as-is in metadata; a BV view (`new_len_bv`) is derived for the
     /// forall index range guard and the symbolic-tail ground seed, since the
     /// `Array(BV,T)` carrier is BV-indexed.
+    ///
+    /// `in_domain` is the operation's precondition (`0 <= n <= len` for a
+    /// `take`, ...). Where the encoding DROPS its obligations
+    /// (`drops_domain_obligations`: a spec function's defining axiom, a
+    /// broadcast, a demand-inline retry), every cell tie below holds only
+    /// inside the domain, and a ground seed only below the result's length:
+    /// out of its domain a view is an unspecified sequence, and a read past
+    /// its length is unspecified too. With the ties unguarded, `spec fn
+    /// tk0(s: Seq<u8>, n: int) -> int { s.take(n)[0] as int }` made `tk0(s,
+    /// -1) == s[0]` `Verified`, and so did `s.skip(-1)[1] == s[0]` and
+    /// `s.take(2)[3] == s[3]` (§5b rule 10).
     pub(in crate::encoder) fn encode_index_shifted_seq(
         &mut self,
         source: Term,
         receiver_name: Option<&str>,
         offset64: Term,
         new_len: Term,
+        in_domain: Option<Term>,
     ) -> TrustVcResult<Term> {
+        let in_domain = in_domain.filter(|_| new_len_guard_applies(self, new_len));
         let new_len_is_int = self.len_is_int(new_len);
         if !new_len_is_int {
             // Legacy BV-length path retains the bounded-width non-negativity guard.
@@ -256,6 +277,13 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_bvult(bound_idx, new_len_bv)
             .map_err(|e| e.to_string())?;
+        let idx_in_range = match in_domain {
+            Some(in_domain) => self
+                .solver
+                .try_and(in_domain, idx_in_range)
+                .map_err(|e| e.to_string())?,
+            None => idx_in_range,
+        };
         let guarded_body = self
             .solver
             .try_implies(idx_in_range, body)
@@ -278,7 +306,22 @@ impl<'a> AstExpressionParser<'a> {
                 .solver
                 .try_bv_const(i, crate::ir::pointer_width())
                 .map_err(|e| e.to_string())?;
-            self.assert_shifted_seq_ground_instance(result, source, offset64, idx64)?;
+            let guard = match in_domain {
+                Some(in_domain) => {
+                    let position = self.solver.int_const(i);
+                    let below_len = self
+                        .solver
+                        .try_lt(position, new_len)
+                        .map_err(|e| e.to_string())?;
+                    Some(
+                        self.solver
+                            .try_and(in_domain, below_len)
+                            .map_err(|e| e.to_string())?,
+                    )
+                }
+                None => None,
+            };
+            self.assert_shifted_seq_ground_instance(result, source, offset64, idx64, guard)?;
         }
 
         // Seed at new_len - 1 directly (no ITE wrapper). The forall axiom is
@@ -296,7 +339,22 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_bvsub(new_len_ground_bv, one)
             .map_err(|e| e.to_string())?;
-        self.assert_shifted_seq_ground_instance(result, source, offset64, last_idx)?;
+        let guard = match in_domain {
+            Some(in_domain) => {
+                let zero = self.solver.int_const(0);
+                let nonempty = self
+                    .solver
+                    .try_lt(zero, new_len)
+                    .map_err(|e| e.to_string())?;
+                Some(
+                    self.solver
+                        .try_and(in_domain, nonempty)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            None => None,
+        };
+        self.assert_shifted_seq_ground_instance(result, source, offset64, last_idx, guard)?;
 
         if let Some(name) = receiver_name {
             self.collection_lengths.insert(name.to_string(), new_len);
@@ -607,4 +665,11 @@ impl<'a> AstExpressionParser<'a> {
 
         Ok(result)
     }
+}
+
+/// Whether a view's cell ties are guarded by its domain: only where the
+/// encoding drops its obligations, and only for an `Int` length (the legacy
+/// bit-vector length path keeps its own guards).
+fn new_len_guard_applies(parser: &super::super::AstExpressionParser<'_>, new_len: Term) -> bool {
+    parser.drops_domain_obligations() && parser.len_is_int(new_len)
 }

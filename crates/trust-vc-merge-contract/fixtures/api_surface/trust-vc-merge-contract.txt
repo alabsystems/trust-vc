@@ -26,7 +26,6 @@ field trust_vc_merge_contract::SortMeta::Map::value: Box<SortMeta>
 field trust_vc_merge_contract::SortMeta::Opaque::name: String
 field trust_vc_merge_contract::SortMeta::Seq::elem: Box<SortMeta>
 field trust_vc_merge_contract::SortMeta::Set::elem: Box<SortMeta>
-field trust_vc_merge_contract::api_surface::ApiSurfaceError::Build::0: rustdoc_json_stable::BuildError
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir::path: std::path::PathBuf
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir::source: std::io::Error
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize::path: std::path::PathBuf
@@ -34,8 +33,15 @@ field trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize::source
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItem::id: rustdoc_types::Id
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName::context: &'static str
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName::id: rustdoc_types::Id
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingRustdocJson::command: String
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingRustdocJson::path: std::path::PathBuf
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile::path: std::path::PathBuf
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile::source: std::io::Error
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocFailed::command: String
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocFailed::status: String
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocFailed::stderr_tail: String
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocLaunch::command: String
+field trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocLaunch::source: std::io::Error
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind::context: &'static str
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind::id: rustdoc_types::Id
 field trust_vc_merge_contract::api_surface::ApiSurfaceError::WriteFile::path: std::path::PathBuf
@@ -176,12 +182,14 @@ variant trust_vc_merge_contract::SortMeta::Opaque
 variant trust_vc_merge_contract::SortMeta::Real
 variant trust_vc_merge_contract::SortMeta::Seq
 variant trust_vc_merge_contract::SortMeta::Set
-variant trust_vc_merge_contract::api_surface::ApiSurfaceError::Build
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::CreateDir
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::Deserialize
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItem
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingItemName
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::MissingRustdocJson
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::ReadFile
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocFailed
+variant trust_vc_merge_contract::api_surface::ApiSurfaceError::RustdocLaunch
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::UnexpectedItemKind
 variant trust_vc_merge_contract::api_surface::ApiSurfaceError::WriteFile
 variant trust_vc_merge_contract::fixtures::FixtureError::Bundle

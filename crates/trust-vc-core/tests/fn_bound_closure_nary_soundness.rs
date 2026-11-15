@@ -9,11 +9,12 @@
 //! generalize verbatim.
 //!
 //! WHY THIS IS SOUND AND NON-TRIVIAL (per arity ≥ 2, plus 0 / 3 sanity):
-//! * `Fn` captures immutably ⇒ DETERMINISTIC across calls, so one congruent UF per
-//!   signature is sound: equal argument TUPLES give the equal result. Determinism
-//!   (`f(3,4) == f(3,4)`) VERIFIES; distinct args (`f(3,4) == f(3,5)`) and a
-//!   concrete pin (`f(3,4) == 7`) COUNTEREXAMPLE. `arg_type_key` makes the UF
-//!   per-signature, so a 2-ary and a 1-ary `Fn` never collide.
+//! * One congruent UF per signature: equal argument TUPLES are one term. An `Fn`
+//!   closure can read shared state, so two applications may differ at run time,
+//!   and the `Verified` answer of `f(3,4) == f(3,4)` is refused; distinct args
+//!   (`f(3,4) == f(3,5)`) and a concrete pin (`f(3,4) == 7`) COUNTEREXAMPLE.
+//!   `arg_type_key` makes the UF per-signature, so a 2-ary and a 1-ary `Fn`
+//!   never collide.
 //! * The callee-side obligation is the SOUND conditional assume over the opaque
 //!   n-ary UFs: `call_requires%(f, (a,b)) ==> call_ensures%(f, (a,b), f(a,b))`.
 //!   The prove-requires GATES the assume-ensures: a callee using `f.ensures`
@@ -24,6 +25,10 @@
 //!   lying closure (def-side sinks the caller) all counterexample, and a re-passed
 //!   Fn-bound PARAM (never a registered literal) fails closed.
 //! * `FnMut`/`FnOnce` are non-deterministic and stay fail-closed at EVERY arity.
+//! * H6: the application PROVES `f.requires((args..))` (Verus/vstd
+//!   semantics); the determinism fixtures declare it and have requires-free
+//!   `*_no_requires_cx` twins refuted on `__call_requires_pp*_f_*`, and the traps
+//!   declare every applied tuple's requires so they land on the ASSERTION.
 //!
 //! CACHE DISCIPLINE (mandatory): every verdict is recomputed cache-off
 //! (`TRUST_VC_DISABLE_VC_CACHE=1`) so a stale `Verified` can never mask a
@@ -57,7 +62,20 @@ fn assert_verified(func: &str) {
     let v = verdict(func);
     assert!(
         matches!(v, VerifyResult::Verified),
-        "`{func}` should VERIFY (sound n-ary `Fn` determinism / obligation / linkage); got {v:?}"
+        "`{func}` should VERIFY (sound n-ary `Fn` obligation / linkage); got {v:?}"
+    );
+}
+
+/// Assert the refusal of a `Verified` answer for a callable parameter evaluated
+/// more than once. Only a `Verified` answer produces it.
+fn assert_refused(func: &str) {
+    let v = verdict(func);
+    assert!(
+        matches!(
+            &v,
+            VerifyResult::Error { message } if message.starts_with("bodiless call repeated")
+        ),
+        "`{func}` should be REFUSED (a callable parameter evaluated twice); got {v:?}"
     );
 }
 
@@ -73,42 +91,63 @@ fn assert_counterexample(func: &str) {
     );
 }
 
+/// A Counterexample on an obligation whose name starts with `prefix`.
+fn assert_cx_on(func: &str, prefix: &str) {
+    let v = verdict(func);
+    match &v {
+        VerifyResult::Counterexample {
+            obligation_name, ..
+        } if obligation_name.starts_with(prefix) => {}
+        _ => panic!("`{func}` should COUNTEREXAMPLE on a `{prefix}*` obligation; got {v:?}"),
+    }
+}
+
 fn assert_not_verified(func: &str) {
-    match verify(func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("FN-BOUND N-ARY FALSE-VERIFY: `{func}` must not verify")
-        }
-        // An extraction Err (deferred / fail-closed lowering) or any solver
-        // non-Verified verdict (incl. Unknown) is a sound non-verify.
-        _ => {}
+    // An extraction Err (deferred / fail-closed lowering) or any solver
+    // non-Verified verdict (incl. Unknown) is a sound non-verify.
+    if let Ok(VerifyResult::Verified) = verify(func) {
+        panic!("FN-BOUND N-ARY FALSE-VERIFY: `{func}` must not verify")
     }
 }
 
 // --- TYPING / DETERMINISM (arity-2) ---------------------------------------
 
 #[test]
-fn t1_nary2_determinism_verified() {
-    // The load-bearing success signal: verifies ONLY if `f: F` is typed
-    // `SpecFn(u64,u64,u64)` and `f(3,4)` lowers to the congruent `spec_fn_apply`
+fn t1_nary2_determinism_refused() {
+    // The refusal comes only from a `Verified` answer, which needs `f: F` typed
+    // `SpecFn(u64,u64,u64)` and `f(3,4)` lowered to the congruent `spec_fn_apply`
     // UF over the 2-tuple (without it, a fail-closed "Undefined function: f").
-    assert_verified("nary2_determinism_verified");
+    assert_refused("nary2_determinism_refused");
 }
 
 #[test]
-fn t2_nary2_determinism_where_clause_verified() {
-    assert_verified("nary2_determinism_where_clause_verified");
+fn t1b_nary2_determinism_no_requires_cx() {
+    assert_cx_on("nary2_determinism_no_requires_cx", "__call_requires_pp");
+}
+
+#[test]
+fn t2_nary2_determinism_where_clause_refused() {
+    assert_refused("nary2_determinism_where_clause_refused");
+}
+
+#[test]
+fn t2b_nary2_determinism_where_clause_no_requires_cx() {
+    assert_cx_on(
+        "nary2_determinism_where_clause_no_requires_cx",
+        "__call_requires_pp",
+    );
 }
 
 #[test]
 fn t3_nary2_distinct_args_counterexample() {
     // Distinct second arg: congruence gives nothing.
-    assert_counterexample("nary2_distinct_args_cx");
+    assert_cx_on("nary2_distinct_args_cx", "assertion_");
 }
 
 #[test]
 fn t4_nary2_concrete_trap_counterexample() {
     // Unconstrained result; a concrete pin is not provable.
-    assert_counterexample("nary2_concrete_trap_cx");
+    assert_cx_on("nary2_concrete_trap_cx", "assertion_");
 }
 
 // --- OBLIGATION (2a n-ary) -------------------------------------------------
@@ -177,8 +216,9 @@ fn t14_nary2_pass_site_param_repass_fail_closed() {
 
 #[test]
 fn t15_fnmut2_fail_closed() {
-    // `FnMut` at arity-2 stays fail-closed (not typed `SpecFn`; the call does not
-    // lower). A `Verified` = congruence leaked to a non-deterministic bound.
+    // `FnMut` at arity-2 stays fail-closed (not typed `SpecFn`; the application is
+    // rejected at extraction). A `Verified` = congruence leaked to a
+    // non-deterministic bound.
     assert_not_verified("fnmut2_fail_closed");
 }
 
@@ -188,25 +228,35 @@ fn t16_fnonce2_fail_closed() {
 }
 
 #[test]
-fn t17_nary0_determinism_verified() {
-    // Arity-0 sanity: a nullary `Fn` is a deterministic constant; `f() == f()`
-    // verifies via congruence over the empty tuple.
-    assert_verified("nary0_determinism_verified");
+fn t17_nary0_determinism_refused() {
+    // Arity-0 sanity: `f() == f()` is one congruent term over the empty tuple,
+    // and a nullary `Fn` closure can return a counter.
+    assert_refused("nary0_determinism_refused");
+}
+
+#[test]
+fn t17b_nary0_determinism_no_requires_cx() {
+    assert_cx_on("nary0_determinism_no_requires_cx", "__call_requires_pp");
 }
 
 #[test]
 fn t18_nary0_concrete_trap_counterexample() {
-    assert_counterexample("nary0_concrete_trap_cx");
+    assert_cx_on("nary0_concrete_trap_cx", "assertion_");
 }
 
 #[test]
-fn t19_nary3_determinism_verified() {
-    assert_verified("nary3_determinism_verified");
+fn t19_nary3_determinism_refused() {
+    assert_refused("nary3_determinism_refused");
+}
+
+#[test]
+fn t19b_nary3_determinism_no_requires_cx() {
+    assert_cx_on("nary3_determinism_no_requires_cx", "__call_requires_pp");
 }
 
 #[test]
 fn t20_nary3_distinct_args_counterexample() {
-    assert_counterexample("nary3_distinct_args_cx");
+    assert_cx_on("nary3_distinct_args_cx", "assertion_");
 }
 
 #[test]

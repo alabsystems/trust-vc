@@ -92,7 +92,7 @@ pub fn collect_old_value_deref(var_name: String) {
 /// Registers a snapshot for `final!(var)` in postconditions — the symmetric
 /// twin of [`collect_old_value`] for the new-mut-ref/prophecy core.
 ///
-/// New-mut-ref Phase 0 (`design-new-mut-ref.md`): this exists only so the
+/// New-mut-ref Phase 0 (`docs/archive/design-new-mut-ref.md`): this exists only so the
 /// `final!()` macro-emitted tokens reference a real symbol. It mirrors the
 /// `old!()` snapshot mechanics (declare `__trust_vc_final_var`, alias display,
 /// assume equality with the current value). Phase 0 wires no caller that emits

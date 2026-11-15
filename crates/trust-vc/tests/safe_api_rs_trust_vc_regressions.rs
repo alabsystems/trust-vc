@@ -292,9 +292,6 @@ fn safe_api_error_fragments(case: &str) -> Option<&'static [&'static str]> {
         "safe_api_trait_impl_side_requires_currently_blocked" => {
             &["trait method implementation cannot declare requires"]
         }
-        "safe_api_closure_smuggling_boundary_fails_closed" => {
-            &["unknown return type for function 'f'"]
-        }
         "safe_api_fn_pointer_return_boundary_fails_closed" => &[
             "Failed to lower obligation 'return_value'",
             "unresolved variable `safe_api_fn_pointer_private_target`",

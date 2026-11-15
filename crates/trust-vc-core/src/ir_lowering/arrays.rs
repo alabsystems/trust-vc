@@ -44,6 +44,10 @@ pub(super) fn lower_array_repeat(
         )));
     }
 
+    super::entry::refuse_unsuffixed_float_elements(
+        std::iter::once(&*repeat.expr),
+        "an array repeat",
+    )?;
     let lowered = lower_syn_expr_with_depth(&repeat.expr, env, depth)?;
     lower_array_elements_to_seq(vec![lowered; repeat_len], "array repeat")
 }

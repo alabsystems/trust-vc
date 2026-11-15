@@ -73,6 +73,25 @@ fn narrowness_pin_foreign_attributes_still_ignored() {
     );
 }
 
+/// A foreign namespaced attribute is not a dropped contract clause, but it can
+/// be an attribute macro: the refusal comes from the unread-item rule.
+#[test]
+fn a_foreign_namespaced_attribute_is_refused_as_a_possible_macro() {
+    let path = format!(
+        "{}/tests/data/dropped_contract_attr_foreign.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let v = verify_function_from_file(&path, "foreign_attribute_is_not_a_dropped_clause");
+    assert!(
+        matches!(&v, Ok(VerifyResult::Error { message })
+            if message.starts_with("unread item")
+                && message.contains("some_crate::widget")
+                && !message.contains("unknown trust_vc")),
+        "the foreign attribute must be refused as a possible macro, not as a \
+         dropped clause, got {v:?}"
+    );
+}
+
 #[test]
 fn narrowness_pin_known_other_trust_vc_attribute_still_verifies() {
     let v = verify_function_from_file(&fx(), "known_other_trust_vc_attribute_still_verifies");

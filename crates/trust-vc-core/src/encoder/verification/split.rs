@@ -197,6 +197,7 @@ pub(super) fn try_localize_failure(
 
     Some(crate::encoder::types::VerifyResult::Counterexample {
         obligation_name: assertion.display_name().to_string(),
+        location: assertion.location.clone(),
         model: Some(enhanced_model),
         bindings: Vec::new(),
     })
@@ -339,6 +340,7 @@ pub(super) fn try_verify_quantified_conjunction_split(
         }
         return Ok(Some(AssertionOutcome::Counterexample {
             obligation_name: assertion.display_name().to_string(),
+            location: assertion.location.clone(),
             model: Some(lines.join("\n")),
             bindings: Vec::new(),
         }));

@@ -35,7 +35,8 @@ use crate::encoder::VerifyResult;
 
 /// Extract VCs from the named function and return `(verdict, obligation_count)`.
 fn verify_named(code: &str, name: &str) -> (VerifyResult, usize) {
-    let file = parse_file(code).expect("proof-block ghost-add fixture should parse");
+    let file =
+        crate::parse_file_allow_tracked(code).expect("proof-block ghost-add fixture should parse");
     let func =
         find_function(&file, name).unwrap_or_else(|| panic!("fixture should define fn {name}"));
     let vc = extract_verification_conditions(func)
@@ -69,7 +70,7 @@ fn assert_fail_closed(code: &str, name: &str, upstream: &str) {
 }
 
 fn extraction_error(code: &str, name: &str) -> String {
-    let file = parse_file(code).expect("fixture should parse");
+    let file = crate::parse_file_allow_tracked(code).expect("fixture should parse");
     let func =
         find_function(&file, name).unwrap_or_else(|| panic!("fixture should define fn {name}"));
     match extract_verification_conditions(func) {
@@ -98,7 +99,7 @@ fn faithful_spec_pass_ghost_add_verifies() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = add(j, 2u64);
             });
@@ -119,7 +120,7 @@ fn two_ghost_adds_against_truncating_model_verifies() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = add(j, 2u64);
                 j = add(j, 2u64);
@@ -147,7 +148,7 @@ fn two_ghost_adds_asserting_unbounded_sum_fails_closed() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = add(j, 2u64);
                 j = add(j, 2u64);
@@ -169,7 +170,7 @@ fn ghost_plus_in_proof_block_has_no_overflow_obligation_verifies() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = j + 2u64;
             });
@@ -181,7 +182,7 @@ fn ghost_plus_in_proof_block_has_no_overflow_obligation_verifies() {
     // assert condition, which is the pre-existing assert-site behavior — so we
     // assert the *structural* property here: no `overflow_check_*` obligation is
     // emitted for the proof-block assignment.
-    let file = parse_file(code).expect("fixture parses");
+    let file = crate::parse_file_allow_tracked(code).expect("fixture parses");
     let func = find_function(&file, "test").expect("fn test");
     let vc = extract_verification_conditions(func).expect("extracts");
     let overflow_checks = vc
@@ -216,7 +217,7 @@ fn faithful_spec_fails_2_plus_four_is_fail_closed() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = add(j, 2u64);
                 j = add(j, 2u64);
@@ -236,7 +237,7 @@ fn wrong_truncating_equality_is_fail_closed() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 j = add(j, 2u64);
             });
@@ -301,7 +302,7 @@ fn return_inside_exec_proof_block_is_rejected() {
     let code = r#"
         #[trust_vc::ensures(true)]
         fn test(a: u64) {
-            let mut j: u64 = a;
+            let ghost mut j: u64 = a;
             trust_vc::proof_block!({
                 if a > 0u64 {
                     return;
@@ -314,5 +315,149 @@ fn return_inside_exec_proof_block_is_rejected() {
     assert!(
         err.contains("return") && err.contains("proof block"),
         "return inside an exec proof_block must be rejected; got: {err}"
+    );
+}
+
+// ========================================================================
+// mode discipline: the EXEC-local liar twins
+//
+// Every fixture above declares `j` as `let ghost mut j` — the literal upstream
+// spelling. Until 2026-09-16 that spelling did not PARSE (`let ghost` is not
+// Rust), so this file said `let mut j`, i.e. an EXEC local, and the proof
+// block mutated it. That is not a cosmetic difference:
+// `trust_vc::proof_block!` expands, in any build without `cfg(trust_mc)`, to
+// `let _ = || { ..body.. };` — a closure that is never called. So the exec
+// spelling asked the solver to believe a mutation the compiler ERASES.
+//
+// These twins pin both halves: the exec-local spelling is REJECTED with the
+// verbatim Verus diagnostic, and the rejection is not vacuous — the same body
+// with `let ghost mut` verifies (the `faithful_*` tests above).
+// ========================================================================
+
+/// LIAR TWIN of `faithful_spec_pass_ghost_add_verifies`: identical body, but
+/// `j` is an EXEC local. Upstream Verus rejects it with
+/// `cannot assign to exec variable from proof mode`
+/// (`modes.rs::ghost_wrapper_assign_fail3`), and so must trust-vc.
+#[test]
+fn proof_block_assigning_an_exec_local_is_rejected() {
+    let code = r#"
+        #[trust_vc::ensures(true)]
+        fn test(a: u64) {
+            let mut j: u64 = a;
+            trust_vc::proof_block!({
+                j = add(j, 2u64);
+            });
+            assert!(j == add(a, 2u64));
+        }
+    "#;
+    let err = extraction_error(code, "test");
+    assert!(
+        err.contains("cannot assign to exec variable from proof mode"),
+        "a proof_block! assigning an EXEC local must be rejected with the verbatim \
+         Verus diagnostic — the assignment is erased at runtime, so believing it \
+         is a false Verified; got: {err}"
+    );
+}
+
+/// The measured false `Verified` this rule closes, in its sharpest form: before
+/// the mode check, this body verified `e == 7` while the compiled program left
+/// `e == 0`, and the liar twin `assert!(e == 0)` came back `Counterexample` —
+/// proving the solver genuinely held the erased value.
+#[test]
+fn erased_proof_block_mutation_of_exec_local_cannot_be_believed() {
+    let code = r#"
+        #[trust_vc::ensures(true)]
+        fn f() {
+            let mut e: u64 = 0u64;
+            trust_vc::proof_block!({
+                e = 7u64;
+            });
+            assert!(e == 7u64);
+        }
+    "#;
+    let err = extraction_error(code, "f");
+    assert!(
+        err.contains("cannot assign to exec variable from proof mode"),
+        "got: {err}"
+    );
+}
+
+/// NON-VACUITY control for the two twins above: the same shape with a GHOST
+/// local is accepted and reaches a real verdict. Without this, a checker that
+/// rejected every `proof_block!` would pass both twins.
+#[test]
+fn ghost_local_assigned_in_proof_block_is_still_accepted() {
+    let code = r#"
+        #[trust_vc::ensures(true)]
+        fn f(a: u64) {
+            let ghost mut g: u64 = a;
+            trust_vc::proof_block!({
+                g = add(g, 2u64);
+            });
+            assert!(g == add(a, 2u64));
+        }
+    "#;
+    assert_verified(
+        code,
+        "f",
+        "modes.rs declare_spec_var_in_exec (positive control)",
+    );
+}
+
+/// Rule 1, the exec-side twin: EXEC code may not mutate a ghost/tracked local.
+/// Upstream `modes.rs::assign_spec_var_in_exec` / `assign_proof_var_in_exec`.
+#[test]
+fn exec_code_mutating_a_ghost_local_is_rejected() {
+    for (code, upstream) in [
+        (
+            r#"
+            #[trust_vc::ensures(true)]
+            fn myfun() {
+                let ghost b: bool;
+                b = false;
+            }
+            "#,
+            "assign_spec_var_in_exec",
+        ),
+        (
+            r#"
+            #[trust_vc::ensures(true)]
+            fn myfun() {
+                let tracked b: bool;
+                b = false;
+            }
+            "#,
+            "assign_proof_var_in_exec",
+        ),
+    ] {
+        let err = extraction_error(code, "myfun");
+        assert!(
+            err.contains("exec code cannot mutate non-exec variable"),
+            "upstream {upstream} must be rejected with the verbatim diagnostic; got: {err}"
+        );
+    }
+}
+
+/// NON-VACUITY control for rule 1: INITIALIZING a ghost/tracked local in exec
+/// is legal (upstream `initialize_spec_var_in_exec` /
+/// `initialize_proof_var_in_exec` are both `Ok`), and a plain exec assignment
+/// is untouched. A checker that rejected every ghost local would pass the test
+/// above and fail this one.
+#[test]
+fn ghost_local_initialization_and_plain_exec_assignment_stay_accepted() {
+    let code = r#"
+        #[trust_vc::ensures(true)]
+        fn myfun(a: u64) {
+            let ghost g: u64 = a;
+            let tracked t: u64 = a;
+            let mut e: u64 = a;
+            e = a;
+            assert!(g == a && t == a && e == a);
+        }
+    "#;
+    assert_verified(
+        code,
+        "myfun",
+        "modes.rs initialize_{spec,proof}_var_in_exec (positive control)",
     );
 }

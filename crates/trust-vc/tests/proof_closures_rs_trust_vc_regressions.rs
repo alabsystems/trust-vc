@@ -117,6 +117,22 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
         "test_calls_in_assignments_to_mut_var / mutable assignment call subset",
         1,
     ),
+    // 2026-09-11: direct proof-local closure application (one-arg, zero-arg, as a subexpression) verifies.
+    (
+        "proof_closure_local_application_verified",
+        "basic_test / direct proof-local closure application",
+        1,
+    ),
+    (
+        "proof_closure_zero_arg_local_application_verified",
+        "basic_test_0_args / direct zero-argument proof-local closure application",
+        1,
+    ),
+    (
+        "proof_closure_call_as_subexpression_verified",
+        "test_call_as_subexpression / proof-local closure call as a comparison operand",
+        1,
+    ),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
@@ -150,23 +166,29 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
         "test_calls_in_assignments_to_mut_var_fail / false tail after assignment calls",
         1,
     ),
+    (
+        "proof_closure_local_application_liar_counterexample",
+        "basic_test / direct proof-local closure application liar",
+        1,
+    ),
+    (
+        "proof_closure_zero_arg_local_application_liar_counterexample",
+        "basic_test_0_args / zero-argument proof-local closure application liar",
+        1,
+    ),
+    (
+        "proof_closure_call_as_subexpression_liar_counterexample",
+        "test_call_as_subexpression / closure call as operand liar",
+        1,
+    ),
 ];
 
 const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
-        "proof_closure_local_application_currently_errors",
-        "basic_test / direct proof-local closure application",
-        &["unknown return type for function 'f'", "standalone closure"],
-    ),
-    (
-        "proof_closure_zero_arg_local_application_currently_errors",
-        "basic_test_0_args / direct zero-argument proof-local closure application",
-        &["unknown return type for function 'f'", "standalone closure"],
-    ),
-    (
         "proof_closure_move_capture_application_currently_errors",
         "closure_depends_on_type_param / direct move-capture proof-local closure",
         &[
+            "unresolved variable `y`",
             "unknown return type for function 'f'",
             "standalone closure",
             "closure",
@@ -179,16 +201,6 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
             "unknown return type for function 'f'",
             "standalone closure",
             "assignment",
-            "closure",
-        ],
-    ),
-    (
-        "proof_closure_call_as_subexpression_currently_errors",
-        "test_calls_as_sub_expression / proof closure call in argument position",
-        &[
-            "unknown return type for function 'f'",
-            "standalone closure",
-            "call function",
             "closure",
         ],
     ),

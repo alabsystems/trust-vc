@@ -82,7 +82,14 @@ fn clean_full_git_head(repo_root: &Path) -> Option<String> {
 }
 
 fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
+    // This script only reads the repository it watches. Without
+    // GIT_OPTIONAL_LOCKS=0, `git status` takes and drops `index.lock` to save
+    // refreshed stat data, which writes into the git directory after Cargo
+    // recorded this run, so the next build would find a watched path newer
+    // than the run and re-run it, rebuilding every crate that depends on this
+    // one.
     let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -121,39 +128,74 @@ fn emit_source_rerun_paths(repo_root: &Path) {
 }
 
 fn emit_git_rerun_paths(repo_root: &Path) {
+    // Cargo scans a watched directory recursively, so a watched `.git`
+    // directory re-ran this script after any git command wrote into it (a
+    // fetch, a gc, a lock taken and dropped), none of which moves HEAD or the
+    // index. A `.git` file (a linked worktree, a submodule's gitfile) names the
+    // repository and changes only when it is re-pointed, so only a file is
+    // watched; the paths below cover a directory.
     let dot_git = repo_root.join(".git");
-    println!("cargo:rerun-if-changed={}", dot_git.display());
+    if dot_git.is_file() {
+        emit_existing_rerun_path(&dot_git);
+    }
 
     // `git rev-parse --git-path` handles ordinary repositories and linked
-    // worktrees. HEAD/ref changes alter the revision; index changes alter the
-    // cleanliness claim. Re-run the build script for each authority input.
-    for git_path in ["HEAD", "index"] {
-        if let Some(path) = git_stdout(repo_root, &["rev-parse", "--git-path", git_path]) {
-            let path = PathBuf::from(path);
-            let path = if path.is_absolute() {
-                path
-            } else {
-                repo_root.join(path)
-            };
-            println!("cargo:rerun-if-changed={}", path.display());
-
-            if git_path == "HEAD" {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Some(reference) = contents.trim().strip_prefix("ref:") {
-                        if let Some(ref_path) =
-                            git_stdout(repo_root, &["rev-parse", "--git-path", reference.trim()])
-                        {
-                            let ref_path = PathBuf::from(ref_path);
-                            let ref_path = if ref_path.is_absolute() {
-                                ref_path
-                            } else {
-                                repo_root.join(ref_path)
-                            };
-                            println!("cargo:rerun-if-changed={}", ref_path.display());
-                        }
-                    }
-                }
+    // worktrees. HEAD and the ref it names alter the revision; the index alters
+    // the cleanliness claim.
+    let Some(head) = git_path(repo_root, "HEAD") else {
+        return;
+    };
+    emit_existing_rerun_path(&head);
+    if let Some(index) = git_path(repo_root, "index") {
+        emit_existing_rerun_path(&index);
+    }
+    let Ok(contents) = std::fs::read_to_string(&head) else {
+        return;
+    };
+    let Some(reference) = contents.trim().strip_prefix("ref:") else {
+        return;
+    };
+    let Some(loose) = git_path(repo_root, reference.trim()) else {
+        return;
+    };
+    if loose.is_file() {
+        emit_existing_rerun_path(&loose);
+        return;
+    }
+    // A packed branch has no loose ref file: its revision is in packed-refs,
+    // and the next commit on it writes the loose file into this directory.
+    if let Some(packed) = git_path(repo_root, "packed-refs") {
+        emit_existing_rerun_path(&packed);
+    }
+    // Packing can remove the whole nested branch directory. Watch its nearest
+    // existing ancestor inside refs so creating that directory invalidates the
+    // identity, without recursively watching unrelated Git metadata.
+    if let Some(refs) = git_path(repo_root, "refs") {
+        for directory in loose.ancestors().skip(1) {
+            if !directory.starts_with(&refs) {
+                break;
+            }
+            if directory.is_dir() {
+                emit_existing_rerun_path(directory);
+                break;
             }
         }
+    }
+}
+
+fn git_path(repo_root: &Path, name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(git_stdout(repo_root, &["rev-parse", "--git-path", name])?);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    })
+}
+
+/// Cargo re-runs a build script on every build while one of its watched paths
+/// is missing, so a path is watched only when it exists.
+fn emit_existing_rerun_path(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }

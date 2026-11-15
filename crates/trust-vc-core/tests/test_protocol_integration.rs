@@ -5,7 +5,7 @@
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 //!
 //! Tests the full pipeline: register components → translate → model check → result.
-//! Requires the `ty` feature: `cargo test --features ty`
+//! Requires the `ty` feature: `targo --unverified test -p trust-vc-core --features ty`
 
 #![cfg(feature = "ty")]
 
@@ -26,7 +26,7 @@ fn test_protocol_counter_bounded_verified() {
         register_protocol_action(
             "Counter",
             "Increment",
-            "{ self.x < 5 ; self.x = self.x + 1 }",
+            "{ if self.x >= 5 { return; } self.x = self.x + 1 }",
         );
         register_protocol_invariant("Counter", "Bounded", "{ self.x <= 5 }");
 
@@ -68,13 +68,13 @@ fn test_protocol_mutex_mutual_exclusion_verified() {
         register_protocol_action(
             "Mutex",
             "Enter1",
-            "{ self.in_cs2 == false ; self.in_cs1 = true }",
+            "{ if self.in_cs2 { return; } self.in_cs1 = true }",
         );
         register_protocol_action("Mutex", "Leave1", "{ self.in_cs1 = false }");
         register_protocol_action(
             "Mutex",
             "Enter2",
-            "{ self.in_cs1 == false ; self.in_cs2 = true }",
+            "{ if self.in_cs1 { return; } self.in_cs2 = true }",
         );
         register_protocol_action("Mutex", "Leave2", "{ self.in_cs2 = false }");
 
@@ -108,7 +108,7 @@ fn test_protocol_mutex_buggy_violation() {
         register_protocol_action(
             "Mutex",
             "Enter2",
-            "{ self.in_cs1 == false ; self.in_cs2 = true }",
+            "{ if self.in_cs1 { return; } self.in_cs2 = true }",
         );
         register_protocol_action("Mutex", "Leave2", "{ self.in_cs2 = false }");
 
@@ -140,18 +140,18 @@ fn test_protocol_two_phase_commit_safety() {
         register_protocol_action(
             "TwoPC",
             "Vote1",
-            "{ self.p1_voted == false ; self.p1_voted = true }",
+            "{ if self.p1_voted { return; } self.p1_voted = true }",
         );
         register_protocol_action(
             "TwoPC",
             "Vote2",
-            "{ self.p2_voted == false ; self.p2_voted = true }",
+            "{ if self.p2_voted { return; } self.p2_voted = true }",
         );
         // Coordinator commits only after both voted
         register_protocol_action(
             "TwoPC",
             "Commit",
-            "{ self.p1_voted == true ; self.p2_voted == true ; self.committed = true }",
+            "{ if !self.p1_voted { return; } if !self.p2_voted { return; } self.committed = true }",
         );
 
         // Safety: committed → both voted
@@ -183,7 +183,7 @@ fn test_multi_protocol_independent_verification() {
         register_protocol_action(
             "BCounter",
             "Increment",
-            "{ self.x < 5 ; self.x = self.x + 1 }",
+            "{ if self.x >= 5 { return; } self.x = self.x + 1 }",
         );
         register_protocol_invariant("BCounter", "Bounded", "{ self.x <= 5 }");
 
@@ -193,13 +193,13 @@ fn test_multi_protocol_independent_verification() {
         register_protocol_action(
             "SMutex",
             "Enter1",
-            "{ self.in_cs2 == false ; self.in_cs1 = true }",
+            "{ if self.in_cs2 { return; } self.in_cs1 = true }",
         );
         register_protocol_action("SMutex", "Leave1", "{ self.in_cs1 = false }");
         register_protocol_action(
             "SMutex",
             "Enter2",
-            "{ self.in_cs1 == false ; self.in_cs2 = true }",
+            "{ if self.in_cs1 { return; } self.in_cs2 = true }",
         );
         register_protocol_action("SMutex", "Leave2", "{ self.in_cs2 = false }");
         register_protocol_invariant(

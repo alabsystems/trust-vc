@@ -10,6 +10,7 @@
 use ay_dpll::api::{Sort, Term};
 
 use crate::encoder::arith_semantics::resolve_expr_wrap;
+use crate::encoder::width_coercion::ir_type_signedness;
 use crate::encoder::AstExpressionParser;
 use crate::error::TrustVcResult;
 use crate::ir::{LogicOp, TrustVcExpr, TrustVcType};
@@ -74,15 +75,28 @@ impl<'a> AstExpressionParser<'a> {
                 .map_err(|e| e.to_string().into());
         }
 
-        // Use term_widths to decide: BV terms have width metadata, boolean
-        // terms do not. This avoids the silent BV→bool fallback (#2174).
-        if let Some(&width_info) = self.term_widths.get(&inner_term) {
+        // The operand decides: an integer-typed operand (its IR type), or a
+        // bit-vector-sorted term, takes BV NOT — propagating the solver's
+        // error when the two disagree, so a sort bug never silently becomes
+        // boolean NOT (#2174). Anything else is boolean NOT. (This used to ask
+        // `term_widths`, a hash-consed table, whether the term was a BV.) The
+        // result carries the operand's IR-type signedness, never the table's.
+        let inner_ty = self.infer_operand_value_type(inner, None);
+        if let Some(width) = inner_ty
+            .bit_width()
+            .or_else(|| self.bv_term_width(inner_term))
+        {
             // Inner term is a bitvector — use BV NOT and propagate errors.
             let result = self
                 .solver
                 .try_bvnot(inner_term)
-                .map_err(|e| format!("BV NOT failed on {}-bit operand: {}", width_info.0, e))?;
-            self.term_widths.insert(result, width_info);
+                .map_err(|e| format!("BV NOT failed on {}-bit operand: {}", width, e))?;
+            if let Some(info) = self
+                .bv_term_width(result)
+                .zip(ir_type_signedness(&inner_ty))
+            {
+                self.term_widths.insert(result, info);
+            }
             Ok(result)
         } else {
             // No BV metadata — boolean NOT.
@@ -264,8 +278,12 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_bvneg(inner_term)
             .map_err(|e| e.to_string())?;
-        if let Some(&width_info) = self.term_widths.get(&inner_term) {
-            self.term_widths.insert(result, width_info);
+        // Width from the sort, signedness from the operand's IR type.
+        if let Some(info) = self
+            .bv_term_width(inner_term)
+            .zip(ir_type_signedness(&ir_ty))
+        {
+            self.term_widths.insert(result, info);
         }
         if self.overflow_behavior.should_check()
             && self.quantifier_depth == 0

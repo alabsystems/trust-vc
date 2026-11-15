@@ -1,0 +1,18 @@
+
+verus!{
+pub trait U {
+    spec fn mm(&self) -> u8;
+}
+pub trait Tr { }
+#[verifier::external]
+pub trait Sub: Q + Tr { }
+pub struct S<X> { pub x: X }
+pub struct Z { pub z: u8 }
+impl<X: Q> U for S<X> {
+    open spec fn mm(&self) -> u8 { 2 }
+}
+pub trait Q { }
+pub open spec fn g0<X: Sub>(s: S<X>) -> u8 { s.mm() }
+pub proof fn f0<X: Sub>(s: S<X>) ensures g0(s) == 2 { }
+pub proof fn f1<X: Sub>(s: S<X>) ensures s.mm() == 2 { }
+} // verus!

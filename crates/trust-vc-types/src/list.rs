@@ -2,8 +2,6 @@
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 // Licensed under the Apache License, Version 2.0
 
-use crate::runtime_boundary::variant_accessor_panic;
-
 /// Spec-only linked list for inductive proofs.
 ///
 /// `List<T>` is a recursive algebraic datatype for structural induction.
@@ -49,21 +47,29 @@ impl<T> List<T> {
         matches!(self, List::Cons(_, _))
     }
 
-    /// Returns the head element. Panics on `Nil`.
+    /// Returns the head element, or `None` on `Nil`.
+    ///
+    /// Total: a selector that panicked on the wrong variant was a reachable
+    /// panic the verifier refuted, and Trust's contract language cannot yet
+    /// state a variant precondition on `&self`, so the wrong variant is `None`.
     #[must_use]
-    pub fn head(&self) -> &T {
+    pub fn head(&self) -> Option<&T> {
         match self {
-            List::Cons(h, _) => h,
-            List::Nil => variant_accessor_panic("List", "head", "Nil"),
+            List::Cons(h, _) => Some(h),
+            List::Nil => None,
         }
     }
 
-    /// Returns the tail list. Panics on `Nil`.
+    /// Returns the tail list, or `None` on `Nil`.
+    ///
+    /// Total: a selector that panicked on the wrong variant was a reachable
+    /// panic the verifier refuted, and Trust's contract language cannot yet
+    /// state a variant precondition on `&self`, so the wrong variant is `None`.
     #[must_use]
-    pub fn tail(&self) -> &List<T> {
+    pub fn tail(&self) -> Option<&List<T>> {
         match self {
-            List::Cons(_, t) => t,
-            List::Nil => variant_accessor_panic("List", "tail", "Nil"),
+            List::Cons(_, t) => Some(t),
+            List::Nil => None,
         }
     }
 
@@ -102,8 +108,10 @@ mod tests {
         assert!(list.is_cons());
         assert!(!list.is_nil());
         assert_eq!(list.len(), 2);
-        assert_eq!(*list.head(), 1);
-        assert_eq!(list.tail().len(), 1);
+        assert_eq!(list.head(), Some(&1));
+        assert_eq!(list.tail().map(List::len), Some(1));
+        assert_eq!(list.tail().and_then(List::head), Some(&2));
+        assert!(list.tail().and_then(List::tail).is_some_and(List::is_nil));
     }
 
     #[test]
@@ -112,17 +120,12 @@ mod tests {
         assert!(list.is_nil());
     }
 
+    /// Regression: the selectors are total; `Nil` has no head or tail
+    /// (they used to panic, a reachable panic the verifier refuted).
     #[test]
-    #[should_panic(expected = "List::head called on Nil")]
-    fn test_list_head_panics_on_nil() {
+    fn test_list_selectors_on_nil_are_none() {
         let list: List<i32> = List::Nil;
-        let _ = list.head();
-    }
-
-    #[test]
-    #[should_panic(expected = "List::tail called on Nil")]
-    fn test_list_tail_panics_on_nil() {
-        let list: List<i32> = List::Nil;
-        let _ = list.tail();
+        assert_eq!(list.head(), None);
+        assert!(list.tail().is_none());
     }
 }

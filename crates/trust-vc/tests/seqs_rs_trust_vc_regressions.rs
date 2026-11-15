@@ -7,8 +7,8 @@
 //! These tests do not claim full Verus seq parity. They prove the current
 //! len/index/update/push/subrange/extensionality-adjacent subset, named-source
 //! to_set/source-contains equivalence, `Seq::new(len, generator)`, small
-//! filter-to-set cases, and small filter subset while documenting fail-closed
-//! Seq boundaries. Solver
+//! filter-to-set cases, and small filter subset (with refuted liar twins) while
+//! documenting fail-closed Seq boundaries. Solver
 //! `Unknown` is rejected as unsupported-gap evidence.
 
 mod common;
@@ -155,6 +155,12 @@ const EXPECTED_CASES: &[ExpectedCase] = &[
         1,
     ),
     (
+        "filter_lemmas_retained_membership_exact_subset",
+        "filter_lemmas",
+        "verified",
+        3,
+    ),
+    (
         "auto_extensionality_syntax1",
         "auto_extensionality_syntax1",
         "verified",
@@ -269,6 +275,111 @@ const ERROR_CASES: &[(&str, &str, &[&str])] = &[
         "seq_empty_macro_type_inference_currently_blocked",
         "broader vstd::seq! empty literal",
         &["seq![] requires an element type"],
+    ),
+];
+
+/// Refuted liar twins of pinned `filter_lemmas` fragments: `(liar, verified twin)`.
+///
+/// Each liar is the SAME shape as its verified twin with a false claim, in the
+/// same port file, and must come back `Counterexample` — the evidence that the
+/// twin's `Verified` reads the filter axioms rather than holding vacuously.
+/// They are deliberately NOT rows of `EXPECTED_CASES` / the port table / the
+/// manifest: upstream `filter_lemmas` is `=> Ok(())`, and the gate's per-case
+/// rule (every port case mapped to an upstream id carries that id's verdict)
+/// turns a mapped `counterexample` row into a mismatch — measured 2026-09-13
+/// with `scripts/corpus_coverage.py --only /seqs.rs`: pinning these four rows
+/// under `filter_lemmas` dropped the file from 5/6 to 4/6 in that script's
+/// DECLARATION-CONSISTENT column (the `decl` column since 2026-09-16 — manifest
+/// bookkeeping, not the verified-coverage headline).
+const FILTER_LEMMAS_LIAR_TWINS: &[(&str, &str)] = &[
+    (
+        "filter_lemmas_excluded_element_counterexample",
+        "filter_lemmas_retained_membership_exact_subset",
+    ),
+    (
+        "filter_lemmas_wrong_length_bound_counterexample",
+        "filter_lemmas_length_bound_exact_subset",
+    ),
+    (
+        "filter_lemmas_small_wrong_len_counterexample",
+        "filter_lemmas_small_len_and_index_exact_subset",
+    ),
+    (
+        "filter_lemmas_small_wrong_index_counterexample",
+        "filter_lemmas_small_drop_then_pack_exact_subset",
+    ),
+    (
+        "filter_lemmas_small_filter_to_set_excluded_member_counterexample",
+        "filter_lemmas_small_filter_to_set_retained_membership_exact_subset",
+    ),
+];
+
+/// Refuted liar twins of the pinned `test1_seq_to_set_contains_matches_source_contains`
+/// rows: `(liar, verified twin)`.
+///
+/// Each liar is the SAME shape as its twin — a `requires` about `s.contains(..)` on a
+/// SYMBOLIC `Seq<i32>` and a `s.to_set().contains(..)` goal — with the hypothesis
+/// negated, so the claim is false (`s = []` refutes it). It must come back
+/// `Counterexample` in this file context: the evidence that the twin's `Verified`
+/// reads the hypothesis rather than a goal that holds on every `Seq`. Like
+/// `FILTER_LEMMAS_LIAR_TWINS`, they stay out of `EXPECTED_CASES` / the port table / the
+/// manifest, because upstream `test1` is `=> Ok(())`.
+///
+/// They were `unknown (incomplete)` until 2026-09-14: `Seq::contains` was built as
+/// `exists i. range && s[i] == v`, so a negated occurrence reached ay as
+/// `(not (exists ..))`, which ay 0.26.0 does not model. The encoder now spells it as
+/// `not (forall i. range => s[i] != v)` (`encode_seq_contains_quantified`), and ay's
+/// double-negation elimination hands a negated occurrence the guarded universal rather
+/// than `(not (exists ..))`. For THESE two twins that is enough: both are measured
+/// `Counterexample` with the model `s = []`.
+///
+/// Scope, measured 2026-09-16 and deliberately narrow: arriving as the guarded universal
+/// is NECESSARY, not sufficient. Other negated shapes still fail closed at this ay pin —
+/// De Morgan through `&&` (`requires(!(s.contains(5) && s.contains(6)))`), a negated
+/// occurrence read under a branch, and a `u32` boundary element each measure
+/// `unknown ((incomplete quantifier-unhandled))`, and
+/// `seq_contains_hypothesis_goal_identity_capability` pins two of that class
+/// (`negated_goal_liar`, `other_element_liar`) FAIL-CLOSED rather than refuted. Nothing
+/// here is a false `Verified`; the claim is about which liars REFUTE, and it is exactly
+/// the two below.
+const TO_SET_SOURCE_CONTAINS_LIAR_TWINS: &[(&str, &str)] = &[
+    (
+        "test1_seq_to_set_absent_element_fails",
+        "test1_seq_to_set_contains_matches_source_contains",
+    ),
+    (
+        "test1_seq_to_set_absent_variable_counterexample",
+        "test1_seq_to_set_contains_matches_source_contains_variable",
+    ),
+];
+
+/// Refuted liar twins of pinned verified `test1` rows whose SHAPE had none in this file:
+/// `(liar, verified twin)`.
+///
+/// Measured 2026-09-15 at ay 0.26.0 with `TRUST_VC_DISABLE_VC_CACHE=1`: the `Seq::map`
+/// index value, the `Seq<bool>` element, the literal `to_set().finite()` claim and the
+/// `subrange(..).add(..)` length each had a verified pin with no false-claim twin
+/// anywhere in `seqs.rs` — the wrong-push-length, wrong-subrange-index and absent-member
+/// liars exercise different operators. Each liar below keeps its twin's shape with one
+/// false claim and must come back `Counterexample`. Like `FILTER_LEMMAS_LIAR_TWINS` and
+/// `TO_SET_SOURCE_CONTAINS_LIAR_TWINS` they stay out of `EXPECTED_CASES`, the port table
+/// and the manifest, because upstream `test1` is `=> Ok(())`.
+const TEST1_SHAPE_LIAR_TWINS: &[(&str, &str)] = &[
+    (
+        "test1_seq_map_wrong_index_value_counterexample",
+        "test1_seq_map_index",
+    ),
+    (
+        "test1_bool_wrong_element_counterexample",
+        "test1_bool_and_repeat_literals",
+    ),
+    (
+        "test1_seq_to_set_not_finite_counterexample",
+        "test1_seq_to_set_finite_exact_subset",
+    ),
+    (
+        "test1_subrange_add_wrong_len_counterexample",
+        "test1_subrange_add_len",
     ),
 ];
 
@@ -646,6 +757,93 @@ fn seqs_rs_counterexample_expected_cases_reject_wrong_claims_from_file() {
         assert!(
             matches!(result, VerifyResult::Counterexample { .. }),
             "{case} ({upstream_case}) should be rejected, got: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn seqs_rs_to_set_source_contains_liar_twins_are_refuted_from_file() {
+    let path = seqs_port_path();
+
+    for (liar, twin) in TO_SET_SOURCE_CONTAINS_LIAR_TWINS {
+        assert!(
+            EXPECTED_CASES
+                .iter()
+                .any(|(case, upstream_case, status, _)| {
+                    case == twin && *upstream_case == "test1" && *status == "verified"
+                }),
+            "{liar}'s twin {twin} should be a pinned verified test1 case"
+        );
+        assert!(
+            EXPECTED_CASES.iter().all(|(case, _, _, _)| case != liar),
+            "{liar} must stay out of the upstream-mapped expected cases (see TO_SET_SOURCE_CONTAINS_LIAR_TWINS)"
+        );
+        let (result, obligations) = verify_case(&path, liar, "test1 liar twin");
+        assert!(
+            obligations >= 1,
+            "{liar} should collect at least one obligation, got {obligations}"
+        );
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{liar} (liar twin of {twin}) should be refuted, got: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn seqs_rs_test1_shape_liar_twins_are_refuted_from_file() {
+    let path = seqs_port_path();
+
+    for (liar, twin) in TEST1_SHAPE_LIAR_TWINS {
+        assert!(
+            EXPECTED_CASES
+                .iter()
+                .any(|(case, upstream_case, status, _)| {
+                    case == twin && *upstream_case == "test1" && *status == "verified"
+                }),
+            "{liar}'s twin {twin} should be a pinned verified test1 case"
+        );
+        assert!(
+            EXPECTED_CASES.iter().all(|(case, _, _, _)| case != liar),
+            "{liar} must stay out of the upstream-mapped expected cases (see TEST1_SHAPE_LIAR_TWINS)"
+        );
+        let (result, obligations) = verify_case(&path, liar, "test1 shape liar twin");
+        assert!(
+            obligations >= 1,
+            "{liar} should collect at least one obligation, got {obligations}"
+        );
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{liar} (liar twin of {twin}) should be refuted, got: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn seqs_rs_filter_lemmas_liar_twins_are_refuted_from_file() {
+    let path = seqs_port_path();
+
+    for (liar, twin) in FILTER_LEMMAS_LIAR_TWINS {
+        assert!(
+            EXPECTED_CASES
+                .iter()
+                .any(|(case, upstream_case, status, _)| {
+                    case == twin && *upstream_case == "filter_lemmas" && *status == "verified"
+                }),
+            "{liar}'s twin {twin} should be a pinned verified filter_lemmas case"
+        );
+        assert!(
+            EXPECTED_CASES.iter().all(|(case, _, _, _)| case != liar),
+            "{liar} must stay out of the upstream-mapped expected cases (see FILTER_LEMMAS_LIAR_TWINS)"
+        );
+        let (result, obligations) = verify_case(&path, liar, "filter_lemmas liar twin");
+        assert!(
+            obligations >= 1,
+            "{liar} should collect at least one obligation, got {obligations}"
+        );
+        assert!(
+            matches!(result, VerifyResult::Counterexample { .. }),
+            "{liar} (liar twin of {twin}) should be refuted, got: {result:?}"
         );
     }
 }

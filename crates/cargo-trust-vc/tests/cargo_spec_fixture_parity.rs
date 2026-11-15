@@ -55,7 +55,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build -p cargo-trust-vc` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -92,13 +94,35 @@ fn rustc_command() -> PathBuf {
             }
         }
     }
-    PathBuf::from(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+    // Never a bare `rustc` from PATH: targo exports only `$CARGO` to tests.
+    PathBuf::from(format!("trustc{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn cargo_command() -> PathBuf {
     std::env::var("CARGO")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("cargo{}", std::env::consts::EXE_SUFFIX)))
+        .unwrap_or_else(|_| PathBuf::from(format!("targo{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// A `cargo check` child process with its verification lane already named.
+///
+/// `rust-toolchain.toml` pins `channel = "trust"`, so `$CARGO` in a test run is
+/// Targo, and Targo refuses a lane-less `check`: "refuses to create an
+/// implicitly unverified artifact". The refusal is a build error, so a probe
+/// spawned without a lane never reaches the fixture it means to typecheck and
+/// the assertion it carries reports the wrong thing (measured 2026-09-11: three
+/// probes here failed on the refusal text, one of them a fail-closed probe that
+/// asserts a SPECIFIC diagnostic and would otherwise have been satisfied by any
+/// failure at all). These probes typecheck fixtures; they establish no proof
+/// claim, so the lane they name is the unverified one. The lane is always
+/// named (owner directive 2026-09-28): a stock cargo rejects the flag and fails
+/// the probe loudly instead of typechecking with another compiler.
+fn cargo_check_command() -> Command {
+    let mut command = Command::new(cargo_command());
+    // UNVERIFIED lane: this child carries no proof claim.
+    command.arg("--unverified");
+    command.arg("check");
+    command
 }
 
 fn build_fake_rustc_recorder(root: &Path) -> PathBuf {
@@ -569,15 +593,12 @@ fn spec_use_imports_real_fixture_semantic_artifacts_for_renamed_spec_def2() {
 #[test]
 fn unverified_spec_use_fixture_typechecks_upstream_calling_shape() {
     let fixture = fixture_path("cargo_unverified_spec_use");
-    // Run from a NEUTRAL cwd with --manifest-path: cargo discovers config
-    // from the current directory upward, so an in-fixture cwd picks up the
-    // repo's committed `.cargo/config.toml` sibling `[patch]` override, which
-    // changes resolution and makes the canonical Git-source Cargo.lock
-    // unsatisfiable under `--locked`. The
-    // neutral cwd checks exactly what the lock pins: the git-source deps.
-    let output = Command::new(cargo_command())
-        .current_dir(std::env::temp_dir())
-        .arg("check")
+    // The committed fixture lock resolves AY through the repo's sibling
+    // `[patch]` configuration. Use that same configuration here: a neutral
+    // cwd changes source identities and cannot replay this path-sourced lock.
+    // Keep --locked --offline so missing or stale inputs still fail closed.
+    let output = cargo_check_command()
+        .current_dir(repo_root())
         .arg("--locked")
         .arg("--offline")
         .arg("--manifest-path")
@@ -1005,9 +1026,8 @@ verus_state_machines_macros = {{ path = "{macro_crate_path}" }}
         std::fs::write(temp.join("src/main.rs"), source)
             .expect("temp probe source should be writable");
 
-        let output = Command::new(cargo_command())
+        let output = cargo_check_command()
             .current_dir(&temp)
-            .arg("check")
             .arg("--quiet")
             .arg("--offline")
             .output()
@@ -1058,13 +1078,10 @@ fn consume_machines_pinned_upstream_foo_body_is_preserved() {
 #[test]
 fn consume_machines_fixture_typechecks_upstream_shaped_support_crate() {
     let fixture = fixture_path("cargo_unverified_consume_machines");
-    // Neutral cwd + --manifest-path: see
-    // unverified_spec_use_fixture_typechecks_upstream_calling_shape — the
-    // in-fixture cwd picks up the active repo-local sibling `[patch]` and
-    // breaks `--locked` against the canonical Git-source lock.
-    let output = Command::new(cargo_command())
-        .current_dir(std::env::temp_dir())
-        .arg("check")
+    // Resolve under the same repo-local sibling `[patch]` configuration as
+    // the committed fixture lock; retain --locked --offline as above.
+    let output = cargo_check_command()
+        .current_dir(repo_root())
         .arg("--locked")
         .arg("--offline")
         .arg("--manifest-path")

@@ -1,0 +1,7 @@
+::verus_builtin_macros::verus!{
+pub trait T {
+    #[verifier::external_body]
+    fn f(&self) { fn inner() {}  }
+}
+fn user<A: T>(s: &A) { s.f(); }
+}

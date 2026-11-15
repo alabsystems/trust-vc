@@ -364,14 +364,25 @@ const EXPECTED_CASE_METADATA: &[(&str, &str, &str, usize)] = &[
         0,
     ),
     (
-        "mut_refs_closure_mut_ref_current_capture_currently_errors",
+        "mut_refs_closure_mut_ref_current_capture_verified",
         "spec_capture_of_mut_ref",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_closure_mut_ref_current_capture_wrong_value_counterexample",
+        "spec_capture_of_mut_ref",
+        "counterexample",
+        1,
     ),
 ];
 
 const VERIFIED_CASES: &[(&str, &str, usize)] = &[
+    (
+        "mut_refs_closure_mut_ref_current_capture_verified",
+        "spec_capture_of_mut_ref",
+        1,
+    ),
     (
         "mut_refs_closure_arg_direct_update_verified",
         "closure_with_mut_ref_arg_basic",
@@ -396,6 +407,11 @@ const VERIFIED_CASES: &[(&str, &str, usize)] = &[
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str, usize)] = &[
+    (
+        "mut_refs_closure_mut_ref_current_capture_wrong_value_counterexample",
+        "spec_capture_of_mut_ref",
+        1,
+    ),
     (
         "mut_refs_closure_arg_wrong_old_value_counterexample",
         "closure_with_mut_ref_arg_basic",
@@ -476,22 +492,7 @@ const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
     (
         "mut_refs_closure_has_resolved_capture_currently_errors",
         "",
-        &[
-            "has_resolved",
-            "unknown return type for function",
-            "standalone closure",
-        ],
-    ),
-    (
-        // Deref-assignment `*x = 5` is now supported; this surface fails-closed
-        // later on the `mut_ref_current(P)` prophecy-intrinsic call form. Accept
-        // either sound fail-closed message.
-        "mut_refs_closure_mut_ref_current_capture_currently_errors",
-        "spec_capture_of_mut_ref",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "unknown return type for function",
-        ],
+        &["has_resolved", "is refused", "standalone closure"],
     ),
 ];
 

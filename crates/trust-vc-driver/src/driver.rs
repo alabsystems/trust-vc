@@ -45,10 +45,10 @@
 //! lowered is peeled; a value-break, a side-effecting/extra statement, or any
 //! unhandled node fails CLOSED to [`DriverError::UnsupportedContract`].
 //!
-//! This module compiles **only** under a nightly toolchain with the `rustc-dev`
-//! and `llvm-tools` components (see this crate's `rust-toolchain.toml`) and
-//! `RUSTC_BOOTSTRAP=1`. It is excluded from the default (stable) build so that
-//! the load-bearing [`crate::lower`] seam stays portable and CI-cheap.
+//! This module compiles **only** against the Trust toolchain's `rustc_private`
+//! crates, which its sysroot serves (a dev channel, so no `RUSTC_BOOTSTRAP` is
+//! needed). It is excluded from the default build so that the load-bearing
+//! [`crate::lower`] seam stays portable and cheap.
 //!
 //! It obtains a [`TyCtxt`] via `rustc_driver::Callbacks`, walks each function's
 //! **fully type-checked THIR**, and lowers the *scalar Hoare fragment* into a
@@ -105,9 +105,10 @@
 //!
 //! ## API-stability caveat
 //!
-//! `rustc_private` is unstable and its surface drifts between nightlies. This
-//! code targets the toolchain pinned in `rust-toolchain.toml`. When bumping the
-//! pin, expect to adjust the `Callbacks::after_analysis` signature, the HIR
+//! `rustc_private` is unstable and its surface drifts between compiler builds.
+//! This code targets the Trust toolchain the root `rust-toolchain.toml` pins.
+//! When the toolchain moves, expect to adjust the `Callbacks::after_analysis`
+//! signature, the HIR
 //! item-iteration API, `fn_sig`/`generics_of`, and the THIR accessors
 //! (`thir_body`, `ExprKind`, `StmtKind`, `PatKind`, `hir_name`).
 
@@ -139,7 +140,8 @@ use trust_vc_core::ir::{
 /// `-Z` flag that makes THIR-consuming passes (notably `check_unsafety`) *borrow*
 /// rather than **steal** the THIR, so it survives to `after_analysis`. Without
 /// it `tcx.thir_body(..)` panics with "attempted to read from stolen value".
-/// `run` injects this automatically; it requires `RUSTC_BOOTSTRAP=1`.
+/// `run` injects this automatically; the Trust compiler's dev channel accepts
+/// the `-Z` flag without `RUSTC_BOOTSTRAP`.
 const NO_STEAL_THIR: &str = "-Zno-steal-thir";
 
 /// The cfg the trust_vc contract macros key their bare-marker surface bridge on.
@@ -1390,7 +1392,10 @@ fn map_struct_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<TrustVcType> {
     // Iterate in `FieldIdx` (declaration) order so field position i equals the
     // `ExprKind::Field { name: FieldIdx }` / constructor-domain index.
     for field in variant.fields.iter() {
-        let field_ty = field.ty(tcx, args);
+        // `FieldDef::ty` substitutes `args` without normalizing. The mapper
+        // accepts only scalars and bare type parameters, which need no
+        // normalization, and rejects anything else.
+        let field_ty = field.ty(tcx, args).skip_normalization();
         // Scalar/spec-int OR a free type parameter (opaque sort); non-scalar
         // (incl. nested/recursive datatype) → None → fail closed.
         let mapped = map_field_ty(tcx, field_ty)?;
@@ -1447,7 +1452,8 @@ fn map_enum_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<TrustVcType> {
     for variant in adt.variants().iter() {
         let mut fields: Vec<(String, TrustVcType)> = Vec::with_capacity(variant.fields.len());
         for field in variant.fields.iter() {
-            let field_ty = field.ty(tcx, args);
+            // Unnormalized for the same reason as in the struct case above.
+            let field_ty = field.ty(tcx, args).skip_normalization();
             // Scalar/spec-int OR a free type parameter (opaque sort); non-scalar
             // (incl. nested/recursive datatype) → None → fail closed.
             let mapped = map_field_ty(tcx, field_ty)?;
@@ -1812,7 +1818,7 @@ fn map_ty(ty: Ty<'_>) -> Option<TrustVcType> {
 /// results. Mirrors how Verus's `rust_verify` wraps `RunCompiler`.
 pub fn run(args: &[String]) -> Vec<DriverResult> {
     // Inject `-Zno-steal-thir` so the THIR survives to `after_analysis` (it is
-    // otherwise stolen by `check_unsafety`). Requires `RUSTC_BOOTSTRAP=1`.
+    // otherwise stolen by `check_unsafety`). The Trust dev channel accepts it.
     let mut full_args = args.to_vec();
     if !full_args.iter().any(|a| a == NO_STEAL_THIR) {
         full_args.push(NO_STEAL_THIR.to_string());

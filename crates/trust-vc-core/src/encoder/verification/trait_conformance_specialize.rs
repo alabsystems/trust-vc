@@ -128,6 +128,7 @@ pub(super) fn specialize_self_type(ty: &TrustVcType, concrete_type: &TrustVcType
                 .collect(),
         },
         TrustVcType::RecursiveRef(name) => TrustVcType::RecursiveRef(name.clone()),
+        TrustVcType::NamedCarrier(name) => TrustVcType::NamedCarrier(name.clone()),
         other => other.clone(),
     }
 }

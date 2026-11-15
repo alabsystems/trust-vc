@@ -7,7 +7,7 @@
 use crate::encoder::UnknownCategory;
 use crate::error::TrustVcError;
 
-/// A single variable binding from a counterexample model.
+/// A variable or function binding from a counterexample model.
 ///
 /// Provides structured access to variable names, types, and values
 /// that violate a proof obligation. Used by IDE plugins, CI tools,
@@ -21,7 +21,7 @@ pub struct CounterexampleBinding {
     pub raw_name: String,
     /// Human-readable type (e.g., `i32`, `Seq<u64>`).
     pub ty: String,
-    /// Rendered value (e.g., `-42`, `[1, 2, 3]`).
+    /// Rendered value (e.g., `-42`, `[1, 2, 3]`, or a function's formal parameters and body).
     pub value: String,
 }
 
@@ -52,8 +52,22 @@ pub enum VerifyResult {
     Verified,
     /// Found a counterexample - at least one obligation is violable.
     Counterexample {
-        /// Which obligation failed
+        /// Which obligation failed. This is the obligation's NAME and nothing
+        /// else: no source position, no rendered `file:line:column`, no
+        /// prose. Consumers that match an obligation by name — the
+        /// `proof_note`/`custom_err` diagnostic channel
+        /// (`VerificationContext::apply_proof_note_verdict`), the certificate
+        /// writer's per-obligation attribution, the corpus regression suites —
+        /// compare against this directly. Gluing anything else in here is what
+        /// silently removed the user-label capability once already; see
+        /// `crates/trust-vc-core/tests/refuted_obligation_identity.rs`.
         obligation_name: String,
+        /// WHERE the refutation is, as its OWN field: the rendered
+        /// `file:line:column` of the refuted obligation, or `None` on a lane
+        /// that records no position (the path-less entry point). A renderer
+        /// that wants to show the position composes it with `obligation_name`
+        /// itself; it is never composed for it.
+        location: Option<String>,
         /// Variable assignments that violate the obligation (if available)
         model: Option<String>,
         /// Structured variable bindings from the counterexample model.

@@ -55,10 +55,6 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "eq_cmp_u8_order_to_eq_helper_call_verified",
         "eq_cmp1::test",
     ),
-    (
-        "eq_cmp_custom_partial_eq_operator_verified",
-        "eq_cmp1::test_p_ee",
-    ),
     ("eq_cmp_primitive_order_branch_equality_verified", "eq_cmp1"),
     ("eq_cmp_option_equality_witnesses_verified", "eq_cmp1"),
     (
@@ -67,6 +63,20 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
     ),
     ("eq_cmp_option_order_to_eq_helper_verified", "eq_cmp1::test"),
     ("eq_cmp_structural_tuple_operator_verified", "eq_cmp1"),
+    // 2026-09-11: `.eq()` method calls — derived (check_eq) and hand-written (test_p_eq) PartialEq — verify.
+    (
+        "eq_cmp_structural_tuple_eq_method_verified",
+        "eq_cmp1::check_eq",
+    ),
+    (
+        "eq_cmp_custom_partial_eq_method_verified",
+        "eq_cmp1::test_p_eq",
+    ),
+    // 2026-09-11: the `!=` OPERATOR on a hand-written PartialEq lowers to the impl's eq (upstream test_p_ee).
+    (
+        "eq_cmp_custom_partial_eq_operator_verified",
+        "eq_cmp1::test_p_ee",
+    ),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
@@ -76,28 +86,21 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
         "eq_cmp_primitive_order_wrong_branch_counterexample",
         "eq_cmp1::test_eq_wrong",
     ),
+    (
+        "eq_cmp_structural_tuple_eq_method_liar_counterexample",
+        "eq_cmp1::check_eq",
+    ),
+    (
+        "eq_cmp_custom_partial_eq_method_liar_counterexample",
+        "eq_cmp1::test_p_eq",
+    ),
+    (
+        "eq_cmp_custom_partial_eq_operator_liar_counterexample",
+        "eq_cmp1::test_p_ee",
+    ),
 ];
 
-const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[
-    (
-        "eq_cmp_structural_tuple_eq_method_currently_blocked",
-        "eq_cmp1::check_eq",
-        &[
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpTuple`",
-            "method is not available in specification context",
-        ],
-    ),
-    (
-        "eq_cmp_custom_partial_eq_method_currently_blocked",
-        "eq_cmp1::test_p_eq",
-        &[
-            "Failed to lower obligation 'assertion_0'",
-            "unsupported method `eq() on type `EqCmpCustomPartialEq`",
-            "method is not available in specification context",
-        ],
-    ),
-];
+const FAIL_CLOSED_CASES: &[(&str, &str, &[&str])] = &[];
 
 fn expected_error_patterns_from_fail_closed_cases() -> Vec<ExpectedErrorPatterns> {
     FAIL_CLOSED_CASES
@@ -328,10 +331,16 @@ fn eq_cmp_rs_expected_case_metadata_is_exact() {
                 2,
             ),
             (
-                "eq_cmp_structural_tuple_eq_method_currently_blocked",
+                "eq_cmp_structural_tuple_eq_method_verified",
                 "eq_cmp1::check_eq",
-                "error",
-                0,
+                "verified",
+                3,
+            ),
+            (
+                "eq_cmp_structural_tuple_eq_method_liar_counterexample",
+                "eq_cmp1::check_eq",
+                "counterexample",
+                2,
             ),
             (
                 "eq_cmp_option_partial_ord_method_verified",
@@ -346,15 +355,27 @@ fn eq_cmp_rs_expected_case_metadata_is_exact() {
                 1,
             ),
             (
-                "eq_cmp_custom_partial_eq_method_currently_blocked",
+                "eq_cmp_custom_partial_eq_method_verified",
                 "eq_cmp1::test_p_eq",
-                "error",
-                0,
+                "verified",
+                2,
+            ),
+            (
+                "eq_cmp_custom_partial_eq_method_liar_counterexample",
+                "eq_cmp1::test_p_eq",
+                "counterexample",
+                2,
             ),
             (
                 "eq_cmp_custom_partial_eq_operator_verified",
                 "eq_cmp1::test_p_ee",
                 "verified",
+                1,
+            ),
+            (
+                "eq_cmp_custom_partial_eq_operator_liar_counterexample",
+                "eq_cmp1::test_p_ee",
+                "counterexample",
                 1,
             ),
         ]

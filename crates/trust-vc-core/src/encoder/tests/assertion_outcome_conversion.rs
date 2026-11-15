@@ -27,6 +27,7 @@ fn test_verified_converts_to_verify_result_verified() {
 fn test_counterexample_preserves_obligation_name_and_model() {
     let outcome = AssertionOutcome::Counterexample {
         obligation_name: "assert_x_positive".to_string(),
+        location: None,
         model: Some("x = -1".to_string()),
         bindings: Vec::new(),
     };
@@ -48,6 +49,7 @@ fn test_counterexample_preserves_obligation_name_and_model() {
 fn test_counterexample_preserves_none_model() {
     let outcome = AssertionOutcome::Counterexample {
         obligation_name: "invariant_loop_0".to_string(),
+        location: None,
         model: None,
         bindings: Vec::new(),
     };

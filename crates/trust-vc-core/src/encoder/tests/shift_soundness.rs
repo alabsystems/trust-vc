@@ -785,6 +785,8 @@ fn test_unsigned_overshift_is_counterexample_not_error() {
 #[test]
 fn test_shl_method_call_in_range_amount_verifies() {
     let mut ctx = VerificationContext::new();
+    // The source imports `std::ops::{Shl, Shr}`.
+    ctx.set_std_operator_methods(["shl", "shr"]);
     ctx.declare_var_typed("u", crate::ir::TrustVcType::parse_or_opaque("u16"));
     // Tautology: only the shift-bounds check can make this fail.
     ctx.push_obligation(ProofObligation::assert(
@@ -806,6 +808,8 @@ fn test_shl_method_call_in_range_amount_verifies() {
 #[test]
 fn test_shl_method_call_by_bitwidth_amount_is_counterexample() {
     let mut ctx = VerificationContext::new();
+    // The source imports `std::ops::{Shl, Shr}`.
+    ctx.set_std_operator_methods(["shl", "shr"]);
     ctx.declare_var_typed("u", crate::ir::TrustVcType::parse_or_opaque("u16"));
     ctx.push_obligation(ProofObligation::assert(
         "taut",
@@ -825,6 +829,8 @@ fn test_shl_method_call_by_bitwidth_amount_is_counterexample() {
 #[test]
 fn test_shr_method_call_in_range_amount_verifies() {
     let mut ctx = VerificationContext::new();
+    // The source imports `std::ops::{Shl, Shr}`.
+    ctx.set_std_operator_methods(["shl", "shr"]);
     ctx.declare_var_typed("u", crate::ir::TrustVcType::parse_or_opaque("i16"));
     ctx.push_obligation(ProofObligation::assert(
         "taut",
@@ -850,6 +856,8 @@ fn test_shr_method_call_in_range_amount_verifies() {
 #[test]
 fn test_shr_method_call_by_bitwidth_signed_amount_is_vir_error() {
     let mut ctx = VerificationContext::new();
+    // The source imports `std::ops::{Shl, Shr}`.
+    ctx.set_std_operator_methods(["shl", "shr"]);
     ctx.declare_var_typed("u", crate::ir::TrustVcType::parse_or_opaque("i16"));
     ctx.push_obligation(ProofObligation::assert(
         "taut",

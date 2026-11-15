@@ -669,6 +669,7 @@ fn combine_rules_cover_all_outcome_pairings() {
     let verified = || VerifyResult::Verified;
     let cex = |name: &str| VerifyResult::Counterexample {
         obligation_name: name.to_string(),
+        location: None,
         model: None,
         bindings: Vec::new(),
     };

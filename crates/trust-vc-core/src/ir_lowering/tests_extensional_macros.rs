@@ -117,6 +117,27 @@ fn lower_strict_eq_macro_over_set_mk_map_constant_folded_body_builds_true() {
     assert_eq!(lowered, TrustVcExpr::BoolLit(true));
 }
 
+/// `(200 * 2) / 4` beside a `u8` is `u8` arithmetic (`200 * 2` wraps to 144,
+/// and 144 / 4 is 36), so it is not the `100` a folded-first reading makes it
+/// (§5b rule 2): the two maps differ, and `strict_eq!` must not build `true`
+/// from their text.
+#[test]
+fn lower_strict_eq_macro_over_set_mk_map_does_not_fold_an_untyped_tree() {
+    let expr: syn::Expr = syn::parse_str(
+        "strict_eq!(
+            s.mk_map(SpecFn::new(|x: u8| x + ((200 * 2) / 4))),
+            s.mk_map(SpecFn::new(|y: u8| y + 100))
+        )",
+    )
+    .unwrap();
+    let env = env_with(&[("s", "Set<u8>")]);
+    let lowered = lower_syn_expr(&expr, &env);
+    assert!(
+        !matches!(lowered, Ok(TrustVcExpr::BoolLit(true))),
+        "`x + 36` and `y + 100` are different maps: {lowered:?}"
+    );
+}
+
 #[test]
 fn lower_strict_eq_macro_over_set_mk_map_commuted_body_builds_false() {
     let expr: syn::Expr = syn::parse_str(

@@ -22,16 +22,3 @@ pub(crate) fn ghost_runtime_panic(type_name: &str, member: &str) -> ! {
     // quality-audit: allow-panic
     panic!("{type_name}::{member} called at runtime \u{2014} only valid in verification context")
 }
-
-/// Panics with a message indicating an invalid enum-variant accessor was called.
-///
-/// Used by algebraic datatype selectors (`List::head` on `Nil`, `Tree::value` on `Branch`)
-/// that are valid only on the correct variant.
-#[cold]
-#[inline(never)]
-#[track_caller]
-#[allow(clippy::panic)]
-pub(crate) fn variant_accessor_panic(type_name: &str, member: &str, wrong_variant: &str) -> ! {
-    // quality-audit: allow-panic
-    panic!("{type_name}::{member} called on {wrong_variant}")
-}

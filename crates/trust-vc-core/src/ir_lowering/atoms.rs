@@ -46,7 +46,7 @@ pub(super) fn lower_lit(lit: &syn::ExprLit) -> Result<TrustVcExpr, LoweringError
             if !suffix.is_empty() {
                 super::diagnostic_parity::check_int_literal_in_range(value, &ty)?;
             }
-            Ok(TrustVcExpr::IntLit { value, ty })
+            Ok(typed_int_literal(TrustVcExpr::IntLit { value, ty }, suffix))
         }
         syn::Lit::Float(float_lit) => lower_real_lit(float_lit),
         // A string literal lowers to `StringLit`, which the encoder already
@@ -192,6 +192,24 @@ fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
         b = r;
     }
     a
+}
+
+/// A literal whose suffix TYPES it `i32` (`200i32`, `-128i32`), pinned by an
+/// identity cast. An unsuffixed literal lowers to the same `Int { width: 32 }`
+/// type — the placeholder that takes the type of the peer it meets — so a bare
+/// `200i32` next to `x: u8` was retyped to the `u8` 200: `x + 200i32 == 44`
+/// (`x == 100`) came back `Verified`, where the operands of two types make the
+/// sum the integer 300 (design-trust-proof-backend.md §5b). Every other suffix
+/// already names a type no placeholder has.
+pub(crate) fn typed_int_literal(literal: TrustVcExpr, suffix: &str) -> TrustVcExpr {
+    if suffix != "i32" {
+        return literal;
+    }
+    TrustVcExpr::Cast {
+        expr: Box::new(literal),
+        from_ty: TrustVcType::Int { width: 32 },
+        to_ty: TrustVcType::Int { width: 32 },
+    }
 }
 
 pub(crate) fn type_from_int_suffix(suffix: &str) -> Result<TrustVcType, LoweringError> {

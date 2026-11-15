@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
+// quality-audit: allow-file allow-rust-size — one CLI case matrix for sibling impls, sharing its fixture helpers
 //! One trait, TWO impls: each impl's method must be verified against its OWN
 //! contract, and a legal program must not be failed for containing both.
 //!
@@ -85,7 +86,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
     if fallback.exists() {
         return fallback;
     }
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn check_json(path: &PathBuf) -> String {
@@ -377,5 +380,239 @@ impl G for X { fn g(&self) -> u64 { 6u64 } }
         parsed["summary"]["verified"].as_u64(),
         Some(0),
         "nothing in this file should be reported verified: {stdout}"
+    );
+}
+
+/// CARDINAL, the PARAMETERIZED-trait member: one generic trait implemented for
+/// ONE self type at two trait arguments. Both impls mint the same concrete
+/// symbol `S__wc`, and every registry the conformance lane read was keyed
+/// without the trait arguments, so the first-declared body answered for BOTH
+/// impls. Measured before the fix (cache off, `cargo-trust-vc check --json .` on a
+/// bare crate carrying these items): two
+/// `trait impl conformance Wc::wc for S` rows, both `verified`, summary
+/// `verified=2 counterexample=0 unknown=0 error=0`, exit 0 — while rustc gives
+/// `<S as Wc<u32>>::wc(&S) == 2` against the trait's `ensures(result == 1u8)`.
+///
+/// The lane now lists the two impls as distinct rows carrying their trait
+/// arguments and fails both CLOSED (it cannot tell them apart), so the file is
+/// not green. The engine-level liars and narrowness controls live in
+/// `trust-vc-core/tests/trait_args_impl_conformance_collision_soundness.rs`.
+#[test]
+fn two_impls_of_one_parameterized_trait_for_one_type_are_not_green() {
+    const COLLIDED: &str = r#"struct S;
+#[trust_vc::trait_spec]
+trait Wc<B> { #[trust_vc::ensures(result == 1u8)] fn wc(&self) -> u8; }
+#[trust_vc::trait_impl]
+impl Wc<bool> for S { fn wc(&self) -> u8 { 1u8 } }
+#[trust_vc::trait_impl]
+impl Wc<u32> for S { fn wc(&self) -> u8 { 2u8 } }
+"#;
+    let path = temp_file("trait_args_collision", COLLIDED);
+    let output = Command::new(cargo_trust_vc_bin())
+        .args(["trust-vc", "check", "--json"])
+        .arg(&path)
+        .env("TRUST_VC_DISABLE_VC_CACHE", "1")
+        .output()
+        .expect("cargo-trust-vc should be runnable");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("check --json output must parse");
+
+    let conformance: BTreeMap<String, String> = parsed["functions"]
+        .as_array()
+        .expect("`functions` must be an array")
+        .iter()
+        .filter_map(|entry| {
+            let name = entry["name"].as_str()?;
+            name.starts_with("trait impl conformance ").then(|| {
+                (
+                    name.to_string(),
+                    entry["result"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        conformance.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "trait impl conformance Wc<bool>::wc for S",
+            "trait impl conformance Wc<u32>::wc for S",
+        ],
+        "each impl must be its own, distinctly named conformance row: {stdout}"
+    );
+    for (name, result) in &conformance {
+        assert_ne!(
+            result, "verified",
+            "CARDINAL FALSE VERIFY — `{name}` was reported verified although `impl Wc<u32> for \
+             S` returns 2 against `ensures(result == 1u8)` and the lane cannot tell the two \
+             impls apart: {stdout}"
+        );
+    }
+    assert_eq!(
+        parsed["summary"]["verified"].as_u64(),
+        Some(0),
+        "nothing in this file may be reported verified: {stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "a file with an unchecked, non-conforming impl must not exit 0: {stdout}"
+    );
+}
+
+/// The members of the same family the decl list could not see, end to end.
+///
+/// * ERASED trait arguments: `impl Wc<u8> for S` beside
+///   `impl<'x> Wc<&'x u8> for S`. Both arguments lower to `u8`, so the two
+///   decls MERGED before the conformance lane counted claimants. Measured before
+///   the fix (cache off): ONE row `trait impl conformance Wc<u8>::wc for S`,
+///   `verified`, summary `verified=1`, exit 0 — while rustc gives
+///   `<S as Wc<&u8>>::wc(&S) == 2` against `ensures(result == 1u8)`.
+/// * the CALLER lane: `impl Dm<bool> for S {}` (inherits the default, 2) beside
+///   `impl Dm<u32> for S` (returns 1). No contract anywhere, so there is no
+///   conformance row and only the caller can go red. Measured before the fix:
+///   the FALSE `Dm::<u32>::d(&s) == 2` reported `verified`, exit 0.
+///
+/// Both files must now be non-green, with no caller or row reported verified
+/// on a claim about the group. The engine-level liars and controls are L11-L17
+/// and C9-C10 in `trust-vc-core/tests/trait_args_impl_conformance_collision_soundness.rs`.
+#[test]
+fn sibling_impl_groups_the_decl_list_cannot_see_are_not_green() {
+    const ERASED_ARGUMENTS: &str = r#"pub struct S;
+#[trust_vc::trait_spec]
+pub trait Wc<B> { #[trust_vc::ensures(result == 1u8)] fn wc(&self) -> u8; }
+mod a { use super::*; #[trust_vc::trait_impl] impl Wc<u8> for S { fn wc(&self) -> u8 { 1u8 } } }
+mod b { use super::*; #[trust_vc::trait_impl] impl<'x> Wc<&'x u8> for S { fn wc(&self) -> u8 { 2u8 } } }
+"#;
+    const CALLER_LANE: &str = r#"pub struct S;
+#[trust_vc::trait_spec]
+pub trait Dm<B> { fn d(&self) -> u8 { 2u8 } }
+#[trust_vc::trait_impl]
+impl Dm<bool> for S {}
+#[trust_vc::trait_impl]
+impl Dm<u32> for S { fn d(&self) -> u8 { 1u8 } }
+#[trust_vc::ensures(true)]
+pub fn u32_eq2(s: S) { let v: u8 = Dm::<u32>::d(&s); trust_vc::assert!(v == 2u8); }
+"#;
+    for (label, source, liar_rows) in [
+        (
+            "erased_trait_arguments",
+            ERASED_ARGUMENTS,
+            &["trait impl conformance Wc<u8>::wc for S"][..],
+        ),
+        ("sibling_group_caller", CALLER_LANE, &["u32_eq2"][..]),
+    ] {
+        let path = temp_file(label, source);
+        let output = Command::new(cargo_trust_vc_bin())
+            .args(["trust-vc", "check", "--json"])
+            .arg(&path)
+            .env("TRUST_VC_DISABLE_VC_CACHE", "1")
+            .output()
+            .expect("cargo-trust-vc should be runnable");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+            panic!("{label}: check --json output must parse: {err}\n{stdout}")
+        });
+        let results: BTreeMap<String, String> = parsed["functions"]
+            .as_array()
+            .expect("`functions` must be an array")
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry["name"].as_str()?.to_string(),
+                    entry["result"].as_str().unwrap_or_default().to_string(),
+                ))
+            })
+            .collect();
+        for name in liar_rows {
+            let result = results
+                .get(*name)
+                .unwrap_or_else(|| panic!("{label}: no `{name}` entry: {stdout}"));
+            assert_ne!(
+                result, "verified",
+                "{label}: CARDINAL FALSE VERIFY — `{name}` reported verified for a group of impls \
+                 of one trait for one self type that the engine cannot tell apart: {stdout}"
+            );
+        }
+        assert_eq!(
+            parsed["summary"]["verified"].as_u64(),
+            Some(0),
+            "{label}: nothing in this file may be reported verified: {stdout}"
+        );
+        assert!(
+            !output.status.success(),
+            "{label}: a file whose only claims are about an unresolvable impl group must not exit \
+             0: {stdout}"
+        );
+    }
+}
+
+/// The family member the SOURCE walk could not see, end to end: a sibling impl
+/// written where the module item list never reaches — a function body here; a
+/// `const _: () = { .. };` initializer, a module nested in a function body and
+/// another impl's method behave identically (engine-level shapes and controls:
+/// L18 in
+/// `trust-vc-core/tests/trait_args_impl_conformance_collision_soundness.rs`).
+///
+/// Such an impl is never registered and never conformance-checked, while Rust
+/// applies it crate-wide — rustc warns exactly that while compiling this shape
+/// ("an `impl` is never scoped, even when it is nested inside an item"), and the
+/// corresponding plain-Rust program prints `<S as Wc<u32>>::wc(&S) == 2`.
+/// Measured before the fix (cache off, `cargo-trust-vc check --json`): ONE row
+/// `trait impl conformance Wc<bool>::wc for S` reported `verified`, the FALSE
+/// caller `Wc::<u32>::wc(&s) == 1u8` reported `verified`, summary
+/// `verified=2 counterexample=0 unknown=0 error=0`, exit 0 — a fully GREEN file
+/// over a body returning 2.
+#[test]
+fn a_sibling_impl_the_source_walk_could_not_see_is_not_green() {
+    const HIDDEN_SIBLING: &str = r#"pub struct S;
+#[trust_vc::trait_spec]
+pub trait Wc<B> { #[trust_vc::ensures(result == 1u8)] fn wc(&self) -> u8; }
+#[trust_vc::trait_impl]
+impl Wc<bool> for S { fn wc(&self) -> u8 { 1u8 } }
+fn hidden_holder() { #[trust_vc::trait_impl] impl Wc<u32> for S { fn wc(&self) -> u8 { 2u8 } } }
+#[trust_vc::ensures(true)]
+pub fn u32_eq1(s: S) { let v: u8 = Wc::<u32>::wc(&s); trust_vc::assert!(v == 1u8); }
+"#;
+    let path = temp_file("hidden_sibling_impl", HIDDEN_SIBLING);
+    let output = Command::new(cargo_trust_vc_bin())
+        .args(["trust-vc", "check", "--json"])
+        .arg(&path)
+        .env("TRUST_VC_DISABLE_VC_CACHE", "1")
+        .output()
+        .expect("cargo-trust-vc should be runnable");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("check --json output must parse: {err}\n{stdout}"));
+    let results: BTreeMap<String, String> = parsed["functions"]
+        .as_array()
+        .expect("`functions` must be an array")
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry["name"].as_str()?.to_string(),
+                entry["result"].as_str().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    for name in ["trait impl conformance Wc<bool>::wc for S", "u32_eq1"] {
+        let result = results
+            .get(name)
+            .unwrap_or_else(|| panic!("no `{name}` entry: {stdout}"));
+        assert_ne!(
+            result, "verified",
+            "CARDINAL FALSE VERIFY — `{name}` reported verified although an impl of the same \
+             trait for the same self type, hidden in a function body, returns 2 against \
+             `ensures(result == 1u8)`: {stdout}"
+        );
+    }
+    assert_eq!(
+        parsed["summary"]["verified"].as_u64(),
+        Some(0),
+        "nothing in this file may be reported verified: {stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "a file whose visible impl is answered for by an unchecked hidden sibling must not exit \
+         0: {stdout}"
     );
 }

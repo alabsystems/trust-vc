@@ -93,10 +93,12 @@ fn continue_skips_measure(mut i: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// LANDMINE (break-interior non-flat body): the `if { break }` makes the body
-// non-flat, so no exact single-iteration transition is captured and the decrease
-// cannot be discharged. COUNTEREXAMPLE (trust-vc under-verifies here; it must not
-// false-verify).
+// POSITIVE (break-interior body, rows 430/431 — 2026-09-10): a break-only
+// `if cond { break; }` keeps the body in the exact-transition lane, so the
+// measure IS registered: WF1 under the invariant, WF2 under `guard ∧ ¬cond`
+// with the exact `i + 1` transition. The loop genuinely terminates, so it
+// VERIFIES. (Before that landing the `if { break }` made the body non-flat and
+// this was pinned as an under-verifying Counterexample.)
 // ---------------------------------------------------------------------------
 #[trust_vc::requires(i <= 10u64)]
 #[trust_vc::ensures(true)]
@@ -104,6 +106,25 @@ fn break_interior_non_flat(mut i: u64) {
     while i < 10u64 {
         trust_vc::invariant!(i <= 10u64);
         trust_vc::loop_decreases!(10u64 - i);
+
+        i = i + 1u64;
+        if i == 10u64 {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LANDMINE (break-interior body, BAD measure): same shape, but the measure `i`
+// GROWS on every head-to-head iteration. The exact lane must REFUTE WF2 — the
+// break site exempts nothing about the measure. Must NOT verify.
+// ---------------------------------------------------------------------------
+#[trust_vc::requires(i <= 10u64)]
+#[trust_vc::ensures(true)]
+fn break_interior_bad_measure(mut i: u64) {
+    while i < 10u64 {
+        trust_vc::invariant!(i <= 10u64);
+        trust_vc::loop_decreases!(i);
 
         i = i + 1u64;
         if i == 10u64 {

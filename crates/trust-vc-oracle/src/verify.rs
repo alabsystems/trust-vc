@@ -39,6 +39,7 @@ pub(crate) fn report_to_feedback(report: &VerificationReport) -> ProofFeedback {
             obligation_name,
             model: _,
             bindings,
+            ..
         } => {
             let counterexamples = bindings.iter().map(binding_to_field).collect();
             let localization = extract_localization(report);

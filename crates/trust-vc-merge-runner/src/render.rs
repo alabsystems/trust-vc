@@ -52,7 +52,8 @@ fn sort_to_smt(sort: &SortMeta, context: &str) -> Result<String, RunnerError> {
 
 /// Renders bound variable list for `forall`: `(n Int) (m Bool)`.
 fn render_bound_vars(vars: &[VarDecl], context: &str) -> Result<String, RunnerError> {
-    let mut parts = Vec::with_capacity(vars.len());
+    // No up-front capacity hint sized by the caller-controlled slice length.
+    let mut parts = Vec::new();
     for var in vars {
         let sort = sort_to_smt(var.sort(), &format!("{context} bound var `{}`", var.name()))?;
         parts.push(format!("({} {sort})", var.name()));
@@ -64,7 +65,8 @@ fn render_bound_vars(vars: &[VarDecl], context: &str) -> Result<String, RunnerEr
 fn render_func_decls(bundle: &MergeBundle) -> Result<String, RunnerError> {
     let mut out = String::new();
     for decl in bundle.func_decls() {
-        let mut param_sorts = Vec::with_capacity(decl.param_sorts().len());
+        // No up-front capacity hint sized by the bundle-controlled arity.
+        let mut param_sorts = Vec::new();
         for (i, sort) in decl.param_sorts().iter().enumerate() {
             param_sorts.push(sort_to_smt(
                 sort,
@@ -151,24 +153,25 @@ pub(crate) fn render_bundle_to_smt(bundle: &MergeBundle) -> Result<String, Runne
         script.push_str(&format!("(assert {})\n", assumption.expr()));
     }
 
-    if bundle.assertions().is_empty() {
-        script.push_str("; no assertions — trivially verified\n");
-        script.push_str("(assert false)\n");
-    } else if bundle.assertions().len() == 1 {
-        validate_bool_sort(bundle.assertions()[0].sort(), "assertion[0]")?;
-        script.push_str(&format!(
-            "(assert (not {}))\n",
-            bundle.assertions()[0].expr()
-        ));
-    } else {
-        let mut conjunction = String::from("(and");
-        for (i, assertion) in bundle.assertions().iter().enumerate() {
-            validate_bool_sort(assertion.sort(), &format!("assertion[{i}]"))?;
-            conjunction.push(' ');
-            conjunction.push_str(assertion.expr());
+    match bundle.assertions() {
+        [] => {
+            script.push_str("; no assertions — trivially verified\n");
+            script.push_str("(assert false)\n");
         }
-        conjunction.push(')');
-        script.push_str(&format!("(assert (not {conjunction}))\n"));
+        [only] => {
+            validate_bool_sort(only.sort(), "assertion[0]")?;
+            script.push_str(&format!("(assert (not {}))\n", only.expr()));
+        }
+        assertions => {
+            let mut conjunction = String::from("(and");
+            for (i, assertion) in assertions.iter().enumerate() {
+                validate_bool_sort(assertion.sort(), &format!("assertion[{i}]"))?;
+                conjunction.push(' ');
+                conjunction.push_str(assertion.expr());
+            }
+            conjunction.push(')');
+            script.push_str(&format!("(assert (not {conjunction}))\n"));
+        }
     }
 
     script.push_str("(check-sat)\n");

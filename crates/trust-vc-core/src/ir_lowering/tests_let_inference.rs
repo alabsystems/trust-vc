@@ -122,23 +122,26 @@ fn lower_typed_let_preserves_suffixed_literal_type() {
     let lowered = lower_syn_expr(&expr, &env).expect("lowering should succeed");
     match &lowered {
         crate::ir::TrustVcExpr::Let { value, .. } => {
-            match value.as_ref() {
+            // A suffixed `0i32` is pinned at `i32` by an identity cast
+            // (`atoms::typed_int_literal`); the binding's `u64` never
+            // re-types it (the encoder refuses the mismatched `let`).
+            let value = match value.as_ref() {
+                crate::ir::TrustVcExpr::Cast {
+                    expr,
+                    from_ty: TrustVcType::Int { width: 32 },
+                    to_ty: TrustVcType::Int { width: 32 },
+                } => expr.as_ref(),
+                other => other,
+            };
+            match value {
                 crate::ir::TrustVcExpr::IntLit {
                     value: 0,
                     ty: lit_ty,
                 } => {
-                    // i32 suffix means Int{32} — same as default, so coercion
-                    // fires and converts to u64. This is actually correct Rust
-                    // behavior: `let y: u64 = 0i32` is a type mismatch in Rust.
-                    // Our coercion is a best-effort for verification purposes.
-                    // The important thing is it doesn't panic.
-                    assert!(
-                        matches!(
-                            lit_ty,
-                            TrustVcType::Int { width: 32 } | TrustVcType::Uint { width: 64 }
-                        ),
-                        "suffixed literal should stay i32 or be coerced to u64, got {:?}",
-                        lit_ty
+                    assert_eq!(
+                        *lit_ty,
+                        TrustVcType::Int { width: 32 },
+                        "a suffixed literal keeps its suffix's type"
                     );
                 }
                 other => panic!("expected IntLit, got {:?}", other),

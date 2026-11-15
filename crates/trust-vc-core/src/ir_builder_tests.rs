@@ -219,11 +219,11 @@ fn closure_uf_symbols_are_injective_over_type_spelling_and_argument_boundaries()
     let datatype = named_datatype("T");
     let opaque = TrustVcType::Opaque("T".to_string());
     assert_ne!(
-        spec_fn_apply_symbol(&[type_param.clone()], &ret),
-        spec_fn_apply_symbol(&[datatype.clone()], &ret),
+        spec_fn_apply_symbol(std::slice::from_ref(&type_param), &ret),
+        spec_fn_apply_symbol(std::slice::from_ref(&datatype), &ret),
     );
     assert_ne!(
-        spec_fn_apply_symbol(&[datatype.clone()], &ret),
+        spec_fn_apply_symbol(std::slice::from_ref(&datatype), &ret),
         spec_fn_apply_symbol(&[opaque], &ret),
     );
     assert_ne!(

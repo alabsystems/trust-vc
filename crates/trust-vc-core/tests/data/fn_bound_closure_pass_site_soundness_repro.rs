@@ -137,13 +137,24 @@ fn fnbound_2b_param_repass_fail_closed<F: Fn(u64) -> u64>(f: F) {
 }
 
 // ===========================================================================
-// REGRESSION — determinism WITHOUT passing a closure still VERIFIES from the
-// congruent `spec_fn_apply` term alone (Increment 1 intact). A local closure `c`
-// exists in scope, but this caller does not pass it to a reflecting callee, so no
-// pass-site fact is emitted and nothing is over-constrained. MUST VERIFY.
+// REGRESSION — two calls WITHOUT passing a closure are still proved equal from
+// the congruent `spec_fn_apply` term (Increment 1 intact), under the applied
+// `f.requires((3,))` that H6 proves at every application. This caller passes no
+// closure to a reflecting callee, so no pass-site fact is emitted and nothing is
+// over-constrained. The claim is false for a stateful `Fn` closure, so the
+// `Verified` answer MUST BE REFUSED, not refuted.
 // ===========================================================================
-#[trust_vc::ensures(true)]
+#[trust_vc::requires(f.requires((3u64,)))]
 fn fnbound_2b_determinism_regression<F: Fn(u64) -> u64>(f: F) {
+    let a = f(3u64);
+    let b = f(3u64);
+    trust_vc::assert!(a == b);
+}
+
+// H6 twin: the same determinism WITHOUT the requires. MUST COUNTEREXAMPLE on the
+// call-site `__call_requires` obligation.
+#[trust_vc::ensures(true)]
+fn fnbound_2b_determinism_no_requires_cx<F: Fn(u64) -> u64>(f: F) {
     let a = f(3u64);
     let b = f(3u64);
     trust_vc::assert!(a == b);

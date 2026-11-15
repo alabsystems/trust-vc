@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 
-use trust_vc_types::Seq;
+use trust_vc_types::{seq, Seq};
 
 #[trust_vc::ensures(true)]
 fn calc_basics() {
-    let a: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
-    let b: Seq<u8> = trust_vc_types::seq![1u8];
-    let c: Seq<u8> = trust_vc_types::seq![2u8];
-    let d: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
+    let a: Seq<u8> = seq![1u8, 2u8];
+    let b: Seq<u8> = seq![1u8];
+    let c: Seq<u8> = seq![2u8];
+    let d: Seq<u8> = seq![1u8, 2u8];
 
     trust_vc::calc! {
         (==)
@@ -57,10 +57,10 @@ fn calc_intermediate_relations() {
 
 #[trust_vc::ensures(true)]
 fn calc_hides_intermediates() {
-    let a: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
-    let b: Seq<u8> = trust_vc_types::seq![123u8, 45u8];
-    let c: Seq<u8> = trust_vc_types::seq![67u8, 89u8];
-    let d: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
+    let a: Seq<u8> = seq![1u8, 2u8];
+    let b: Seq<u8> = seq![123u8, 45u8];
+    let c: Seq<u8> = seq![67u8, 89u8];
+    let d: Seq<u8> = seq![1u8, 2u8];
 
     trust_vc::calc! {
         (==)
@@ -70,7 +70,7 @@ fn calc_hides_intermediates() {
         { trust_vc::assume!(false); } d;
     };
 
-    trust_vc::assert!(b == d);
+    trust_vc::assert!(b == d); // FAILS
 }
 
 fn calc_scalar_keeps_intermediates_distinct() {
@@ -105,16 +105,16 @@ fn calc_scalar_descending_relations() {
 
 #[trust_vc::ensures(true)]
 fn calc_keeps_intermediates_distinct() {
-    let a: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
-    let b: Seq<u8> = trust_vc_types::seq![1u8];
-    let c: Seq<u8> = trust_vc_types::seq![2u8];
-    let d: Seq<u8> = trust_vc_types::seq![1u8, 2u8];
+    let a: Seq<u8> = seq![1u8, 2u8];
+    let b: Seq<u8> = seq![1u8];
+    let c: Seq<u8> = seq![2u8];
+    let d: Seq<u8> = seq![1u8, 2u8];
 
     trust_vc::calc! {
         (==)
-        a;
-        { trust_vc::assume!(false); } b + c;
-        { trust_vc::assert!(1i32 == 2i32); } d;
+        a; { trust_vc::assume!(false); }
+        b + c; { trust_vc::assert!(1i32 == 2i32); } // FAILS
+        d;
     };
 }
 

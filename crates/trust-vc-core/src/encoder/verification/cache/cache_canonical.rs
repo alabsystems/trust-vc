@@ -167,12 +167,37 @@ pub(super) fn write_context(
     }
 
     {
+        // Which invariants belong to a NESTED loop (their base case drops the
+        // function-entry facts about the modified vars) — part of the verdict,
+        // so part of the key.
+        let mut nested: Vec<_> = ctx.loop_nested_entry_invariants.iter().collect();
+        nested.sort();
+        let _ = writeln!(out, "loop_nested_entry_invariants:{}", nested.len());
+        for name in nested {
+            let _ = writeln!(out, "nested_entry:{name}");
+        }
+    }
+
+    {
         let mut keys: Vec<_> = ctx.loop_modified_vars.keys().collect();
         keys.sort();
         let _ = writeln!(out, "loop_modified_vars:{}", keys.len());
         for key in keys {
             if let Some(vars) = ctx.loop_modified_vars.get(key) {
                 let _ = writeln!(out, "modified:{key}={}", vars.join(","));
+            }
+        }
+    }
+
+    {
+        // Which loop each loop-lane obligation belongs to decides which
+        // invariants its step assumes — part of the verdict, so part of the key.
+        let mut keys: Vec<_> = ctx.loop_invariant_groups.keys().collect();
+        keys.sort();
+        let _ = writeln!(out, "loop_invariant_groups:{}", keys.len());
+        for key in keys {
+            if let Some(group) = ctx.loop_invariant_groups.get(key) {
+                let _ = writeln!(out, "group:{key}={group}");
             }
         }
     }
@@ -346,10 +371,12 @@ fn assert_cache_field_classification_is_exhaustive(ctx: &PreparedVerificationCon
         broadcast_use_groups: _,
         assert_by_scopes: _,
         loop_entry_scopes: _,
+        loop_nested_entry_invariants: _,
         assert_by_scope_revealed_fns: _,
         forall_bound_vars: _,
         loop_guards: _,
         loop_modified_vars: _,
+        loop_invariant_groups: _,
         loop_body_transitions: _,
         has_collection_context: _,
         revealed_fns: _,
@@ -672,6 +699,7 @@ fn write_trait_decl(out: &mut String, decl: &TraitDecl) {
             has_default: _,
             default_body: _,
             default_ensures: _,
+            generic_params: _,
         } = method;
         let _ = writeln!(out, "    method:{}", method.name);
         let _ = writeln!(out, "      return:{}", method.return_type.to_type_string());
@@ -697,6 +725,13 @@ fn write_trait_decl(out: &mut String, decl: &TraitDecl) {
         for e in &method.default_ensures {
             let _ = writeln!(out, "        {e}");
         }
+        // H10 (method half): two declarations differing ONLY in the method's own
+        // generic parameters lower differently — an uncarried one fails every
+        // call closed — so they must not share a cache entry.
+        let _ = writeln!(out, "      generic_params:{}", method.generic_params.len());
+        for generic in &method.generic_params {
+            let _ = writeln!(out, "        {generic}");
+        }
     }
 }
 
@@ -709,6 +744,7 @@ fn write_trait_impl_decl(out: &mut String, decl: &TraitImplDecl) {
         is_external: _,
         trait_type_args: _,
         inherent_shadowed_methods: _,
+        impl_group: _,
     } = decl;
     let _ = writeln!(
         out,
@@ -744,6 +780,18 @@ fn write_trait_impl_decl(out: &mut String, decl: &TraitImplDecl) {
         decl.inherent_shadowed_methods.len()
     );
     for method_name in &decl.inherent_shadowed_methods {
+        let _ = writeln!(out, "    {method_name}");
+    }
+    // SEMANTIC for the same reason: a member of a sibling-impl group publishes
+    // no linking / default-body / impl-ensures axiom and no concrete-receiver
+    // resolution, and refuses its shared methods' conformance obligations.
+    let _ = writeln!(
+        out,
+        "  impl_group:{}:{}",
+        decl.impl_group.has_sibling_impl,
+        decl.impl_group.shared_method_names.len()
+    );
+    for method_name in &decl.impl_group.shared_method_names {
         let _ = writeln!(out, "    {method_name}");
     }
 }

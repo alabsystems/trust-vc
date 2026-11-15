@@ -11,6 +11,10 @@
 //!   trust-vc-trust-runner --input bundle.json --output report.json --input-format native-trust_ir-bundle
 //!   trust-vc-trust-runner --input request.json --output report.json --proof-policy evidence-only
 //!   trust-vc-trust-runner --input - --output -
+//!
+//! Exit codes: 0 ok, 1 usage, 2 error, 3 refuted, 4 unknown, 5 rejected (a
+//! native TrustIr bundle was consumed, but at least one certificate was
+//! refused release admission — see the report's `release_admission` rows).
 
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -19,7 +23,7 @@ use std::path::{Path, PathBuf};
 use trust_ir::request::NativeVerificationBundle;
 use trust_vc_trust_engine::{
     TrustMirMemoryProofUnit, TrustOutcome, TrustProofPolicy, TrustTrustIrAdapterRequest,
-    TrustVcNativeTrustIrBundleReport, TrustVcNativeTrustIrVerdict, TrustVcTrustEngine,
+    TrustVcNativeTrustIrBundleReport, TrustVcNativeTrustIrExitClass, TrustVcTrustEngine,
     TrustVerificationReport, TrustVerificationRequest, TrustVerifier,
 };
 
@@ -28,6 +32,11 @@ const EXIT_USAGE: i32 = 1;
 const EXIT_ERROR: i32 = 2;
 const EXIT_REFUTED: i32 = 3;
 const EXIT_UNKNOWN: i32 = 4;
+/// A native TrustIr bundle whose rollup is `CertificatesRejected`. It used to
+/// exit 0 (its exit class was `Ok`), so a bundle with no release-grade
+/// certificate at all looked, to anything reading the exit status, exactly
+/// like one whose every certificate was admitted.
+const EXIT_REJECTED: i32 = 5;
 
 fn main() {
     match run(std::env::args().skip(1)) {
@@ -404,15 +413,36 @@ fn report_exit_code(report: &RunnerReport) -> i32 {
         // trust-vc could not answer was indistinguishable from one it fully
         // admitted. Read the rollup instead.
         //
-        // Scoped deliberately: only `DischargeNotAnswerable` is non-zero for
-        // now. `CertificatesRejected` stays 0 because release admission is a
-        // GRADING result — the bundle was consumed and the report says which
-        // certificates are non-release — and promoting it to a failure exit is
-        // a separate, user-visible policy change that deserves its own commit.
+        // Scoped deliberately: `CertificatesRejected` stays 0 because release
+        // admission is a GRADING result — the bundle was consumed and the
+        // report says which certificates are non-release — and promoting it to
+        // a failure exit is a separate, user-visible policy change that
+        // deserves its own commit.
+        //
+        // The discharge verdicts are NOT in that category. `Refuted` means the
+        // solver produced a counterexample for an obligation the compiler asked
+        // trust-vc to prove, and a decline (or a request that never reached the
+        // lowering) means trust-vc did not prove it. Both must be visible to a
+        // shell that only reads `$?`, so they map onto the exit codes the
+        // request lane already uses for exactly these two meanings.
+        // MERGED 2026-09-23: the discharge verdicts of BOTH lanes are
+        // classified by `exit_class`, which maps `Refuted` / `DischargeRefuted`
+        // to EXIT_REFUTED, a decline / not-answerable / advisory discharge to
+        // EXIT_UNKNOWN, and `Discharged` to EXIT_OK — the same mapping the match
+        // that stood here spelled out by hand.
+        //
+        // The classification lives on the verdict type, NOT in a match here.
+        // This is a separate crate from the library, so `#[non_exhaustive]`
+        // would force a `_ =>` arm — and a `_ => EXIT_OK` arm is precisely how
+        // a newly added verdict (say, an ADVISORY discharge) would start
+        // exiting 0 without anyone noticing. `exit_class` is exhaustive inside
+        // the library, so adding a variant breaks the build there instead.
         RunnerReport::NativeTrustIr(native) => {
-            return match native.verdict() {
-                TrustVcNativeTrustIrVerdict::DischargeNotAnswerable => EXIT_UNKNOWN,
-                _ => EXIT_OK,
+            return match native.verdict().exit_class() {
+                TrustVcNativeTrustIrExitClass::Ok => EXIT_OK,
+                TrustVcNativeTrustIrExitClass::Refuted => EXIT_REFUTED,
+                TrustVcNativeTrustIrExitClass::Unknown => EXIT_UNKNOWN,
+                TrustVcNativeTrustIrExitClass::Rejected => EXIT_REJECTED,
             };
         }
     };
@@ -442,7 +472,7 @@ fn report_exit_code(report: &RunnerReport) -> i32 {
 }
 
 fn usage() -> &'static str {
-    "Usage: trust-vc-trust-runner --input <request.json|-> --output <report.json|-> [--input-format <auto|trust-request|trust_ir-adapter|mir-memory|native-trust_ir-bundle>] [--proof-policy <policy>]\n\nProof policies: evidence-only, attach-replayable-certificates, require-replayable-certificate, require-strict-replayable-certificate, require-release-admissible-certificate"
+    "Usage: trust-vc-trust-runner --input <request.json|-> --output <report.json|-> [--input-format <auto|trust-request|trust_ir-adapter|mir-memory|native-trust_ir-bundle>] [--proof-policy <policy>]\n\nProof policies: evidence-only, attach-replayable-certificates, require-replayable-certificate, require-strict-replayable-certificate, require-release-admissible-certificate\n\nExit codes: 0 ok, 1 usage, 2 error, 3 refuted, 4 unknown, 5 rejected (native bundle consumed, a certificate refused release admission)"
 }
 
 #[derive(Debug)]

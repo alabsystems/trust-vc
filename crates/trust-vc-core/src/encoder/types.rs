@@ -65,6 +65,7 @@ pub(crate) fn sort_for_type(ty: &TrustVcType) -> Sort {
         TrustVcType::Datatype { name, .. } | TrustVcType::RecursiveRef(name) => {
             crate::encoder::datatype::datatype_carrier_sort(name)
         }
+        TrustVcType::NamedCarrier(name) => Sort::Uninterpreted(name.clone()),
         // Poly/TypeParam: type-erased polymorphic sort (#2053).
         TrustVcType::TypeParam(_) | TrustVcType::Poly => Sort::Uninterpreted("Poly".to_string()),
         // Opaque: retained for compatibility. verify_typed() rejects
@@ -120,6 +121,7 @@ pub(crate) fn quantifier_sort_for_type(ty: &TrustVcType) -> Sort {
         TrustVcType::Datatype { name, .. } | TrustVcType::RecursiveRef(name) => {
             crate::encoder::datatype::datatype_carrier_sort(name)
         }
+        TrustVcType::NamedCarrier(name) => Sort::Uninterpreted(name.clone()),
         // Poly/TypeParam: type-erased polymorphic sort (#2053).
         TrustVcType::TypeParam(_) | TrustVcType::Poly => Sort::Uninterpreted("Poly".to_string()),
         TrustVcType::Opaque(_) => Sort::Int,

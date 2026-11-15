@@ -4,43 +4,31 @@
 
 //! Type-inferring builder variants for codegen paths.
 //!
-//! These functions infer the result type from operands and coerce unsuffixed
-//! `Int{32}` literals to match the peer operand's type. Used by
+//! These functions derive the result type from the operands and type an
+//! unsuffixed `Int{32}` literal by its peer operand where its value fits — the
+//! syn lowering's rules (design-trust-proof-backend.md §5b). Used by
 //! `expr_codegen.rs` where the result type is not known at compile time.
 
 use crate::ir::TrustVcType;
 use crate::ir_expr::{ArithOp, CollectionOp, CompareOp, SpecialArithOp, TrustVcExpr, WrappingMode};
 
-/// Coerces unsuffixed `Int{32}` literals to match a peer operand's type.
-///
-/// Local mirror of `ir_lowering::operators::coerce_unsuffixed_literal` to
-/// avoid reaching into the private `operators` module, which breaks clean-
-/// clone builds (module `operators` is `mod`, not `pub(crate) mod`).
-/// Part of #2187.
+/// Types an unsuffixed `Int{32}` literal by a peer operand's type — only
+/// where that never changes its value: the literal (for `-v`, the literal
+/// `-v`) takes the peer's type exactly when it is a value of that type
+/// (`ir_lowering::untyped_literal_at_peer`, the rule the syn lowering's
+/// `coerce_unsuffixed_literal` applies). This mirror used to retype by SHAPE:
+/// `-1` next to a `u8` became `Neg(IntLit { 1, u8 })` — the `u8` negation of
+/// 1, i.e. 255 — and `300` a `u8` literal no `u8` holds.
 fn coerce_unsuffixed_literal(expr: TrustVcExpr, peer_ty: &TrustVcType) -> TrustVcExpr {
-    match expr {
-        TrustVcExpr::IntLit {
-            value,
-            ty: TrustVcType::Int { width: 32 },
-        } if matches!(peer_ty, TrustVcType::Uint { .. } | TrustVcType::Int { .. }) => {
-            TrustVcExpr::IntLit {
-                value,
-                ty: peer_ty.clone(),
-            }
-        }
-        TrustVcExpr::Neg(inner)
-            if matches!(
-                inner.as_ref(),
-                TrustVcExpr::IntLit {
-                    ty: TrustVcType::Int { width: 32 },
-                    ..
-                }
-            ) && matches!(peer_ty, TrustVcType::Uint { .. } | TrustVcType::Int { .. }) =>
-        {
-            TrustVcExpr::Neg(Box::new(coerce_unsuffixed_literal(*inner, peer_ty)))
-        }
-        other => other,
+    let literal = match &expr {
+        TrustVcExpr::IntLit { .. } => true,
+        TrustVcExpr::Neg(inner) => matches!(inner.as_ref(), TrustVcExpr::IntLit { .. }),
+        _ => false,
+    };
+    if !literal {
+        return expr;
     }
+    crate::ir_lowering::untyped_literal_at_peer(&expr, peer_ty).unwrap_or(expr)
 }
 
 fn collection_receiver_name(expr: &TrustVcExpr) -> Option<String> {
@@ -101,7 +89,7 @@ pub fn arith_inferred(op: ArithOp, left: TrustVcExpr, right: TrustVcExpr) -> Tru
                 let (returned_left, returned_right) = *returned;
                 let left = coerce_unsuffixed_literal(returned_left, &right_ty);
                 let right = coerce_unsuffixed_literal(returned_right, &left_ty);
-                let ty = infer_expr_type(&left);
+                let ty = crate::ir_lowering::arith_node_type(op, &left, &right);
                 return TrustVcExpr::Arith {
                     op,
                     left: Box::new(left),
@@ -113,7 +101,9 @@ pub fn arith_inferred(op: ArithOp, left: TrustVcExpr, right: TrustVcExpr) -> Tru
     }
     let left = coerce_unsuffixed_literal(left, &right_ty);
     let right = coerce_unsuffixed_literal(right, &left_ty);
-    let ty = infer_expr_type(&left);
+    // Derived from BOTH operands, as the syn lowering types the node
+    // (`ir_lowering::arith_node_type`), never copied from the left one.
+    let ty = crate::ir_lowering::arith_node_type(op, &left, &right);
     TrustVcExpr::Arith {
         op,
         left: Box::new(left),
@@ -146,9 +136,21 @@ pub fn special_arith_inferred(
             right: Box::new(right),
         };
     }
+    // Shifts take the LEFT operand's type; only the amount is typed by it (the
+    // syn lowering's `lower_special`). Coercing the value toward the amount's
+    // type re-typed a `1i32 << k` (`k: u32`) as a `u32` shift.
+    if matches!(op, SpecialArithOp::Shl | SpecialArithOp::Shr) {
+        let right = coerce_unsuffixed_literal(right, &left_ty);
+        return TrustVcExpr::SpecialArith {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+            ty: left_ty,
+        };
+    }
     let left = coerce_unsuffixed_literal(left, &right_ty);
     let right = coerce_unsuffixed_literal(right, &left_ty);
-    let ty = infer_expr_type(&left);
+    let ty = crate::ir_lowering::derived_node_type(&left, &right);
     TrustVcExpr::SpecialArith {
         op,
         left: Box::new(left),
@@ -173,7 +175,8 @@ pub fn ite_inferred(
     let else_ty = infer_expr_type(&else_branch);
     let then_branch = coerce_unsuffixed_literal(then_branch, &else_ty);
     let else_branch = coerce_unsuffixed_literal(else_branch, &then_ty);
-    let ty = infer_expr_type(&then_branch);
+    // Derived from both branches (`ir_lowering::derived_node_type`).
+    let ty = crate::ir_lowering::derived_node_type(&then_branch, &else_branch);
     TrustVcExpr::Ite {
         cond: Box::new(cond),
         then_branch: Box::new(then_branch),

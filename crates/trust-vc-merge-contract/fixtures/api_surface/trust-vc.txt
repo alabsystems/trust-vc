@@ -38,6 +38,7 @@ proc_macro trust_vc::recommends!
 proc_macro trust_vc::requires!
 proc_macro trust_vc::reveal!
 proc_macro trust_vc::reveal_group!
+proc_macro trust_vc::state_machine!
 proc_macro trust_vc::strict_eq!
 proc_macro trust_vc::track_let!
 proc_macro_attribute trust_vc::action

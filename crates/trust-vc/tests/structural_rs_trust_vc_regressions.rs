@@ -48,6 +48,10 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "test_structural_eq",
     ),
     (
+        "structural_manual_partial_eq_method_negation_verified",
+        "test_not_structural_generic",
+    ),
+    (
         "structural_car_direct_derived_partial_eq_verified",
         "test_structural_eq",
     ),
@@ -78,12 +82,17 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
         "structural_enum_value_status_wrong_value",
         "test_structural_enum_with_values",
     ),
+    // RE-PINNED 2026-09-13 (was a fail-closed "unsupported method eq()" pin):
+    // the hand-written `eq` body is `false`, so the claim is refuted with a
+    // model and its negation verifies (VERIFIED_CASES).
+    (
+        "structural_manual_partial_eq_method_counterexample",
+        "test_not_structural_generic",
+    ),
 ];
 
-const FAIL_CLOSED_CASES: &[(&str, &str)] = &[(
-    "structural_manual_partial_eq_method_currently_blocked",
-    "test_not_structural_generic",
-)];
+// No structural case fails closed on an error message any more.
+const FAIL_CLOSED_CASES: &[(&str, &str)] = &[];
 
 #[derive(Debug, Eq, PartialEq)]
 struct CaseMetadata {
@@ -260,11 +269,18 @@ fn expected_metadata() -> Vec<CaseMetadata> {
             expected_error_patterns: Vec::new(),
         },
         CaseMetadata {
-            case_id: "structural_manual_partial_eq_method_currently_blocked".to_string(),
+            case_id: "structural_manual_partial_eq_method_counterexample".to_string(),
             upstream_case_id: "test_not_structural_generic".to_string(),
-            expected_verdict: "error".to_string(),
-            min_obligations: 0,
-            expected_error_patterns: vec!["unsupported method".to_string(), "eq()".to_string()],
+            expected_verdict: "counterexample".to_string(),
+            min_obligations: 3,
+            expected_error_patterns: Vec::new(),
+        },
+        CaseMetadata {
+            case_id: "structural_manual_partial_eq_method_negation_verified".to_string(),
+            upstream_case_id: "test_not_structural_generic".to_string(),
+            expected_verdict: "verified".to_string(),
+            min_obligations: 3,
+            expected_error_patterns: Vec::new(),
         },
     ]
 }

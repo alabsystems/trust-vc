@@ -279,14 +279,21 @@ fn single_trait_false_claim_still_refuted() {
 
 /// Inherent only, true claim: must still VERIFY. The cross-kind gate drops the
 /// inherent body only when a trait impl for the same type declares the same
-/// name; with no trait present nothing may change.
+/// name; with no trait present nothing may change. `S::make` is a proof
+/// function, which panics when the exec body calls it at run time, so the
+/// ghost-call rule refuses the answer; it refuses only a `Verified` answer.
 #[test]
 fn inherent_only_true_claim_still_verifies() {
     let result = verify("inh_t", "make_is_one", INHERENT_ONLY);
     assert!(
-        matches!(result, VerifyResult::Verified),
+        matches!(
+            &result,
+            VerifyResult::Error { message }
+                if message.contains("ghost function called from exec code")
+        ),
         "NARROWNESS: with no trait impl in the file, `S::make() == 1` must still verify — \
-         the cross-kind gate must not fire on a lone inherent method. Got: {result:?}"
+         the cross-kind gate must not fire on a lone inherent method (a `Verified` answer, \
+         refused by the ghost-call rule). Got: {result:?}"
     );
 }
 

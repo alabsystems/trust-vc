@@ -9,64 +9,87 @@ mod format;
 mod tests;
 
 use collect::ApiSurfaceCollector;
-use rustdoc_json_stable::{BuildError, Builder, Color};
 use rustdoc_types::Id;
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::process::Command;
 use thiserror::Error;
 
 pub const API_SURFACE_FIXTURE_DIR_REL_PATH: &str = "fixtures/api_surface";
 
-// `rustdoc-json-stable` does not expose per-command environment overrides when
-// it uses the active toolchain, so generating stable rustdoc JSON currently
-// requires a short, process-global RUSTC_BOOTSTRAP override. Keep the mutation
-// and restoration in one serialized, panic-safe scope. This also prevents two
-// concurrent snapshot requests from restoring each other's values.
-static RUSTC_BOOTSTRAP_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct RustcBootstrapEnvRestore(Option<OsString>);
-
-impl RustcBootstrapEnvRestore {
-    fn install() -> Self {
-        let previous = std::env::var_os("RUSTC_BOOTSTRAP");
-        write_rustc_bootstrap(Some(OsStr::new("1")));
-        Self(previous)
-    }
+/// The Trust toolchain's Cargo frontend: `$CARGO` (targo exports itself to test
+/// processes and to `targo run`), else `targo` from PATH. There is no stock
+/// fallback: the generator always names the unverified lane, which a cargo that
+/// is not targo rejects.
+fn cargo_program() -> OsString {
+    std::env::var_os("CARGO")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from("targo"))
 }
 
-impl Drop for RustcBootstrapEnvRestore {
-    fn drop(&mut self) {
-        write_rustc_bootstrap(self.0.take().as_deref());
-    }
-}
-
-/// THE single raw environment write for this crate: set (`Some`) or remove
-/// (`None`) `RUSTC_BOOTSTRAP`. Every mutation routes through here, serialized
-/// by the `RUSTC_BOOTSTRAP_ENV_LOCK` that `with_rustc_bootstrap` holds, and
-/// restored by `RustcBootstrapEnvRestore`'s `Drop`. This crate is a dependency
-/// leaf below `trust-vc-core` and cannot import its env choke point, so it
-/// keeps this one equivalent blessed primitive — the ONLY `env_mutation` site
-/// in the crate.
+/// Emit rustdoc JSON for the lib target of `manifest_path` with trustdoc.
 ///
-/// `env_mutation` is the Trust toolchain's deny-by-default env wall; stock
-/// rustc does not know the lint name, hence `unknown_lints`.
-#[allow(unknown_lints, env_mutation)]
-fn write_rustc_bootstrap(value: Option<&OsStr>) {
-    match value {
-        Some(value) => std::env::set_var("RUSTC_BOOTSTRAP", value),
-        None => std::env::remove_var("RUSTC_BOOTSTRAP"),
+/// This spawns `targo --unverified rustdoc --lib … -- -Z unstable-options
+/// --output-format json` directly. The `rustdoc-json-stable` builder it
+/// replaces hard-coded `Command::new("cargo")` (or `rustup run <toolchain>
+/// cargo`) and needed a process-global `RUSTC_BOOTSTRAP=1` to unlock the JSON
+/// backend on a stable toolchain; the Trust toolchain is a dev channel, so the
+/// unstable flag needs no bootstrap escape hatch, and the build carries no proof
+/// claim, hence the unverified lane.
+fn build_rustdoc_json(
+    package_name: &str,
+    manifest_path: &Path,
+    target_dir: &Path,
+) -> Result<PathBuf, ApiSurfaceError> {
+    let json_path = target_dir
+        .join("doc")
+        .join(format!("{}.json", package_name.replace('-', "_")));
+    // A JSON file left by an earlier run must not stand in for this one.
+    if let Err(source) = fs::remove_file(&json_path) {
+        if source.kind() != std::io::ErrorKind::NotFound {
+            return Err(ApiSurfaceError::WriteFile {
+                path: json_path,
+                source,
+            });
+        }
     }
-}
-
-fn with_rustc_bootstrap<T>(operation: impl FnOnce() -> T) -> T {
-    let _lock = RUSTC_BOOTSTRAP_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _restore = RustcBootstrapEnvRestore::install();
-    operation()
+    let mut command = Command::new(cargo_program());
+    command
+        .arg("--unverified")
+        .arg("rustdoc")
+        .arg("--lib")
+        .arg("--color")
+        .arg("never")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .args(["--", "-Z", "unstable-options", "--output-format", "json"]);
+    let rendered = format!("{command:?}");
+    let output = command
+        .output()
+        .map_err(|source| ApiSurfaceError::RustdocLaunch {
+            command: rendered.clone(),
+            source,
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+        return Err(ApiSurfaceError::RustdocFailed {
+            command: rendered,
+            status: output.status.to_string(),
+            stderr_tail: tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+        });
+    }
+    if !json_path.is_file() {
+        return Err(ApiSurfaceError::MissingRustdocJson {
+            command: rendered,
+            path: json_path,
+        });
+    }
+    Ok(json_path)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,8 +252,20 @@ impl SnapshotDiff {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ApiSurfaceError {
-    #[error(transparent)]
-    Build(#[from] BuildError),
+    #[error("failed to launch `{command}`: {source}")]
+    RustdocLaunch {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{command}` failed ({status}):\n{stderr_tail}")]
+    RustdocFailed {
+        command: String,
+        status: String,
+        stderr_tail: String,
+    },
+    #[error("`{command}` succeeded but wrote no rustdoc JSON at {path}")]
+    MissingRustdocJson { command: String, path: PathBuf },
     #[error("failed to deserialize rustdoc JSON {path}: {source}")]
     Deserialize {
         path: PathBuf,
@@ -337,13 +372,7 @@ fn generate_api_surface_snapshot_from_manifest(
     manifest_path: &Path,
     target_dir: &Path,
 ) -> Result<ApiSurfaceSnapshot, ApiSurfaceError> {
-    let json_path = with_rustc_bootstrap(|| {
-        Builder::stable()
-            .manifest_path(manifest_path)
-            .target_dir(target_dir)
-            .color(Color::Never)
-            .build()
-    })?;
+    let json_path = build_rustdoc_json(package_name, manifest_path, target_dir)?;
     let payload = fs::read_to_string(&json_path).map_err(|source| ApiSurfaceError::ReadFile {
         path: json_path.clone(),
         source,

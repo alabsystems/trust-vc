@@ -22,6 +22,8 @@
 //   normal-exit fact; and
 // - bare, labeled, and syntactically infinite `loop` reachability gaps are
 //   pinned as stable counterexamples;
+// - a `while` guard block with flat scalar side effects verifies with the
+//   guard block's effects at every head (2026-09-11);
 // - simple Rust for-loop summaries remain fail-closed unsupported boundaries;
 //   and
 // - source-level loop_decreases! and old-state loop assertions remain
@@ -90,16 +92,16 @@ pub const LOOPS_NO_SPINOFF_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         4,
     ),
     (
-        "loops_no_spinoff_loop2_restore_before_break_current_gap_counterexample",
+        "loops_no_spinoff_loop2_restore_before_break_verified",
         "loop2_ok",
-        "counterexample",
-        3,
+        "verified",
+        10,
     ),
     (
-        "loops_no_spinoff_loop2_restore_before_labeled_inner_break_current_gap_counterexample",
+        "loops_no_spinoff_loop2_restore_before_labeled_inner_break_verified",
         "loop2_ok_y",
-        "counterexample",
-        3,
+        "verified",
+        10,
     ),
     (
         "loops_no_spinoff_while_break_does_not_assume_normal_exit_counterexample",
@@ -168,10 +170,10 @@ pub const LOOPS_NO_SPINOFF_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "loops_no_spinoff_complex_while_side_effect_guard_current_gap_counterexample",
+        "loops_no_spinoff_complex_while_side_effect_guard_verified",
         "complex_while",
-        "counterexample",
-        1,
+        "verified",
+        12,
     ),
     (
         "loops_no_spinoff_loop_break_false_labeled_counterexample",
@@ -180,22 +182,22 @@ pub const LOOPS_NO_SPINOFF_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "loops_no_spinoff_infinite_loop_unreachable_current_gap_counterexample",
+        "loops_no_spinoff_infinite_loop_unreachable_verified",
         "infinite_loop",
-        "counterexample",
-        1,
+        "verified",
+        3,
     ),
     (
-        "loops_no_spinoff_loop_infinite_nested_inner_break_current_gap_counterexample",
+        "loops_no_spinoff_loop_infinite_nested_inner_break_verified",
         "loop_infinite2",
-        "counterexample",
-        1,
+        "verified",
+        3,
     ),
     (
-        "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_current_gap_counterexample",
+        "loops_no_spinoff_loop_infinite_nested_labeled_inner_break_verified",
         "loop_infinite2y",
-        "counterexample",
-        1,
+        "verified",
+        3,
     ),
     (
         "loops_no_spinoff_loop_labeled_break_to_outer_false_counterexample",
@@ -216,10 +218,16 @@ pub const LOOPS_NO_SPINOFF_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         1,
     ),
     (
-        "loops_no_spinoff_for_loop_range_fact_boundary_counterexample",
+        "loops_no_spinoff_for_loop_range_fact_verified",
         "for_loop1",
+        "verified",
+        5,
+    ),
+    (
+        "loops_no_spinoff_for_loop_range_fact_liar_counterexample",
+        "for_loop1 test_loop_fail",
         "counterexample",
-        1,
+        5,
     ),
     (
         "loops_no_spinoff_for_loop_accumulator_post_boundary_counterexample",
@@ -408,9 +416,15 @@ fn loops_no_spinoff_allow_complex_invariants_subset_verified(mut i: u64, limit: 
     trust_vc::assert!(i >= 10u64);
 }
 
+// Upstream `loop2_ok` / `loop2_ok_y` (loop_isolation(false) shape, but the
+// nested loop modifies nothing so isolation makes no difference): re-pinned
+// 2026-09-10 from "current gap" counterexamples — an effect-free inner loop is
+// admitted to the outer body's exact-transition lane and its invariant is
+// checked at the outer loop's arbitrary head (audit row 430). The liars
+// `loop2_missing_restore` / `loop2_labeled_break_to_outer` below still refute.
 #[trust_vc::requires(i == 0u64)]
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_loop2_restore_before_break_current_gap_counterexample(mut i: u64, b: bool) {
+fn loops_no_spinoff_loop2_restore_before_break_verified(mut i: u64, b: bool) {
     loop {
         trust_vc::invariant!(i == 0u64);
         trust_vc::loop_ensures!(i == 0u64);
@@ -432,7 +446,7 @@ fn loops_no_spinoff_loop2_restore_before_break_current_gap_counterexample(mut i:
 
 #[trust_vc::requires(i == 0u64)]
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_loop2_restore_before_labeled_inner_break_current_gap_counterexample(
+fn loops_no_spinoff_loop2_restore_before_labeled_inner_break_verified(
     mut i: u64,
     b: bool,
 ) {
@@ -581,10 +595,14 @@ fn loops_no_spinoff_variables_havoc_nested_counterexample(a: u64, mut i: u64, mu
     }
 }
 
+// Upstream `complex_while`: re-pinned VERIFIED 2026-09-11 (audit row 430) from a
+// "current gap" counterexample — the guard block's side effect now runs at every
+// head including the last, failing evaluation (`while_guard_desugar.rs`), so
+// `i == 10` and `x == 11` hold after the loop.
 #[trust_vc::requires(i == 0u64)]
 #[trust_vc::requires(x == 0u64)]
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_complex_while_side_effect_guard_current_gap_counterexample(
+fn loops_no_spinoff_complex_while_side_effect_guard_verified(
     mut i: u64,
     mut x: u64,
 ) {
@@ -611,15 +629,20 @@ fn loops_no_spinoff_loop_break_false_labeled_counterexample() {
     trust_vc::assert!(false);
 }
 
+// Upstream `infinite_loop` / `loop_infinite2` / `loop_infinite2y`: re-pinned
+// 2026-09-10 from "current gap" counterexamples — the code after a bare loop
+// that no `break` can leave is unreachable (audit row 430), so the trailing
+// `assert!(false)` verifies as in Verus. `loop_infinite2x` (`break 'outer`)
+// below still refutes.
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_infinite_loop_unreachable_current_gap_counterexample() {
+fn loops_no_spinoff_infinite_loop_unreachable_verified() {
     loop {}
 
     trust_vc::assert!(false);
 }
 
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_loop_infinite_nested_inner_break_current_gap_counterexample() {
+fn loops_no_spinoff_loop_infinite_nested_inner_break_verified() {
     loop {
         loop {
             break;
@@ -630,7 +653,7 @@ fn loops_no_spinoff_loop_infinite_nested_inner_break_current_gap_counterexample(
 }
 
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_loop_infinite_nested_labeled_inner_break_current_gap_counterexample() {
+fn loops_no_spinoff_loop_infinite_nested_labeled_inner_break_verified() {
     loop {
         'inner: loop {
             break 'inner;
@@ -689,16 +712,24 @@ fn loops_no_spinoff_loop2_missing_restore_counterexample(mut i: u64, b: bool) {
     trust_vc::assert!(i == 0u64);
 }
 
-// Re-pinned 2026-07-24: the range `for` now desugars to a counter-driven `while`
-// (for_range_desugar.rs). `assert!(x < 10)` in the body is a Counterexample — the
-// desugar auto-injects only the LOWER bound `0 <= x`; the upper bound `x < 10` is
-// the loop GUARD, which the while machinery does not assume as a body-entry fact
-// (a sound over-rejection vs Verus, which auto-provides `x < hi`). A proof needing
-// it writes `invariant!(x < 10)`. Boundary moved Error → Counterexample.
+// Upstream `for_loop1` body fact (Verus: `assert(x < 10)` verifies): the range
+// `for` desugars to a counter-driven `while` (for_range_desugar.rs), and since
+// 2026-09-10 a body assertion is checked at an arbitrary loop head UNDER THE
+// GUARD `x < 10` (audit row 430), so the upper bound reaches it. Before, the
+// guard was not a body-entry fact and this was pinned as a sound over-rejection.
 #[trust_vc::ensures(true)]
-fn loops_no_spinoff_for_loop_range_fact_boundary_counterexample() {
+fn loops_no_spinoff_for_loop_range_fact_verified() {
     for x in 0u64..10u64 {
         trust_vc::assert!(x < 10u64);
+    }
+}
+
+// Upstream `for_loop1` `test_loop_fail`: the tighter body fact `x < 9` is false at
+// the last iteration and must be refuted.
+#[trust_vc::ensures(true)]
+fn loops_no_spinoff_for_loop_range_fact_liar_counterexample() {
+    for x in 0u64..10u64 {
+        trust_vc::assert!(x < 9u64);
     }
 }
 

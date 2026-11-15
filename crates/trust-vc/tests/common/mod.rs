@@ -48,6 +48,7 @@ fn panic_message_to_verify_result(msg: String) -> Option<VerifyResult> {
     {
         Some(VerifyResult::Counterexample {
             obligation_name: "caught_verification_failure".to_string(),
+            location: None,
             model: Some(msg),
             bindings: Vec::new(),
         })
@@ -63,6 +64,7 @@ fn panic_message_to_verify_result(msg: String) -> Option<VerifyResult> {
     } else if msg.contains("INVALID:") {
         Some(VerifyResult::Counterexample {
             obligation_name: "caught_validation_failure".to_string(),
+            location: None,
             model: Some(msg),
             bindings: Vec::new(),
         })

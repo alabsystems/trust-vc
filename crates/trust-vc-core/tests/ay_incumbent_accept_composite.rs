@@ -17,9 +17,10 @@
 // constructors shape that returns `Unknown` (documented in
 // `ay_incumbent_vig_realbody.rs`).
 //
-// Runs on the STOCK homebrew toolchain (the trust-vc verification ENGINE has no
-// rustc_private dependency); see `scripts/stock-harness.sh`. Override the
-// fixture with `AY_PB_PROOF_SRC`.
+// The trust-vc verification ENGINE has no rustc_private dependency, so this
+// runs in minutes on the Trust toolchain's unverified lane:
+// `targo --unverified test --locked -p trust-vc-core --test ay_incumbent_accept_composite`.
+// Override the fixture with `AY_PB_PROOF_SRC`.
 
 use trust_vc_core::verify_function_from_file;
 use trust_vc_core::VerifyResult;

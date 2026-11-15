@@ -8,29 +8,47 @@
 // An `F: Fn(A, B, ..) -> R`-bounded value parameter `f: F` is typed as a
 // first-class `SpecFn(A, B, .., R)` value (Increment 1, already n-ary), so an
 // application `f(a, b, ..)` lowers to the opaque, congruent `spec_fn_apply` UF
-// over the N-TUPLE (`dispatch/calls.rs`, widened for Lane 1a). `Fn` captures
-// immutably ⇒ DETERMINISTIC across calls, so:
-//   * determinism `f(3,4) == f(3,4)` (EQUAL args) VERIFIES via congruence, and
+// over the N-TUPLE (`dispatch/calls.rs`, widened for Lane 1a). So:
+//   * two applications with EQUAL args are one congruent term, but an `Fn`
+//     closure can read shared state (an atomic, a borrowed `Cell`), so
+//     `f(3,4) == f(3,4)` is false at run time and its `Verified` answer is
+//     refused, and
 //   * the result is otherwise UNCONSTRAINED — `f(3,4) == 7` and `f(3,4) ==
 //     f(3,5)` are NOT provable and COUNTEREXAMPLE.
 // The callee-side obligation seam (`emit_fn_bound_param_application_obligations`,
-// widened for Lane 1a) emits the SOUND conditional assume over the opaque n-ary
-// reflection UFs `call_requires%` / `call_ensures%`:
+// widened for Lane 1a) PROVES the applied precondition (H6 —
+// Verus/vstd call semantics) and emits the SOUND conditional assume over the
+// opaque n-ary reflection UFs `call_requires%` / `call_ensures%`:
+//   PROVE   call_requires%(f, (a, b))
 //   ASSUME  call_requires%(f, (a, b))  ==>  call_ensures%(f, (a, b), f(a, b))
 // binding the REAL returned `spec_fn_apply(f, (a, b))` term. The prove-requires
 // GATES the assume-ensures (a callee using `f.ensures` without establishing
 // `f.requires` fails closed). Pass-site linkage (`emit_closure_pass_site_linkage_facts`,
 // already arity-agnostic) bridges a passed n-ary `closure!` literal's OWN concrete
 // spec to those opaque UFs. `FnMut`/`FnOnce` stay fail-closed at every arity.
+// Every determinism / trap fixture declares the `f.requires(..)` of each tuple it
+// applies (before H6 the requires was only an antecedent and requires-free
+// determinism verified); each determinism fixture has a requires-free
+// `*_no_requires_cx` twin that counterexamples on the call-site requires.
 
 // ===========================================================================
-// TYPING / DETERMINISM (arity-2). MUST VERIFY. Two applications with EQUAL args
-// give the EQUAL result via the congruent `spec_fn_apply` UF over the 2-tuple.
-// Load-bearing witness that the n-ary `SpecFn` typing took effect (without it the
-// call fails closed, "Undefined function: f").
+// TYPING / DETERMINISM (arity-2). MUST BE REFUSED. Two applications with EQUAL
+// args are one term of the congruent `spec_fn_apply` UF over the 2-tuple, which
+// proves them equal; a stateful `Fn` closure does not. The refusal comes only
+// from a `Verified` answer, so it is also the witness that the n-ary `SpecFn`
+// typing took effect (without it the call fails closed, "Undefined function: f").
 // ===========================================================================
+#[trust_vc::requires(f.requires((3u64, 4u64)))]
+fn nary2_determinism_refused<F: Fn(u64, u64) -> u64>(f: F) {
+    let x = f(3u64, 4u64);
+    let y = f(3u64, 4u64);
+    trust_vc::assert!(x == y);
+}
+
+// H6 twin: requires-free arity-2 determinism is refuted on the call-site
+// `f.requires((3, 4))`. MUST COUNTEREXAMPLE.
 #[trust_vc::ensures(true)]
-fn nary2_determinism_verified<F: Fn(u64, u64) -> u64>(f: F) {
+fn nary2_determinism_no_requires_cx<F: Fn(u64, u64) -> u64>(f: F) {
     let x = f(3u64, 4u64);
     let y = f(3u64, 4u64);
     trust_vc::assert!(x == y);
@@ -38,10 +56,21 @@ fn nary2_determinism_verified<F: Fn(u64, u64) -> u64>(f: F) {
 
 // ===========================================================================
 // DETERMINISM via the where-clause spelling (where-predicate recognition path).
-// MUST VERIFY.
+// MUST BE REFUSED.
 // ===========================================================================
+#[trust_vc::requires(f.requires((5u64, 6u64)))]
+fn nary2_determinism_where_clause_refused<F>(f: F)
+where
+    F: Fn(u64, u64) -> u64,
+{
+    let x = f(5u64, 6u64);
+    let y = f(5u64, 6u64);
+    trust_vc::assert!(x == y);
+}
+
+// H6 twin (where-clause spelling). MUST COUNTEREXAMPLE on the call-site requires.
 #[trust_vc::ensures(true)]
-fn nary2_determinism_where_clause_verified<F>(f: F)
+fn nary2_determinism_where_clause_no_requires_cx<F>(f: F)
 where
     F: Fn(u64, u64) -> u64,
 {
@@ -55,7 +84,7 @@ where
 // gives nothing, so `f(3,4) == f(3,5)` COUNTEREXAMPLES. A `Verified` = congruence
 // leaked across distinct args = UNSOUND.
 // ===========================================================================
-#[trust_vc::ensures(true)]
+#[trust_vc::requires(f.requires((3u64, 4u64)) && f.requires((3u64, 5u64)))]
 fn nary2_distinct_args_cx<F: Fn(u64, u64) -> u64>(f: F) {
     let x = f(3u64, 4u64);
     let y = f(3u64, 5u64);
@@ -68,7 +97,7 @@ fn nary2_distinct_args_cx<F: Fn(u64, u64) -> u64>(f: F) {
 // inventing behaviour = UNSOUND). A Counterexample (NOT an "Undefined function"
 // error) witnesses the term is modeled but unconstrained.
 // ===========================================================================
-#[trust_vc::ensures(true)]
+#[trust_vc::requires(f.requires((3u64, 4u64)))]
 fn nary2_concrete_trap_cx<F: Fn(u64, u64) -> u64>(f: F) {
     let r = f(3u64, 4u64);
     trust_vc::assert!(r == 7u64);
@@ -254,7 +283,8 @@ fn nary2_pass_site_param_repass_fail_closed<F: Fn(u64, u64) -> u64>(f: F) {
 
 // ===========================================================================
 // REGRESSION: `FnMut(u64, u64) -> u64` stays fail-closed at arity-2 (non-
-// deterministic; not typed `SpecFn`, so the call does not lower). MUST NOT VERIFY.
+// deterministic; not typed `SpecFn`, so the application is rejected at extraction
+// — "function value"). MUST NOT VERIFY.
 // ===========================================================================
 #[trust_vc::ensures(true)]
 fn fnmut2_fail_closed<F: FnMut(u64, u64) -> u64>(mut f: F) {
@@ -274,12 +304,21 @@ fn fnonce2_fail_closed<F: FnOnce(u64, u64) -> u64>(f: F) {
 }
 
 // ===========================================================================
-// ARITY-0 SANITY (unit-arg, `Fn() -> u64`): a nullary `Fn` is deterministic (no
-// args, immutable captures ⇒ a constant), so `f() == f()` VERIFIES via congruence
-// over the empty tuple. MUST VERIFY.
+// ARITY-0 SANITY (unit-arg, `Fn() -> u64`): `f() == f()` is one term of the
+// congruent UF over the empty tuple, but a nullary `Fn` closure can return a
+// counter. MUST BE REFUSED.
 // ===========================================================================
+#[trust_vc::requires(f.requires(()))]
+fn nary0_determinism_refused<F: Fn() -> u64>(f: F) {
+    let x = f();
+    let y = f();
+    trust_vc::assert!(x == y);
+}
+
+// H6 twin: requires-free nullary determinism. MUST COUNTEREXAMPLE on the
+// call-site `f.requires(())`.
 #[trust_vc::ensures(true)]
-fn nary0_determinism_verified<F: Fn() -> u64>(f: F) {
+fn nary0_determinism_no_requires_cx<F: Fn() -> u64>(f: F) {
     let x = f();
     let y = f();
     trust_vc::assert!(x == y);
@@ -289,18 +328,26 @@ fn nary0_determinism_verified<F: Fn() -> u64>(f: F) {
 // ARITY-0 SANITY TRAP: the nullary result is UNCONSTRAINED. `f() == 5` is not
 // provable. MUST COUNTEREXAMPLE.
 // ===========================================================================
-#[trust_vc::ensures(true)]
+#[trust_vc::requires(f.requires(()))]
 fn nary0_concrete_trap_cx<F: Fn() -> u64>(f: F) {
     let r = f();
     trust_vc::assert!(r == 5u64);
 }
 
 // ===========================================================================
-// ARITY-3 SANITY: determinism over the 3-tuple VERIFIES via congruence. MUST
-// VERIFY.
+// ARITY-3 SANITY: two applications over the same 3-tuple. MUST BE REFUSED.
 // ===========================================================================
+#[trust_vc::requires(f.requires((1u64, 2u64, 3u64)))]
+fn nary3_determinism_refused<F: Fn(u64, u64, u64) -> u64>(f: F) {
+    let x = f(1u64, 2u64, 3u64);
+    let y = f(1u64, 2u64, 3u64);
+    trust_vc::assert!(x == y);
+}
+
+// H6 twin: requires-free arity-3 determinism. MUST COUNTEREXAMPLE on the
+// call-site requires.
 #[trust_vc::ensures(true)]
-fn nary3_determinism_verified<F: Fn(u64, u64, u64) -> u64>(f: F) {
+fn nary3_determinism_no_requires_cx<F: Fn(u64, u64, u64) -> u64>(f: F) {
     let x = f(1u64, 2u64, 3u64);
     let y = f(1u64, 2u64, 3u64);
     trust_vc::assert!(x == y);
@@ -310,7 +357,7 @@ fn nary3_determinism_verified<F: Fn(u64, u64, u64) -> u64>(f: F) {
 // ARITY-3 SANITY TRAP: a differing third arg breaks congruence, so `f(1,2,3) ==
 // f(1,2,4)` COUNTEREXAMPLES. MUST COUNTEREXAMPLE.
 // ===========================================================================
-#[trust_vc::ensures(true)]
+#[trust_vc::requires(f.requires((1u64, 2u64, 3u64)) && f.requires((1u64, 2u64, 4u64)))]
 fn nary3_distinct_args_cx<F: Fn(u64, u64, u64) -> u64>(f: F) {
     let x = f(1u64, 2u64, 3u64);
     let y = f(1u64, 2u64, 4u64);

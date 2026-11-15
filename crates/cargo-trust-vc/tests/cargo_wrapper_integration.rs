@@ -62,7 +62,9 @@ fn cargo_trust_vc_bin() -> PathBuf {
         return fallback;
     }
 
-    panic!("cargo-trust-vc binary not found; run `cargo build` first");
+    panic!(
+        "cargo-trust-vc binary not found; run `targo --unverified build -p targo-trust-vc` first"
+    );
 }
 
 fn rustc_command() -> PathBuf {
@@ -77,7 +79,8 @@ fn rustc_command() -> PathBuf {
             }
         }
     }
-    PathBuf::from(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+    // Never a bare `rustc` from PATH: targo exports only `$CARGO` to tests.
+    PathBuf::from(format!("trustc{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn build_fake_cargo_recorder(root: &Path) -> PathBuf {
@@ -503,7 +506,7 @@ fn run_cargo_trust_vc_new(root: &Path, args: &[&str]) {
 fn run_build(root: &Path) -> Value {
     let fake_cargo = build_fake_cargo_recorder(root);
     let record_path = root.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(root)
@@ -527,7 +530,7 @@ fn run_build(root: &Path) -> Value {
 fn run_verify(root: &Path) -> Value {
     let fake_cargo = build_fake_cargo_recorder(root);
     let record_path = root.join("cargo-record.json");
-    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "targo".to_string());
 
     let output = Command::new(cargo_trust_vc_bin())
         .current_dir(root)
@@ -624,7 +627,7 @@ fn cargo_new_bin_scaffold_drives_build_wrapper_contract() {
     make_scaffold_hermetic(&project_dir);
 
     let record = run_build(&project_dir);
-    assert_eq!(record_args(&record), vec!["build"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "build"]);
     assert_cargo_verus_env_contract(&record);
 
     let package_id = package_env_id(&project_dir, project_name);
@@ -667,7 +670,7 @@ fn cargo_new_bin_scaffold_drives_verify_wrapper_contract() {
     make_scaffold_hermetic(&project_dir);
 
     let record = run_verify(&project_dir);
-    assert_eq!(record_args(&record), vec!["check"]);
+    assert_eq!(record_args(&record), vec!["--unverified", "check"]);
     assert_cargo_verus_env_contract(&record);
 
     let package_id = package_env_id(&project_dir, project_name);

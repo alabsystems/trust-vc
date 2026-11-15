@@ -200,16 +200,27 @@ pub fn outcome_from(result: &VerifyResult) -> Outcome {
 // solver, not just its yes/no verdict.
 // ---------------------------------------------------------------------------
 
-/// An independently-checkable proof certificate for a verified [`DriverFn`].
+/// An independently-checkable proof certificate from a verified [`DriverFn`].
 ///
 /// Produced from ay's UNSAT proof artifact and re-checked by `trust-vc-kernel`
 /// (`kernel_verified`). Available with the `certificates` feature.
+///
+/// It is the certificate of ONE obligation, [`Self::refuted_obligation`]: the
+/// last one the solver refuted for this function. Every flag is a claim about
+/// that obligation's query. A function with several obligations has a
+/// certificate per obligation in its verification report's steps, and this one
+/// says nothing about the others.
 #[cfg(feature = "certificates")]
 #[derive(Debug, Clone)]
 pub struct Certificate {
-    /// True if `trust-vc-kernel` independently re-checked the ay UNSAT proof.
+    /// The obligation whose negated goal this certificate refutes.
+    pub refuted_obligation: String,
+    /// True if `trust-vc-kernel` independently re-checked the ay UNSAT proof as
+    /// a refutation of [`Self::refuted_obligation`]'s own query (premises bound
+    /// to it; theory lemmas taken as given and checked by ay's strict checker).
     pub kernel_verified: bool,
-    /// True if ay's strict proof checker accepted the proof.
+    /// True if ay's strict proof checker accepted the proof and its premises
+    /// are [`Self::refuted_obligation`]'s own query.
     pub strict_verified: bool,
     /// True if the proof uses only clean-supported (non-`trust`) rules.
     pub clean_supported: bool,
@@ -247,6 +258,7 @@ impl DriverFn {
             .verify_with_report(trust_vc_core::VerificationReportOptions::new());
         let outcome = outcome_from(report.result());
         let certificate = report.proof().map(|p| Certificate {
+            refuted_obligation: p.refuted_obligation().to_string(),
             kernel_verified: p.kernel_verified(),
             strict_verified: p.strict_verified(),
             clean_supported: p.clean_supported(),

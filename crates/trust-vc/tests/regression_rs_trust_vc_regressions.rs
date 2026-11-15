@@ -700,15 +700,25 @@ fn regression_rs_counterexample_subset_is_rejected_from_file() {
     }
 }
 
+/// Every case is checked before the test fails, so one red case cannot hide a
+/// later one that verifies.
 #[test]
 fn regression_rs_unsupported_boundaries_fail_closed_from_file() {
+    let mut failures = Vec::new();
     for (case, upstream_case, expected_fragments) in FAIL_CLOSED_CASES {
-        let message = fail_closed_message(case, upstream_case);
-        assert!(
-            expected_fragments
-                .iter()
-                .any(|expected_fragment| message.contains(expected_fragment)),
-            "{case} ({upstream_case}) error should contain one of {expected_fragments:?}, got: {message}"
-        );
+        let outcome = std::panic::catch_unwind(|| fail_closed_message(case, upstream_case));
+        match outcome {
+            Ok(message) if expected_fragments.iter().any(|f| message.contains(f)) => {}
+            Ok(message) => failures.push(format!(
+                "{case} ({upstream_case}) error should contain one of {expected_fragments:?}, got: {message}"
+            )),
+            Err(payload) => failures.push(
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| format!("{case} ({upstream_case}) panicked")),
+            ),
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

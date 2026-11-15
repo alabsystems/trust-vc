@@ -152,12 +152,33 @@ impl<'a> AstExpressionParser<'a> {
         expr: &TrustVcExpr,
         hint_ty: Option<&TrustVcType>,
     ) -> TrustVcResult<Term> {
-        if let Some(hint_ty) = hint_ty {
-            if let Some(coerced) = Self::coerce_default_int_literal(expr, hint_ty) {
-                return self.encode_subexpr(&coerced);
+        // SOUNDNESS (rank-5 regression): a hint type NARROWER than the 32-bit
+        // default-literal placeholder says this operand is typed by its peer, so
+        // a closed default-width literal tree here must keep the pre-rank-5
+        // narrowing (see `narrow_typed_literal_operand_context`). Sticky
+        // downward, restored on the way out.
+        let saved_narrow_ctx = self.narrow_typed_literal_operand_context;
+        self.narrow_typed_literal_operand_context =
+            saved_narrow_ctx || hint_ty.is_some_and(Self::is_narrow_bounded_int_type);
+        let result = (|this: &mut Self| {
+            if let Some(hint_ty) = hint_ty {
+                if let Some(coerced) = Self::coerce_default_int_literal(expr, hint_ty) {
+                    return this.encode_subexpr(&coerced);
+                }
             }
-        }
-        self.encode_subexpr(expr)
+            this.encode_subexpr(expr)
+        })(self);
+        self.narrow_typed_literal_operand_context = saved_narrow_ctx;
+        result
+    }
+
+    /// True for a bounded integer type strictly narrower than the 32-bit
+    /// default-literal placeholder (`u8`/`i8`/`u16`/`i16`).
+    fn is_narrow_bounded_int_type(ty: &TrustVcType) -> bool {
+        matches!(
+            ty,
+            TrustVcType::Int { width } | TrustVcType::Uint { width } if *width < 32
+        )
     }
 
     fn coerce_bv_term_to_int_for_type(
@@ -180,60 +201,51 @@ impl<'a> AstExpressionParser<'a> {
         Ok(converted)
     }
 
+    /// Type a literal operand by the peer it meets (`hint_ty`), only where that
+    /// never changes its value.
+    ///
+    /// * A literal of an integer type meeting an unbounded peer (`int`, `nat`,
+    ///   `Real`) is the same number at the peer's sort.
+    /// * An UNTYPED literal form — the `Int { width: 32 }` placeholder, or a
+    ///   closed tree of them (`ir_lowering::is_untyped_literal`) — takes the
+    ///   peer's type when EVERY literal in it is a value of that type
+    ///   (`ir_lowering::untyped_literal_at_peer`); a tree is then computed in
+    ///   that type, exactly as Rust types it.
+    ///
+    /// `None` otherwise: the operand keeps its own type and the operation it
+    /// sits in is mixed-type, hence exact (`ir_lowering::types`). This used to
+    /// retype by SHAPE alone: a negative `Int{32}` literal became unsigned (a
+    /// value change), and `Neg(IntLit { -128 })` — the equality-substituted
+    /// `-x0` with `x0: i32 == -128` — became the `i8` negation of `-128`, so
+    /// `-x0 < z` (`z: i8 == 0`) came back Verified. Substitution no longer
+    /// produces that form (`normalize::substitution`).
     fn coerce_default_int_literal(
         expr: &TrustVcExpr,
         hint_ty: &TrustVcType,
     ) -> Option<TrustVcExpr> {
-        if !matches!(
-            hint_ty,
-            TrustVcType::Int { .. }
-                | TrustVcType::Uint { .. }
-                | TrustVcType::MathInt
-                | TrustVcType::Nat
-                | TrustVcType::Real
-        ) {
-            return None;
-        }
-
-        match expr {
-            TrustVcExpr::IntLit { value, ty } => {
-                let hint_uses_unbounded_int = matches!(
-                    hint_ty,
-                    TrustVcType::MathInt | TrustVcType::Nat | TrustVcType::Real
-                );
-                let source_is_integer = matches!(
-                    ty,
-                    TrustVcType::Int { .. }
-                        | TrustVcType::Uint { .. }
-                        | TrustVcType::MathInt
-                        | TrustVcType::Nat
-                );
-                if hint_uses_unbounded_int && source_is_integer {
-                    return Some(TrustVcExpr::IntLit {
-                        value: *value,
-                        ty: hint_ty.clone(),
-                    });
-                }
-                matches!(ty, TrustVcType::Int { width: 32 }).then(|| TrustVcExpr::IntLit {
+        if let TrustVcExpr::IntLit { value, ty } = expr {
+            let unbounded_hint = matches!(
+                hint_ty,
+                TrustVcType::MathInt | TrustVcType::Nat | TrustVcType::Real
+            );
+            let integer_source = matches!(
+                ty,
+                TrustVcType::Int { .. }
+                    | TrustVcType::Uint { .. }
+                    | TrustVcType::MathInt
+                    | TrustVcType::Nat
+            );
+            if unbounded_hint
+                && integer_source
+                && crate::ir_lowering::type_holds_integer(hint_ty, *value) == Some(true)
+            {
+                return Some(TrustVcExpr::IntLit {
                     value: *value,
                     ty: hint_ty.clone(),
-                })
+                });
             }
-            TrustVcExpr::Neg(inner) => {
-                // Never coerce negative literals to unsigned types — Neg(IntLit)
-                // represents a genuinely negative value (e.g., -1) which has no
-                // meaningful unsigned interpretation. Coercing to Uint makes
-                // encode_compare pick bvult instead of bvslt, producing wrong
-                // results for mixed i32/u32 comparisons (#1769 regression from
-                // equality substitution in #2187).
-                if matches!(hint_ty, TrustVcType::Uint { .. } | TrustVcType::Nat) {
-                    return None;
-                }
-                Self::coerce_default_int_literal(inner, hint_ty)
-                    .map(|inner| TrustVcExpr::Neg(Box::new(inner)))
-            }
-            _ => None,
         }
+        crate::ir_lowering::untyped_literal_at_peer(expr, hint_ty)
     }
 
     // =================================================================
@@ -293,7 +305,15 @@ impl<'a> AstExpressionParser<'a> {
                 // re-widens any value that would not be representable at this
                 // width (so a positive out-of-signed-range literal like `200`
                 // is NOT wrapped to a negative BV(8) value).
-                let w = if *width == 32 && matches!(ty, TrustVcType::Int { .. }) {
+                // SOUNDNESS (rank-5 cluster, member 31): never narrow inside a
+                // CLOSED default-width literal operation (`21i32 * 21i32`,
+                // `100 + 100`) — the operation itself would then be computed and
+                // wrap at the narrow width. See
+                // `default_int_literal_narrowing_suppressed`.
+                let w = if *width == 32
+                    && matches!(ty, TrustVcType::Int { .. })
+                    && self.default_int_literal_narrowing_suppressed == 0
+                {
                     let ctx_width = self.infer_int_width();
                     if ctx_width < 32 {
                         ctx_width
@@ -347,7 +367,12 @@ impl<'a> AstExpressionParser<'a> {
                         .try_bv_const_bigint(&BigInt::from(value), actual_width)
                         .map_err(|e| e.to_string())?
                 };
-                self.term_widths.insert(term, (actual_width, signed));
+                self.register_bv_constant(
+                    term,
+                    actual_width,
+                    signed,
+                    top_bit_clear(value, actual_width),
+                );
                 Ok(term)
             }
             TrustVcType::Char => {
@@ -355,7 +380,7 @@ impl<'a> AstExpressionParser<'a> {
                     .solver
                     .try_bv_const(value as i64, 32)
                     .map_err(|e| e.to_string())?;
-                self.term_widths.insert(term, (32, false));
+                self.register_bv_constant(term, 32, false, top_bit_clear(value, 32));
                 Ok(term)
             }
             TrustVcType::Bool => {
@@ -400,8 +425,25 @@ impl<'a> AstExpressionParser<'a> {
                 .try_bv_const_bigint(&value, width)
                 .map_err(|e| e.to_string())?
         };
-        self.term_widths.insert(term, (width, signed));
+        let neutral = i128::try_from(&value).is_ok_and(|value| top_bit_clear(value, width));
+        self.register_bv_constant(term, width, signed, neutral);
         Ok(term)
+    }
+
+    /// Register a BV CONSTANT's width and signedness.
+    ///
+    /// ay hash-conses constants, so this term is shared by every occurrence of
+    /// the same bits at this width (`255u8` is `-1i8`). A constant whose top
+    /// bit is clear denotes the same integer read either way, so it is
+    /// registered sign-neutral and no other occurrence can contest it; any
+    /// other constant is registered normally, and an occurrence of the other
+    /// signedness contests the entry (see `term_widths.rs`).
+    fn register_bv_constant(&mut self, term: Term, width: u32, signed: bool, top_bit_clear: bool) {
+        if top_bit_clear {
+            self.term_widths.insert_sign_neutral(term, (width, signed));
+        } else {
+            self.term_widths.insert(term, (width, signed));
+        }
     }
 
     // =================================================================
@@ -475,14 +517,37 @@ impl<'a> AstExpressionParser<'a> {
 // Free helper functions
 // =====================================================================
 
-/// Check if a TrustVcExpr is a literal zero (for division/modulo by zero detection).
-pub(super) fn is_trust_vc_literal_zero(expr: &TrustVcExpr) -> bool {
-    matches!(expr, TrustVcExpr::IntLit { value: 0, .. })
+/// Whether the `width`-bit constant `value` has its top bit clear, i.e.
+/// `0 <= value < 2^(width-1)`: the constants whose signed and unsigned readings
+/// are the same integer.
+fn top_bit_clear(value: i128, width: u32) -> bool {
+    width > 0 && value >= 0 && (width >= 128 || value < 1i128 << (width - 1))
 }
 
-/// Check if a TrustVcExpr is a literal one (for mul/div algebraic simplifications).
+/// Check if a TrustVcExpr is a literal zero (for division/modulo by zero
+/// detection) — also one pinned at its type by an identity cast (a source
+/// `0i32`).
+pub(super) fn is_trust_vc_literal_zero(expr: &TrustVcExpr) -> bool {
+    matches!(pinned_literal(expr), TrustVcExpr::IntLit { value: 0, .. })
+}
+
+/// Check if a TrustVcExpr is a literal one (for mul/div algebraic
+/// simplifications), pinned or not.
 pub(super) fn is_trust_vc_literal_one(expr: &TrustVcExpr) -> bool {
-    matches!(expr, TrustVcExpr::IntLit { value: 1, .. })
+    matches!(pinned_literal(expr), TrustVcExpr::IntLit { value: 1, .. })
+}
+
+/// The literal under an identity cast (`ir_lowering::atoms::typed_int_literal`,
+/// `ir_lowering::pin_substituted_value`), else `expr` itself.
+fn pinned_literal(expr: &TrustVcExpr) -> &TrustVcExpr {
+    match expr {
+        TrustVcExpr::Cast {
+            expr: inner,
+            from_ty,
+            to_ty,
+        } if from_ty == to_ty && matches!(inner.as_ref(), TrustVcExpr::IntLit { .. }) => inner,
+        other => other,
+    }
 }
 
 /// Extract the compile-time integer value of a literal expression, if any.
@@ -496,6 +561,15 @@ pub(super) fn is_trust_vc_literal_one(expr: &TrustVcExpr) -> bool {
 pub(super) fn trust_vc_int_literal_value(expr: &TrustVcExpr) -> Option<i128> {
     match expr {
         TrustVcExpr::IntLit { value, .. } => Some(*value),
+        // A substituted `i32` value (`normalize::substitution`,
+        // `ir_lowering::pin_substituted_value`) or a source `5i32`
+        // (`ir_lowering::atoms::typed_int_literal`) is pinned to its type by an
+        // identity cast; it is still a compile-time constant.
+        TrustVcExpr::Cast {
+            expr,
+            from_ty,
+            to_ty,
+        } if from_ty == to_ty => trust_vc_int_literal_value(expr),
         TrustVcExpr::Neg(inner) => match inner.as_ref() {
             TrustVcExpr::IntLit { value, .. } => value.checked_neg(),
             _ => None,

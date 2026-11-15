@@ -66,12 +66,11 @@ fn assert_counterexample(tag: &str, src: &str) {
 }
 
 fn assert_not_verified(tag: &str, src: &str) {
-    match verify(tag, src) {
-        VerifyResult::Verified => panic!(
+    if verify(tag, src) == VerifyResult::Verified {
+        panic!(
             "{tag}: an out-of-range map index read must NOT verify (the \
-             Seq::index precondition is unmet) — false Verified is a soundness hole"
-        ),
-        _ => {}
+         Seq::index precondition is unmet) — false Verified is a soundness hole"
+        )
     }
 }
 

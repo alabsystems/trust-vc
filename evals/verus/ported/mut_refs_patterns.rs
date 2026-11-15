@@ -382,10 +382,16 @@ pub const MUT_REFS_PATTERNS_RS_EXPECTED_CASES: &[MutRefsPatternsExpectedCase] = 
         0,
     ),
     (
-        "mut_refs_patterns_mut_ref_current_currently_blocked",
+        "mut_refs_patterns_mut_ref_current_local_borrow_verified",
         "mut_ref_current resolution helper boundary",
-        "error",
-        0,
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_mut_ref_current_local_borrow_wrong_value_counterexample",
+        "mut_ref_current resolution helper boundary",
+        "counterexample",
+        1,
     ),
     (
         "mut_refs_patterns_mut_ref_future_currently_blocked",
@@ -416,6 +422,36 @@ pub const MUT_REFS_PATTERNS_RS_EXPECTED_CASES: &[MutRefsPatternsExpectedCase] = 
         "mut_ref_tracked_binder_forbidden tracked-mode diagnostic",
         "error",
         0,
+    ),
+    (
+        "mut_refs_patterns_side_effects_add1_two_state_verified",
+        "side_effects_in_match_arg::add1 two-state mut_ref_current/mut_ref_future contract",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_statement_call_verified",
+        "side_effects_in_match_arg statement-position call applies the two-state ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_call_verified",
+        "side_effects_in_match_arg::test3 tuple-destructured call result",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_false_counterexample",
+        "side_effects_in_match_arg::test3_fails tuple-destructured call result",
+        "counterexample",
+        1,
+    ),
+    (
+        "mut_refs_patterns_side_effects_let_tuple_wrong_value_counterexample",
+        "side_effects_in_match_arg::test3 tuple-destructured call result, wrong post value",
+        "counterexample",
+        1,
     ),
 ];
 
@@ -955,12 +991,23 @@ fn mut_refs_patterns_has_resolved_currently_blocked() {
     trust_vc::assert!(has_resolved(value));
 }
 
+// `mut_ref_current(P)` on a LOCAL `&mut` borrow reads the CURRENT value behind
+// the borrow, which is exactly what `*P` reads. Pinned in both directions so the
+// op can never drift onto some other state.
 #[trust_vc::ensures(true)]
-fn mut_refs_patterns_mut_ref_current_currently_blocked() {
+fn mut_refs_patterns_mut_ref_current_local_borrow_verified() {
     let mut value = 20u64;
     let value_ref: &mut u64 = &mut value;
 
     trust_vc::assert!(mut_ref_current(value_ref) == 20u64);
+}
+
+#[trust_vc::ensures(true)]
+fn mut_refs_patterns_mut_ref_current_local_borrow_wrong_value_counterexample() {
+    let mut value = 20u64;
+    let value_ref: &mut u64 = &mut value;
+
+    trust_vc::assert!(mut_ref_current(value_ref) == 21u64);
 }
 
 #[trust_vc::ensures(true)]
@@ -1009,4 +1056,82 @@ fn mut_refs_patterns_tracked_ref_mut_binding_currently_blocked(t: Tracked<u64>) 
             trust_vc::assert!(*i == *i);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// upstream `side_effects_in_match_arg`
+//
+// Upstream writes the callee's contract in the `&mut` TWO-STATE VOCABULARY —
+// `requires mut_ref_current(b) < 100`, `ensures mut_ref_future(b) ==
+// mut_ref_current(b) + 1` — and then calls it in several positions, asserting
+// `i == 1` after each. Two separate things had to change before any of it could
+// be ported:
+//
+// 1. The vocabulary spelling VERIFIED at the callee's definition but no caller
+//    could instantiate it: the callee `ensures` reached IR lowering with
+//    `mut_ref_future(..)` unresolved and the whole caller failed to lower. The
+//    plain synonym (`ensures b == ...`) instantiated soundly, so the two
+//    spellings were synonyms at the definition and not at the call site.
+// 2. Binding the result DROPPED the postcondition: `add1(&mut i);` applied it
+//    and `let (r, t) = add1(&mut i);` — upstream's own `test3` — did not, so the
+//    havoc variable came back unconstrained and `i == 1` was refuted.
+//
+// DEVIATION, recorded rather than hidden: upstream's `add1` returns
+// `(Blah, Blah)` for a local `enum Blah`. A tuple of enums has no sort in this
+// engine's result model (`Context contains variables with unrecognized types
+// ... 'result' (type: (Blah, Blah))`), which is an independent type-modelling
+// gap, so the port returns a scalar tuple. Everything that the two fixes are
+// about — the contract vocabulary, the call positions, the destructuring
+// binding form, and upstream's asserted verdicts — is carried over unchanged.
+//
+// `test1` / `test2` (the call in `match` scrutinee position) and the two
+// `_fails` match-arm cases are NOT ported: they need the enum-tuple return.
+
+#[trust_vc::requires(mut_ref_current(b) < 100u64)]
+#[trust_vc::ensures(mut_ref_future(b) == mut_ref_current(b) + 1u64)]
+fn mut_refs_patterns_side_effects_add1_two_state_verified(b: &mut u64) -> (u64, u64) {
+    *b = *b + 1u64;
+    (3u64, 4u64)
+}
+
+// The neighbouring shape that already worked — the other half of the decisive
+// pair. One line apart from the `let (r, t) = ...` form below.
+#[trust_vc::ensures(true)]
+fn mut_refs_patterns_side_effects_statement_call_verified() {
+    let mut i = 0u64;
+    mut_refs_patterns_side_effects_add1_two_state_verified(&mut i);
+
+    trust_vc::assert!(i == 1u64);
+}
+
+// upstream `test3`
+#[trust_vc::ensures(true)]
+fn mut_refs_patterns_side_effects_let_tuple_call_verified() {
+    let mut i = 0u64;
+    let (_r, _t) = mut_refs_patterns_side_effects_add1_two_state_verified(&mut i);
+
+    trust_vc::assert!(i == 1u64);
+}
+
+// upstream `test3_fails`: the same body plus upstream's own marked
+// `assert(false)`, which upstream counts among the file's 5 expected failures.
+#[trust_vc::ensures(true)]
+fn mut_refs_patterns_side_effects_let_tuple_false_counterexample() {
+    let mut i = 0u64;
+    let (_r, _t) = mut_refs_patterns_side_effects_add1_two_state_verified(&mut i);
+
+    trust_vc::assert!(i == 1u64);
+    trust_vc::assert!(false);
+}
+
+// LIAR TWIN of `test3`: the postcondition says the referent is `0 + 1`, so `2`
+// must refute. Without it the verified pin could pass on a vacuous hypothesis
+// (resolving the FINAL endpoint to the ENTRY value would assume `b == b + 1`)
+// rather than on the callee's actual promise.
+#[trust_vc::ensures(true)]
+fn mut_refs_patterns_side_effects_let_tuple_wrong_value_counterexample() {
+    let mut i = 0u64;
+    let (_r, _t) = mut_refs_patterns_side_effects_add1_two_state_verified(&mut i);
+
+    trust_vc::assert!(i == 2u64);
 }

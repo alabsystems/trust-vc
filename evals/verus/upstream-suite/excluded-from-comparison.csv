@@ -1,0 +1,100 @@
+binary,test_name,line,z3_outcome,reason
+adts,test_field_update_mode_fail_1,712,ignored,#[ignore] in source
+adts,test_field_update_mode_fail_2,723,ignored,#[ignore] in source
+adts,test_if_is_variant_regression_125,795,ignored,#[ignore] in source
+adts,test_is_panic_regression_1380,1925,ignored,#[ignore] in source
+basic,equal_regression_148,557,ignored,#[ignore] in source
+broadcast_forall,broadcast_old_syntax_warning,632,ignored,#[ignore] in source
+cargo,cargo_new_builds,152,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,cargo_new_verifies,134,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,unverified_consume_basic_verified_lib,168,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,unverified_consume_machines,168,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,unverified_consume_vstd,168,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,unverified_spec_use,168,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,unverified_structural,168,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_basic_verified_lib,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_basic_verified_lib_consumer_verified,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_big_rlimit,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_lib_with_bin,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_spec_def,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_spec_def2,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_spec_use,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_state_machine_macro_usage,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_transitive1,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_transitive2,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_transitive3,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+cargo,verified_vstd_macro_usage,165,not-run,excluded: invokes `cargo`/`cargo verus` builds (PATH cargo is a reroute here); not run
+consts,allow_external_body_const_regression_1322,437,ignored,#[ignore] in source
+consts,allow_external_body_const_regression_1322_2,454,ignored,#[ignore] in source
+exec_closures,callee_is_computed_expression,771,ignored,#[ignore] in source
+exec_spec_verified,test_exec_spec_alt_quants,1607,ignored,#[ignore] in source
+expand_errors,test10_expand_forall_assume,272,ignored,#[ignore] in source
+expand_errors,test5_expand_forall,142,ignored,#[ignore] in source
+expr_stmts,test_stmts_expr_3,45,ignored,#[ignore] in source
+expr_stmts,test_stmts_expr_ref_mut,64,ignored,#[ignore] in source
+external_fn_specification,external_trait_impl_item_error,1363,ignored,#[ignore] in source
+external_fn_specification,external_trait_item_error,1354,ignored,#[ignore] in source
+external_fn_specification,foreign_trait_use_self_2,1221,ignored,#[ignore] in source
+fndef_types,exec_calling_no_vstd,697,ignored,#[ignore] in source
+impl,test_erased_assoc_type_param,269,ignored,#[ignore] in source
+integer_ring,div_by_zero_fail,214,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,gt_not_supported,272,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,lt_not_supported,283,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,mont_mul_1,32,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,mont_mul_2,48,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,mul_mod_noop,230,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,mul_mod_noop_fail_1,244,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,mul_mod_noop_fail_2,258,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,reserved_keyword,203,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,simple_1,10,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,simple_2,21,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,simple_fail_1,128,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,simple_fail_2,141,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,type_fail,189,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,uninterpreted_function,104,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,warnings,294,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,wide_mul,65,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+integer_ring,wide_mul_fail,152,ignored,"cfg_attr(not(feature = ""singular""), ignore): binaries built without the singular feature"
+lifetime,lifetime_cfg_doesnt_delete_nodes_due_to_ghost_uninhabitness5,1828,ignored,#[ignore] in source
+lifetime,lifetime_cfg_doesnt_delete_nodes_due_to_ghost_uninhabitness6,1853,ignored,#[ignore] in source
+lifetime,lifetime_cfg_doesnt_delete_nodes_due_to_ghost_uninhabitness7,1872,ignored,#[ignore] in source
+loops,regression_11_incorrect_loop_header,319,ignored,#[ignore] in source
+loops,while_continue_panic_regression_421,1060,ignored,#[ignore] in source
+modes,test_proof_fn_call_fail,557,ignored,#[ignore] in source
+modes,tracked_double_deref,637,ignored,#[ignore] in source
+modules,closed_spec_trait_fail,386,ignored,#[ignore] in source
+modules,uninterp_spec_fn_warning,396,ignored,#[ignore] in source
+mut_refs_modes,mut_borrow_in_ghost_decl,121,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_decreases_1,875,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_decreases_2,902,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_decreases_3,926,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_decreases_4,948,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_ensures_1,976,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_ensures_2,1002,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_ensures_3,1027,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_ensures_4,1051,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_1,1190,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_2,1216,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_3,1241,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_4,1264,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_except_break_1,1081,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_except_break_2,1112,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_except_break_3,1137,ignored,#[ignore] in source
+mut_refs_time_travel,test_loop_invariant_except_break_4,1161,ignored,#[ignore] in source
+mut_refs_unions,evil_match_mutate_scrutinee_in_guard_pattern,949,ignored,#[ignore] in source
+mut_refs_unions,evil_match_mutate_scrutinee_in_guard_pattern2,972,ignored,#[ignore] in source
+nonlinear,nlarith1,283,ignored,#[ignore] in source
+opaque_reveal,no_broadcast_use_as_reveal_1,394,ignored,#[ignore] in source
+opaque_reveal,no_broadcast_use_as_reveal_2,405,ignored,#[ignore] in source
+opaque_reveal,regression_925_reveal_loop_1,344,ignored,#[ignore] in source
+opaque_reveal,regression_925_reveal_loop_2,365,ignored,#[ignore] in source
+partial_eq,test_float_nan,10,ignored,#[ignore] in source
+refs,test_mut_ref_arg_proof_pass,94,ignored,#[ignore] in source
+refs,test_mut_ref_unsupported_1,132,ignored,#[ignore] in source
+regression,test_bad_span_for_postcondition_failure_regression_281,104,ignored,#[ignore] in source
+state_machines,lemma_recursion_assert_fail,2956,ignored,#[ignore] in source
+summer_school,e08_fail,303,ignored,#[ignore] in source
+summer_school,e08_pass,284,ignored,#[ignore] in source
+traits,associated_type_bound_lifetime_regression_955,3900,ignored,#[ignore] in source
+traits,test_termination_bounds_1,731,ignored,#[ignore] in source
+unions,is_variant,350,ignored,#[ignore] in source

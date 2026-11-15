@@ -18,14 +18,25 @@
 // - copying from behind a mutable reference, including a value-copy helper;
 // - direct nested-alias reassignment between locals;
 // - branch-sensitive local writes through a mutable reference;
-// - parameter mutable-reference writes through a local alias; and
+// - scalar reborrow updates, direct scalar mutable-reference parameter writes,
+//   and scalar compound assignment through a local alias (the `*_currently_
+//   blocked` ids of the first two are historical: they verify);
+// - parameter mutable-reference writes through a local alias;
+// - writes through mutable references held in tuple / struct-literal locals
+//   (straight-line, if/else-branch, and after a `let moved = holder;` move —
+//   re-keyed to `verified` 2026-09-14); and
 // - stale-value counterexamples for local, helper-read, alias reassignment, and
 //   branch-sensitive writes.
-// Fail-closed expected cases pin unsupported boundaries for reborrow writeback,
-// compound assignment, direct parameter writes, mutable references stored in
-// aggregate fields, Verus-only old/final/current/future state, and
-// prophecy/resolvedness helpers. Solver Unknown outcomes are not listed as
-// expected evidence.
+// Fail-closed expected cases pin unsupported boundaries for compound assignment
+// through a mutable-reference field projection, alias reassignment inside a
+// short-circuit operand or an assignment right-hand side, primitive
+// compound-op evaluation order, Verus-only old/final/current/future/
+// after_borrow state, and resolvedness helpers. (Aggregate-held mutable
+// reference shapes that stay refused — loop-body / compound writes through a
+// holder, by-value tuple-of-`&mut` parameters, holder escapes — are pinned by
+// `crates/trust-vc-core/tests/mut_ref_aggregate_holder_capability.rs` and the
+// sibling mut_refs_* ports, not by a case here.) Solver Unknown outcomes are
+// not listed as expected evidence.
 
 #![allow(dead_code)]
 
@@ -97,8 +108,8 @@ pub const MUT_REFS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     (
         "mut_refs_basic_mut_ref_in_pair_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_assign_op_add_assign_verified",
@@ -169,14 +180,14 @@ pub const MUT_REFS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     (
         "mut_refs_control_flow_tuple_pair_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_moves_via_let_tuple_write_currently_blocked",
         "",
-        "error",
-        0,
+        "verified",
+        3,
     ),
     (
         "mut_refs_short_circuit_alias_reassignment_currently_blocked",
@@ -209,10 +220,22 @@ pub const MUT_REFS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         0,
     ),
     (
-        "mut_refs_mut_ref_current_currently_blocked",
+        "mut_refs_mut_ref_current_unconstrained_counterexample",
         "",
-        "error",
-        0,
+        "counterexample",
+        1,
+    ),
+    (
+        "mut_refs_mut_ref_current_after_write_verified",
+        "",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_mut_ref_current_after_write_stale_counterexample",
+        "",
+        "counterexample",
+        1,
     ),
     (
         "mut_refs_mut_ref_future_currently_blocked",
@@ -232,35 +255,32 @@ pub const MUT_REFS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
         "error",
         0,
     ),
+    (
+        "mut_refs_two_phase_call_takes_mut_ref_verified",
+        "two_phase_borrow_basic::call_takes_mut_ref mut_ref_future ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_two_phase_direct_call_verified",
+        "two_phase_borrow_basic::test1 caller instantiates the mut_ref_future ensures",
+        "verified",
+        1,
+    ),
+    (
+        "mut_refs_two_phase_direct_call_wrong_value_counterexample",
+        "two_phase_borrow_basic::test1 caller, wrong post value",
+        "counterexample",
+        1,
+    ),
 ];
 
 pub const MUT_REFS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
-    (
-        "mut_refs_basic_mut_ref_in_pair_write_currently_blocked",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* u_ref . x",
-        ],
-    ),
     (
         "mut_refs_assign_op_field_add_assign_currently_blocked",
         &[
             "assignment through a mutable-reference projection is unsupported",
             "x_ref . x",
-        ],
-    ),
-    (
-        "mut_refs_control_flow_tuple_pair_write_currently_blocked",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* x_ref . 0",
-        ],
-    ),
-    (
-        "mut_refs_moves_via_let_tuple_write_currently_blocked",
-        &[
-            "assignment through a dereferenced reference is unsupported",
-            "* refs2 . 0",
         ],
     ),
     (
@@ -282,30 +302,24 @@ pub const MUT_REFS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
     (
         "mut_refs_compound_primitive_eval_order_currently_blocked",
         &[
-            "Failed to lower obligation 'assertion_0'",
-            "unresolved variable `a`",
-            "ensure the variable is declared as a function parameter, let-binding, or quantifier-bound variable",
+            "assignment through a dereferenced reference is unsupported in vc_extraction",
         ],
     ),
     (
         "mut_refs_has_resolved_currently_blocked",
-        &["has_resolved", "unknown return type for function"],
+        &["has_resolved", "is refused"],
     ),
     (
         "mut_refs_after_borrow_currently_blocked",
-        &["after_borrow", "unknown return type for function"],
-    ),
-    (
-        "mut_refs_mut_ref_current_currently_blocked",
-        &["mut_ref_current", "unknown return type for function"],
+        &["after_borrow", "is refused"],
     ),
     (
         "mut_refs_mut_ref_future_currently_blocked",
-        &["mut_ref_future", "unknown return type for function"],
+        &["mut_ref_future", "END of its borrow"],
     ),
     (
         "mut_refs_final_currently_blocked",
-        &["Failed to parse assert!() expression", "expected an expression"],
+        &["final", "END of its borrow"],
     ),
     (
         "mut_refs_old_state_currently_blocked",
@@ -675,9 +689,32 @@ fn mut_refs_after_borrow_currently_blocked() {
     trust_vc::assert!(after_borrow(x) == 0u64);
 }
 
+// `mut_ref_current(P)` in a BODY is the value behind `P` AT THAT PROGRAM POINT,
+// not at function entry (upstream `mut_refs.rs::test_array` proves exactly that
+// shape after a mutation). With no `requires`, the entry value is unconstrained,
+// so `== 20` is refutable.
 #[trust_vc::ensures(true)]
-fn mut_refs_mut_ref_current_currently_blocked(x: &mut u64) {
+fn mut_refs_mut_ref_current_unconstrained_counterexample(x: &mut u64) {
     trust_vc::assert!(mut_ref_current(x) == 20u64);
+}
+
+// The discriminating pair: after `*x = 5` the CURRENT value is 5, not the entry
+// value 3. If `mut_ref_current` were resolved to the entry symbol, this would be
+// refuted and the stale twin below would verify — the catastrophic direction.
+#[trust_vc::requires(x == 3u64)]
+#[trust_vc::ensures(true)]
+fn mut_refs_mut_ref_current_after_write_verified(x: &mut u64) {
+    *x = 5u64;
+
+    trust_vc::assert!(mut_ref_current(x) == 5u64);
+}
+
+#[trust_vc::requires(x == 3u64)]
+#[trust_vc::ensures(true)]
+fn mut_refs_mut_ref_current_after_write_stale_counterexample(x: &mut u64) {
+    *x = 5u64;
+
+    trust_vc::assert!(mut_ref_current(x) == 3u64);
 }
 
 #[trust_vc::ensures(true)]
@@ -698,4 +735,48 @@ fn mut_refs_old_state_currently_blocked() {
     *u_ref = 30u64;
 
     trust_vc::assert!(old(u) == 20u64);
+}
+
+// ---------------------------------------------------------------------------
+// upstream `two_phase_borrow_basic`
+//
+// The callee's contract is upstream's, verbatim:
+//     requires x < 50
+//     ensures  mut_ref_future(a) == x + 1
+// It verified at its own definition before this change, but no caller could
+// instantiate it — the callee `ensures` reached IR lowering with
+// `mut_ref_future(..)` unresolved and the whole caller failed to lower, while
+// the plain synonym `ensures a == x + 1` instantiated and verified. The FINAL
+// endpoint now instantiates through the same post-call map bare `a` uses in an
+// `ensures`, which is the synonymy this engine already declares at a
+// definition.
+//
+// DEVIATION, recorded rather than hidden: upstream's `test1` calls through a
+// two-phase borrow (`let mut a_ref = &mut a; call_takes_mut_ref(a_ref,
+// *a_ref);`). `*a_ref` in argument position is an unrelated open gap here
+// ("dereference expressions are not supported in verification syntax"), so the
+// port calls the same callee directly. Upstream's `test1_fails` `assert(false)`
+// is carried as the wrong-post-value liar twin below, which refutes for the
+// stronger reason: it pins WHICH value the postcondition supplies.
+
+#[trust_vc::requires(x < 50u64)]
+#[trust_vc::ensures(mut_ref_future(a) == x + 1u64)]
+fn mut_refs_two_phase_call_takes_mut_ref_verified(a: &mut u64, x: u64) {
+    *a = x + 1u64;
+}
+
+#[trust_vc::ensures(true)]
+fn mut_refs_two_phase_direct_call_verified() {
+    let mut a = 24u64;
+    mut_refs_two_phase_call_takes_mut_ref_verified(&mut a, 24u64);
+
+    trust_vc::assert!(a == 25u64);
+}
+
+#[trust_vc::ensures(true)]
+fn mut_refs_two_phase_direct_call_wrong_value_counterexample() {
+    let mut a = 24u64;
+    mut_refs_two_phase_call_takes_mut_ref_verified(&mut a, 24u64);
+
+    trust_vc::assert!(a == 26u64);
 }

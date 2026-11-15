@@ -20,6 +20,21 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 trust-ir = { workspace = true, features = ["serde"] }
+# INPUT GATE: the producer validator. See the workspace note. Also
+# `coverage_establishment_report`: release admission of a certificate's
+# coverage (src/native_coverage.rs) admits only what trust-ir-build derives
+# from the kernel replay of that very certificate (basis K).
+trust-ir-build = { workspace = true }
+
+# One IR-owned wire codec in production, not a copied JSON-tag interpretation.
+trust-ir-contract = { workspace = true }
+
+[dev-dependencies]
+# `binary` makes the codec's `VERSION` public, so tests/trust_ir_pin_label.rs
+# can read the wire version of the trust-ir the tests link. The codec itself is
+# compiled either way. `parser` lets the tensor refusal tests spell each
+# tensor instruction in trust-ir's own text grammar.
+trust-ir = { workspace = true, features = ["serde", "binary", "parser"] }
 
 [features]
 default = []

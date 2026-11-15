@@ -22,6 +22,13 @@ use crate::local_vars::extract_type_string;
 use crate::vc::{ProofObligation, VerificationContext};
 use crate::VerifyResult;
 
+mod generic_carriage;
+use generic_carriage::{attribute_clause_exprs, contract_clause_exprs_in_items};
+pub(crate) use generic_carriage::{
+    check_generic_declaration, declaration_generic_params, shadowed_generic_params,
+    uncarried_generic_params, GenericShadowNames,
+};
+
 #[derive(Debug, Clone)]
 struct SpecParam {
     name: String,
@@ -79,6 +86,13 @@ struct SpecFunctionDef {
     /// because cycle membership spans multiple functions and the measure-decrease
     /// proof must cover every edge of the cycle.
     recursion_without_full_decreases: bool,
+    /// Generic parameters no call term carries (H10), computed by
+    /// [`uncarried_generic_params`] over the post-monomorphization parameter
+    /// types. Non-empty means distinct instantiations collapse into one
+    /// symbol, which is admissible only for uncarried TYPE parameters of a
+    /// definition published unconditionally (see
+    /// [`Self::definition_is_unconditional`]).
+    uncarried_generics: generic_carriage::UncarriedGenerics,
 }
 
 #[derive(Clone)]
@@ -88,9 +102,21 @@ struct SourceSpecFunction {
     recommends: Vec<String>,
 }
 
+/// Mutable traversal bookkeeping shared by recursive spec applications.
+struct SpecApplicationState<'a> {
+    applied: &'a mut BTreeSet<String>,
+    applying: &'a mut BTreeSet<String>,
+}
+
 #[derive(Default)]
 pub(crate) struct SpecFunctionCatalog {
     specs: HashMap<String, SourceSpecFunction>,
+    /// Bare spec-fn names that an INLINE MODULE re-declares (any `fn` of the
+    /// same ident, spec or exec, `pub` or private), mapped to the `::`-joined
+    /// paths of the modules that do so. The top-level entry stays in `specs`;
+    /// [`scope_forbids_bare_name`](Self::scope_forbids_bare_name) decides per
+    /// use-site scope whether the bare spelling may mean it.
+    shadowed_bare_names: HashMap<String, BTreeSet<String>>,
     /// Exact Rust `use path::item as alias` bindings collected from the body
     /// currently being verified. The alias is a second spelling for the same
     /// function denotation; it is deliberately NOT represented by cloning the
@@ -104,6 +130,16 @@ pub(crate) struct SpecFunctionCatalog {
     /// per recursive cycle even though the gate is consulted once per applied
     /// cycle member.
     termination_cache: RefCell<HashMap<String, TerminationCheck>>,
+    /// Names the source file declares that a generic parameter's bare spelling
+    /// could be resolved to (H10 shadow half; see
+    /// [`generic_carriage::shadowed_generic_params`]).
+    generic_shadow_names: GenericShadowNames,
+    /// The attribute clause expressions of every fn-like item in the file, at
+    /// any depth. A callee's contract is assumed at its call sites, so a
+    /// turbofish it spells (`gop::<u8>(..)`) names an instantiation that reaches
+    /// the verified function's query; `collect_concrete_enum_carriers` reads
+    /// these for turbofish HINTS only, never for carriers.
+    sibling_contract_exprs: Vec<syn::Expr>,
 }
 
 #[derive(Clone)]
@@ -265,6 +301,8 @@ impl SpecFunctionCatalog {
     pub(crate) fn from_file(file: &syn::File) -> Self {
         let mut catalog = Self::default();
         catalog.collect_items(&file.items);
+        catalog.generic_shadow_names = GenericShadowNames::from_file(file);
+        catalog.sibling_contract_exprs = contract_clause_exprs_in_items(&file.items);
         catalog
     }
 
@@ -309,6 +347,13 @@ impl SpecFunctionCatalog {
 
     pub(crate) fn exact_alias_targets(&self) -> &HashMap<String, String> {
         &self.exact_alias_targets
+    }
+
+    /// The names of the spec functions the catalog holds: the file's own, and
+    /// those it imports from other files of the crate. A function of an
+    /// inline module appears under its `::`-joined path.
+    pub(crate) fn spec_names(&self) -> impl Iterator<Item = &str> {
+        self.specs.keys().map(String::as_str)
     }
 
     /// Cross-file extension of [`from_file`](Self::from_file): in addition to the
@@ -492,15 +537,20 @@ impl SpecFunctionCatalog {
         //
         // A spec's solver identity IS the bare spelling, and one verification
         // context mixes the target's scope with every applied helper's scope, so
-        // there is no per-scope answer to install here — the two scopes would
-        // have to share the symbol. The colliding bare key is therefore struck
-        // and the name fails closed in BOTH scopes; a qualified spelling still
-        // resolves through the module-keyed entries above. Over-rejection, never
-        // a hole, and order-independent: the strike depends on the set of
-        // declarations, not on which one the file writes first.
-        let mut shadowing: Vec<(String, String)> = Vec::new();
-        collect_nested_fn_shadows(items, false, &mut shadowing);
-        for (name, tokens) in shadowing {
+        // no per-scope DEFINITION can be installed under the bare symbol. What CAN
+        // be decided is whether a given use site may mean the top-level item at
+        // all: written at the file root it does; written inside a module that
+        // re-declares the ident (or inside one of its sub-modules) it does not.
+        // So the colliding bare key is no longer struck for the whole file
+        // (2026-09-12): the top-level entry stays, the re-declaring modules are
+        // RECORDED here, and `apply_spec_by_name` fails closed — with the scope
+        // named — whenever the spelling is resolved from inside one of them or
+        // from an unknown scope. Order-independent: the set depends on the
+        // declarations, not on which one the file writes first. A qualified
+        // spelling still resolves through the module-keyed entries above.
+        let mut shadowing: Vec<(String, String, String)> = Vec::new();
+        collect_nested_fn_shadows(items, &[], &mut shadowing);
+        for (name, module_path, tokens) in shadowing {
             let Some(existing) = self.specs.get(&name) else {
                 continue;
             };
@@ -510,7 +560,10 @@ impl SpecFunctionCatalog {
             if quote::quote!(#top_level).to_string() == tokens {
                 continue;
             }
-            self.specs.remove(&name);
+            self.shadowed_bare_names
+                .entry(name)
+                .or_default()
+                .insert(module_path);
         }
 
         // Deliberately do not synthesize a bare key for a nested function. A bare
@@ -564,20 +617,30 @@ impl SpecFunctionCatalog {
             // Best effort: a spec that cannot be applied simply contributes no
             // axiom, which can only make the CHECK stricter (an unestablished
             // lemma is dropped). It can never admit a lemma that should fail.
+            // Each catalogued spec is applied from its OWN scope (its module for
+            // a qualified key, the file root for a bare one).
+            let scope = Self::scope_of_key(&name);
             let _ = self.apply_spec_by_name(
                 &name,
+                Some(scope.as_slice()),
                 ctx,
-                &mut applied,
-                &mut applying,
+                SpecApplicationState {
+                    applied: &mut applied,
+                    applying: &mut applying,
+                },
                 &revealed,
                 &concrete_carriers,
             );
         }
     }
 
+    /// `scope` is the module path the TARGET's body is written in (`Some(&[])`
+    /// for a file-root fn); `None` means unknown, which fails closed for any
+    /// bare name an inline module re-declares.
     pub(crate) fn apply_referenced_specs(
         &self,
         func: &syn::ItemFn,
+        scope: Option<&[String]>,
         ctx: &mut VerificationContext,
     ) -> TrustVcResult<()> {
         let mut applied = BTreeSet::new();
@@ -648,9 +711,12 @@ impl SpecFunctionCatalog {
         for name in referenced_contract_call_names(func) {
             self.apply_spec_by_name(
                 &name,
+                scope,
                 ctx,
-                &mut applied,
-                &mut applying,
+                SpecApplicationState {
+                    applied: &mut applied,
+                    applying: &mut applying,
+                },
                 &revealed,
                 &concrete_carriers,
             )?;
@@ -672,9 +738,12 @@ impl SpecFunctionCatalog {
             } else {
                 self.apply_spec_by_name(
                     &name,
+                    scope,
                     ctx,
-                    &mut applied,
-                    &mut applying,
+                    SpecApplicationState {
+                        applied: &mut applied,
+                        applying: &mut applying,
+                    },
                     &revealed,
                     &concrete_carriers,
                 )?;
@@ -707,11 +776,17 @@ impl SpecFunctionCatalog {
             return Ok(());
         }
 
+        // The canonical target names one declaration outright; its body is
+        // written in its own scope.
+        let canonical_scope = Self::scope_of_key(&canonical_name);
         self.apply_spec_by_name(
             &canonical_name,
+            Some(canonical_scope.as_slice()),
             ctx,
-            applied,
-            applying,
+            SpecApplicationState {
+                applied: &mut *applied,
+                applying: &mut *applying,
+            },
             revealed,
             concrete_carriers,
         )?;
@@ -733,7 +808,28 @@ impl SpecFunctionCatalog {
             suppress_recursive_axiom,
             concrete_carriers,
         )?;
+        // H10: the alias symbol is a second helper identity for the same
+        // generic declaration, so it passes the same carriage gate — the
+        // canonical application above may have returned early on cycle
+        // re-entry, before its own gate ran.
+        check_generic_declaration(
+            "source spec function alias",
+            name,
+            &shadowed_generic_params(
+                &source_spec.item_fn.sig,
+                &source_spec.item_fn.block,
+                &self.generic_shadow_names,
+                ctx,
+                true,
+            ),
+            &canonical_def.uncarried_generics,
+            canonical_def.definition_is_unconditional(),
+        )?;
         canonical_def.apply_alias_to_context(name, &canonical_name, ctx)?;
+        ctx.record_helper_generic_params(
+            name,
+            declaration_generic_params(&source_spec.item_fn.sig),
+        );
 
         applying.remove(name);
         applied.insert(name.to_string());
@@ -749,26 +845,87 @@ impl SpecFunctionCatalog {
         let mut applying = BTreeSet::new();
         let revealed = RevealNames::default();
         let concrete_carriers = HashMap::new();
+        // No use-site scope is known here, so a bare name an inline module
+        // re-declares keeps failing closed (exactly the former whole-file strike).
         self.apply_spec_by_name(
             name,
+            None,
             ctx,
-            &mut applied,
-            &mut applying,
+            SpecApplicationState {
+                applied: &mut applied,
+                applying: &mut applying,
+            },
             &revealed,
             &concrete_carriers,
         )?;
         Ok(applied.contains(name))
     }
 
+    /// The scope a catalog KEY's body is written in: the module path of a
+    /// qualified key (`m::sub::f` → `["m", "sub"]`), the file root for a bare
+    /// one.
+    fn scope_of_key(key: &str) -> Vec<String> {
+        let mut segments: Vec<String> = key.split("::").map(str::to_string).collect();
+        segments.pop();
+        segments
+    }
+
+    /// Fails closed when the BARE spelling `name`, resolved from `scope`, may
+    /// not mean the top-level spec fn: an inline module re-declares the ident
+    /// and the use site is written inside that module (or a sub-module of it),
+    /// or the use-site scope is unknown (`None`). At the file root — the only
+    /// place Rust routes the bare spelling to the top-level item — it resolves.
+    /// Qualified keys are never shadowed (they name one declaration outright).
+    fn scope_forbids_bare_name(
+        &self,
+        name: &str,
+        scope: Option<&[String]>,
+    ) -> Option<TrustVcError> {
+        if name.contains("::") {
+            return None;
+        }
+        let modules = self.shadowed_bare_names.get(name)?;
+        let Some(scope) = scope else {
+            return Some(TrustVcError::Encoding {
+                context: "source spec function catalog",
+                detail: format!(
+                    "bare spec function name `{name}` is re-declared inside inline \
+                     module(s) {} and the use site's module scope is unknown; TrustVc \
+                     fails closed instead of guessing which declaration is meant",
+                    modules
+                        .iter()
+                        .map(|m| format!("`{m}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        };
+        let scope_path = scope.join("::");
+        let inside = modules.iter().find(|module| {
+            scope_path == **module || scope_path.starts_with(&format!("{module}::"))
+        })?;
+        Some(TrustVcError::Encoding {
+            context: "source spec function catalog",
+            detail: format!(
+                "bare spec function name `{name}` written inside module `{inside}` shadows \
+                 the top-level spec function of that name (`{inside}::{name}` is declared \
+                 there); one solver symbol cannot carry both definitions, so TrustVc fails \
+                 closed instead of applying the top-level body to a call Rust routes to the \
+                 module's own declaration"
+            ),
+        })
+    }
+
     fn apply_spec_by_name(
         &self,
         name: &str,
+        scope: Option<&[String]>,
         ctx: &mut VerificationContext,
-        applied: &mut BTreeSet<String>,
-        applying: &mut BTreeSet<String>,
+        state: SpecApplicationState<'_>,
         revealed: &RevealNames,
         concrete_carriers: &HashMap<String, TrustVcType>,
     ) -> TrustVcResult<()> {
+        let SpecApplicationState { applied, applying } = state;
         if applied.contains(name) {
             return Ok(());
         }
@@ -776,6 +933,9 @@ impl SpecFunctionCatalog {
         let Some(source_spec) = self.specs.get(name) else {
             return Ok(());
         };
+        if let Some(refusal) = self.scope_forbids_bare_name(name, scope) {
+            return Err(refusal);
+        }
         let item_fn = &source_spec.item_fn;
         // B5 — mutual-recursion keystone: re-entering a name already on the
         // `applying` stack means we have closed a dependency cycle
@@ -790,13 +950,20 @@ impl SpecFunctionCatalog {
             return Ok(());
         }
 
+        // A dependency is spelled inside THIS helper's body, so it is resolved
+        // from the helper's own scope (its module for a qualified key, the file
+        // root for a bare one), never from the target's.
+        let helper_scope = Self::scope_of_key(name);
         for dependency in called_names_in_block(&item_fn.block) {
             if dependency != name && self.specs.contains_key(&dependency) {
                 self.apply_spec_by_name(
                     &dependency,
+                    Some(helper_scope.as_slice()),
                     ctx,
-                    applied,
-                    applying,
+                    SpecApplicationState {
+                        applied: &mut *applied,
+                        applying: &mut *applying,
+                    },
                     revealed,
                     concrete_carriers,
                 )?;
@@ -816,11 +983,45 @@ impl SpecFunctionCatalog {
             suppress_recursive_axiom,
             concrete_carriers,
         )?;
+        // H10: refuse, BEFORE any helper symbol exists, a generic declaration
+        // whose parameter names the lowering environment would misread, or whose
+        // instantiations would collapse into one symbol while nothing proves its
+        // value instantiation-independent. Aliases reach this gate through their
+        // canonical application; best-effort callers (`apply_all_specs_revealed`)
+        // simply skip the refused definition.
+        // The exemption is LOAD-SENSITIVE exactly where it rests on a recursive
+        // definition being ADMITTED: `recursion_without_full_decreases` is the
+        // outcome of a real solver query, so an inconclusive (timed-out)
+        // termination check withholds the body axiom and this refusal fires on
+        // source that verifies on a quiet machine. Deferring instead to the
+        // inconclusive verdict the context already carries was MEASURED and
+        // REVERTED: it does not remove the non-determinism — the
+        // termination query still times out — it only swaps the refusal for a
+        // vaguer verdict, and `generic_recursive_datatypes::
+        // distinct_instantiations_do_not_collapse` pins the CLEAN fail-close
+        // (an `Error` or this typed refusal, never a silent Unknown) as the
+        // required shape. `explain_generic_refusal` names the termination
+        // outcome in the diagnostic instead.
+        check_generic_declaration(
+            "source spec function catalog",
+            name,
+            &shadowed_generic_params(
+                &item_fn.sig,
+                &item_fn.block,
+                &self.generic_shadow_names,
+                ctx,
+                true,
+            ),
+            &def.uncarried_generics,
+            def.definition_is_unconditional(),
+        )
+        .map_err(|err| def.explain_generic_refusal(err))?;
         def.apply_to_context(
             ctx,
             revealed.top_level.contains(name),
             revealed.scoped.contains(name),
         );
+        ctx.record_helper_generic_params(name, declaration_generic_params(&item_fn.sig));
         applying.remove(name);
         applied.insert(name.to_string());
         Ok(())
@@ -840,6 +1041,7 @@ impl SpecFunctionCatalog {
     ) -> ConcreteCarrierAnalysis {
         let mut out: HashMap<String, TrustVcType> = HashMap::new();
         let mut conflicting: BTreeSet<String> = BTreeSet::new();
+        let mut turbofish_hints: Vec<(String, TrustVcType)> = Vec::new();
         // First pass — the VERIFIED FUNCTION's body. Track which self-recursive
         // bases it constructs so we can tell whether a later-detected conflict is
         // one the function itself emits (and must therefore fail closed on).
@@ -850,8 +1052,25 @@ impl SpecFunctionCatalog {
                 out: &mut out,
                 conflicting: &mut conflicting,
                 recursive_bases: Some(&mut func_recursive_bases),
+                catalog: self,
+                turbofish_hints: &mut turbofish_hints,
+                hints_only: false,
             };
             collector.visit_block(&func.block);
+            // The contracts are part of the same query: the function's own, and
+            // every sibling's (a callee's `ensures` is assumed at its call
+            // sites). They contribute only turbofish HINTS (below), never
+            // carriers, so a constructor spelled in a clause keeps its
+            // historical (non-monomorphizing) treatment. Each attribute is read
+            // as a comma-separated clause list, so a multi-clause
+            // `contract(requires(..), ensures(..))` hides nothing.
+            collector.hints_only = true;
+            for expr in attribute_clause_exprs(&func.attrs)
+                .iter()
+                .chain(self.sibling_contract_exprs.iter())
+            {
+                collector.visit_expr(expr);
+            }
         }
         // Second pass — sibling spec-fn bodies. These widen `out`/`conflicting`
         // (so a generic helper used at a single instantiation anywhere still
@@ -862,9 +1081,25 @@ impl SpecFunctionCatalog {
                 out: &mut out,
                 conflicting: &mut conflicting,
                 recursive_bases: None,
+                catalog: self,
+                turbofish_hints: &mut turbofish_hints,
+                hints_only: false,
             };
             for source_spec in self.specs.values() {
                 collector.visit_block(&source_spec.item_fn.block);
+            }
+        }
+        // H10: a turbofish on a call to a generic catalog spec fn NAMES an
+        // instantiation (`gop::<u8>(GList::GNil)`) that its un-inferred arguments
+        // do not show. It never creates a carrier (the template lane keeps
+        // serving `glen::<i32>(GList::GNil)`), but when it disagrees with the
+        // carrier the constructors picked, monomorphizing to that carrier would
+        // lower the call onto the WRONG instantiation and collapse it with the
+        // real one — so the base becomes conflicting and the generic fn is left
+        // uncarried, where `check_generic_declaration` decides.
+        for (base, hinted) in &turbofish_hints {
+            if out.get(base).is_some_and(|carrier| carrier != hinted) {
+                conflicting.insert(base.clone());
             }
         }
         for base in &conflicting {
@@ -2085,6 +2320,18 @@ impl SpecFunctionDef {
         // right (`::`-free) hint for generating fresh bound-variable names.
         let bare_ident = item_fn.sig.ident.to_string();
         let is_opaque = has_opaque_attr(&item_fn.attrs);
+        // A `state_machine!`-generated relation must keep its definitional
+        // axiom; every path below that would drop it is refused instead.
+        if crate::state_machine_dsl::is_generated(&item_fn.attrs)
+            && (is_opaque || has_uninterp_attr(&item_fn.attrs) || recursion_without_full_decreases)
+        {
+            return Err(TrustVcError::Encoding {
+                context: "state_machine!",
+                detail: format!(
+                    "generated state_machine! definition `{name}` has no definitional axiom; refusing to treat it as uninterpreted"
+                ),
+            });
+        }
         // Propagate inline call-site substitution for inline spec functions,
         // including GENERIC ones. Inline substitution replaces the call with the
         // body under the CONCRETE call-site arguments (Verus's exact inline
@@ -2160,8 +2407,8 @@ impl SpecFunctionDef {
         // concrete argument sort. Distinct instantiations stay distinct carriers;
         // an instantiation that cannot be inferred simply isn't rewritten (the
         // generic helper stays uninterpreted — sound, just incomplete).
+        let mut mono_bindings: Vec<(String, TrustVcType)> = Vec::new();
         if !concrete_carriers.is_empty() {
-            let mut mono_bindings: Vec<(String, TrustVcType)> = Vec::new();
             for param in &params {
                 if let TrustVcType::Datatype { name: carrier, .. } = &param.ty {
                     let base = carrier.split('<').next().unwrap_or(carrier);
@@ -2243,7 +2490,16 @@ impl SpecFunctionDef {
         // declares the symbol and emits no axiom at all; the vacuous
         // `f(x) == f(x)` here is a defence-in-depth placeholder that would prove
         // nothing even if it somehow reached the solver.
-        let is_uninterp = has_uninterp_attr(&item_fn.attrs);
+        // SOUNDNESS-CRITICAL (H14, trust boundary). A `#[trust_vc::external_body]`
+        // / `#[trust_vc::external]` spec fn is the SAME case as `uninterp`: the
+        // braces hold a PLACEHOLDER (the meaning the source declares is the
+        // contract, and the real definition is foreign or elsewhere), so there is
+        // nothing here to define. Measured on `5bd3a2cc`: `#[trust_vc::spec]
+        // #[trust_vc::external_body] fn sp() -> u32 { 100 }` published
+        // `sp() == 100` and a caller proved it from the stub. Declare the symbol,
+        // emit NO defining axiom — exactly the `uninterp` treatment below.
+        let is_uninterp = has_uninterp_attr(&item_fn.attrs)
+            || crate::vc_extraction::attr_extract::has_external_trusted_attr(&item_fn.attrs);
         let body_condition = if is_uninterp {
             format!("{trigger} == {trigger}")
         } else {
@@ -2272,6 +2528,13 @@ impl SpecFunctionDef {
         // computed by the catalog — which alone can see all cycle members — and
         // threaded in here as `recursion_without_full_decreases` (see field doc).
 
+        let param_types = params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>();
+        let uncarried_generics =
+            uncarried_generic_params(&item_fn.sig, &param_types, &mono_bindings);
+
         Ok(Self {
             name,
             params,
@@ -2283,7 +2546,48 @@ impl SpecFunctionDef {
             is_uninterp,
             is_inline,
             recursion_without_full_decreases,
+            uncarried_generics,
         })
+    }
+
+    /// True when this definition's body axiom is published for EVERY use,
+    /// independently of any reveal: a transparent body that is neither opaque,
+    /// nor uninterpreted, nor recursion-suppressed.
+    ///
+    /// This is what makes an uncarried generic admissible (H10). The published
+    /// body is lowered in the erased environment, where every
+    /// instantiation-dependent construct fails to lower (`size_of::<T>()`,
+    /// `T::N`, a nested uncarried generic call) and a lowering failure turns the
+    /// whole query into an Error. So a body that DOES lower denotes the same
+    /// value at every instantiation, and `f::<A>(x) == body(x) == f::<B>(x)`
+    /// holds in Rust. An opaque or bodyless definition never has its body
+    /// lowered, so nothing establishes that uniformity for it.
+    fn definition_is_unconditional(&self) -> bool {
+        !self.is_uninterp && !self.is_opaque && !self.recursion_without_full_decreases
+    }
+
+    /// Name the reason a would-be-transparent definition lost its exemption: a
+    /// recursive body whose termination was not admitted stays uninterpreted,
+    /// so the H10 refusal is really a termination outcome (under load, an
+    /// inconclusive termination query) and the diagnostic must say so.
+    fn explain_generic_refusal(&self, err: TrustVcError) -> TrustVcError {
+        match err {
+            TrustVcError::Encoding { context, detail }
+                if detail.starts_with("generic instantiation not carried")
+                    && self.recursion_without_full_decreases
+                    && !self.is_uninterp
+                    && !self.is_opaque =>
+            {
+                TrustVcError::Encoding {
+                    context,
+                    detail: format!(
+                        "{detail} (its recursive definition was not admitted: the decreases \
+                         termination check did not succeed, so the body axiom is withheld)"
+                    ),
+                }
+            }
+            other => other,
+        }
     }
 
     /// Install this spec function's helper declaration and — when its body is
@@ -2993,13 +3297,40 @@ fn collect_nested_pub_spec_fns(
     items: &[syn::Item],
     out: &mut Vec<(String, String, syn::ItemFn)>,
 ) {
+    collect_nested_pub_spec_fns_inner(prefix, items, false, out)
+}
+
+/// SOUNDNESS-CRITICAL (H14, review round 1). `external_marked` carries the
+/// TRUSTED-BOUNDARY marker DOWN from an enclosing module: `#[trust_vc::external]`
+/// / `#[trust_vc::external_body]` is legal on a `mod`, and there it covers every
+/// item the module holds. Nothing read `ItemMod::attrs`, so
+/// `#[trust_vc::external_body] mod extb { #[trust_vc::spec] pub fn sp() -> u32
+/// { 100 } }` still published the defining axiom `sp() == 100` and a caller
+/// proved it from the PLACEHOLDER — while the same marker written on `sp` itself
+/// correctly declined.
+///
+/// The marker is stamped onto the CLONE registered in the catalog, which is read
+/// only to build axioms and `recommends`; the file's own AST is untouched, so no
+/// exact-source-identity or module-scope lookup can see the synthesized
+/// attribute. Downstream, `SpecFunctionDef::from_item_fn` treats it exactly as
+/// `uninterp`: symbol declared, NO defining axiom.
+fn collect_nested_pub_spec_fns_inner(
+    prefix: &[String],
+    items: &[syn::Item],
+    external_marked: bool,
+    out: &mut Vec<(String, String, syn::ItemFn)>,
+) {
     for item in items {
         match item {
             syn::Item::Mod(module) => {
                 if let Some((_, inner)) = &module.content {
                     let mut nested_prefix = prefix.to_vec();
                     nested_prefix.push(module.ident.to_string());
-                    collect_nested_pub_spec_fns(&nested_prefix, inner, out);
+                    let nested_marked = external_marked
+                        || crate::vc_extraction::attr_extract::has_external_trusted_attr(
+                            &module.attrs,
+                        );
+                    collect_nested_pub_spec_fns_inner(&nested_prefix, inner, nested_marked, out);
                 }
             }
             syn::Item::Fn(item_fn)
@@ -3009,15 +3340,25 @@ fn collect_nested_pub_spec_fns(
             {
                 let ident = item_fn.sig.ident.to_string();
                 let qualified_key = format!("{}::{}", prefix.join("::"), ident);
-                out.push((ident, qualified_key, item_fn.clone()));
+                let mut item_fn = item_fn.clone();
+                if external_marked
+                    && !crate::vc_extraction::attr_extract::has_external_trusted_attr(
+                        &item_fn.attrs,
+                    )
+                {
+                    item_fn
+                        .attrs
+                        .push(syn::parse_quote!(#[trust_vc::external_body]));
+                }
+                out.push((ident, qualified_key, item_fn));
             }
             _ => {}
         }
     }
 }
 
-/// Collect `(ident, token string)` for every `fn` declared inside an INLINE
-/// MODULE, at any depth.
+/// Collect `(ident, module path, token string)` for every `fn` declared inside
+/// an INLINE MODULE, at any depth.
 ///
 /// Any such declaration — spec or exec, `pub` or private — shadows a top-level
 /// item of the same name for calls written inside that module, so it is exactly
@@ -3026,17 +3367,24 @@ fn collect_nested_pub_spec_fns(
 /// [`collect_nested_pub_spec_fns`], which decides what may be REFERENCED from
 /// outside): a private nested fn is invisible to other modules but still shadows
 /// inside its own.
-fn collect_nested_fn_shadows(items: &[syn::Item], nested: bool, out: &mut Vec<(String, String)>) {
+fn collect_nested_fn_shadows(
+    items: &[syn::Item],
+    module_path: &[String],
+    out: &mut Vec<(String, String, String)>,
+) {
     for item in items {
         match item {
             syn::Item::Mod(module) => {
                 if let Some((_, inner)) = &module.content {
-                    collect_nested_fn_shadows(inner, true, out);
+                    let mut nested_path = module_path.to_vec();
+                    nested_path.push(module.ident.to_string());
+                    collect_nested_fn_shadows(inner, &nested_path, out);
                 }
             }
-            syn::Item::Fn(item_fn) if nested => {
+            syn::Item::Fn(item_fn) if !module_path.is_empty() => {
                 out.push((
                     item_fn.sig.ident.to_string(),
+                    module_path.join("::"),
                     quote::quote!(#item_fn).to_string(),
                 ));
             }
@@ -3422,6 +3770,13 @@ struct ConcreteCarrierCollector<'a> {
     ctx: &'a VerificationContext,
     out: &'a mut HashMap<String, TrustVcType>,
     conflicting: &'a mut BTreeSet<String>,
+    /// The catalog whose generic spec fns a turbofish'd call may name.
+    catalog: &'a SpecFunctionCatalog,
+    /// `(base, concrete carrier)` pairs named by turbofish'd calls to generic
+    /// catalog spec fns (see `collect_concrete_enum_carriers`).
+    turbofish_hints: &'a mut Vec<(String, TrustVcType)>,
+    /// Record turbofish hints only (contract attributes), never carriers.
+    hints_only: bool,
     /// When `Some` (the verified-function pass only), records the base name of
     /// every SELF-RECURSIVE generic carrier the visited block constructs. The
     /// caller intersects this with `conflicting` to decide whether the function
@@ -3433,6 +3788,12 @@ struct ConcreteCarrierCollector<'a> {
 
 impl<'ast> Visit<'ast> for ConcreteCarrierCollector<'_> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.turbofish_hints
+            .extend(turbofish_spec_call_carriers(call, self.catalog, self.ctx));
+        if self.hints_only {
+            syn::visit::visit_expr_call(self, call);
+            return;
+        }
         if let Some((base, carrier)) = infer_constructor_carrier(call, self.ctx) {
             if let Some(recursive_bases) = self.recursive_bases.as_deref_mut() {
                 if is_recursive_datatype(&carrier) {
@@ -3468,6 +3829,90 @@ impl<'ast> Visit<'ast> for ConcreteCarrierCollector<'_> {
         }
         syn::visit::visit_macro(self, mac);
     }
+}
+
+/// The concrete datatype carriers a turbofish'd call to a generic catalog spec
+/// fn instantiates its parameters at: `gop::<u8>(..)` over `fn gop<T>(xs:
+/// GList<T>)` names `("GList", GList<u8>)`. The turbofish is mapped onto the
+/// declaration's generic parameters in DECLARATION order; a call whose explicit
+/// arguments do not cover every type parameter, or whose instantiated parameter
+/// still mentions a type parameter, names nothing.
+fn turbofish_spec_call_carriers(
+    call: &syn::ExprCall,
+    catalog: &SpecFunctionCatalog,
+    ctx: &VerificationContext,
+) -> Vec<(String, TrustVcType)> {
+    let syn::Expr::Path(expr_path) = &*call.func else {
+        return Vec::new();
+    };
+    if expr_path.qself.is_some() {
+        return Vec::new();
+    }
+    let Some(syn::PathArguments::AngleBracketed(turbofish)) = expr_path
+        .path
+        .segments
+        .last()
+        .map(|segment| &segment.arguments)
+    else {
+        return Vec::new();
+    };
+    let key = expr_path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    let key = catalog
+        .exact_alias_targets
+        .get(&key)
+        .cloned()
+        .unwrap_or(key);
+    let Some(source_spec) = catalog.specs.get(&key) else {
+        return Vec::new();
+    };
+    let sig = &source_spec.item_fn.sig;
+    let type_params = sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(type_param) => Some(type_param.ident.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let explicit = turbofish
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if type_params.is_empty() || explicit.len() != type_params.len() {
+        return Vec::new();
+    }
+    let bindings = type_params
+        .into_iter()
+        .zip(explicit)
+        .filter(|(_, ty)| !matches!(ty, syn::Type::Infer(_)))
+        .map(|(param, ty)| (param, source_type_from_context(ctx, ty, &BTreeSet::new())))
+        .collect::<Vec<_>>();
+    let Ok(params) = spec_params(sig, ctx) else {
+        return Vec::new();
+    };
+    params
+        .into_iter()
+        .filter_map(|param| {
+            let TrustVcType::Datatype { name, .. } = &param.ty else {
+                return None;
+            };
+            let base = name.split('<').next().unwrap_or(name).to_string();
+            let concrete = param.ty.monomorphize(&bindings);
+            (!type_contains_type_param(&concrete) && concrete != param.ty)
+                .then_some((base, concrete))
+        })
+        .collect()
 }
 
 /// Infers the concrete per-instantiation carrier built by an enum-variant
@@ -3751,10 +4196,7 @@ mod tests {
             &[],
             &[("__termination_dbl_0", "0 < n")],
         );
-        assert_ne!(
-            left.isolated_query_key(),
-            right.isolated_query_key()
-        );
+        assert_ne!(left.isolated_query_key(), right.isolated_query_key());
     }
 
     #[test]
@@ -3782,10 +4224,7 @@ mod tests {
             &[("f", TrustVcType::MathInt)],
             &[("t", "0 <= n")],
         );
-        assert_ne!(
-            left.isolated_query_key(),
-            right.isolated_query_key()
-        );
+        assert_ne!(left.isolated_query_key(), right.isolated_query_key());
     }
 
     #[test]
@@ -3969,11 +4408,19 @@ mod tests {
         with_alias
             .source_type_aliases
             .insert("Alias".to_string(), TrustVcType::Nat);
-        assert_ne!(baseline, with_alias.isolated_query_key(), "source_type_aliases");
+        assert_ne!(
+            baseline,
+            with_alias.isolated_query_key(),
+            "source_type_aliases"
+        );
 
         let mut with_overflow = base();
         with_overflow.overflow_behavior = crate::vc::OverflowBehavior::Truncate;
-        assert_ne!(baseline, with_overflow.isolated_query_key(), "overflow_behavior");
+        assert_ne!(
+            baseline,
+            with_overflow.isolated_query_key(),
+            "overflow_behavior"
+        );
 
         let mut with_hidden = base();
         with_hidden.hidden_fns.insert("dbl".to_string());
@@ -3989,7 +4436,11 @@ mod tests {
 
         let mut with_skip_retry = base();
         with_skip_retry.skip_retry_cascade = true;
-        assert_ne!(baseline, with_skip_retry.isolated_query_key(), "skip_retry_cascade");
+        assert_ne!(
+            baseline,
+            with_skip_retry.isolated_query_key(),
+            "skip_retry_cascade"
+        );
     }
 
     #[test]

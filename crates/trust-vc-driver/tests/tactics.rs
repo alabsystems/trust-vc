@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Author: Andrew Yates <andrewyates.name@gmail.com>
 //
-// Run with: cargo test -p trust-vc-driver --features tactics
+// Run with: targo --unverified test -p trust-vc-driver --features tactics
 //
 // The native-code specialization lives in ay's self-hosted JIT; this is the
 // trust-vc-side, shape-keyed dispatch that recognizes recurring monomorphized

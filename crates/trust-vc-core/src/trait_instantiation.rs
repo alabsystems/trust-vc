@@ -158,6 +158,7 @@ mod tests {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }
     }
 

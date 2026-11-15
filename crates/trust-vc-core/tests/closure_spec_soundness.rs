@@ -42,11 +42,8 @@ fn verdict(func: &str) -> VerifyResult {
 fn assert_not_verified(func: &str) {
     // Extraction may itself fail closed (capture guard / call-site) — an
     // extraction Error is a sound non-verify, so treat an Err as acceptable too.
-    match verify_function_from_file(&repro_path(), func) {
-        Ok(VerifyResult::Verified) => {
-            panic!("CLOSURE-SPEC FALSE-VERIFY: `{func}` must not verify")
-        }
-        _ => {}
+    if let Ok(VerifyResult::Verified) = verify_function_from_file(&repro_path(), func) {
+        panic!("CLOSURE-SPEC FALSE-VERIFY: `{func}` must not verify")
     }
 }
 

@@ -30,9 +30,31 @@ impl<'a> AstExpressionParser<'a> {
     pub(super) fn encode_cast(
         &mut self,
         inner: &TrustVcExpr,
-        from_ty: &TrustVcType,
+        declared_from_ty: &TrustVcType,
         to_ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
+        // A cast reads its operand at the operand's OWN type — the sign that
+        // decides how a narrower value is extended and how a bit-vector is
+        // lifted to `int`. The node's declared `from_ty` is a producer's
+        // claim; where it names another integer type it is not the operand's
+        // (`Cast { x_u8, from_ty: i8 }` read 200 as -56), so the operand's own
+        // integer type wins. An untyped literal takes the declared type when
+        // it fits it (§5b rule 2), which changes nothing.
+        let own_from = self.infer_operand_value_type(inner, Some(declared_from_ty));
+        let integer = |ty: &TrustVcType| {
+            matches!(
+                ty,
+                TrustVcType::Int { .. }
+                    | TrustVcType::Uint { .. }
+                    | TrustVcType::MathInt
+                    | TrustVcType::Nat
+            )
+        };
+        let from_ty = if integer(&own_from) && integer(declared_from_ty) {
+            &own_from
+        } else {
+            declared_from_ty
+        };
         if matches!((from_ty, to_ty), (TrustVcType::MathInt, TrustVcType::Nat)) {
             if let TrustVcExpr::Cast {
                 expr: real_inner,
@@ -50,7 +72,22 @@ impl<'a> AstExpressionParser<'a> {
             }
         }
 
-        let inner_term = self.encode_subexpr(inner)?;
+        // An identity cast at a fixed-width type PINS its operand at that type
+        // (a source `100i32`, `ir_lowering::atoms::typed_int_literal`; a
+        // substituted `i32` value, `ir_lowering::pin_substituted_value`): an
+        // `Int { width: 32 }` literal under it is exactly an `i32`, never the
+        // placeholder that `encode_int_lit` narrows to the context width.
+        // Narrowed, `100i32 + 100i32` beside an `i8` variable was computed in 8
+        // bits (-56), and `assert!(100i32 + 100i32 < 0i32)` came back Verified.
+        let pinned = from_ty == to_ty && crate::ir_lowering::is_fixed_width_int(from_ty);
+        if pinned {
+            self.default_int_literal_narrowing_suppressed += 1;
+        }
+        let inner_term = self.encode_subexpr(inner);
+        if pinned {
+            self.default_int_literal_narrowing_suppressed -= 1;
+        }
+        let inner_term = inner_term?;
 
         if from_ty == to_ty {
             return Ok(inner_term);
@@ -419,7 +456,7 @@ impl<'a> AstExpressionParser<'a> {
                     // is equisatisfiable with `inner_term` and appears only as
                     // the cast result, so the source variable keeps its own
                     // signedness for its other occurrences.
-                    return self.reinterpret_bv_signedness(inner_term, tw, to_signed);
+                    self.reinterpret_bv_signedness(inner_term, tw, to_signed)
                 } else if fw < tw {
                     // Widening: sign-extend or zero-extend
                     let from_signed = matches!(from_ty, TrustVcType::Int { .. });

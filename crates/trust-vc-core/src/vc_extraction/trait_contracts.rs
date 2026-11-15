@@ -474,21 +474,13 @@ pub(super) fn apply_source_trait_declarations(
     file: &File,
     vc: &mut VerificationContext,
 ) -> TrustVcResult<()> {
-    let trait_contracts = SourceTraitContractRegistry::from_file(file)?;
     // Resolve every `impl <path> for T` header against the file's declarations,
     // `use` renames and module structure BEFORE any decl is registered, so the
     // DECLARATION decides which trait an impl belongs to. See
     // `crate::trait_path_resolution` for the two measured defects this closes.
     let scope_index = crate::trait_path_resolution::TraitScopeIndex::build(file);
     scope_index.reject_duplicate_trait_names()?;
-    collect_source_trait_declarations(
-        file,
-        &file.items,
-        &mut Vec::new(),
-        &scope_index,
-        vc,
-        &trait_contracts,
-    )
+    collect_source_trait_declarations(file, &file.items, &mut Vec::new(), &scope_index, vc)
 }
 
 /// Returns true if `items` declares at least one `#[trust_vc::trait_impl]`
@@ -516,12 +508,40 @@ fn collect_source_trait_declarations(
     module: &mut Vec<String>,
     scope_index: &crate::trait_path_resolution::TraitScopeIndex,
     vc: &mut VerificationContext,
-    trait_contracts: &SourceTraitContractRegistry,
+) -> TrustVcResult<()> {
+    collect_source_trait_declarations_scoped(root_file, items, module, false, scope_index, vc)
+}
+
+/// `trusted_boundary` is true once ANY enclosing inline `mod` carried
+/// `#[trust_vc::external_body]` / `#[trust_vc::external]`.
+///
+/// SOUNDNESS-CRITICAL (H14/E11). A trait DEFAULT BODY inside a marked module is
+/// one of the bodies that marker covers, and round 1's claim that a marker on a
+/// MODULE opaques every body inside it was false for exactly this lane: the
+/// stub was still published as `Trait__m(self) == <stub>` and a caller proved
+/// it. This is the ONLY walk that carries the module chain down to a
+/// `parse_trait_decl`, so the withdrawal happens here; `parse_trait_decl`
+/// itself handles the method-level and trait-level spellings.
+///
+/// Containment is EXACT — this is the real AST descent, not a name match — so
+/// it withdraws nothing from a trait declared outside the marked module.
+fn collect_source_trait_declarations_scoped(
+    root_file: &File,
+    items: &[syn::Item],
+    module: &mut Vec<String>,
+    trusted_boundary: bool,
+    scope_index: &crate::trait_path_resolution::TraitScopeIndex,
+    vc: &mut VerificationContext,
 ) -> TrustVcResult<()> {
     for item in items {
         match item {
             syn::Item::Trait(item_trait) if has_trust_vc_attr(&item_trait.attrs, "trait_spec") => {
                 let mut decl = crate::trait_expand::parse_trait_decl(item_trait)?;
+                if trusted_boundary {
+                    crate::trait_expand::withdraw_trusted_boundary_default_bodies(
+                        &mut decl.methods,
+                    );
+                }
                 // `parse_trait_decl` keys supertraits by the bound path's LAST
                 // SEGMENT, which under a `use` rename is not the declaration's
                 // ident — a measured cardinal false verify. Re-key them against
@@ -566,6 +586,17 @@ fn collect_source_trait_declarations(
                 let decl = decl.with_inherent_shadowed_methods(
                     crate::vc_extraction::shadowed_trait_impl_methods(root_file, item_impl),
                 );
+                // Census the OTHER impls of this trait for this self type from
+                // SOURCE, before `register_trait_impl` can merge an erased-equal
+                // pair into one decl (`crate::trait_impl_groups`). Computed after
+                // the trait name is resolved, in lockstep with the catalog lane.
+                let impl_group = crate::trait_impl_groups::impl_group_census(
+                    root_file,
+                    scope_index,
+                    &decl,
+                    item_impl,
+                );
+                let decl = decl.with_impl_group(impl_group);
                 for impl_item in &item_impl.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         // `default_ensures` is legal ONLY on a defaulted trait-method
@@ -666,19 +697,36 @@ fn collect_source_trait_declarations(
                             // closed anyway (net-A fallback Error / conformance
                             // Counterexample). Fail-closed on a malformed attr via
                             // the `?`.
+                            //
+                            // SCOPE: the clauses are written in the IMPL's
+                            // parameter names, which may rename or permute the
+                            // trait's. Only their POSITIONAL canonical form
+                            // (`canonicalize_impl_method_ensures`, the same
+                            // `__trust_vc_conf_arg_{i}` numbering as the body
+                            // captured above) is registered; when no exact
+                            // rewrite exists nothing is registered — nothing
+                            // published, nothing asserted. An EXTERNAL impl
+                            // registers nothing either: conformance never
+                            // examines it, so its `ensures` could only ever be
+                            // an unchecked axiom (Verus parity: an external impl
+                            // is invisible to callers).
                             let (_impl_requires, impl_ensures) =
                                 crate::extern_spec_helpers::extract_contracts(
                                     &method.attrs,
                                     "trait_impl",
                                 )?;
-                            if !impl_ensures.is_empty() {
-                                vc.register_trait_impl_method_ensures(
-                                    crate::ir::ImplMethodKey::new(
-                                        &decl.trait_name,
-                                        concrete_fn_name,
-                                    ),
-                                    impl_ensures,
-                                );
+                            if !impl_ensures.is_empty() && !decl.is_external {
+                                if let Some(canonical) =
+                                    super::canonicalize_impl_method_ensures(method, &impl_ensures)
+                                {
+                                    vc.register_trait_impl_method_ensures(
+                                        crate::ir::ImplMethodKey::new(
+                                            &decl.trait_name,
+                                            concrete_fn_name,
+                                        ),
+                                        canonical,
+                                    );
+                                }
                             }
                         }
                     }
@@ -687,14 +735,16 @@ fn collect_source_trait_declarations(
             }
             syn::Item::Mod(item_mod) => {
                 if let Some((_, inner_items)) = &item_mod.content {
+                    let inner_boundary = trusted_boundary
+                        || super::attr_extract::has_external_trusted_attr(&item_mod.attrs);
                     module.push(item_mod.ident.to_string());
-                    let nested = collect_source_trait_declarations(
+                    let nested = collect_source_trait_declarations_scoped(
                         root_file,
                         inner_items,
                         module,
+                        inner_boundary,
                         scope_index,
                         vc,
-                        trait_contracts,
                     );
                     module.pop();
                     nested?;
@@ -1192,6 +1242,17 @@ fn returned_opaque_call_signature(
     if path.qself.is_some() || path.path.segments.is_empty() {
         return None;
     }
+    // H10: an explicit generic argument names an instantiation the opaque
+    // symbol cannot carry, and an unresolved callee exposes no declaration to
+    // prove its parameters carry it. Offer no fallback evidence.
+    if path
+        .path
+        .segments
+        .iter()
+        .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+    {
+        return None;
+    }
     let segments = path
         .path
         .segments
@@ -1273,6 +1334,21 @@ fn infer_default_call_arg_type(
 struct ResolvedCallee {
     item_fn: ItemFn,
     is_spec: bool,
+    /// The inline-module path this callee was actually resolved through, with
+    /// the notation-only `crate::`/`self::` prefix already normalized away —
+    /// i.e. exactly what `find_free_fn_at_exact_path` walked.
+    ///
+    /// SOUNDNESS-CRITICAL and CAPABILITY-CRITICAL (H14/E13): this is what makes
+    /// the trusted-boundary question exact instead of token-approximate, so a
+    /// top-level `okt` and a token-identical `ext::okt` inside a marked module
+    /// get two different answers. See
+    /// [`crate::vc_extraction::trusted_boundary_covers_resolved_fn`].
+    ///
+    /// `None` on purpose whenever resolution did NOT walk inline modules — the
+    /// inherent-associated-function lane below, whose `Type::assoc` path is not
+    /// a module chain. The consumer then falls back to the approximate
+    /// predicate, which is the fail-closed half.
+    resolved_path: Option<String>,
 }
 
 /// Resolves a qualified call without suffix guessing.  Module functions are
@@ -1288,6 +1364,7 @@ fn resolve_qualified_callee(items: &[syn::Item], callee: &CalleePath) -> Option<
         return Some(ResolvedCallee {
             is_spec: has_trust_vc_attr(&item_fn.attrs, "spec"),
             item_fn: item_fn.clone(),
+            resolved_path: Some(normalized.join("::")),
         });
     }
     if normalized.len() < 2 {
@@ -1298,6 +1375,9 @@ fn resolve_qualified_callee(items: &[syn::Item], callee: &CalleePath) -> Option<
     Some(ResolvedCallee {
         is_spec: has_trust_vc_attr(&method.attrs, "spec"),
         item_fn: impl_item_fn_to_item_fn(method),
+        // NOT a module chain: `Type::assoc` names an inherent impl, so the exact
+        // walk cannot answer and the approximate predicate stays in charge.
+        resolved_path: None,
     })
 }
 
@@ -1477,8 +1557,26 @@ fn helper_is_requires_free(item_fn: &ItemFn) -> bool {
     !has_requires_clause(&item_fn.attrs).unwrap_or(true)
 }
 
-fn helper_body_is_visible(item_fn: &ItemFn) -> bool {
-    !has_trust_vc_attr(&item_fn.attrs, "opaque") && !has_trust_vc_attr(&item_fn.attrs, "uninterp")
+fn helper_body_is_visible(file: &File, resolved_path: Option<&str>, item_fn: &ItemFn) -> bool {
+    // SOUNDNESS-CRITICAL (H14, trust boundary): an `#[trust_vc::external_body]` /
+    // `#[trust_vc::external]` body is not visible in ANY mode — it is a
+    // placeholder standing in for an implementation that is foreign or elsewhere,
+    // so it may never contribute proof power. Same disposition as `opaque` (hidden
+    // until revealed) and `uninterp` (no body at all): the callee keeps its
+    // declaration and its contract and stays an opaque UF.
+    // The marker is equally legal on the ENCLOSING MODULE, where it covers every
+    // item the module holds (review round 1: `#[trust_vc::external] mod ext {
+    // pub fn ex() -> u32 { 100 } }` still published `ex() == 100`).
+    // CAPABILITY-CRITICAL (E13): the enclosure question is asked by RESOLVED
+    // PATH. Asking the token-approximate predicate raw here answered `.any(
+    // marked)` over every token-identical declaration in the file, so an
+    // ordinary top-level callee lost its body whenever a marked module happened
+    // to hold an identical one — the same shape the sibling-helper lane
+    // Verifies (E12), i.e. one program with two answers on two lanes.
+    !has_trust_vc_attr(&item_fn.attrs, "opaque")
+        && !has_trust_vc_attr(&item_fn.attrs, "uninterp")
+        && !super::attr_extract::has_external_trusted_attr(&item_fn.attrs)
+        && !super::trusted_boundary_covers_resolved_fn(file, resolved_path, item_fn)
 }
 
 /// Registers the free functions called inside the DEFAULT-method bodies of
@@ -1567,6 +1665,7 @@ pub(super) fn register_default_body_free_function_helpers(
     }
 
     let catalog = crate::spec_function_catalog::SpecFunctionCatalog::from_file(file);
+    let generic_shadow_names = crate::spec_function_catalog::GenericShadowNames::from_file(file);
     for callee in &called {
         if arities
             .get(&callee.full_name)
@@ -1580,6 +1679,7 @@ pub(super) fn register_default_body_free_function_helpers(
                 ResolvedCallee {
                     item_fn: item_fn.clone(),
                     is_spec: has_trust_vc_attr(&item_fn.attrs, "spec"),
+                    resolved_path: Some(callee.full_name.clone()),
                 }
             })
         } else {
@@ -1606,14 +1706,64 @@ pub(super) fn register_default_body_free_function_helpers(
             Ok(signature) => signature,
             Err(_) => continue,
         };
+        // H10: an opaque registration keys the symbol by name and arguments
+        // only, so a generic parameter no argument carries would collapse
+        // distinct instantiations into one term. Register nothing here; a
+        // requires-free visible spec definition may still be admitted by the
+        // source catalog, whose own gate accepts only an unconditionally
+        // published (instantiation-uniform) body. Anything else leaves the
+        // default body unbuildable, which fails closed per obligation. No
+        // file-wide flag is set: that would poison every unrelated unit.
+        let generic_refusal = crate::spec_function_catalog::check_generic_declaration(
+            "register trait default-body callee",
+            &callee.full_name,
+            &crate::spec_function_catalog::shadowed_generic_params(
+                &resolved.item_fn.sig,
+                &resolved.item_fn.block,
+                &generic_shadow_names,
+                vc,
+                false,
+            ),
+            &crate::spec_function_catalog::uncarried_generic_params(
+                &resolved.item_fn.sig,
+                &signature.param_types,
+                &[],
+            ),
+            false,
+        );
+        if generic_refusal.is_err() {
+            if resolved.is_spec
+                && helper_is_requires_free(&resolved.item_fn)
+                && helper_body_is_visible(
+                    file,
+                    resolved.resolved_path.as_deref(),
+                    &resolved.item_fn,
+                )
+                && !matches!(
+                    callee.segments.first().map(String::as_str),
+                    Some("crate" | "self")
+                )
+            {
+                let _ = catalog.apply_explicit_spec(&callee.full_name, vc);
+            }
+            continue;
+        }
         register_opaque_callee(&callee.full_name, &signature, vc)?;
+        vc.record_helper_generic_params(
+            &callee.full_name,
+            crate::spec_function_catalog::declaration_generic_params(&resolved.item_fn.sig),
+        );
 
         if resolved.is_spec {
             // A precondition-bearing, opaque, uninterpreted, malformed, or
             // otherwise unsupported spec helper remains an opaque UF.  Only a
             // requires-free visible definition may contribute proof power.
             if !helper_is_requires_free(&resolved.item_fn)
-                || !helper_body_is_visible(&resolved.item_fn)
+                || !helper_body_is_visible(
+                    file,
+                    resolved.resolved_path.as_deref(),
+                    &resolved.item_fn,
+                )
             {
                 continue;
             }
@@ -1632,7 +1782,9 @@ pub(super) fn register_default_body_free_function_helpers(
             {
                 Ok(Some(true)) => continue,
                 Ok(Some(false) | None) => register_callee_body_definition_axiom(
+                    file,
                     &callee.full_name,
+                    resolved.resolved_path.as_deref(),
                     &resolved.item_fn,
                     source_structs,
                     vc,
@@ -1645,7 +1797,9 @@ pub(super) fn register_default_body_free_function_helpers(
         // Exec functions are opaque by default.  A requires-free, body-justified
         // definitional ensures may be carried by the existing guarded lane.
         register_exec_callee_postcondition_axioms(
+            file,
             &callee.full_name,
+            resolved.resolved_path.as_deref(),
             &resolved.item_fn,
             source_structs,
             vc,
@@ -1659,12 +1813,14 @@ pub(super) fn register_default_body_free_function_helpers(
 /// must be one pure returned expression whose free names are exactly parameters;
 /// otherwise the already-declared helper remains opaque.
 fn register_callee_body_definition_axiom(
+    file: &File,
     name: &str,
+    resolved_path: Option<&str>,
     item_fn: &ItemFn,
     source_structs: Option<&SourceStructRegistry>,
     vc: &mut VerificationContext,
 ) {
-    if !helper_is_requires_free(item_fn) || !helper_body_is_visible(item_fn) {
+    if !helper_is_requires_free(item_fn) || !helper_body_is_visible(file, resolved_path, item_fn) {
         return;
     }
     let Some(body) = body_definitional_expr(&item_fn.block).cloned() else {
@@ -1740,7 +1896,9 @@ fn register_callee_body_definition_axiom(
 ///
 /// [`referenced_body_axiom_broadcasts`]: crate::encoder::verification
 fn register_exec_callee_postcondition_axioms(
+    file: &File,
     name: &str,
+    resolved_path: Option<&str>,
     item_fn: &ItemFn,
     source_structs: Option<&SourceStructRegistry>,
     vc: &mut VerificationContext,
@@ -1768,6 +1926,22 @@ fn register_exec_callee_postcondition_axioms(
     // A requires-bearing exec callee stays OPAQUE (signature only), so a default
     // relying on its value fails CLOSED — exactly the round-6 sound behavior —
     // rather than false-Verifying. Fail closed on a malformed contract attr too.
+    // SOUNDNESS-CRITICAL (H14, trust boundary). The axiom below is published only
+    // when the callee's BODY is the postcondition's `rhs` — that body-justification
+    // is the whole reason this site is sound (see the FV-4 note). An
+    // `#[trust_vc::external_body]` / `#[trust_vc::external]` callee has no body to
+    // justify anything with: the braces hold a placeholder and the real
+    // implementation is foreign. Decline, so a trait default relying on such a
+    // callee's value fails CLOSED. The callee stays an opaque UF; its declared
+    // contract is unaffected everywhere it is applied per call site.
+    // …and equally when the marker sits on the callee's enclosing MODULE — asked
+    // by RESOLVED PATH (E13), so a token-identical declaration inside a marked
+    // module does not withdraw the top-level callee's postcondition axiom.
+    if super::attr_extract::has_external_trusted_attr(&item_fn.attrs)
+        || super::trusted_boundary_covers_resolved_fn(file, resolved_path, item_fn)
+    {
+        return;
+    }
     if has_requires_clause(&item_fn.attrs).unwrap_or(true) {
         return;
     }

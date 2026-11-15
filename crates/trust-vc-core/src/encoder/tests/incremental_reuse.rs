@@ -15,7 +15,9 @@ use crate::encoder::verification::assertion_timeout::{
     verify_assertion_with_timeout_reuse, ReuseAttempt,
 };
 use crate::encoder::verification::outcome::AssertionOutcome;
-use crate::encoder::verification::test_hooks::FORCE_SCOPE_POP_FAILURE_ONCE;
+use crate::encoder::verification::test_hooks::{
+    FORCE_SCOPE_POP_FAILURE_ONCE, FORCE_SOLVE_PANIC_ONCE,
+};
 use crate::prepared_context::{prepare_context, PreparedObligation};
 use crate::vc::{ObligationKind, OverflowBehavior};
 
@@ -432,4 +434,87 @@ fn test_scope_pop_failure_marks_encoder_non_reusable() {
             )
         }
     }
+}
+
+/// Build the one-assertion context of `x: i32, assume x > 0, assert x > 0`
+/// and hand its encoder and assertion to `check`.
+fn with_one_assertion_encoder(check: impl FnOnce(AYEncoder, &PreparedObligation)) {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("x", crate::ir::TrustVcType::parse_or_opaque("i32"));
+    ctx.push_obligation(ProofObligation::assume("x_positive", "x > 0"));
+    ctx.push_obligation(ProofObligation::assert("a1", "x > 0"));
+
+    let prepared = prepare_context(&ctx).expect("prepare_context should succeed");
+    let assumptions: Vec<&PreparedObligation> = prepared
+        .obligations
+        .iter()
+        .filter(|o| matches!(o.kind, ObligationKind::Assume))
+        .collect();
+    let assertion = prepared
+        .obligations
+        .iter()
+        .find(|o| matches!(o.kind, ObligationKind::Assert))
+        .expect("assertion should exist");
+    let slices = crate::encoder::verification::VerificationSlices::new(
+        &prepared,
+        &assumptions,
+        &[],
+        &[],
+        &[],
+        &[],
+    );
+    let encoder =
+        AYEncoder::setup_from_prepared(&slices, false, None).expect("setup should succeed");
+    check(encoder, assertion);
+}
+
+/// A solve that panicked poisons the encoder's solver: the shared fast path
+/// must not hand the encoder back for the next assertion.
+#[test]
+fn test_solver_panic_marks_encoder_non_reusable() {
+    with_one_assertion_encoder(|encoder, assertion| {
+        FORCE_SOLVE_PANIC_ONCE.with(|flag| flag.set(true));
+        let attempt = verify_assertion_with_timeout_reuse(encoder, assertion, None)
+            .expect("attempt should work");
+        FORCE_SOLVE_PANIC_ONCE.with(|flag| flag.set(false));
+
+        match attempt {
+            ReuseAttempt::NonReusable { outcome } => assert!(
+                matches!(outcome, AssertionOutcome::Unknown { .. }),
+                "a panicked solve must answer Unknown, never a verdict: {outcome:?}"
+            ),
+            ReuseAttempt::Completed { outcome, .. } => panic!(
+                "an encoder whose solve panicked must not be reused, got Completed: {outcome:?}"
+            ),
+            ReuseAttempt::TimedOut => panic!("a forced solve panic should not time out"),
+            ReuseAttempt::Panicked { outcome } => {
+                panic!("the solve panic is caught inside the solve, not by the thread: {outcome:?}")
+            }
+        }
+    });
+}
+
+/// Twin of the test above without the forced panic: the same encoder is
+/// handed back for reuse with its verdict.
+#[test]
+fn test_solver_without_panic_stays_reusable() {
+    with_one_assertion_encoder(|encoder, assertion| {
+        let attempt = verify_assertion_with_timeout_reuse(encoder, assertion, None)
+            .expect("attempt should work");
+        FORCE_SOLVE_PANIC_ONCE.with(|flag| flag.set(false));
+
+        match attempt {
+            ReuseAttempt::Completed { outcome, .. } => assert!(
+                matches!(outcome, AssertionOutcome::Verified),
+                "x > 0 follows from its own assumption: {outcome:?}"
+            ),
+            ReuseAttempt::NonReusable { outcome } => {
+                panic!("a clean solve must keep the encoder reusable: {outcome:?}")
+            }
+            ReuseAttempt::TimedOut => panic!("a clean solve should not time out"),
+            ReuseAttempt::Panicked { outcome } => {
+                panic!("a clean solve should not panic: {outcome:?}")
+            }
+        }
+    });
 }

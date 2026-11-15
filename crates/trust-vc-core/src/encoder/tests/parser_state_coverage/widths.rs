@@ -70,7 +70,7 @@ fn test_infer_int_width_fallback_to_32() {
 // --- BV coercion ---
 
 #[test]
-fn test_coerce_bv_widths_extends_narrower() {
+fn test_coerce_bv_widths_refuses_two_widths_met_untyped() {
     let mut solver = make_solver();
     let narrow = solver.bv_var("narrow", 8);
     let wide = solver.bv_var("wide", 32);
@@ -91,19 +91,12 @@ fn test_coerce_bv_widths_extends_narrower() {
     parser.term_widths.insert(narrow, (8, false));
     parser.term_widths.insert(wide, (32, true));
 
-    let (a, b) = parser
-        .coerce_bv_widths(narrow, wide)
-        .expect("coercion should succeed");
-
-    assert_ne!(
-        a, narrow,
-        "narrow term should be replaced by extended version"
-    );
-    assert_eq!(b, wide, "wide term should be unchanged");
-    assert_eq!(
-        parser.term_widths.get(&a),
-        Some(&(32, false)),
-        "extended term should inherit width from wider operand and signedness from source"
+    // Neither term's own type is known here: a `term_widths` sign is the
+    // hash-consed term's, not the value's, so nothing is widened — two
+    // widths are refused (design-trust-proof-backend.md §5b rule 10).
+    assert!(
+        parser.coerce_bv_widths(narrow, wide).is_err(),
+        "terms of two widths met untyped must be refused, never widened"
     );
 }
 

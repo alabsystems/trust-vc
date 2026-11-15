@@ -27,6 +27,7 @@ fn counter_trait_decl() -> TraitDecl {
                 has_default: false,
                 default_body: None,
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "grant".to_string(),
@@ -37,6 +38,7 @@ fn counter_trait_decl() -> TraitDecl {
                 has_default: false,
                 default_body: None,
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),
@@ -56,6 +58,7 @@ fn simple_trait_decl() -> TraitDecl {
             has_default: false,
             default_body: None,
             default_ensures: Vec::new(),
+            generic_params: Vec::new(),
         }],
         supertraits: Vec::new(),
         generics: Vec::new(),
@@ -65,6 +68,7 @@ fn simple_trait_decl() -> TraitDecl {
 fn simple_impl_decl() -> TraitImplDecl {
     TraitImplDecl {
         inherent_shadowed_methods: Default::default(),
+        impl_group: Default::default(),
         trait_name: "Valued".to_string(),
         concrete_type: TrustVcType::Bool,
         method_bindings: vec![("get_value".to_string(), "BoolImpl__get_value".to_string())],
@@ -93,6 +97,7 @@ fn trait_with_default() -> TraitDecl {
                 has_default: false,
                 default_body: None,
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
             TraitMethodDecl {
                 name: "is_labeled".to_string(),
@@ -103,6 +108,7 @@ fn trait_with_default() -> TraitDecl {
                 has_default: true,
                 default_body: Some("self.label()".to_string()),
                 default_ensures: Vec::new(),
+                generic_params: Vec::new(),
             },
         ],
         supertraits: Vec::new(),

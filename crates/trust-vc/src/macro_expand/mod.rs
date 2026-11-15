@@ -67,7 +67,55 @@ pub(crate) fn parse_expr_with_chains(expr: &proc_macro2::TokenStream) -> syn::Re
 pub(crate) fn normalize_expr_tokens(
     expr: &proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    parse_expr_with_chains(expr).map(|parsed| quote!(#parsed))
+    let parsed = parse_expr_with_chains(expr)?;
+    let tokens = quote!(#parsed);
+    reject_mut_ref_final_marker(expr, &tokens)?;
+    Ok(tokens)
+}
+
+/// Refuse the parse-time marker for the reserved-keyword spec op `final(..)`
+/// BEFORE it can be emitted into a runtime `assert!`.
+///
+/// `final(..)` SURVIVES the parse: `trust_vc_core` rewrites the
+/// reserved keyword to `MUT_REF_FINAL_MARKER` so the clause is parseable at all.
+/// That marker is resolved, with clause context, by the file-check path's
+/// two-state resolver; there is no runtime function behind it. Emitting it into
+/// a runtime obligation compiles to `error[E0425]: cannot find function
+/// `__trust_vc_mut_ref_final``, which names a symbol the author never wrote —
+/// strictly worse than the pre-rewrite "expected an expression".
+///
+/// `normalize_expr_tokens` above is the SHARED token path (`requires!`,
+/// `assume!`, `invariant!`, `recommends!`, `assert_by`/`calc` operands, …);
+/// `postcondition_lowering::normalize_expr_tokens` (the `ensures` path) and
+/// `proof_entrypoints::assert` (which parses its own tokens and never reaches
+/// either normalizer) call this helper directly. Every surface is pinned in
+/// `tests/compile-fail/mut_ref_final_*.rs`.
+pub(crate) fn reject_mut_ref_final_marker(
+    source: &proc_macro2::TokenStream,
+    normalized: &proc_macro2::TokenStream,
+) -> syn::Result<()> {
+    if !normalized
+        .to_string()
+        .contains(trust_vc_core::MUT_REF_FINAL_MARKER)
+    {
+        return Ok(());
+    }
+    let span = source
+        .clone()
+        .into_iter()
+        .next()
+        .map_or_else(proc_macro2::Span::call_site, |tt| tt.span());
+    Err(syn::Error::new(
+        span,
+        "`final(..)` is a `&mut` two-state contract op resolved by the \
+         verification path (`cargo trust-vc check`), and has no runtime \
+         meaning to expand into an obligation. It is supported in a function \
+         contract clause over a supported scalar `&mut` parameter \
+         (`final`/`mut_ref_future` in `ensures`; `mut_ref_current`/`old` in \
+         either). Write the postcondition over the bare `&mut` parameter \
+         (which already denotes its final value there), or verify this \
+         function through the verification path",
+    ))
 }
 
 #[allow(clippy::indexing_slicing)] // invariant: `trees[..index]`/`trees[index+1..]` bounded by `position()` return within `trees.len()`

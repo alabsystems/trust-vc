@@ -187,6 +187,7 @@ fn import_dependency_specs(
             lib_path.display()
         )
     })?;
+    refuse_identifier_spelling(&lib_path, &file)?;
 
     let public_functions = collect_public_function_map(&file.items);
     let public_reexports = collect_public_reexports(&file.items);
@@ -226,6 +227,7 @@ fn import_dependency_specs(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    let running_calls = trust_vc_core::exec_running_call_paths(target_func);
     for spec in collect_public_spec_signatures(
         &file.items,
         &lib_dir,
@@ -234,6 +236,7 @@ fn import_dependency_specs(
         &spec_referenced_calls,
         &mut used_bound_names,
     )? {
+        ensure_spec_not_called_from_running_code(&spec.name, running_calls.as_ref(), target_func)?;
         ctx.declare_helper_function_typed(&spec.name, spec.return_ty, spec.params);
         if let Some(body_axiom) = spec.body_axiom {
             import_body_axiom(&spec.name, body_axiom, ctx);
@@ -244,6 +247,7 @@ fn import_dependency_specs(
         &spec_referenced_calls,
         &mut used_bound_names,
     )? {
+        ensure_spec_not_called_from_running_code(&spec.name, running_calls.as_ref(), target_func)?;
         ctx.declare_helper_function_typed(&spec.name, spec.return_ty, spec.params);
         if let Some(body_axiom) = spec.body_axiom {
             import_body_axiom(&spec.name, body_axiom, ctx);
@@ -262,6 +266,26 @@ fn import_dependency_specs(
         }
     }
 
+    Ok(())
+}
+
+/// Fails closed when the running code of an exec `target_func` calls the
+/// dependency spec function `name`. A spec function is ghost code: outside a
+/// verification build its body panics when called, and the lane would read
+/// the call as the function's value.
+fn ensure_spec_not_called_from_running_code(
+    name: &str,
+    running_calls: Option<&BTreeSet<String>>,
+    target_func: &ItemFn,
+) -> Result<(), String> {
+    if running_calls.is_some_and(|calls| calls.contains(name)) {
+        return Err(format!(
+            "exec function `{}` calls the dependency spec function `{name}` from code that runs; \
+             a spec function has no executable body (outside a verification build a call of it \
+             panics), so TrustVc fails closed instead of reading the call as its value",
+            target_func.sig.ident
+        ));
+    }
     Ok(())
 }
 
@@ -872,6 +896,34 @@ fn collect_public_spec_signatures(
     referenced_calls: &BTreeSet<String>,
     used_bound_names: &mut BTreeSet<String>,
 ) -> Result<Vec<DependencySpecSignature>, String> {
+    collect_public_spec_signatures_scoped(
+        items,
+        module_dir,
+        alias,
+        module_path,
+        false,
+        referenced_calls,
+        used_bound_names,
+    )
+}
+
+/// `trusted_boundary` is true once ANY enclosing `mod` in the dependency
+/// carried `#[trust_vc::external_body]` / `#[trust_vc::external]`.
+///
+/// SOUNDNESS-CRITICAL (H14). The marker on a `mod` covers every body inside it,
+/// exactly as it does in the file lane; containment here is the real AST/module
+/// descent, so nothing outside the marked module is affected. The SIGNATURE is
+/// still imported — only the defining equation is withdrawn.
+#[allow(clippy::too_many_arguments)]
+fn collect_public_spec_signatures_scoped(
+    items: &[syn::Item],
+    module_dir: &Path,
+    alias: &str,
+    module_path: &str,
+    trusted_boundary: bool,
+    referenced_calls: &BTreeSet<String>,
+    used_bound_names: &mut BTreeSet<String>,
+) -> Result<Vec<DependencySpecSignature>, String> {
     let mut specs = Vec::new();
     for item in items {
         match item {
@@ -879,23 +931,25 @@ fn collect_public_spec_signatures(
                 let local_name = qualified_name(module_path, &item_fn.sig.ident.to_string());
                 let qualified = format!("{alias}::{local_name}");
                 if referenced_calls.contains(&qualified) {
-                    specs.push(signature_from_spec(
-                        alias,
-                        &local_name,
-                        item_fn,
-                        used_bound_names,
-                    )?);
+                    let mut signature =
+                        signature_from_spec(alias, &local_name, item_fn, used_bound_names)?;
+                    if trusted_boundary {
+                        signature.body_axiom = None;
+                    }
+                    specs.push(signature);
                 }
             }
             syn::Item::Mod(module) if is_public(&module.vis) => {
                 let path = qualified_name(module_path, &module.ident.to_string());
+                let inner_boundary = trusted_boundary || has_external_trusted_attr(&module.attrs);
                 if let Some((_, items)) = &module.content {
                     // Inline module: recurse directly (directory unchanged).
-                    specs.extend(collect_public_spec_signatures(
+                    specs.extend(collect_public_spec_signatures_scoped(
                         items,
                         module_dir,
                         alias,
                         &path,
+                        inner_boundary,
                         referenced_calls,
                         used_bound_names,
                     )?);
@@ -909,15 +963,17 @@ fn collect_public_spec_signatures(
                     // Part of #2778.
                     if let Ok(source) = fs::read_to_string(&module_file) {
                         if let Ok(parsed) = trust_vc_core::parse_file_allow_tracked(&source) {
+                            refuse_identifier_spelling(&module_file, &parsed)?;
                             let child_dir = module_file
                                 .parent()
                                 .map(Path::to_path_buf)
                                 .unwrap_or_else(|| module_dir.to_path_buf());
-                            specs.extend(collect_public_spec_signatures(
+                            specs.extend(collect_public_spec_signatures_scoped(
                                 &parsed.items,
                                 &child_dir,
                                 alias,
                                 &path,
+                                inner_boundary,
                                 referenced_calls,
                                 used_bound_names,
                             )?);
@@ -1160,14 +1216,30 @@ fn parse_dependency_lib_file(dep: &PathDependency) -> Result<Option<syn::File>, 
             lib_path.display()
         )
     })?;
-    trust_vc_core::parse_file_allow_tracked(&source)
-        .map(Some)
-        .map_err(|err| {
-            format!(
-                "failed to parse dependency spec source {}: {err}",
-                lib_path.display()
-            )
-        })
+    let file = trust_vc_core::parse_file_allow_tracked(&source).map_err(|err| {
+        format!(
+            "failed to parse dependency spec source {}: {err}",
+            lib_path.display()
+        )
+    })?;
+    refuse_identifier_spelling(&lib_path, &file)?;
+    Ok(Some(file))
+}
+
+/// Fails closed when `file`, a dependency source at `path`, spells an
+/// identifier outside ASCII. rustc reads identifiers in Unicode
+/// normalization form C, so a dependency's `pub fn K` spelled with the Kelvin
+/// sign is the `K` the verified file calls, while this import matches names
+/// as written and would not find the spec function the call reaches.
+fn refuse_identifier_spelling(path: &Path, file: &syn::File) -> Result<(), String> {
+    match trust_vc_core::identifier_spelling_hazard(file) {
+        None => Ok(()),
+        Some(hazard) => Err(format!(
+            "dependency spec source {}: {hazard}, so a name the verified file spells need not \
+             be the one this import matches",
+            path.display()
+        )),
+    }
 }
 
 fn collect_public_concrete_signatures(
@@ -1220,6 +1292,11 @@ fn signature_from_spec(
     if has_dependency_contract_attr(&item_fn.attrs) {
         return Err(format!(
             "dependency spec function `{alias}::{local_name}` has contract or recommendation attributes, but TrustVc does not import dependency spec contracts"
+        ));
+    }
+    if has_cfg_gated_mode_attr(&item_fn.attrs) {
+        return Err(format!(
+            "dependency function `{alias}::{local_name}` is a spec function only under a `#[cfg_attr(..)]` whose predicate TrustVc does not evaluate, and a build that leaves the mode out runs its body as exec code"
         ));
     }
 
@@ -1768,6 +1845,19 @@ fn body_axiom_from_spec(
         return Ok(None);
     }
 
+    // SOUNDNESS-CRITICAL (H14, review round 3). On the trusted boundary the
+    // braces hold a PLACEHOLDER — the real implementation is foreign, or
+    // elsewhere — so `dep::sp(args) == <stub>` is not a definition of anything.
+    // The signature is still imported (the callee stays a typed UF), which is
+    // what a trusted declaration promises and the only thing a caller may
+    // assume about it. The file lane (`spec_function_catalog`, E6) and the
+    // proc-macro lane (`spec_expand`, E9) already decline the identical source
+    // text; importing it as a DEFINITION one crate boundary out is the same
+    // lane disagreement, with the same false-Verify at the end of it.
+    if has_external_trusted_attr(&item_fn.attrs) {
+        return Ok(None);
+    }
+
     // An `#[trust_vc::opaque]` dependency spec still gets its body axiom imported,
     // but registered suppressed-until-reveal (see `import_body_axiom`). The body
     // must still be one we can faithfully lower; if it is not, we DO NOT fabricate
@@ -1911,6 +2001,33 @@ fn has_spec_attr(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// True when a `#[cfg_attr(<predicate>, ..)]` carries a `spec` or `proof` mode.
+/// The parse unwraps it and keeps it in place (`tracked_syntax`), so such a
+/// function reads as a spec function here while the build may run it as exec
+/// code.
+fn has_cfg_gated_mode_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let is_cfg_attr = attr
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "cfg_attr");
+        let syn::Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        is_cfg_attr
+            && list
+                .parse_args_with(Punctuated::<syn::Meta, Token![,]>::parse_terminated)
+                .is_ok_and(|metas| {
+                    metas.iter().skip(1).any(|meta| {
+                        meta.path().segments.last().is_some_and(|segment| {
+                            segment.ident == "spec" || segment.ident == "proof"
+                        })
+                    })
+                })
+    })
+}
+
 fn has_dependency_contract_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().segments.last().is_some_and(|segment| {
@@ -1919,6 +2036,26 @@ fn has_dependency_contract_attr(attrs: &[syn::Attribute]) -> bool {
                 "requires" | "ensures" | "recommends" | "returns" | "contract"
             )
         })
+    })
+}
+
+/// True when the item carries a trusted-boundary marker —
+/// `#[trust_vc::external_body]` / `#[trust_vc::external]`, in any namespace.
+///
+/// SOUNDNESS-CRITICAL (H14). Mirrors `trust_vc_core`'s
+/// `vc_extraction::attr_extract::has_external_trusted_attr`, which is
+/// crate-private there, and must keep the SAME last-segment rule: the two
+/// lanes reading the same source text and disagreeing about whether a body is
+/// a definition is exactly the defect this closes. Last-segment matching is
+/// deliberately WIDE (`#[verifier::external_body]` declines too): over-
+/// declining costs one body axiom, under-declining publishes a placeholder as
+/// a fact across a crate boundary.
+fn has_external_trusted_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "external" || segment.ident == "external_body")
     })
 }
 
@@ -3040,6 +3177,208 @@ pub use lib as concrete_a;
         assert!(
             error.contains("does not import dependency concrete recommendations"),
             "error should explain dependency concrete recommendation limitation: {error}"
+        );
+    }
+
+    // =======================================================================
+    // H14 — the DEPENDENCY-IMPORT lane. `body_axiom_from_spec` builds
+    // `<alias>::<fn>(args) == <body tokens>` and `import_body_axiom` pushes it
+    // as `__body_axiom_<f>_dependency_spec`. It knew `#[trust_vc::opaque]` and
+    // nothing else, so the SAME
+    // `#[trust_vc::spec] #[trust_vc::external_body]` uninterpreted-spec idiom
+    // that the file lane (E6) and the proc-macro lane (E9) decline was still
+    // imported from a dependency crate as a DEFINITION — one crate boundary
+    // out, the same lane disagreement.
+    // =======================================================================
+
+    #[test]
+    fn dependency_spec_on_the_trusted_boundary_imports_no_body_axiom() {
+        let item: ItemFn = syn::parse_quote! {
+            #[trust_vc::spec]
+            #[trust_vc::external_body]
+            pub fn sp(x: u16) -> int {
+                (x as int) + (x as int)
+            }
+        };
+
+        let mut used_bound_names = BTreeSet::new();
+        let spec = signature_from_spec("dep", "sp", &item, &mut used_bound_names)
+            .expect("a trusted-boundary spec still imports its SIGNATURE");
+        assert!(
+            spec.body_axiom.is_none(),
+            "TRUST-BOUNDARY BREACH (dependency lane): the braces of an \
+             `#[trust_vc::external_body]` spec hold a PLACEHOLDER, so \
+             `dep::sp(x) == x + x` is not a definition of anything. Got {:?}",
+            spec.body_axiom.map(|axiom| axiom.condition)
+        );
+    }
+
+    #[test]
+    fn dependency_spec_external_spelling_imports_no_body_axiom() {
+        let item: ItemFn = syn::parse_quote! {
+            #[trust_vc::spec]
+            #[trust_vc::external]
+            pub fn sp(x: u16) -> int {
+                (x as int) + (x as int)
+            }
+        };
+
+        let mut used_bound_names = BTreeSet::new();
+        let spec = signature_from_spec("dep", "sp", &item, &mut used_bound_names)
+            .expect("a trusted-boundary spec still imports its SIGNATURE");
+        assert!(
+            spec.body_axiom.is_none(),
+            "TRUST-BOUNDARY BREACH (dependency lane, `external`): same boundary, \
+             same placeholder. Got {:?}",
+            spec.body_axiom.map(|axiom| axiom.condition)
+        );
+    }
+
+    #[test]
+    fn dependency_spec_foreign_namespace_imports_no_body_axiom() {
+        let item: ItemFn = syn::parse_quote! {
+            #[trust_vc::spec]
+            #[verifier::external_body]
+            pub fn sp(x: u16) -> int {
+                (x as int) + (x as int)
+            }
+        };
+
+        let mut used_bound_names = BTreeSet::new();
+        let spec = signature_from_spec("dep", "sp", &item, &mut used_bound_names)
+            .expect("a trusted-boundary spec still imports its SIGNATURE");
+        assert!(
+            spec.body_axiom.is_none(),
+            "TRUST-BOUNDARY BREACH (dependency lane, foreign namespace): \
+             last-segment matching is what every other publisher on this boundary \
+             uses. Got {:?}",
+            spec.body_axiom.map(|axiom| axiom.condition)
+        );
+    }
+
+    /// A spec mode under `#[cfg_attr(..)]`: the build that leaves it out runs
+    /// the body as exec code, so the import fails closed. The same function
+    /// with the mode written directly still imports.
+    #[test]
+    fn dependency_spec_under_cfg_attr_fails_closed() {
+        let source =
+            "#[cfg_attr(trust_vc, trust_vc::spec)]\npub fn inc(x: u64) -> u64 {\n    x + 1u64\n}\n";
+        let file = trust_vc_core::parse_file_allow_tracked(source).expect("fixture parses");
+        let syn::Item::Fn(item) = &file.items[0] else {
+            panic!("fixture is a function");
+        };
+        let mut used_bound_names = BTreeSet::new();
+        let error = signature_from_spec("dep", "inc", item, &mut used_bound_names)
+            .expect_err("a gated spec mode must not import");
+        assert!(error.contains("`#[cfg_attr(..)]`"), "{error}");
+
+        let source = "#[trust_vc::spec]\npub fn inc(x: u64) -> u64 {\n    x + 1u64\n}\n";
+        let file = trust_vc_core::parse_file_allow_tracked(source).expect("fixture parses");
+        let syn::Item::Fn(item) = &file.items[0] else {
+            panic!("fixture is a function");
+        };
+        let mut used_bound_names = BTreeSet::new();
+        signature_from_spec("dep", "inc", item, &mut used_bound_names)
+            .expect("the mode written directly still imports");
+    }
+
+    /// A dependency spec function is ghost code: outside a verification build
+    /// its body panics when called. An exec function that calls one from code
+    /// that runs (`u2`) fails closed; the same function named in a contract
+    /// (`t2`) or in `trust_vc::assert!` (`t3`) still imports.
+    #[test]
+    fn dependency_spec_called_from_running_code_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "trust_vc_dependency_specs_running_call_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manifest = write_test_dependency_package(
+            &root.join("b"),
+            "b",
+            "",
+            "#[trust_vc::spec]\npub fn inc2(x: u64) -> u64 {\n    x + 1u64\n}\n",
+        );
+        let dep = PathDependency {
+            alias: "b".to_string(),
+            manifest_path: manifest,
+        };
+        let calls = BTreeSet::from(["b::inc2".to_string()]);
+        let import = |target: &ItemFn, body: bool| {
+            let empty = BTreeSet::new();
+            let (body_calls, contract_calls) = if body {
+                (&calls, &empty)
+            } else {
+                (&empty, &calls)
+            };
+            let mut ctx = VerificationContext::new();
+            import_dependency_specs(&dep, &calls, body_calls, contract_calls, target, &mut ctx)
+        };
+
+        let u2: ItemFn = syn::parse_quote! {
+            #[trust_vc::ensures(true)]
+            pub fn u2(x: u64) -> u64 {
+                b::inc2(x)
+            }
+        };
+        let error = import(&u2, true).expect_err("a running call of a dependency spec function");
+        assert!(
+            error.contains("calls the dependency spec function `b::inc2`"),
+            "{error}"
+        );
+        let u3: ItemFn = syn::parse_quote! {
+            pub fn u3(x: u64) {
+                assert!(b::inc2(x) > 0u64);
+            }
+        };
+        import(&u3, true).expect_err("a call in the arguments of a std macro runs");
+
+        let t2: ItemFn = syn::parse_quote! {
+            #[trust_vc::requires(x < 10u64)]
+            #[trust_vc::ensures(result == b::inc2(x))]
+            pub fn t2(x: u64) -> u64 {
+                x + 1u64
+            }
+        };
+        import(&t2, false).expect("a contract is ghost code");
+        let t3: ItemFn = syn::parse_quote! {
+            #[trust_vc::requires(x < 10u64)]
+            pub fn t3(x: u64) {
+                trust_vc::assert!(b::inc2(x) > x);
+            }
+        };
+        import(&t3, true).expect("`trust_vc::assert!` is ghost code");
+        let s4: ItemFn = syn::parse_quote! {
+            #[trust_vc::spec]
+            pub fn s4(x: u64) -> u64 {
+                b::inc2(x)
+            }
+        };
+        import(&s4, true).expect("a spec function may call a spec function");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// NARROWNESS, and the owner's unified-compilation ruling in this lane: an
+    /// ORDINARY dependency spec function is DEFINED by its body and must keep
+    /// its imported axiom. Without this pin the gate above could degenerate
+    /// into "never import a dependency body axiom".
+    #[test]
+    fn ordinary_dependency_spec_still_imports_its_body_axiom() {
+        let item: ItemFn = syn::parse_quote! {
+            #[trust_vc::spec]
+            pub fn sp(x: u16) -> int {
+                (x as int) + (x as int)
+            }
+        };
+
+        let mut used_bound_names = BTreeSet::new();
+        let spec = signature_from_spec("dep", "sp", &item, &mut used_bound_names)
+            .expect("an ordinary public spec body should import");
+        assert!(
+            spec.body_axiom.is_some(),
+            "CAPABILITY LOST (dependency lane): an unmarked spec function's body IS \
+             its definition across the crate boundary as much as inside the file"
         );
     }
 }

@@ -81,6 +81,13 @@ const VERIFIED_CASES: &[(&str, &str)] = &[
         "loop_with_break_loop_clause_safety_shape_verified",
         "loop_with_break_with_decreases_clause safety-only surrogate",
     ),
+    // 2026-09-10 (audit rows 430/431): the break-only `if` no longer leaves the
+    // exact lane, so the faithful shape verifies (upstream: Ok) — moved here from
+    // the counterexample subset, where it had pinned the old under-verification.
+    (
+        "loop_with_break_with_decreases_clause_verified",
+        "loop_with_break_with_decreases_clause",
+    ),
 ];
 
 const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
@@ -99,10 +106,6 @@ const COUNTEREXAMPLE_CASES: &[(&str, &str)] = &[
     (
         "while_loop_missing_decreases_wrong_exit_fact_counterexample",
         "while_loop_needs_decreases_clause safety-only surrogate",
-    ),
-    (
-        "loop_with_break_with_decreases_clause_counterexample",
-        "loop_with_break_with_decreases_clause",
     ),
     // Re-pinned 2026-07-24: the range `for` now desugars to a counter-driven
     // `while` (for_range_desugar.rs), so this loop is REASONED about rather than
@@ -278,9 +281,9 @@ fn expected_metadata() -> Vec<CaseMetadata> {
             expected_error_patterns: Vec::new(),
         },
         CaseMetadata {
-            case_id: "loop_with_break_with_decreases_clause_counterexample".to_string(),
+            case_id: "loop_with_break_with_decreases_clause_verified".to_string(),
             upstream_case_id: "loop_with_break_with_decreases_clause".to_string(),
-            expected_verdict: "counterexample".to_string(),
+            expected_verdict: "verified".to_string(),
             min_obligations: 8,
             expected_error_patterns: Vec::new(),
         },

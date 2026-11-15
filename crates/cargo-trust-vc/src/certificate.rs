@@ -41,7 +41,11 @@ pub struct FunctionCertificate {
     /// `proof-certificates` feature is enabled and the function was verified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_alethe: Option<String>,
-    /// Whether ay's strict proof checker accepted the UNSAT proof.
+    /// Whether ay's strict proof checker accepted the UNSAT proof AND its
+    /// premises are the query trust-vc posed for the obligation it refutes.
+    /// `proof_alethe` is the last certificate recorded for this function, so
+    /// both are about that one obligation, not every obligation of the
+    /// function; `obligations` lists them all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_strict_verified: Option<bool>,
 }
@@ -173,6 +177,9 @@ mod tests {
                     name: "postcondition".into(),
                     kind: "assert".into(),
                     location: Some("src/lib.rs:12:1".into()),
+                    source_location: Some(
+                        trust_vc_core::SourceLocation::new(12, 1).with_file("src/lib.rs"),
+                    ),
                     condition_hash: "sha256:condition".into(),
                     status: ObligationStatus::Verified,
                     unknown_category: None,
@@ -181,6 +188,7 @@ mod tests {
                     name: "return_value".into(),
                     kind: "assume".into(),
                     location: None,
+                    source_location: None,
                     condition_hash: "sha256:return".into(),
                     status: ObligationStatus::Assumed,
                     unknown_category: None,

@@ -4,7 +4,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
-mod frame_condition;
+pub(in crate::encoder) mod frame_condition;
 mod havoc_all;
 
 use super::outcome::AssertionOutcome;
@@ -112,8 +112,7 @@ impl AYEncoder {
         // Guarding here as well removes the reliance on that ordering and covers
         // the WF2 measure lane, which has no base case at all. Fail-closed by
         // construction: the helper returns a Counterexample or nothing.
-        if let Some(outcome) =
-            super::typed_assertions::reflexive_disequality_refutation(invariant)
+        if let Some(outcome) = super::typed_assertions::reflexive_disequality_refutation(invariant)
         {
             return Ok(outcome);
         }
@@ -127,10 +126,49 @@ impl AYEncoder {
                 modified,
                 loop_guard,
                 verified_invariants,
+                true,
             )
         } else {
             havoc_all::verify_inductive_step_havoc_all_typed(ctx, invariant, verified_invariants)
         }
+    }
+
+    /// Break-site EXIT CHECK (audit rows 430/431): prove `check` at the state a
+    /// break-only `if cond { break; }` site is reached with `cond` true, from
+    /// ANY loop head satisfying the verified invariants and the registered guard
+    /// (`head_guard ∧ cond_site`), through the registered SITE transition. This
+    /// is the frame-condition step WITHOUT the inductive hypothesis: the checked
+    /// predicate (a regular invariant, or a loop `ensures`) is not assumed at the
+    /// pre-state, because an `ensures` need not hold at the head — assuming it
+    /// there let a false `ensures` verify vacuously. Exit checks always carry
+    /// loop metadata (the extractor registers it with the obligation); one
+    /// without it is a wiring bug and fails closed rather than falling into the
+    /// havoc-all lane, which has no guard to name the exit.
+    pub(in crate::encoder) fn verify_exit_check_step_typed(
+        ctx: &PreparedVerificationContext,
+        check: &PreparedObligation,
+        verified_invariants: &[&PreparedObligation],
+    ) -> TrustVcResult<AssertionOutcome> {
+        if let Some(outcome) = super::typed_assertions::reflexive_disequality_refutation(check) {
+            return Ok(outcome);
+        }
+        let Some(modified) = ctx.loop_modified_vars.get(&check.name) else {
+            return Ok(AssertionOutcome::Error {
+                message: format!(
+                    "break-site exit check '{}' carries no loop metadata; refusing to verify it \
+                     outside its loop",
+                    check.name
+                ),
+            });
+        };
+        frame_condition::verify_inductive_step_frame_condition_typed(
+            ctx,
+            check,
+            modified,
+            ctx.loop_guards.get(&check.name),
+            verified_invariants,
+            false,
+        )
     }
 
     /// Adds broadcast assumptions from a PreparedVerificationContext.

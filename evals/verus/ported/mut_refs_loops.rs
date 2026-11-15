@@ -237,8 +237,8 @@ pub const MUT_REFS_LOOPS_RS_EXPECTED_CASES: &[(&str, &str, &str, usize)] = &[
     (
         "mut_refs_loop_tuple_field_writeback_boundary_currently_errors",
         "future_preserved_in_loop",
-        "error",
-        0,
+        "verified",
+        2,
     ),
     (
         "mut_refs_loop_nested_tuple_mut_ref_write_boundary_currently_errors",
@@ -300,15 +300,6 @@ pub const MUT_REFS_LOOPS_RS_EXPECTED_ERROR_PATTERNS: &[(&str, &[&str])] = &[
         &[
             "assignment through a dereferenced reference is unsupported",
             "* x_ref",
-        ],
-    ),
-    (
-        "mut_refs_loop_tuple_field_writeback_boundary_currently_errors",
-        &[
-            "assignment through a mutable-reference projection is unsupported",
-            "tuple-field",
-            "pair_ref . 0",
-            "field '0'",
         ],
     ),
     (

@@ -7,9 +7,9 @@
 //!
 //! An `if`/`while` boolean test is evaluated EXACTLY ONCE, UNCONDITIONALLY,
 //! before either branch / the first iteration — exactly like a `match`
-//! scrutinee. So a panic-carrying arithmetic site (`if a / b > 0`, `while a + b
-//! > 0`, signed `i32::MIN / -1`, `a - b` underflow) or an OOB index (`if
-//! arr[i] > 0`) in the condition carries a real exec panic obligation.
+//! scrutinee. So a panic-carrying arithmetic site (`if a / b > 0`,
+//! `while a + b > 0`, signed `i32::MIN / -1`, `a - b` underflow) or an OOB
+//! index (`if arr[i] > 0`) in the condition carries a real exec panic obligation.
 //!
 //! `visit_expr_if` / `visit_expr_while` (body_extract.rs) previously lowered the
 //! condition with `visit_expr` + `expr_to_scoped_string` for value-numbering /

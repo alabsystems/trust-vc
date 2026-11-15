@@ -89,6 +89,39 @@ pub(crate) struct ResultBindingMeta {
 
 pub(crate) const COLLECTION_CONSTRUCTOR_PREFIX: &str = "__trust_vc_collection_ctor_";
 pub(crate) const SEQ_FROM_FN_BUILTIN: &str = "__trust_vc_seq_from_fn";
+/// `__trust_vc_let_bound::<T>(value)`: a body `let v: T = value;` as the
+/// extractor substitutes it, lowered as `value` bound at `T` (§5b rule 6).
+pub(crate) const LET_BOUND_MARKER: &str = "__trust_vc_let_bound";
+/// `__trust_vc_bind_like(witness, value)`: a value the extractor writes into a
+/// slot with no written type (an unascribed binding, a pattern binding, a
+/// field), lowered as `value` bound at the type `witness` derives (§5b rule
+/// 12).
+pub(crate) const BIND_LIKE_MARKER: &str = "__trust_vc_bind_like";
+/// `__trust_vc_self_typed(value)`: an argument substituted for a closure
+/// parameter whose type is neither written (`|a: T|`) nor declared by the
+/// closure's binding. Rust gives that parameter one type, unified from every
+/// call of the closure and every use in its body; the lowering reads only the
+/// argument, so the argument must carry its type itself. It is lowered as
+/// `value`, and REFUSED when `value` is an untyped literal form (an unsuffixed
+/// integer or float literal, or a name bound to one) whose type only its
+/// context fixes (§5b rule 11).
+pub(crate) const SELF_TYPED_MARKER: &str = "__trust_vc_self_typed";
+/// `__trust_vc_untyped_site(value)`: the value of an exec arithmetic-safety
+/// site whose slot type the obligation does not hold. Lowered as `value`,
+/// and REFUSED when `value` is a constant untyped literal form that panics in
+/// a fixed-width type it may take (`untyped_site.rs`).
+pub(crate) const UNTYPED_SITE_MARKER: &str = "__trust_vc_untyped_site";
+/// `__trust_vc_untyped_binding(value)`: the value of an unascribed `let` of an
+/// untyped literal form whose type the binding's uses do not determine here.
+/// Lowered as a conditional with one value (`untyped_site.rs`): wherever it
+/// meets no peer it is checked in every type it may take, and a constant one
+/// that panics in such a type is refused.
+pub(crate) const UNTYPED_BINDING_MARKER: &str = "__trust_vc_untyped_binding";
+/// `__trust_vc_slot_typed::<T>(value)`: the value of an exec arithmetic-safety
+/// site that fills a slot of type `T` (a parameter, an inferred binding): an
+/// untyped literal form there is typed at `T` (refused when a literal does
+/// not fit it); a value of its own type is left as it is (`untyped_site.rs`).
+pub(crate) const SLOT_TYPED_MARKER: &str = "__trust_vc_slot_typed";
 pub(crate) const SET_NEW_BUILTIN: &str = "__trust_vc_set_new";
 
 /// Type environment for variable and function return type lookups during lowering.
@@ -109,8 +142,23 @@ pub(crate) struct TypeEnv {
     prophecy_bindings: HashMap<String, TrustVcType>,
     fn_return_types: HashMap<String, TrustVcType>,
     fn_param_types: HashMap<String, Vec<TrustVcType>>,
+    /// H10: declaration-order type/const generic parameter names of a function
+    /// whose registration checked generic carriage. Cleared whenever the
+    /// function's parameter types are re-registered.
+    fn_generic_params: HashMap<String, Vec<String>>,
     field_metadata: HashMap<String, HashMap<String, FieldMeta>>,
     method_metadata: HashMap<(String, String), MethodMeta>,
+    /// H10 (method half): declaration-order type/const generic parameter names
+    /// of a registered METHOD's own signature (`fn k<P>(&self)` → `["P"]`),
+    /// keyed exactly like [`Self::method_metadata`]. Recorded only by a
+    /// registration that carries the declaration's generics; cleared whenever
+    /// the method's metadata is re-registered, so a stale list can never
+    /// describe a different signature.
+    ///
+    /// ABSENT is not "non-generic": it means the registration recorded nothing,
+    /// and the call site treats an explicit turbofish over such a method as
+    /// unmappable and fails closed.
+    method_generic_params: HashMap<(String, String), Vec<String>>,
     /// `(datatype_name, method_name)` pairs whose `method_metadata` entry was
     /// synthesized by [`Self::register_variant_helper_methods`] — i.e. the
     /// auto-generated datatype tester (`is_V`) / selector (`get_V_field`)
@@ -144,6 +192,11 @@ pub(crate) struct TypeEnv {
     /// Crate-private capability for the synthetic source-catalog `int` result
     /// marker. False in every ordinary/user-authored lowering environment.
     allow_source_catalog_math_int_marker: bool,
+    /// The operator methods (`add`, `shl`, `shr`) that are the std operator on
+    /// a primitive integer receiver here, because the std trait is in scope at
+    /// every call of them in the source file. Empty unless the extractor
+    /// showed it, so a call of one of them on an integer is refused.
+    std_operator_methods: HashSet<String>,
 }
 
 impl TypeEnv {
@@ -157,8 +210,10 @@ impl TypeEnv {
             prophecy_bindings: HashMap::new(),
             fn_return_types: HashMap::new(),
             fn_param_types: HashMap::new(),
+            fn_generic_params: HashMap::new(),
             field_metadata: HashMap::new(),
             method_metadata: HashMap::new(),
+            method_generic_params: HashMap::new(),
             auto_accessor_methods: HashSet::new(),
             constructor_metadata: HashMap::new(),
             option_bindings: HashMap::new(),
@@ -168,6 +223,7 @@ impl TypeEnv {
             derived_clone_types: HashSet::new(),
             manual_partial_eq_types: HashSet::new(),
             allow_source_catalog_math_int_marker: false,
+            std_operator_methods: HashSet::new(),
         }
     }
 
@@ -183,6 +239,18 @@ impl TypeEnv {
     /// capability. There is intentionally no public or mutable setter.
     pub(crate) const fn allows_source_catalog_math_int_marker(&self) -> bool {
         self.allow_source_catalog_math_int_marker
+    }
+
+    /// Records that `method` (`add`, `shl` or `shr`) on a primitive integer is
+    /// the std operator method in this environment's source.
+    pub(crate) fn register_std_operator_method(&mut self, method: impl Into<String>) {
+        self.std_operator_methods.insert(method.into());
+    }
+
+    /// Whether `method` on a primitive integer is the std operator method.
+    #[must_use]
+    pub(crate) fn reads_std_operator_method(&self, method: &str) -> bool {
+        self.std_operator_methods.contains(method)
     }
 
     /// Records that a datatype's source carried `#[derive(PartialEq)]`.
@@ -459,7 +527,22 @@ impl TypeEnv {
         for param_type in &param_types {
             self.register_type_metadata(param_type);
         }
+        self.fn_generic_params.remove(&name);
         self.fn_param_types.insert(name, param_types);
+    }
+
+    /// H10: the declaration-order generic parameter names of `name`, when its
+    /// registration recorded them (see `insert_fn_generic_params`).
+    pub(crate) fn lookup_fn_generic_params(&self, name: &str) -> Option<&[String]> {
+        self.fn_generic_params.get(name).map(Vec::as_slice)
+    }
+
+    /// H10: record the declaration-order generic parameter names of a function
+    /// whose parameter types are already registered.
+    pub(crate) fn insert_fn_generic_params(&mut self, name: String, generic_params: Vec<String>) {
+        if self.fn_param_types.contains_key(&name) {
+            self.fn_generic_params.insert(name, generic_params);
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -491,8 +574,39 @@ impl TypeEnv {
         method_name: String,
         meta: MethodMeta,
     ) {
+        self.method_generic_params
+            .remove(&(receiver_type_name.clone(), method_name.clone()));
         self.method_metadata
             .insert((receiver_type_name, method_name), meta);
+    }
+
+    /// H10 (method half): record the declaration-order generic parameter names
+    /// of a method whose metadata is already registered. A method with no
+    /// metadata records nothing, so the pair can never describe a signature the
+    /// lowering does not have.
+    pub(crate) fn insert_method_generic_params(
+        &mut self,
+        receiver_type_name: String,
+        method_name: String,
+        generic_params: Vec<String>,
+    ) {
+        let key = (receiver_type_name, method_name);
+        if self.method_metadata.contains_key(&key) {
+            self.method_generic_params.insert(key, generic_params);
+        }
+    }
+
+    /// H10 (method half): the recorded declaration-order generic parameter
+    /// names of `(receiver_type_name, method_name)`, or `None` when the
+    /// registration recorded none.
+    pub(crate) fn lookup_method_generic_params(
+        &self,
+        receiver_type_name: &str,
+        method_name: &str,
+    ) -> Option<&[String]> {
+        self.method_generic_params
+            .get(&(receiver_type_name.to_string(), method_name.to_string()))
+            .map(Vec::as_slice)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

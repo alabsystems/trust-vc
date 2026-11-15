@@ -28,7 +28,8 @@ pub struct S {
     pub x: u8,
 }
 
-/// TRUE, and at the file root: unaffected in this order too.
+/// TRUE, and at the file root: the scope refusal leaves it alone in this order
+/// too, and the unread-item rule refuses it.
 #[trust_vc::ensures(true)]
 fn top_level_narrow_is_true(s: S) -> u64 {
     trust_vc::assert!(s.x <= 255u8);

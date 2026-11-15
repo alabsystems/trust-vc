@@ -113,8 +113,37 @@ impl<'a> AstExpressionParser<'a> {
         self.encode_subexpr(&result)
     }
 
-    fn ensure_projected_collection_meta(&mut self, term: Term, ty: &TrustVcType) {
+    /// Mint fresh, UNCONSTRAINED dom/len metadata for a collection value that
+    /// was reached by PROJECTION rather than declared as a variable.
+    ///
+    /// Also called from `encode_fn_call` (fn_call.rs): a struct FIELD read in a
+    /// SPEC expression does not lower to a `ReadPlace` at all — `lower_field_access`
+    /// emits `TrustVcExpr::FnCall { name: <selector UF>, .. }` — so the receiver
+    /// never travels the place route and would otherwise carry no metadata,
+    /// making every `contains_key()` on it fail closed.
+    ///
+    /// Soundness: the minted `__trust_vc_place_dom` array and
+    /// `__trust_vc_place_len` BV are FRESH and carry no axiom tying them to the
+    /// collection value, so they answer nothing the query's own assumptions have
+    /// not pinned through the very same term. The early return on an
+    /// already-registered term is what keeps two occurrences of one place on one
+    /// dom (term identity, not re-minting).
+    pub(in crate::encoder::ir_encoder) fn ensure_projected_collection_meta(
+        &mut self,
+        term: Term,
+        ty: &TrustVcType,
+    ) {
         if self.collection_meta_by_term.contains_key(&term) {
+            return;
+        }
+
+        // SAME PLACE => SAME TERM => SAME COMPANIONS. `collection_meta_by_term`
+        // is rebuilt per `AstExpressionParser`, so a term minted while encoding
+        // the assumptions would otherwise get a SECOND, unrelated dom while
+        // encoding the goal. `projected_collection_meta` carries the first one
+        // across every parser instance of the query.
+        if let Some(meta) = self.projected_collection_meta.get(&term).cloned() {
+            self.register_collection_meta(term, meta);
             return;
         }
 
@@ -152,17 +181,16 @@ impl<'a> AstExpressionParser<'a> {
             _ => None,
         };
 
-        self.register_collection_meta(
-            term,
-            CollectionMeta {
-                kind,
-                len_term,
-                len_guard: None,
-                elem_ty: ty.collection_elem(),
-                key_ty,
-                dom_term,
-            },
-        );
+        let meta = CollectionMeta {
+            kind,
+            len_term,
+            len_guard: None,
+            elem_ty: ty.collection_elem(),
+            key_ty,
+            dom_term,
+        };
+        self.projected_collection_meta.insert(term, meta.clone());
+        self.register_collection_meta(term, meta);
     }
 
     fn encode_place_index_projection(
@@ -172,7 +200,8 @@ impl<'a> AstExpressionParser<'a> {
         _elem_ty: &TrustVcType,
     ) -> TrustVcResult<Term> {
         let index_term = self.encode_subexpr(index)?;
-        let idx = self.coerce_seq_index(receiver_term, None, index_term)?;
+        let own = self.own_sign(index, None);
+        let idx = self.coerce_seq_index(receiver_term, None, index_term, own)?;
 
         if !self.receiver_is_map(receiver_term, None) {
             self.add_seq_index_bounds_check(receiver_term, None, idx, "index")?;

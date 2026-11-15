@@ -5,19 +5,3 @@ version = 4
 [[package]]
 name = "trust-vc-verus-basic-fail-assign-non-mut"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "ay-core"
-version = "0.15.0"
-
-[[patch.unused]]
-name = "ay-dpll"
-version = "0.15.0"
-
-[[patch.unused]]
-name = "ay-frontend"
-version = "0.15.0"
-
-[[patch.unused]]
-name = "ay-sys"
-version = "0.15.0"

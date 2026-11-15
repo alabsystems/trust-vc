@@ -102,7 +102,7 @@ fn fresh_bound_name(base: &str, used_names: &mut HashSet<String>) -> String {
         .iter()
         .map(String::len)
         .max()
-        .map_or(base.len(), |len| len);
+        .unwrap_or(base.len());
     let pad_len = max_used_len.saturating_sub(base.len()).saturating_add(1);
     let candidate = format!("{base}_{}", "_".repeat(pad_len));
     used_names.insert(candidate.clone());
@@ -315,11 +315,9 @@ fn collection_chain_root(operand: &TrustVcExpr) -> &TrustVcExpr {
         TrustVcExpr::CollectionOp {
             op: CollectionOp::Insert | CollectionOp::Remove,
             receiver,
-            ty,
+            ty: TrustVcType::Set(_) | TrustVcType::Map(_, _),
             ..
-        } if matches!(ty, TrustVcType::Set(_) | TrustVcType::Map(_, _)) => {
-            collection_chain_root(receiver)
-        }
+        } => collection_chain_root(receiver),
         _ => operand,
     }
 }
@@ -831,6 +829,45 @@ fn build_finite_map_membership_eq(
     conjunction
 }
 
+/// The keys at which a CONCRETE map operand can be present: the insert keys of a
+/// `Map::<K,V>::empty().insert(k,v)…` chain (`concrete_map_insert_chain`), or the
+/// inserted elements of the concrete `Set::<K>::empty().insert(k)…` chain that a
+/// `Set::mk_map(f)` is built over — `dom(S.mk_map(f)) == S` exactly, and the
+/// elements of a pure insert chain are exactly its insert keys.
+///
+/// `None` for anything else (a map/set VARIABLE anywhere in the chain, `remove`,
+/// an opaque op-result such as `filter`/`union`), which keeps the symbolic FORALL.
+///
+/// WHY the `mk_map` arm (soundness-preserving completeness fix, 2026-09-13): the
+/// maps.rs `test1_fails2` refutation — `strict_eq!(S1.mk_map(k→10k),
+/// S2.mk_map(k→11k))` over two three-element literal sets — timed out (30 s wall,
+/// repeated across the retry cascade: the whole suite took 393 s). The strict-eq
+/// extensionality bridge `ext_eq(a,b) ⟹ a == b` built its premise in the
+/// symbolic-key FORALL form, and the bisected query showed ay 0.26.0 deciding the
+/// bare negated store-chain equality in 16 ms and the same query WITHOUT that
+/// bridge in 298 ms, but the skolemized bridge together with the `__set_len_insert`
+/// cardinality chains came back `incomplete` (5 s) / timeout. The per-key form is
+/// ground (every read a literal-index `select`, every value the closure body at a
+/// literal key), so the premise is decided outright — here to FALSE, which leaves
+/// the bridge vacuous and the raw `==` refuted with a countermodel.
+fn concrete_finite_map_keys(expr: &TrustVcExpr) -> Option<Vec<TrustVcExpr>> {
+    if let Some(keys) = concrete_map_insert_chain(expr) {
+        return Some(keys);
+    }
+    match expr {
+        TrustVcExpr::CollectionOp {
+            op: CollectionOp::SetMkMap,
+            receiver,
+            args,
+            ty,
+            ..
+        } if args.len() == 1 && matches!(ty, TrustVcType::Map(_, _)) => {
+            concrete_set_insert_chain(receiver)
+        }
+        _ => None,
+    }
+}
+
 fn build_map_ext_eq(
     lhs: TrustVcExpr,
     rhs: TrustVcExpr,
@@ -838,14 +875,16 @@ fn build_map_ext_eq(
     value_ty: TrustVcType,
 ) -> TrustVcExpr {
     // Finite-map specialization (mirrors the finite-set fix). When BOTH operands
-    // are concrete `empty().insert(..)` chains, decide equality by the per-key
-    // domain+value conjunction over the union of the concrete insert keys instead
-    // of the symbolic-key FORALL, whose skolemized store-chain read ay cannot
-    // case-split onto the store support (a genuine CE stalls to `unknown`).
+    // are concrete — `empty().insert(..)` chains, or `mk_map` over a concrete
+    // `Set::empty().insert(..)` chain (`concrete_finite_map_keys`) — decide
+    // equality by the per-key domain+value conjunction over the union of the
+    // concrete keys instead of the symbolic-key FORALL, whose skolemized
+    // store-chain read ay cannot case-split onto the store support (a genuine CE
+    // stalls to `unknown`).
     // Logically equivalent for concrete maps; every read is a literal-index select.
     if let (Some(lhs_keys), Some(rhs_keys)) = (
-        concrete_map_insert_chain(&lhs),
-        concrete_map_insert_chain(&rhs),
+        concrete_finite_map_keys(&lhs),
+        concrete_finite_map_keys(&rhs),
     ) {
         if lhs_keys.len() + rhs_keys.len() <= MAP_EXT_EQ_FINITE_MEMBERSHIP_CAP {
             let mut keys = lhs_keys;
@@ -886,8 +925,13 @@ fn substitute_free_vars(expr: &TrustVcExpr, subst: &HashMap<String, TrustVcExpr>
     impl ScopeAwareTrustVcExprFolder for Substitutor<'_> {
         fn fold_expr_scoped(&mut self, expr: TrustVcExpr, bound: &HashSet<&str>) -> TrustVcExpr {
             match expr {
-                TrustVcExpr::Var { ref name, .. } if !bound.contains(name.as_str()) => {
-                    self.subst.get(name).cloned().unwrap_or(expr)
+                TrustVcExpr::Var { ref name, ref ty } if !bound.contains(name.as_str()) => {
+                    match self.subst.get(name) {
+                        Some(replacement) => {
+                            crate::ir_lowering::pin_substituted_value(ty, replacement)
+                        }
+                        None => expr,
+                    }
                 }
                 other => fold_expr_scoped_children(self, other, bound),
             }
@@ -1061,6 +1105,42 @@ fn value_fits_int_lit_type(value: i128, ty: &TrustVcType) -> bool {
     }
 }
 
+/// An integer literal — a bare `IntLit`, or one pinned at its type by an
+/// identity cast (a source `4i32`, `ir_lowering::atoms::typed_int_literal`):
+/// `(value, type, pinned)`.
+fn strict_int_literal(expr: &TrustVcExpr) -> Option<(i128, &TrustVcType, bool)> {
+    match expr {
+        TrustVcExpr::IntLit { value, ty } => Some((*value, ty, false)),
+        TrustVcExpr::Cast {
+            expr,
+            from_ty,
+            to_ty,
+        } if from_ty == to_ty => match expr.as_ref() {
+            TrustVcExpr::IntLit { value, ty } if ty == to_ty => Some((*value, ty, true)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The folded literal, pinned again when an operand was (`2i32 + 2i32` folds
+/// to the `4i32` a source `4i32` lowers to, never to a bare placeholder).
+fn strict_folded_int_literal(value: i128, ty: TrustVcType, pinned: bool) -> TrustVcExpr {
+    let literal = TrustVcExpr::IntLit {
+        value,
+        ty: ty.clone(),
+    };
+    if pinned {
+        TrustVcExpr::Cast {
+            expr: Box::new(literal),
+            from_ty: ty.clone(),
+            to_ty: ty,
+        }
+    } else {
+        literal
+    }
+}
+
 fn fold_strict_local_int_constants(expr: TrustVcExpr) -> TrustVcExpr {
     struct LocalIntFolder;
 
@@ -1076,17 +1156,33 @@ fn fold_strict_local_int_constants(expr: TrustVcExpr) -> TrustVcExpr {
                     let left = self.fold_expr(*left);
                     let right = self.fold_expr(*right);
                     if let (
-                        TrustVcExpr::IntLit {
-                            value: left_value,
-                            ty: left_ty,
-                        },
-                        TrustVcExpr::IntLit {
-                            value: right_value,
-                            ty: right_ty,
-                        },
-                    ) = (&left, &right)
+                        Some((left_value, left_ty, left_pinned)),
+                        Some((right_value, right_ty, right_pinned)),
+                    ) = (strict_int_literal(&left), strict_int_literal(&right))
                     {
-                        if left_ty == &ty && right_ty == &ty {
+                        let (left_value, right_value) = (&left_value, &right_value);
+                        // A closed tree of UNSUFFIXED literals has no value of
+                        // its own: its literals are typed by the peer it meets
+                        // (design-trust-proof-backend.md §5b rule 2) — `x +
+                        // (200 + 100)` with `x: u8` is `u8` arithmetic (44),
+                        // not `x + 300`. It folds only to a value every type
+                        // it may take agrees on (`2 + 2` is 4 in all of them).
+                        let typed =
+                            ty != TrustVcType::Int { width: 32 } || left_pinned || right_pinned;
+                        if !typed {
+                            let tree = TrustVcExpr::Arith {
+                                op,
+                                left: Box::new(left.clone()),
+                                right: Box::new(right.clone()),
+                                ty: ty.clone(),
+                            };
+                            if let Some(value) =
+                                crate::ir_lowering::untyped_operation_value_all_types_agree(&tree)
+                            {
+                                return TrustVcExpr::IntLit { value, ty };
+                            }
+                        }
+                        if typed && left_ty == &ty && right_ty == &ty {
                             let folded_value = match op {
                                 ArithOp::Add => left_value.checked_add(*right_value),
                                 ArithOp::Sub => left_value.checked_sub(*right_value),
@@ -1101,7 +1197,11 @@ fn fold_strict_local_int_constants(expr: TrustVcExpr) -> TrustVcExpr {
                             };
                             if let Some(value) = folded_value {
                                 if value_fits_int_lit_type(value, &ty) {
-                                    return TrustVcExpr::IntLit { value, ty };
+                                    return strict_folded_int_literal(
+                                        value,
+                                        ty,
+                                        left_pinned || right_pinned,
+                                    );
                                 }
                             }
                         }
@@ -1116,13 +1216,10 @@ fn fold_strict_local_int_constants(expr: TrustVcExpr) -> TrustVcExpr {
                 }
                 TrustVcExpr::Neg(inner) => {
                     let inner = self.fold_expr(*inner);
-                    if let TrustVcExpr::IntLit { value, ty } = &inner {
+                    if let Some((value, ty, pinned)) = strict_int_literal(&inner) {
                         if let Some(negated) = value.checked_neg() {
                             if value_fits_int_lit_type(negated, ty) {
-                                return TrustVcExpr::IntLit {
-                                    value: negated,
-                                    ty: ty.clone(),
-                                };
+                                return strict_folded_int_literal(negated, ty.clone(), pinned);
                             }
                         }
                     }

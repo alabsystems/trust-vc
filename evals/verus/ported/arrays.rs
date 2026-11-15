@@ -314,6 +314,34 @@ pub const ARRAYS_RS_EXPECTED_CASES: &[ArraysRsExpectedCase] = &[
         "error",
         0,
     ),
+    // RE-PINNED 2026-09-13: four false array-view claims that were parked as
+    // "currently unknown" scouts (referenced by neither the suite nor the
+    // manifest) are refuted with a model by the engine and are pinned as
+    // Counterexamples beside their verified twins.
+    (
+        "array_to_slice_literal_view_wrong_contains_counterexample",
+        "test_array_to_slice",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_to_slice_wrong_len_counterexample",
+        "test_array_to_slice",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_literal_view_seq_binding_wrong_contains_counterexample",
+        "test_array_literals",
+        "counterexample",
+        2,
+    ),
+    (
+        "array_named_view_wrong_contains_counterexample",
+        "test_array_literals",
+        "counterexample",
+        2,
+    ),
 ];
 
 pub const ARRAYS_RS_FAIL_CLOSED_ERROR_PATTERNS: &[ArraysRsFailClosedErrorPatterns] = &[
@@ -705,12 +733,12 @@ fn array_to_slice_literal_view_false_tail_counterexample() {
 }
 
 #[trust_vc::ensures(true)]
-fn array_to_slice_literal_view_wrong_contains_currently_unknown() {
+fn array_to_slice_literal_view_wrong_contains_counterexample() {
     trust_vc::assert!((&[4u8, 5u8, 6u8]).view().contains(7u8));
 }
 
 #[trust_vc::ensures(true)]
-fn array_to_slice_wrong_len_currently_unknown(ar: &[u8; 3]) {
+fn array_to_slice_wrong_len_counterexample(ar: &[u8; 3]) {
     trust_vc::assert!(ar.view().len() == 4usize);
 }
 
@@ -787,7 +815,7 @@ fn array_literal_view_seq_binding_contains() {
 }
 
 #[trust_vc::ensures(true)]
-fn array_literal_view_seq_binding_wrong_contains_currently_unknown() {
+fn array_literal_view_seq_binding_wrong_contains_counterexample() {
     let s: Seq<u8> = [10u8, 20u8, 30u8].view();
     trust_vc::assert!(s.contains(40u8));
 }
@@ -827,7 +855,7 @@ fn array_named_view_contains_false_tail_counterexample() {
 }
 
 #[trust_vc::ensures(true)]
-fn array_named_view_wrong_contains_currently_unknown() {
+fn array_named_view_wrong_contains_counterexample() {
     trust_vc::assert!([10u8, 20u8, 40u8].view().contains(30u8));
 }
 

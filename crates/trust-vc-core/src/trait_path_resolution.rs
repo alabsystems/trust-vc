@@ -39,6 +39,7 @@
 //!    This is unconditional over every `trait` item — `#[trust_vc::trait_spec]`
 //!    or not — because the self-receiver-kind registry keys unannotated traits
 //!    too.
+//!
 //! 1a. [`prune_shadowed_duplicate_traits`] runs BEFORE that gate and is what
 //!    keeps it from costing legal programs. Two same-named traits in different
 //!    modules is legal Rust (`rustc --edition 2021` compiles and runs it), and
@@ -61,6 +62,7 @@
 //!    with the impl naming `decoy::Tr` and the bound naming `real::Tr`, the
 //!    bound's `"Tr"` was answered by the impl's survivor, so a FALSE assertion
 //!    verified while its TRUE twin did not.
+//!
 //! 1b. [`TraitScopeIndex::reject_duplicate_type_names`] does the same on the
 //!    RECEIVER side, and closes a separate cardinal false verify. All method
 //!    metadata (`ctx.inherent_methods`, and the concrete trait-impl

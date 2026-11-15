@@ -20,6 +20,23 @@ pub(crate) struct ProtocolStateVarDef {
     pub(crate) protocol_name: String,
     pub(crate) field_name: String,
     pub(crate) rust_type: String,
+    /// The variable's value in the protocol's initial state.
+    pub(crate) initial: ProtocolInitial,
+}
+
+/// Where a protocol state variable starts.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "ty"), allow(dead_code))]
+pub(crate) enum ProtocolInitial {
+    /// Registered by name (`register_protocol_state_var`): its type's zero,
+    /// `0` or `false`.
+    Zero,
+    /// A `#[protocol]` field: its value in the struct's `Default::default()`,
+    /// from each of two calls (`None` for a type the lane does not model).
+    Default([Option<super::ProtocolValue>; 2]),
+    /// A field of a `#[protocol]` struct that does not implement `Default`.
+    NoDefault,
 }
 
 #[doc(hidden)]
@@ -148,6 +165,7 @@ pub(super) fn assemble_protocol_components(
             name: proto_name.clone(),
             spec: translated.spec,
             config: translated.config,
+            shape: Some(translated.shape),
         });
     }
 

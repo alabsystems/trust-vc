@@ -23,10 +23,30 @@
 //! struct args / alias-local forwarding (`let r = &mut a; f(r)`) stay
 //! fail-closed (error or CE — NEVER a stale-value Verified); a contract-less
 //! callee is havoc-only (post-state unconstrained → CE on any stale claim); an
-//! expression-position contracted call (`let _r = f(&mut v)`) discharges its
-//! `requires` but DROPS the `ensures` assumption (the recording runs before
-//! the havoc, so binding it would pin the postcondition to the pre-call value
-//! — the p10 vacuity landmine); `&mut &x` temporaries never havoc `x`.
+//! `&mut &x` temporaries never havoc `x`.
+//!
+//! CORRECTION (call-site instantiation, THIS change): the line that stood here
+//! said an expression-position contracted call (`let _r = f(&mut v)`) discharges
+//! its `requires` but DROPS the `ensures` assumption. That was a DEFECT, not a
+//! boundary, and it is now fixed: `f(&mut v);` and `let _r = f(&mut v);` are one
+//! line apart and only the first applied the callee's postcondition, so a caller
+//! that bound the result silently lost it (the havoc symbol came back
+//! UNCONSTRAINED) on a shape upstream relies on — `let (r, t) = add1(&mut i);
+//! assert(i == 1);` (upstream `mut_refs_patterns.rs::side_effects_in_match_arg`).
+//! The cause was ORDERING, not semantics: a `let` initializer is rendered before
+//! the walk reaches `visit_expr_call`, so the `&mut`-argument framing had not run
+//! and `ensures_binding_sound` correctly refused a pre-havoc binding. The
+//! `Stmt::Local` arm now frames the call first, so both spellings reach the
+//! recorder in the same state. The p10 VACUITY LANDMINE the old behaviour guarded
+//! is still pinned, unchanged, by f6: binding the ensures to the PRE-call value
+//! would assume `v == 5` and `v == 7` of the same symbol and vacuously verify
+//! everything, so f6's `assert!(1 == 2)` after the call must stay a genuine CE.
+//!
+//! TWO-STATE VOCABULARY AT THE CALL SITE (group g): `final(P)` /
+//! `mut_ref_future(P)` in a callee `ensures` now instantiate through the SAME
+//! post-call map bare `P` uses — the synonymy the def-side resolver already
+//! declares — while in a `requires` they stay refused BY NAME (at call time the
+//! exit value does not exist, and the entry value is not a stand-in for it).
 //!
 //! CORRECTION (slice-D remediation): the original slice-D report claimed the
 //! scope-outs above were "all fail-closed" — that was TRUE only for the
@@ -79,6 +99,41 @@ fn inc_no_req(a: &mut u64) {
 #[trust_vc::ensures(old(a) == 5u64)]
 fn keep5_old_only(a: &mut u64) {
     *a = 9u64;
+}
+
+// tuple-returning sibling of set7, for the bound-result forms (f5c-f5e): the
+// callee's promise about `a` is identical, only the RETURN shape differs.
+#[trust_vc::requires(a < 10u64)]
+#[trust_vc::ensures(a == 7u64)]
+fn set7_pair(a: &mut u64) -> (u64, u64) {
+    *a = 7u64;
+    (3u64, 4u64)
+}
+
+// GROUP g callees — the `&mut` two-state VOCABULARY spelling of the same
+// promises set7/add1 make in the plain spelling. In an `ensures` the two are
+// EXACT SYNONYMS, so every g caller below must behave exactly like its plain
+// counterpart in group (a)/(b).
+#[trust_vc::requires(a < 10u64)]
+#[trust_vc::ensures(mut_ref_future(a) == 7u64)]
+fn set7_future(a: &mut u64) {
+    *a = 7u64;
+}
+
+// the RELATION spelling, upstream's own
+// (`mut_refs_patterns.rs::side_effects_in_match_arg::add1`,
+// `mut_refs_temporaries.rs`): both endpoints named explicitly, in one clause.
+#[trust_vc::requires(mut_ref_current(b) < 100u64)]
+#[trust_vc::ensures(mut_ref_future(b) == mut_ref_current(b) + 1u64)]
+fn add1_two_state(b: &mut u64) {
+    *b = *b + 1u64;
+}
+
+// the reserved-keyword spelling of the FINAL endpoint.
+#[trust_vc::requires(a < 10u64)]
+#[trust_vc::ensures(final(a) == 7u64)]
+fn set7_final(a: &mut u64) {
+    *a = 7u64;
 }
 
 // contract-less callee: havoc-only at the call site
@@ -314,14 +369,112 @@ fn f4_shared_temp_regression_verified() {
     trust_vc::assert!(x == 5u64);
 }
 
-// expression-position contracted call: the ensures assumption is DROPPED
-// (recording precedes the havoc), so the true post-value claim cannot
-// discharge — fail-closed-incomplete CE, never a wrong-state binding
+// EXPRESSION-POSITION contracted call: the callee `ensures` applies here
+// exactly as it does for the statement-position `set7(&mut v);` neighbour one
+// line away (a1/a2). This used to be the DROPPED case — see the module-doc
+// correction — and it is the decisive half of the pair: same callee, same
+// argument, the only difference is that the result is bound.
 #[trust_vc::ensures(true)]
-fn f5_let_position_ensures_dropped(x: u64) {
+fn f5_let_position_ensures_applied_verified(x: u64) {
     let mut v = 5u64;
     let _r = set7(&mut v);
     trust_vc::assert!(v == 7u64);
+}
+
+// f5's LIAR TWIN: the postcondition is `v == 7`, so `v == 8` must refute. Without
+// it f5 could pass on a vacuous or over-strong hypothesis rather than on the
+// callee's actual promise.
+#[trust_vc::ensures(true)]
+fn f5b_let_position_wrong_value_counterexample() {
+    let mut v = 5u64;
+    let _r = set7(&mut v);
+    trust_vc::assert!(v == 8u64);
+}
+
+// UPSTREAM'S OWN SHAPE (`mut_refs_patterns.rs::side_effects_in_match_arg::test3`):
+// the result is bound by a TUPLE DESTRUCTURING pattern, not a single name. The
+// framing is per CALL, not per binding form, so this must behave exactly like f5.
+#[trust_vc::ensures(true)]
+fn f5c_let_tuple_position_ensures_applied_verified() {
+    let mut v = 5u64;
+    let (_r, _t) = set7_pair(&mut v);
+    trust_vc::assert!(v == 7u64);
+}
+
+// f5c's LIAR TWIN.
+#[trust_vc::ensures(true)]
+fn f5d_let_tuple_position_wrong_value_counterexample() {
+    let mut v = 5u64;
+    let (_r, _t) = set7_pair(&mut v);
+    trust_vc::assert!(v == 8u64);
+}
+
+// f5c's ANTI-VACUITY tripwire, the tuple sibling of f6: an unrelated false
+// claim after the call must still refute.
+#[trust_vc::ensures(true)]
+fn f5e_let_tuple_position_no_vacuity_counterexample() {
+    let mut v = 5u64;
+    let (_r, _t) = set7_pair(&mut v);
+    trust_vc::assert!(1u64 == 2u64);
+}
+
+// The framing moved into the `Stmt::Local` arm, so the DROP DISCIPLINE that
+// guards a statement-position call's `ensures` has to still hold for the bound
+// form. f5f/f5g are the two leak shapes; f5h is the no-over-rejection half.
+//
+// f5f: branch-local call, read AFTER the branch — the postcondition holds only
+// on the taken path and must never leak past it.
+#[trust_vc::ensures(true)]
+fn f5f_let_position_branch_leak_fails_closed(c: bool) {
+    let mut v = 5u64;
+    if c {
+        let _r = set7(&mut v);
+    }
+    trust_vc::assert!(v == 7u64);
+}
+
+// f5g: a loop-body call's `ensures` must not survive a possibly ZERO-TRIP loop.
+#[trust_vc::ensures(true)]
+fn f5g_let_position_loop_leak_fails_closed(n: u64) {
+    let mut v = 5u64;
+    let mut k = 0u64;
+    while k < n {
+        let _r = set7(&mut v);
+        k = k + 1u64;
+    }
+    trust_vc::assert!(v == 7u64);
+}
+
+// f5h: inside the branch the postcondition IS available — the drops above are
+// scoped, not a blanket refusal of the bound form under a path condition.
+#[trust_vc::ensures(true)]
+fn f5h_let_position_branch_inside_verified(c: bool) {
+    let mut v = 5u64;
+    if c {
+        let _r = set7(&mut v);
+        trust_vc::assert!(v == 7u64);
+    }
+}
+
+// f5i/f5j: TWO bound calls in a row. Each call mints its own fresh post-call
+// symbol, so the second `ensures` must constrain the second one (f5i) without
+// the pair manufacturing a contradiction (f5j). A framing that ran twice for one
+// call node — the reason `framed_mut_ref_call_sites` exists — would leave the
+// final symbol unconstrained and f5i would refute.
+#[trust_vc::ensures(true)]
+fn f5i_two_bound_calls_verified() {
+    let mut v = 5u64;
+    let _r = set7(&mut v);
+    let _s = set7(&mut v);
+    trust_vc::assert!(v == 7u64);
+}
+
+#[trust_vc::ensures(true)]
+fn f5j_two_bound_calls_no_vacuity_counterexample() {
+    let mut v = 5u64;
+    let _r = set7(&mut v);
+    let _s = set7(&mut v);
+    trust_vc::assert!(1u64 == 2u64);
 }
 
 // its tripwire: binding the ensures pre-havoc manufactured a contradiction
@@ -381,6 +534,98 @@ fn f9_byvalue_param_nocontract_stale_counterexample(mut p: u64) {
 fn f10_byvalue_param_contracted_verified(mut p: u64) {
     set7(&mut p);
     trust_vc::assert!(p == 7u64);
+}
+
+// ---------- (g) two-state VOCABULARY instantiated at the call site ----------
+
+// g1/g2 are the decisive pair for the vocabulary fix: `set7_future`'s promise is
+// spelled `mut_ref_future(a) == 7`, `set7`'s is the plain `a == 7`, and in an
+// `ensures` those are declared exact synonyms. Before the fix the plain spelling
+// instantiated at a call site and the vocabulary spelling did not — it reached IR
+// lowering unresolved and the whole caller failed to lower. g1 is the a1 chain
+// with the callee's spelling swapped and nothing else changed.
+#[trust_vc::ensures(true)]
+fn g1_future_op_ensures_verified() {
+    let mut v = 5u64;
+    set7_future(&mut v);
+    trust_vc::assert!(v == 7u64);
+}
+
+// g1's LIAR TWIN.
+#[trust_vc::ensures(true)]
+fn g2_future_op_wrong_value_counterexample() {
+    let mut v = 5u64;
+    set7_future(&mut v);
+    trust_vc::assert!(v == 8u64);
+}
+
+// g1's ANTI-VACUITY tripwire: resolving the vocabulary spelling to the WRONG
+// endpoint (the entry value) would assume `v == 5` and `v == 7` of the same
+// symbol and verify anything at all.
+#[trust_vc::ensures(true)]
+fn g3_future_op_no_vacuity_counterexample() {
+    let mut v = 5u64;
+    set7_future(&mut v);
+    trust_vc::assert!(1u64 == 2u64);
+}
+
+// the RELATION spelling: both endpoints in one clause, so a caller that resolved
+// `mut_ref_future` to the entry state would read `b == b + 1` and go vacuous.
+#[trust_vc::ensures(true)]
+fn g4_two_state_relation_verified() {
+    let mut i = 0u64;
+    add1_two_state(&mut i);
+    trust_vc::assert!(i == 1u64);
+}
+
+// g4's LIAR TWIN.
+#[trust_vc::ensures(true)]
+fn g5_two_state_relation_wrong_value_counterexample() {
+    let mut i = 0u64;
+    add1_two_state(&mut i);
+    trust_vc::assert!(i == 2u64);
+}
+
+// g4's ANTI-VACUITY tripwire.
+#[trust_vc::ensures(true)]
+fn g6_two_state_relation_no_vacuity_counterexample() {
+    let mut i = 0u64;
+    add1_two_state(&mut i);
+    trust_vc::assert!(1u64 == 2u64);
+}
+
+// the reserved-keyword `final(..)` spelling reaches the same seam.
+#[trust_vc::ensures(true)]
+fn g7_final_op_ensures_verified() {
+    let mut v = 5u64;
+    set7_final(&mut v);
+    trust_vc::assert!(v == 7u64);
+}
+
+// g7's LIAR TWIN.
+#[trust_vc::ensures(true)]
+fn g8_final_op_wrong_value_counterexample() {
+    let mut v = 5u64;
+    set7_final(&mut v);
+    trust_vc::assert!(v == 8u64);
+}
+
+// BOTH FIXES AT ONCE: the vocabulary spelling in the callee AND a bound result
+// at the call site — upstream's `side_effects_in_match_arg::test3` shape with
+// upstream's own contract vocabulary.
+#[trust_vc::ensures(true)]
+fn g9_two_state_relation_let_binding_verified() {
+    let mut i = 0u64;
+    let _r = add1_two_state(&mut i);
+    trust_vc::assert!(i == 1u64);
+}
+
+// g9's LIAR TWIN.
+#[trust_vc::ensures(true)]
+fn g10_two_state_relation_let_binding_wrong_value_counterexample() {
+    let mut i = 0u64;
+    let _r = add1_two_state(&mut i);
+    trust_vc::assert!(i == 2u64);
 }
 "####;
 
@@ -590,8 +835,53 @@ fn battery_f4_shared_temp_regression_verified() {
 }
 
 #[test]
-fn battery_f5_let_position_ensures_dropped() {
-    assert_never_verifies("f5_let_position_ensures_dropped");
+fn battery_f5_let_position_ensures_applied_verified() {
+    assert_verified("f5_let_position_ensures_applied_verified");
+}
+
+#[test]
+fn battery_f5b_let_position_wrong_value_counterexample() {
+    assert_fails("f5b_let_position_wrong_value_counterexample");
+}
+
+#[test]
+fn battery_f5c_let_tuple_position_ensures_applied_verified() {
+    assert_verified("f5c_let_tuple_position_ensures_applied_verified");
+}
+
+#[test]
+fn battery_f5d_let_tuple_position_wrong_value_counterexample() {
+    assert_fails("f5d_let_tuple_position_wrong_value_counterexample");
+}
+
+#[test]
+fn battery_f5e_let_tuple_position_no_vacuity_counterexample() {
+    assert_fails("f5e_let_tuple_position_no_vacuity_counterexample");
+}
+
+#[test]
+fn battery_f5f_let_position_branch_leak_fails_closed() {
+    assert_never_verifies("f5f_let_position_branch_leak_fails_closed");
+}
+
+#[test]
+fn battery_f5g_let_position_loop_leak_fails_closed() {
+    assert_never_verifies("f5g_let_position_loop_leak_fails_closed");
+}
+
+#[test]
+fn battery_f5h_let_position_branch_inside_verified() {
+    assert_verified("f5h_let_position_branch_inside_verified");
+}
+
+#[test]
+fn battery_f5i_two_bound_calls_verified() {
+    assert_verified("f5i_two_bound_calls_verified");
+}
+
+#[test]
+fn battery_f5j_two_bound_calls_no_vacuity_counterexample() {
+    assert_fails("f5j_two_bound_calls_no_vacuity_counterexample");
 }
 
 #[test]
@@ -619,4 +909,56 @@ fn battery_f9_byvalue_param_nocontract_stale_counterexample() {
 #[test]
 fn battery_f10_byvalue_param_contracted_verified() {
     assert_verified("f10_byvalue_param_contracted_verified");
+}
+
+// ---- (g) two-state vocabulary at the call site ----
+
+#[test]
+fn battery_g1_future_op_ensures_verified() {
+    assert_verified("g1_future_op_ensures_verified");
+}
+
+#[test]
+fn battery_g2_future_op_wrong_value_counterexample() {
+    assert_fails("g2_future_op_wrong_value_counterexample");
+}
+
+#[test]
+fn battery_g3_future_op_no_vacuity_counterexample() {
+    assert_fails("g3_future_op_no_vacuity_counterexample");
+}
+
+#[test]
+fn battery_g4_two_state_relation_verified() {
+    assert_verified("g4_two_state_relation_verified");
+}
+
+#[test]
+fn battery_g5_two_state_relation_wrong_value_counterexample() {
+    assert_fails("g5_two_state_relation_wrong_value_counterexample");
+}
+
+#[test]
+fn battery_g6_two_state_relation_no_vacuity_counterexample() {
+    assert_fails("g6_two_state_relation_no_vacuity_counterexample");
+}
+
+#[test]
+fn battery_g7_final_op_ensures_verified() {
+    assert_verified("g7_final_op_ensures_verified");
+}
+
+#[test]
+fn battery_g8_final_op_wrong_value_counterexample() {
+    assert_fails("g8_final_op_wrong_value_counterexample");
+}
+
+#[test]
+fn battery_g9_two_state_relation_let_binding_verified() {
+    assert_verified("g9_two_state_relation_let_binding_verified");
+}
+
+#[test]
+fn battery_g10_two_state_relation_let_binding_wrong_value_counterexample() {
+    assert_fails("g10_two_state_relation_let_binding_wrong_value_counterexample");
 }

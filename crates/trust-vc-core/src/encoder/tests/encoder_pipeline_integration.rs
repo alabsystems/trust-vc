@@ -224,6 +224,140 @@ fn test_pipeline_datatype_expression_only_result_constructor_verifies() {
 // 2. Fuel encoding: recursive function termination via ay fuel axioms
 // ---------------------------------------------------------------------------
 
+/// Environment variable that tells a child copy of this test binary which
+/// bounded test body to run.
+const BOUNDED_CHILD_ENV: &str = "TRUST_VC_BOUNDED_TEST_CHILD";
+
+/// Resident-memory ceiling for a bounded test's child process.
+const BOUNDED_CHILD_MAX_RSS_KIB: u64 = 2 * 1024 * 1024;
+
+/// Wall-clock ceiling for a bounded test's child process.
+const BOUNDED_CHILD_MAX_WALL: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Resident set size of `pid` in KiB, from `ps`; `None` when it cannot be read.
+fn child_rss_kib(pid: u32) -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Runs `body` in a child copy of this test binary and fails the test if the
+/// child grows past [`BOUNDED_CHILD_MAX_RSS_KIB`] or runs past
+/// [`BOUNDED_CHILD_MAX_WALL`].
+///
+/// A recursive definition whose E-matching expansion outgrows the solver's
+/// limits can take all of the machine's memory before any in-process check
+/// sees it; one such fuel test once reached 65 GB. The child is killed with
+/// SIGKILL at either ceiling, so a regression costs one failed test instead
+/// of the machine. The body, and what it asserts, is unchanged; it runs in
+/// the child exactly as it would in process.
+#[track_caller]
+fn run_bounded_in_child(test_name: &str, body: impl FnOnce()) {
+    if std::env::var_os(BOUNDED_CHILD_ENV).is_some_and(|name| name == test_name) {
+        body();
+        return;
+    }
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let exact = format!("{module}::{test_name}");
+    let exe = std::env::current_exe().expect("test binary path for the bounded child");
+    let mut child = std::process::Command::new(exe)
+        .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
+        .env(BOUNDED_CHILD_ENV, test_name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the bounded child test process");
+    let drain = |stream: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut text = String::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_string(&mut text);
+            }
+            text
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let started = std::time::Instant::now();
+    let mut peak_kib = 0u64;
+    let outcome = loop {
+        if let Some(status) = child.try_wait().expect("poll the bounded child") {
+            break Ok(status);
+        }
+        peak_kib = peak_kib.max(child_rss_kib(child.id()).unwrap_or(0));
+        let over = if peak_kib > BOUNDED_CHILD_MAX_RSS_KIB {
+            Some(format!("resident memory {peak_kib} KiB"))
+        } else if started.elapsed() > BOUNDED_CHILD_MAX_WALL {
+            Some(format!("wall time {:?}", started.elapsed()))
+        } else {
+            None
+        };
+        if let Some(over) = over {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(over);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    match outcome {
+        Ok(status) if status.success() && stdout.contains("1 passed") => {}
+        Ok(status) => {
+            panic!("{test_name} failed in its bounded child ({status}):\n{stdout}\n{stderr}")
+        }
+        Err(over) => panic!(
+            "{test_name} was killed at its ceiling: {over} (limits {BOUNDED_CHILD_MAX_RSS_KIB} \
+             KiB, {BOUNDED_CHILD_MAX_WALL:?})\n{stdout}\n{stderr}"
+        ),
+    }
+}
+
+/// A context holding the spec function `name(n: i32) -> i32` and its body
+/// axiom `name(n) == body`, triggered on `name(n)`.
+fn recursive_i32_fn_ctx(name: &str, body: &str) -> VerificationContext {
+    let mut ctx = VerificationContext::new();
+    ctx.declare_var_typed("n", TrustVcType::parse_or_opaque("i32"));
+
+    ctx.set_function_context(FunctionContext {
+        name: name.to_string(),
+        params: vec![("n".to_string(), TrustVcType::from_str("i32").unwrap())],
+        return_type: TrustVcType::from_str("i32").unwrap(),
+        is_recursive: true,
+        mode: crate::mode::FunctionMode::Spec,
+        trait_bounds: vec![],
+    });
+
+    ctx.obligations.push(
+        ProofObligation::broadcast_assume(
+            format!("__body_axiom_{name}"),
+            format!("{name}(n) == {body}"),
+        )
+        .with_bound_vars(vec!["n".to_string()])
+        .with_trigger_patterns(vec![vec![format!("{name}(n)")]]),
+    );
+    ctx
+}
+
+const FACT_BODY: &str = "{ if n == 0 { 1 } else { n * fact(n - 1) } }";
+const FIB_BODY: &str =
+    "{ if n == 0 { 0 } else { if n == 1 { 1 } else { fib(n - 1) + fib(n - 2) } } }";
+
 /// End-to-end: factorial base case through full pipeline.
 ///
 /// Exercises: fuel.rs encode_fuel_axioms -> direct defining axiom emission ->
@@ -233,34 +367,26 @@ fn test_pipeline_datatype_expression_only_result_constructor_verifies() {
 /// exactly one E-matching round to unfold.
 #[test]
 fn test_pipeline_fuel_factorial_base_case_verifies() {
-    let mut ctx = VerificationContext::new();
-    ctx.declare_var_typed("n", TrustVcType::parse_or_opaque("i32"));
-
-    ctx.set_function_context(FunctionContext {
-        name: "fact".to_string(),
-        params: vec![("n".to_string(), TrustVcType::from_str("i32").unwrap())],
-        return_type: TrustVcType::from_str("i32").unwrap(),
-        is_recursive: true,
-        mode: crate::mode::FunctionMode::Spec,
-        trait_bounds: vec![],
+    run_bounded_in_child("test_pipeline_fuel_factorial_base_case_verifies", || {
+        let mut ctx = recursive_i32_fn_ctx("fact", FACT_BODY);
+        ctx.push_obligation(ProofObligation::assert("fact_0", "fact(0) == 1"));
+        expect_verified(
+            &AYEncoder::verify(&ctx),
+            "fact(0) == 1 should verify (base case, 1 E-matching round)",
+        );
     });
+}
 
-    ctx.obligations.push(
-        ProofObligation::broadcast_assume(
-            "__body_axiom_fact",
-            "fact(n) == { if n == 0 { 1 } else { n * fact(n - 1) } }",
-        )
-        .with_bound_vars(vec!["n".to_string()])
-        .with_trigger_patterns(vec![vec!["fact(n)".to_string()]]),
-    );
-
-    // Base case: fact(0) == 1, requires 1 E-matching round
-    ctx.push_obligation(ProofObligation::assert("fact_0", "fact(0) == 1"));
-
-    let result = AYEncoder::verify(&ctx);
-    expect_verified(
-        &result,
-        "fact(0) == 1 should verify (base case, 1 E-matching round)",
+/// Refuted twin of [`test_pipeline_fuel_factorial_base_case_verifies`].
+#[test]
+fn test_pipeline_fuel_factorial_base_case_wrong_value_not_verified() {
+    run_bounded_in_child(
+        "test_pipeline_fuel_factorial_base_case_wrong_value_not_verified",
+        || {
+            let mut ctx = recursive_i32_fn_ctx("fact", FACT_BODY);
+            ctx.push_obligation(ProofObligation::assert("fact_0", "fact(0) == 2"));
+            expect_not_verified(&AYEncoder::verify(&ctx), "fact(0) == 2 is false");
+        },
     );
 }
 
@@ -269,38 +395,34 @@ fn test_pipeline_fuel_factorial_base_case_verifies() {
 /// Exercises: fuel.rs encode_fuel_axioms -> direct defining axiom ->
 /// multi-round E-matching chaining (fact(5) needs 5 unfoldings).
 ///
-/// fact(5) = 5*4*3*2*1 = 120. With MAX_EMATCHING_ROUNDS = 8, 5 unfoldings
-/// are within reach.
+/// fact(5) = 5*4*3*2*1 = 120. Five unfoldings are well within ay's
+/// E-matching round limit.
 #[test]
 fn test_pipeline_fuel_factorial_small_concrete_verifies() {
-    let mut ctx = VerificationContext::new();
-    ctx.declare_var_typed("n", TrustVcType::parse_or_opaque("i32"));
-
-    ctx.set_function_context(FunctionContext {
-        name: "fact".to_string(),
-        params: vec![("n".to_string(), TrustVcType::from_str("i32").unwrap())],
-        return_type: TrustVcType::from_str("i32").unwrap(),
-        is_recursive: true,
-        mode: crate::mode::FunctionMode::Spec,
-        trait_bounds: vec![],
-    });
-
-    ctx.obligations.push(
-        ProofObligation::broadcast_assume(
-            "__body_axiom_fact",
-            "fact(n) == { if n == 0 { 1 } else { n * fact(n - 1) } }",
-        )
-        .with_bound_vars(vec!["n".to_string()])
-        .with_trigger_patterns(vec![vec!["fact(n)".to_string()]]),
+    run_bounded_in_child(
+        "test_pipeline_fuel_factorial_small_concrete_verifies",
+        || {
+            let mut ctx = recursive_i32_fn_ctx("fact", FACT_BODY);
+            // fact(5) == 120: needs 5 E-matching rounds
+            ctx.push_obligation(ProofObligation::assert("fact_5", "fact(5) == 120"));
+            expect_verified(
+                &AYEncoder::verify(&ctx),
+                "fact(5) == 120 should verify (5 E-matching rounds, within fuel limit)",
+            );
+        },
     );
+}
 
-    // fact(5) == 120: needs 5 E-matching rounds (within limit of 8)
-    ctx.push_obligation(ProofObligation::assert("fact_5", "fact(5) == 120"));
-
-    let result = AYEncoder::verify(&ctx);
-    expect_verified(
-        &result,
-        "fact(5) == 120 should verify (5 E-matching rounds, within fuel limit)",
+/// Refuted twin of [`test_pipeline_fuel_factorial_small_concrete_verifies`].
+#[test]
+fn test_pipeline_fuel_factorial_small_concrete_wrong_value_not_verified() {
+    run_bounded_in_child(
+        "test_pipeline_fuel_factorial_small_concrete_wrong_value_not_verified",
+        || {
+            let mut ctx = recursive_i32_fn_ctx("fact", FACT_BODY);
+            ctx.push_obligation(ProofObligation::assert("fact_5", "fact(5) == 121"));
+            expect_not_verified(&AYEncoder::verify(&ctx), "fact(5) == 121 is false");
+        },
     );
 }
 
@@ -311,37 +433,33 @@ fn test_pipeline_fuel_factorial_small_concrete_verifies() {
 /// through both branches of the recursion tree.
 ///
 /// fib(0)=0, fib(1)=1, fib(5)=5 needs: fib(5)=fib(4)+fib(3),
-/// fib(4)=fib(3)+fib(2), etc. The tree flattens to ~5 distinct calls.
+/// fib(4)=fib(3)+fib(2), etc. The tree flattens to ~5 distinct calls. The
+/// symbolic `fib(n)` terms in the context also seed the axiom, and each of
+/// their unfoldings mints two more calls; this is the test that once ran the
+/// solver out of memory, hence the bounded child.
 #[test]
 fn test_pipeline_fuel_fibonacci_concrete_verifies() {
-    let mut ctx = VerificationContext::new();
-    ctx.declare_var_typed("n", TrustVcType::parse_or_opaque("i32"));
-
-    ctx.set_function_context(FunctionContext {
-        name: "fib".to_string(),
-        params: vec![("n".to_string(), TrustVcType::from_str("i32").unwrap())],
-        return_type: TrustVcType::from_str("i32").unwrap(),
-        is_recursive: true,
-        mode: crate::mode::FunctionMode::Spec,
-        trait_bounds: vec![],
+    run_bounded_in_child("test_pipeline_fuel_fibonacci_concrete_verifies", || {
+        let mut ctx = recursive_i32_fn_ctx("fib", FIB_BODY);
+        // fib(5) == 5: exercises multi-recursive unfolding
+        ctx.push_obligation(ProofObligation::assert("fib_5", "fib(5) == 5"));
+        expect_verified(
+            &AYEncoder::verify(&ctx),
+            "fib(5) == 5 should verify with multi-recursive E-matching chaining",
+        );
     });
+}
 
-    ctx.obligations.push(
-        ProofObligation::broadcast_assume(
-            "__body_axiom_fib",
-            "fib(n) == { if n == 0 { 0 } else { if n == 1 { 1 } else { fib(n - 1) + fib(n - 2) } } }",
-        )
-        .with_bound_vars(vec!["n".to_string()])
-        .with_trigger_patterns(vec![vec!["fib(n)".to_string()]]),
-    );
-
-    // fib(5) == 5: exercises multi-recursive unfolding
-    ctx.push_obligation(ProofObligation::assert("fib_5", "fib(5) == 5"));
-
-    let result = AYEncoder::verify(&ctx);
-    expect_verified(
-        &result,
-        "fib(5) == 5 should verify with multi-recursive E-matching chaining",
+/// Refuted twin of [`test_pipeline_fuel_fibonacci_concrete_verifies`].
+#[test]
+fn test_pipeline_fuel_fibonacci_concrete_wrong_value_not_verified() {
+    run_bounded_in_child(
+        "test_pipeline_fuel_fibonacci_concrete_wrong_value_not_verified",
+        || {
+            let mut ctx = recursive_i32_fn_ctx("fib", FIB_BODY);
+            ctx.push_obligation(ProofObligation::assert("fib_5", "fib(5) == 6"));
+            expect_not_verified(&AYEncoder::verify(&ctx), "fib(5) == 6 is false");
+        },
     );
 }
 

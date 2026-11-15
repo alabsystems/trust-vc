@@ -1,4 +1,4 @@
-# trust-vc v0.3
+# trust-vc
 
 trust-vc is the **proof-calculus and SMT backend of Trust** (the Trust rustc
 fork), where it lives as the `first-party/trust-vc` submodule. It consumes
@@ -16,10 +16,10 @@ Verus-compatibility driver targets. The 156-file Verus corpus under
 measures parity against it.
 
 > North-star design: `design-trust-proof-backend.md` (Trust proof backend).
-> `design-rustc-driver-frontend.md` (the Verus-compat front end) is
+> `docs/archive/design-rustc-driver-frontend.md` (the Verus-compat front end) is
 > historical — superseded at R1 (2026-07-11).
 
-**Author:** Andrew Yates <andrewyates.name@gmail.com> · **Version:** 0.4.0 · **License:** Apache-2.0
+**Author:** Andrew Yates <andrewyates.name@gmail.com> · **License:** Apache-2.0
 **Copyright:** 2026 Andrew Yates
 
 ## What trust-vc Does
@@ -183,8 +183,38 @@ inventory lives in `crates/trust-vc/src/lib.rs`.
 `#[trust_vc::protocol]`, `#[trust_vc::action]`, `#[trust_vc::safety]` and
 `#[trust_vc::liveness]` are a legacy experimental bridge to TY protocol state
 machines. The macros always compile; the model-checking backend is behind the
-`ty` feature. Protocol verification is not on the active trust-vc roadmap —
-strategic ownership lives in `trust-mc` / `tRust`.
+`ty` feature, and it runs the `ty` binary (`TRUST_VC_TY_BIN`, else `ty` on
+`PATH`) rather than linking ty: a `ty` whose run does not advertise
+`check-json-contract-v2`, `check-exact-source-v2`, `check-enabled-contract-v1`,
+`check-no-cache-v1` and `check-exit-incomplete-v1`, or that advertises the
+retired `check-json-contract-v1` or `check-exact-source-v1`, is refused,
+whatever its version. Protocol verification is not on the active trust-vc roadmap —
+strategic ownership lives in `trust-mc` / `tRust`. State fields are `bool` or
+fixed-width integers, by the type Rust resolves for the field (through any
+alias), and action and safety bodies are translated from a closed, typed
+subset of Rust (`crates/trust-vc-core/src/protocol/rust_expr.rs` lists it);
+anything outside it is refused, and an integer overflow in a body is reported
+as a violation. An action is early returns `if <bool> { return; }`, which
+disable it where they return, followed by assignments `self.field = value`; a
+bare `bool` statement is refused, since Rust evaluates it and runs on. The
+model starts from the struct's `Default::default()`, as Rust builds it (a
+user `impl Default` included); a struct without `Default`, or whose
+`Default::default()` returns two different states, is refused.
+`Struct::__trust_vc_register_protocol()` selects a protocol, and its model
+holds every `#[action]`, `#[safety]` and `#[liveness]` declared for that
+struct type in a crate linked into the program, whether or not its function
+runs and whatever `cfg` that crate was built with; a component with a
+receiver must be a method of the struct it names, and its other attributes
+are limited to ones that leave its body as written (doc comments, lint
+levels, `cfg`, `inline`, `cold`, `must_use`, `track_caller`, `deprecated`,
+`rustfmt::`/`clippy::`): an attribute macro below it could change what Rust
+runs after the model read the body. What a `Verified` covers is every state
+reachable from `Default::default()` through those `#[action]` functions, as
+compiled for the run that registers the protocol; a field changed any other
+way (a method without `#[action]`, a struct literal, a write to a `pub`
+field) is outside the model. A raw `ProtocolObligation`'s config may only
+select what is checked: `INIT`, `NEXT`, `INVARIANT`, `PROPERTY` and
+`CHECK_DEADLOCK` lines, one name each.
 
 ### Ghost Types (trust-vc-types)
 
@@ -199,7 +229,7 @@ structural induction.
 | `Map<K,V>` | `Array(K, V)` | `get()`, `insert()`, `contains_key()`, `dom()` |
 | `Multiset<T>` | `Array(T, Int)` | `count()`, `insert()`, `remove()`, `union()`, `intersect()` |
 | `Ghost<T>` | unwrapped `T` | `view()` — extract ghost value in spec context |
-| `Tracked<T>` | unwrapped `T` | Linear/affine ghost ownership for proof mode |
+| `Tracked<T>` | unwrapped `T` | Ghost ownership for proof mode (linear permission threading is not enforced yet) |
 | `Proph<T>` | unwrapped `T` | Prophecy variables for future-value reasoning in proof mode |
 | `List<T>` | UF datatype (Nil/Cons) | Recursive linked list for structural induction |
 | `Tree<T>` | UF datatype (Leaf/Branch) | Recursive binary tree for structural induction |
@@ -209,23 +239,59 @@ structural induction.
 
 ## Current Status
 
+**What "done" means.** The completion bar is Verus's capability list, used as
+a checklist: every Verus verification capability supported by trust-vc at
+"full or superior" power, with the Trust toolchain discharging its proof
+obligations through trust-vc and trust-vc discharging them on ay (owner
+direction, 2026-09-17). The project's internal capability audit rates 219
+capability rows; measured 2026-09-17: 54 full, 6 superior, 105 partial, 50
+missing, 4 not applicable — 60 of 219 full or superior. Concurrency (ghost
+permissions, invariants, atomics, state machines) is in scope as of the same
+date.
+
 **Verus replacement: not proven.** `evals/verus/verus-tests.json` pins 156
 upstream Verus test files — **46 `ported`, 106 `unsupported-gap`, 4
-`not-applicable`**. `unsupported-gap` is a failing classification under the
-manifest's own gate, so `replacement_verdict` is `not_proven` and stays that way
-until every entry is `ported` or `not-applicable` *and* the full trust-vc,
-upstream-Verus and corpus gates pass from a clean worktree. The feature tables
-above describe **in-repo surface, not corpus acceptance** — do not read a broad
-feature list as Verus parity. The gate is the source of truth.
+`not-applicable`** (measured 2026-09-17). `unsupported-gap` is a failing
+classification under the manifest's own gate, so `replacement_verdict` is
+`not_proven` and stays that way until every entry is `ported` or
+`not-applicable` *and* the full trust-vc, upstream-Verus and corpus gates pass
+from a clean worktree. The feature tables above describe **in-repo surface, not
+corpus acceptance** — do not read a broad feature list as Verus parity. The
+gate is the source of truth for the corpus; it is a diagnostic, not the
+completion bar above.
 
-**Scale.** About 922k lines of Rust across the 11 workspace crates (source and
-tests), including 900+ integration test files and compile-fail tests via
-trybuild.
+**Toolchain and verification posture.** `rust-toolchain.toml` pins
+`channel = "trust"`, and the Trust compiler's typed verification pipeline is ON
+by default (`-Ztrust-verify=on`) under the `strict` policy. trust-vc is the
+verifier *tool* — its `trust-vc-driver` crate is a rustc-driver linking
+`rustc_private` — not a verification target, so building it is not a
+verification run. The development tree therefore
+commits **no blanket off-switch**: `.cargo/config.toml` sets no
+`build.rustflags` at all, and targo injects `-Ztrust-verify=off` per unit once
+the caller has explicitly selected a lane (`targo --unverified build`). The
+published snapshot is the same since 2026-09-28: its `.cargo/config.toml` sets
+no verification flags either, so build it with `targo --unverified build` (the
+Trust toolchain ships `targo`; install [aterm](https://github.com/alabsystems/aterm#install)
+and atpkg installs Trust). A lane-less `cargo check` is a
+verification-ON run of every unit: measured 2026-08-30, it stops inside
+third-party units before reaching first-party code — the `quote` and
+`proc-macro2` build scripts and `unicode-ident` — and the `unicode-ident`
+failures are completeness gaps (`unknown`), not refutations. Verifying trust-vc
+under its own toolchain stays the separate, explicit `targo trust-vc evidence`
+lane; a build gate is not a verification claim. Since 2026-09-11 the release
+gate itself verifies, in the advisory lane:
+`targo trust check --allow-l0-gaps --locked --workspace` (Level 0 refutations
+are reported as warnings and unknowns are tolerated), then the kernel's
+unverified-lane unit tests, then `targo tippy -- -D warnings`.
+
+**Scale.** About 955k lines of tracked Rust across the 11 workspace crates
+(source and tests; measured 2026-09-17), including 773 top-level integration
+test files and compile-fail tests via trybuild.
 
 **No CI.** There is no `.github/workflows`; every gate is local.
 `targo trust-vc gate` runs fmt, clippy, test, examples, evidence triage and a
-fuzz smoke in one command; `scripts/quality_audit.py`, `scripts/stock-harness.sh`
-and `scripts/merge_parity_gate.py` run individually. Test health is therefore not
+fuzz smoke in one command; `scripts/quality_audit.py` and
+`scripts/merge_parity_gate.py` run individually. Test health is therefore not
 enforced on push — run the gate locally before relying on a checkout.
 
 ### Replacement Evidence
@@ -363,55 +429,51 @@ Subcommands: `check`, `gate`, `fuzz`, `evidence`, `suggest`, `new`,
 `--features`, …) stays on the cargo subcommand. `trust-vc` never silently
 ignores a flag: it names the one you passed and the one to use instead.
 
-## Running proofs on STOCK rustc (no Trust fork — minutes, not hours)
+## Running the native-proof harness
 
 The trust-vc verification **engine** (`trust-vc-core` + the `trust_vc` proc
 macros + the `ay` SMT solver crates) has **no `rustc_private` dependency and no
 `#![feature(...)]`**: `verify_function_from_file` parses the proof fixture itself
-and runs the AY engine + trust-vc-kernel, all pure Rust. Only the separate
-`trust-vc-driver` rustc-driver links `rustc_private` and needs the Trust
-rustc-fork stage2 (an hours-long build). The native-deductive proof harness does
-**not** use the driver, so it builds and runs on stock/homebrew rustc in well
-under a minute.
-
-Use the committed runner — it handles the stock-rustc flag override for you:
+and runs the AY engine + trust-vc-kernel, all pure Rust. The native-deductive
+proof drivers therefore build and run in the Trust toolchain's unverified
+lane:
 
 ```bash
-scripts/stock-harness.sh                       # curated AY real-fixture suite
-scripts/stock-harness.sh --all                 # every ay_* native-proof driver
-scripts/stock-harness.sh ay_incumbent_vig_realbody   # one proof target
+# one proof target
+targo --unverified test --locked -p trust-vc-core --test ay_incumbent_vig_realbody
+# the curated AY real-fixture suite
+targo --unverified test --locked -p trust-vc-core \
+  --test ay_eval_verdict_realbody --test ay_optimum_floor_realbody \
+  --test ay_incumbent_vig_realbody --test ay_incumbent_accept_composite \
+  --test ay_verdict_chain
 ```
 
-Equivalently, by hand:
-
-```bash
-RUSTC=/opt/homebrew/bin/rustc RUSTFLAGS="" /opt/homebrew/bin/cargo test \
-  -p trust-vc-core --test ay_incumbent_vig_realbody --locked
-```
-
-Both overrides leave the Trust-toolchain path untouched. `RUSTC` matters because
-homebrew `cargo` ignores `rust-toolchain.toml`'s `channel = "trust"` but still
-resolves `rustc` from `PATH`, where the rustup shim — which honors that pin, and
-fails whenever the toolchain is absent or mid-rebuild — usually shadows
-homebrew's. `RUSTFLAGS=""` clears ambient Trust-only `-Z` flags that stock rustc
-would reject (the committed `.cargo/config.toml` no longer sets
-`build.rustflags`; Targo injects its own per-unit off-switch). Dependencies stay
-on the exact revisions in `Cargo.lock` — no redirect to mutable local checkouts.
-On a rustup `stable`, `cargo +stable` (or `RUSTUP_TOOLCHAIN=stable`) handles both
-halves at once. The script picks the homebrew cargo automatically and isolates
-artifacts in `target-stock/`.
+Only `trust-vc-driver`'s `rustc-driver` feature links `rustc_private`, and the
+Trust sysroot serves that too:
+`targo --unverified test --locked -p trust-vc-driver --features rustc-driver`.
+(The stock-rustc harness that stood here, `scripts/stock-harness.sh`, was
+removed on 2026-09-28: ALab builds with the Trust toolchain only.)
 
 ## False-Verified Fuzzing
 
-The cargo-fuzz suite for contradictory postconditions lives under `fuzz/` and
+The libFuzzer suite for contradictory postconditions lives under `fuzz/` and
 exercises the VC extraction plus encoder path. Targets: `ensures_false`,
 `strict_inequality`, `mode_crossing`, `collections_contradiction`.
 
 ```bash
-targo trust-vc fuzz                     # every target, 30s each (needs cargo-fuzz)
+targo trust-vc fuzz                     # every target, 30s each, via fuzz/run.sh
 targo trust-vc fuzz ensures_false --time 900
+fuzz/run.sh ensures_false -max_total_time=60              # one target directly
 targo --unverified test --manifest-path fuzz/Cargo.toml   # the targets' own tests
 ```
+
+The fuzzers run on the Trust toolchain: `fuzz/run.sh` builds each target with
+`targo --unverified build` and cargo-fuzz's coverage instrumentation, not
+through cargo-fuzz (whose build spawns a bare `cargo` from PATH), and without a
+sanitizer, because the Trust sysroot ships no sanitizer runtime (measured
+2026-09-28: `ld: library 'rustc-trust_rt.asan' not found`). Only an
+AddressSanitizer build is the stock-nightly exception described in
+`fuzz/README.md`.
 
 ## Documentation
 

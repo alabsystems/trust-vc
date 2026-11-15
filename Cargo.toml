@@ -9,20 +9,23 @@ members = [
   "crates/cargo-trust-vc",
   "crates/trust-vc",
   "crates/trust-vc-core",
+  "crates/trust-vc-bitvector",
   "crates/trust-vc-driver",
   "crates/trust-vc-kernel",
   "crates/trust-vc-merge-contract",
   "crates/trust-vc-merge-runner",
   "crates/trust-vc-oracle",
+  "crates/trust-vc-rustc",
   "crates/trust-vc-std",
   "crates/trust-vc-trust-engine",
   "crates/trust-vc-types",
+  "crates/trust-vc-vcir",
 ]
 exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alabsystems/trust-vc"
@@ -30,6 +33,7 @@ authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 
 # Centralized dependencies.
 [workspace.dependencies]
+trust-vc-bitvector = { path = "crates/trust-vc-bitvector" }
 # Owned dependency stack consumed as git deps so trust-vc builds standalone from
 # any location. A single git source per crate avoids duplicate package
 # identities.
@@ -40,28 +44,40 @@ authors = ["Andrew Yates <andrewyates.name@gmail.com>"]
 # names the dev tier. Publication remaps an attested dev revision to the
 # corresponding public snapshot; never guess that mapping here.
 #
-# Pinned to a 40-HEX SHA — never a tag or branch=main — so the evidence gate's
-# "common ay pin" check resolves one immutable provenance. The `version` req
-# must MOVE WITH ay on every bump: cargo checks a [patch]ed source against it,
-# and a stale req silently drops the sibling patch and resolves the git pin.
-# (`+g<sha>` build metadata does NOT help — cargo ignores build metadata when
-# matching versions; only a MINOR bump makes a mismatch fail loudly.)
-#
-# NOTE: committed `.cargo/config.toml` [patch]es all four to the sibling `../ay`
-# checkout, so local builds compile that worktree. The evidence gate preserves
-# BOTH authorities and requires the clean sibling HEAD to equal this exact rev.
-# Bump all four rows and the version together with the sibling identity.
-ay-core = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
-ay-dpll = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
-ay-frontend = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
-ay-sys = { version = "0.19.0", git = "https://github.com/alabsystems/ay.git", rev = "419bc211ca4b95c04e0c63896389a2d1ad54dc32" }
-# ty and trust-ir are rev-pinned (not branch=main) for reproducible standalone
-# builds. ty's internal tla-ir -> trust-ir-build dependencies still name
-# trust-ir's main branch, so Cargo.lock must pin those branch sources to the
-# same trust-ir commit as the direct dependency. Update both sources together.
-tla-core = { git = "https://github.com/alabsystems/ty.git", rev = "a13fc3bcca38a65e2be43aeb97086b6cd649dc76" }
-tla-check = { git = "https://github.com/alabsystems/ty.git", rev = "a13fc3bcca38a65e2be43aeb97086b6cd649dc76" }
-trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "036e1ea8a3994b0eeb826c88e6116cf076560aea", default-features = false, features = ["clean-expr"] }
+# Pinned to one immutable canonical Git revision. Move the package version and
+# all four revisions together; Cargo.lock records that same Git source for the
+# complete AY closure. Normal resolution uses Cargo's authenticated checkout,
+# without a sibling-worktree redirect.
+ay-core = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
+ay-dpll = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
+ay-frontend = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
+ay-sys = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
+# trust-ir is rev-pinned (not branch=main) for reproducible standalone builds;
+# its three legs below move together. No ty crate is linked: the protocol
+# lane runs the `ty` binary (`trust-vc-core/src/protocol/`).
+trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87", default-features = false, features = ["clean-expr"] }
+# The PRODUCER's own validator, used by the discharge lane as an INPUT GATE.
+# `trust-ir-build::validate_module` is the well-formedness authority for the
+# format this crate consumes; adversarial review rounds 1-4 each found a
+# false-`Discharged` path whose shape that validator ALREADY rejects. Running it
+# on every incoming bundle closes the class instead of the instance. Unlike
+# `trust-ir-contract` below, this is NOT a dev-dependency: the gate must run in
+# the shipped library, and Trust's `[patch]` tables already cover `trust-ir-build`
+# (see the note below), so it introduces no second package identity there.
+# Keep the rev byte-identical to `trust-ir`'s: two revs would give the validator
+# a different `Module` type than the one it validates.
+# trust-vc-trust-engine also calls its `coverage_establishment_report` (basis K
+# only) so that release admission of a certificate's coverage is DERIVED from
+# the kernel replay of that very certificate by trust-ir-build's own rule, never
+# read from a producer-written row and never re-implemented here. It enables
+# `trust-ir/fmt` (the obligation/context digests) itself. Its default
+# `clean-tv-anchor` feature is needed: without it the Clean-kernel contract
+# re-check always fails closed, so neither the input gate nor basis K could
+# accept a CleanCic certificate that does re-check.
+trust-ir-build = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87" }
+# The native engine decodes the shared question with the IR-owned Formula/Sort
+# codec. Keep the exact source identical to trust-ir and trust-ir-build above.
+trust-ir-contract = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87" }
 
 # BigInt for 128-bit bitvector constants
 num-bigint = "0.4"
@@ -85,8 +101,7 @@ trust-vc-types = { path = "crates/trust-vc-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-rustdoc-json-stable = "0.9.7"
-rustdoc-types = "0.57.3"
+rustdoc-types = "0.60.0"
 libc = "0.2"
 
 # Logging
@@ -121,26 +136,19 @@ incremental = true
 # cost under an unoptimized dev build turns minutes-long test suites into
 # hours. The solver is the inner loop of every verification — always compile
 # it (and its bignum substrate) optimized, dev profile included.
-[profile.dev.package.ay-core]
-opt-level = 3
-[profile.dev.package.ay-dpll]
-opt-level = 3
-[profile.dev.package.ay-frontend]
-opt-level = 3
-[profile.dev.package.ay-sys]
-opt-level = 3
-[profile.dev.package.num-bigint]
+# MEASURED 2026-09-16 (solver-red capture, ledger row of that date): naming only
+# the four ay façade crates plus num-bigint left every OTHER crate of the ay
+# stack (ay-sat, ay-proof, ay-theories, ay-model-check, …) at opt-level 0 in
+# dev/test builds — the bit-blasted QF_BV obligations (multiplication-overflow
+# and division checks) then ran 10-100× slower than the same query through a
+# release `ay` CLI and tripped the 30 s wall. ay's own workspace compiles all
+# non-member packages optimized (`[profile.dev.package."*"]`); do the same
+# here. Build-config only: no semantic effect on any verdict.
+[profile.dev.package."*"]
 opt-level = 3
 
 [profile.release]
 strip = "debuginfo"
-
-# Cross-repo co-development override: the sibling [patch] redirects for the Git
-# deps above are committed in `.cargo/config.toml`. Every build therefore needs
-# the authenticated sibling checkout; the evidence gate binds its clean HEAD to
-# the exact manifest authority. Keep the patch key byte-aligned with the Git
-# source and the version in step with the sibling so Cargo retains one direct
-# package identity instead of silently dropping the patch.
 
 [workspace.metadata.atpkg]
 # The user-facing commands here, both produced by crate cargo-trust-vc and both
@@ -167,3 +175,9 @@ expose = ["cargo-trust-vc", "trust-vc"]
 # ship. `-p cargo-trust-vc` produces BOTH exposed bins — they are two targets of
 # that one package.
 build-args = ["-p", "targo-trust-vc"]
+
+# Trust: policy for `targo trust` over this workspace.
+[trust]
+# No budget key: Trust retired `function_budget_ms` (its DECISION_QUEUE
+# BUDGET-1a; Trust 0.11.0 refuses the key here as an unknown field), so a
+# `targo trust` run of this workspace uses the toolchain's builtin clocks.

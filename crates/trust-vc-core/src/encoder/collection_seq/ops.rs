@@ -7,6 +7,7 @@
 //! Sequence-level transforms (shift, reverse, no_duplicates, concat) are in
 //! `seq_transforms.rs` (#2621).
 
+use crate::encoder::width_coercion::OwnSign;
 use ay_dpll::api::{Sort, Term};
 
 use super::super::AstExpressionParser;
@@ -17,13 +18,14 @@ const FIXED_ARRAY_CONTAINS_UNROLL_LIMIT: usize = 64;
 const FILTER_CONTAINS_UNROLL_LIMIT: usize = 2;
 
 impl<'a> AstExpressionParser<'a> {
-    /// Encode Seq::contains(value) with an Int-sorted existential witness.
+    /// Encode Seq::contains(value) with an Int-sorted witness.
     ///
-    /// Encoding:
+    /// Meaning (for a symbolic length; see `encode_seq_contains_quantified`
+    /// for the exact term spelling, which is the negated guarded universal):
     ///   exists i: Int.
     ///     0 <= i < bv2int(len) && select(seq, int2bv(i, pw)) == value
     ///
-    /// This avoids BV-sorted existentials, which are unsound in ay-dpll E-matching (#1757).
+    /// This avoids BV-sorted quantifiers, which are unsound in ay-dpll E-matching (#1757).
     pub(in crate::encoder) fn encode_seq_contains(
         &mut self,
         receiver: Term,
@@ -94,7 +96,6 @@ impl<'a> AstExpressionParser<'a> {
                 .map_err(|e| e.to_string())?;
             if let Some(info) = self.element_width_info(receiver, receiver_name) {
                 self.term_widths.insert(candidate, info);
-                self.term_widths.entry(value).or_insert(info);
             }
             let (candidate, coerced_value) = self.coerce_bv_widths(candidate, value)?;
             value = coerced_value;
@@ -202,7 +203,6 @@ impl<'a> AstExpressionParser<'a> {
                 .map_err(|e| e.to_string())?;
             if let Some(info) = self.element_width_info(receiver, receiver_name) {
                 self.term_widths.insert(candidate, info);
-                self.term_widths.entry(value).or_insert(info);
             }
             let (candidate, coerced_value) = self.coerce_bv_widths(candidate, value)?;
             value = coerced_value;
@@ -280,11 +280,80 @@ impl<'a> AstExpressionParser<'a> {
             .solver
             .try_eq(element, value)
             .map_err(|e| e.to_string())?;
-        let body = self.solver.try_and(range, eq).map_err(|e| e.to_string())?;
+        // SPELLING: `contains` is built as `not (forall i. range => element != value)`,
+        // the exact negation-normal dual of `exists i. range && element == value`
+        // (the two are logically equivalent: `not forall i. not P  <=>  exists i. P`,
+        // and `range => not eq` is `not (range && eq)`). The spelling matters
+        // because ay's term constructor eliminates double negation, so EVERY
+        // negation site — a `!s.contains(v)` hypothesis, the verifier's negated
+        // goal, De Morgan through `&&`/`||` — gets the guarded universal itself,
+        // never `(not (exists ..))`. Measured 2026-09-14 against the ay 0.26.0
+        // sibling API (64- and 32-bit carriers): `(not (exists i. range && s[i] == 9))`
+        // is `unknown (incomplete)` with or without the ground seed and even with
+        // `len == 0` asserted, while `(forall i. range => s[i] != 9)` is `sat`
+        // (model validated) in both cases; the hypothesis/goal pair
+        // `exists` + `not exists` is `unknown (incomplete)` where `not forall` +
+        // `forall` is `unsat`. The positive occurrence `not (forall ..)` behaves
+        // as the existential did (skolemized: `sat` without the seed,
+        // `unknown (incomplete)` next to it, `unsat` against its dual).
+        //
+        // SCOPE of that "EVERY": it is a claim about the TERM ay receives, not
+        // about what ay can decide. Reaching the solver as the guarded universal
+        // is necessary but NOT sufficient — measured 2026-09-16, De Morgan
+        // through `&&`, a negated occurrence under a branch, and a `u32`
+        // boundary element still come back
+        // `unknown ((incomplete quantifier-unhandled))`, and
+        // `seq_contains_hypothesis_goal_identity_capability` pins two of that
+        // class fail-closed. This spelling removed a class of `(not (exists ..))`
+        // blindness; it did not make quantified `contains` decidable.
+        let not_eq = self.solver.try_not(eq).map_err(|e| e.to_string())?;
+        let body = self
+            .solver
+            .try_implies(range, not_eq)
+            .map_err(|e| e.to_string())?;
 
-        self.solver
-            .try_exists(&[bound_idx], body)
-            .map_err(|e| e.to_string().into())
+        // One term per alpha-equivalence class of the COERCED body (see
+        // `SeqContainsQuantifiedMemo`): the key is built only now, after every
+        // width coercion, so a value whose extension differs (`sext` vs `zext`
+        // of the same interned BV constant) gets a different key.
+        let placeholder = match self.seq_contains_memo_mut().placeholder {
+            Some(placeholder) => placeholder,
+            None => {
+                let placeholder = self
+                    .solver
+                    .fresh_var("__seq_contains_memo_key_idx", Sort::Int);
+                self.seq_contains_memo_mut().placeholder = Some(placeholder);
+                placeholder
+            }
+        };
+        let renamed_body = self.solver.substitute(body, &[bound_idx], &[placeholder]);
+        if let Some(&memo) = self
+            .seq_contains_memo_mut()
+            .by_renamed_body
+            .get(&renamed_body)
+        {
+            return Ok(memo);
+        }
+        let absent = self
+            .solver
+            .try_forall(&[bound_idx], body)
+            .map_err(|e| e.to_string())?;
+        let contains = self.solver.try_not(absent).map_err(|e| e.to_string())?;
+        self.seq_contains_memo_mut()
+            .by_renamed_body
+            .insert(renamed_body, contains);
+        Ok(contains)
+    }
+
+    /// The encoder-owned `Seq::contains` memo when one is threaded in, else
+    /// this parser's local one.
+    fn seq_contains_memo_mut(
+        &mut self,
+    ) -> &mut super::super::parser_state::SeqContainsQuantifiedMemo {
+        match self.seq_contains_quantified_memo.as_deref_mut() {
+            Some(memo) => memo,
+            None => &mut self.seq_contains_quantified_memo_local,
+        }
     }
 
     /// Encode the exact occurrence count of `needle` for bounded Seq lengths.
@@ -342,7 +411,6 @@ impl<'a> AstExpressionParser<'a> {
                 .map_err(|e| e.to_string())?;
             if let Some(info) = self.element_width_info(receiver, receiver_name) {
                 self.term_widths.insert(candidate, info);
-                self.term_widths.entry(needle).or_insert(info);
             }
             let (candidate, coerced_needle) = self.coerce_bv_widths(candidate, needle)?;
             needle = coerced_needle;
@@ -423,18 +491,43 @@ impl<'a> AstExpressionParser<'a> {
     /// Always-on (not gated by `check_overflow`). In Verus, out-of-bounds Seq
     /// access is a verification error, not an optional overflow check. Length
     /// is now pointer_width (same as Seq index sort), so no extension needed.
+    /// Returns the bound it pushed (`None` for a quantifier-bound index, whose
+    /// bound is skipped): a read where that obligation is dropped is
+    /// unspecified outside it (`read_within_carrier`).
     pub(in crate::encoder) fn add_seq_index_bounds_check(
         &mut self,
         receiver_term: Term,
         receiver_name: Option<&str>,
         idx: Term,
         method: &str,
-    ) -> TrustVcResult<()> {
+    ) -> TrustVcResult<Option<Term>> {
         if self.is_quantifier_bound_term(idx) {
             self.diagnostics
                 .record(super::super::diagnostics::EncodingApproximation::BoundsCheckSkipped);
-            return Ok(());
+            return Ok(None);
         }
+        let in_bounds = self.seq_index_bound(receiver_term, receiver_name, idx, method)?;
+        self.overflow_checks.push((
+            format!(
+                "Seq::{}({}, i) requires i < len",
+                method,
+                receiver_name.unwrap_or("<anonymous>")
+            )
+            .into(),
+            in_bounds,
+        ));
+        Ok(Some(in_bounds))
+    }
+
+    /// The index bound `0 <= idx < len` of a read of `receiver_term` (see
+    /// [`Self::add_seq_index_bounds_check`], which pushes it as an obligation).
+    fn seq_index_bound(
+        &mut self,
+        receiver_term: Term,
+        receiver_name: Option<&str>,
+        idx: Term,
+        method: &str,
+    ) -> TrustVcResult<Term> {
         let len = self
             .lookup_collection_len(receiver_term, receiver_name)
             .ok_or_else(|| {
@@ -485,38 +578,20 @@ impl<'a> AstExpressionParser<'a> {
         // `bv_index_wraps_int2bv`).
         if idx_is_bv && !self.bv_index_wraps_int2bv(idx) {
             if let Some(len_bv) = self.fixed_array_static_len_bv(receiver_name, len)? {
-                let idx_bv = self.coerce_to_len_width(idx)?;
+                let idx_bv = self.coerce_to_len_width(idx, OwnSign::of_constructed(false))?;
                 let in_bounds = self
                     .seq_index_bound_bv(idx_bv, len_bv)
                     .map_err(|e| format!("Failed to create Seq::{} bounds check: {}", method, e))?;
-                self.overflow_checks.push((
-                    format!(
-                        "Seq::{}({}, i) requires i < len",
-                        method,
-                        receiver_name.unwrap_or("<anonymous>")
-                    )
-                    .into(),
-                    in_bounds,
-                ));
-                return Ok(());
+                return Ok(in_bounds);
             }
         }
         if self.len_is_int(len) && idx_is_bv && !self.bv_index_wraps_int2bv(idx) {
             if let Some(len_bv) = self.try_folded_len_index_bv(len)? {
-                let idx_bv = self.coerce_to_len_width(idx)?;
+                let idx_bv = self.coerce_to_len_width(idx, OwnSign::of_constructed(false))?;
                 let in_bounds = self
                     .seq_index_bound_bv(idx_bv, len_bv)
                     .map_err(|e| format!("Failed to create Seq::{} bounds check: {}", method, e))?;
-                self.overflow_checks.push((
-                    format!(
-                        "Seq::{}({}, i) requires i < len",
-                        method,
-                        receiver_name.unwrap_or("<anonymous>")
-                    )
-                    .into(),
-                    in_bounds,
-                ));
-                return Ok(());
+                return Ok(in_bounds);
             }
         }
         // `len` is Int under Route A (#2779): compare `0 <= idx < len` in the
@@ -548,16 +623,7 @@ impl<'a> AstExpressionParser<'a> {
                 .try_bvult(idx, len)
                 .map_err(|e| format!("Failed to create Seq::{} bounds check: {}", method, e))?
         };
-        self.overflow_checks.push((
-            format!(
-                "Seq::{}({}, i) requires i < len",
-                method,
-                receiver_name.unwrap_or("<anonymous>")
-            )
-            .into(),
-            in_bounds,
-        ));
-        Ok(())
+        Ok(in_bounds)
     }
 
     /// For a named receiver of a statically-sized array type `[T; N]`, return the
@@ -627,14 +693,13 @@ impl<'a> AstExpressionParser<'a> {
     ///
     /// `bvult(bvsub(a, b), a)` is logically EQUIVALENT to
     /// `bvuge(a, b) && bvugt(b, 0)`:
-    ///   * `b == 0`            => `bvsub(a, 0) == a`, so `a <u a` is false, and
-    ///                            `bvugt(0, 0)` is false — both reject. (A genuine
-    ///                            OOB: `idx == len`.)
-    ///   * `1 <= b <= a`       => `a - b` lies in `[0, a)`, true; `bvuge(a, b)` and
-    ///                            `bvugt(b, 0)` both true.
-    ///   * `b > a`             => `bvsub` wraps to `a - b + 2^w >= a`, false; and
-    ///                            `bvuge(a, b)` is false — both reject. (A genuine
-    ///                            underflow-wrap OOB.)
+    /// * `b == 0`            => `bvsub(a, 0) == a`, so `a <u a` is false, and
+    ///   `bvugt(0, 0)` is false — both reject. (A genuine OOB: `idx == len`.)
+    /// * `1 <= b <= a`       => `a - b` lies in `[0, a)`, true; `bvuge(a, b)` and
+    ///   `bvugt(b, 0)` both true.
+    /// * `b > a`             => `bvsub` wraps to `a - b + 2^w >= a`, false; and
+    ///   `bvuge(a, b)` is false — both reject. (A genuine underflow-wrap OOB.)
+    ///
     /// So the reshaped bound is equisatisfiable with the original — it NEVER
     /// weakens the check (a real OOB still fails closed) — but it removes the
     /// `bvsub` from inside the comparison, which ay decides directly. Only fires

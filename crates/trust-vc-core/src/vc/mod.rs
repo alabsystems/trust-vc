@@ -38,12 +38,14 @@ mod context;
 mod obligation;
 mod verify;
 
-pub(crate) use context::SelfReceiverKind;
 pub use context::{
     BitshiftBehavior, DemandInlineConfig, Div0Behavior, FunctionContext, OverflowBehavior,
     VariableDecl, VerificationContext, VerificationMode,
 };
-pub(crate) use obligation::BroadcastGuardClause;
+pub(crate) use context::{CollectionOrigin, SelfReceiverKind};
+pub(crate) use obligation::{
+    is_closure_scoped_obligation_name, BroadcastGuardClause, CLOSURE_SCOPED_OBLIGATION_PREFIX,
+};
 pub use obligation::{
     ConditionOrigin, InvariantMask, ObligationKind, ProofObligation, ProofStepMeta, SolverMode,
     TypedProofObligation,

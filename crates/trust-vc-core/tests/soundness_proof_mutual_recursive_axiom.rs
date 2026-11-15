@@ -174,11 +174,18 @@ fn unmodelable_decreases_cycle_must_fail_closed() {
 #[test]
 fn non_cyclic_fn_value_call_ensures_still_trusted() {
     // Over-rejection guard for S2: a NON-recursive call through a fn-item value must
-    // still bring the callee's ensures into scope.
+    // still bring the callee's ensures into scope. `fv_id` is a proof function,
+    // which panics when the exec body calls it at run time, so the ghost-call
+    // rule refuses the answer; it refuses only a `Verified` answer.
+    let v = verdict("caller_fnvalue_noncyclic");
     assert!(
-        matches!(verdict("caller_fnvalue_noncyclic"), VerifyResult::Verified),
+        matches!(
+            &v,
+            VerifyResult::Error { message }
+                if message.contains("ghost function called from exec code")
+        ),
         "OVER-REJECTION: a non-cyclic fn-item-value call must still trust the callee's \
-         opaque ensures"
+         opaque ensures (a `Verified` answer, refused by the ghost-call rule); got {v:?}"
     );
 }
 

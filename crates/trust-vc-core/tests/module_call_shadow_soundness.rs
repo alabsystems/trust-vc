@@ -18,6 +18,7 @@
 //!   * the false program must stop reporting `Verified`, and
 //!   * a TRUE program of the same shape must still verify, so the fix cannot
 //!     degenerate into "decline every colliding call path".
+//!
 //! Every shadow case also has an ORDER-FLIP control: the verdict must be
 //! identical with the declarations swapped, which is what catches a resolver
 //! that is wrong in either direction.

@@ -98,11 +98,8 @@ fn assert_verified(code: &str, name: &str, what: &str) {
 }
 
 fn assert_not_counterexample(code: &str, name: &str, what: &str) {
-    match verdict(code, name) {
-        VerifyResult::Counterexample { model, .. } => {
-            panic!("{what}: expected no spurious counterexample, got Counterexample {model:?}")
-        }
-        _ => {}
+    if let VerifyResult::Counterexample { model, .. } = verdict(code, name) {
+        panic!("{what}: expected no spurious counterexample, got Counterexample {model:?}")
     }
 }
 

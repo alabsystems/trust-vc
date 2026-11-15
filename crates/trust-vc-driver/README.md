@@ -18,7 +18,7 @@ and Seq on trust** (`crates/trust-vc-kernel/src/lib.rs:17`); Alethe is one of it
 export formats, not an input it re-checks. The north star is
 `design-trust-proof-backend.md` at the repo root.
 
-See `design-rustc-driver-frontend.md` (repo root) for the full rationale, ROI bounds,
+See `docs/archive/design-rustc-driver-frontend.md` for the full rationale, ROI bounds,
 and migration plan. The short version: the dominant reason 100% Verus parity is
 hard is an **information ceiling** — the `syn` front end never sees rustc's
 types, trait resolution, borrow info, or const-eval, yet most unsupported Verus
@@ -33,8 +33,15 @@ half changes.
 
 | Layer | Toolchain | Built by default | Role |
 |-------|-----------|------------------|------|
-| `lower` | **stable** (root `rust-toolchain.toml`, 1.95.0) | ✅ yes | Driver-independent IR bridge: a fully-typed `DriverFn` → `VerificationContext` → real encoder + ay. The load-bearing, tested seam. |
-| `driver` | **Trust toolchain** (`trust`; the fork's stage2 + its `rustc_private` libs) | ❌ no (`feature = "rustc-driver"`) | The real `rustc_driver::Callbacks`: obtains `TyCtxt`, finds verification targets, maps type-checked signatures, walks THIR, feeds `lower`. |
+| `lower` | **Trust toolchain** (`channel = "trust"`, the root `rust-toolchain.toml`) — but no `rustc_private` | ✅ yes | Driver-independent IR bridge: a fully-typed `DriverFn` → `VerificationContext` → real encoder + ay. The load-bearing, tested seam. |
+| `driver` | **Trust toolchain plus its `rustc_private` half** | ❌ no (`feature = "rustc-driver"`) | The real `rustc_driver::Callbacks`: obtains `TyCtxt`, finds verification targets, maps type-checked signatures, walks THIR, feeds `lower`. |
+
+> Corrected 2026-08-30: this table used to call the `lower` row **stable
+> (1.95.0)**, and the closing section used to speak of a "nightly pin" in this
+> crate. Neither is true — the workspace pins `channel = "trust"`. What actually
+> separates the two rows is `rustc_private`, not the channel. (This crate's own
+> duplicate `rust-toolchain.toml` was removed on 2026-09-28; the root pin covers
+> it.)
 
 The two layers meet at exactly one type — `lower::DriverFn` — so the
 toolchain-pinned rustc glue is thin and replaceable while the reusable lowering
@@ -53,44 +60,31 @@ postconditions verify, and false ones are refuted with a counterexample (not
 rubber-stamped).
 
 The real driver builds against the **Trust toolchain's** `rustc_private`
-libraries — trust-vc is a submodule of the Trust rustc fork, and the driver's
-`extern crate rustc_{driver,hir,interface,middle}` resolve from the fork's
-`build/` tree. `rustc-dev` is **not** a rustup component on the linked `trust`
-toolchain, so a bare `cargo build --features rustc-driver` fails with E0463
-("can't find crate for `rustc_*`"). The wrapper script discovers the fork's
-rustc_private rlibs + the matching host proc-macro dylibs (the same artifacts
-bootstrap collects for clippy/miri-style `rustc_private` tools) and puts them on
-rustc's `-L` search path:
+libraries, which the Trust sysroot serves directly — no `-L` overlay, no
+`RUSTC_BOOTSTRAP`, no wrapper script (the `scripts/build-trust-vc-driver.sh`
+recipe that assembled them from a Trust `build/` tree was removed on
+2026-09-28):
 
 ```bash
-scripts/build-trust-vc-driver.sh          # compile the driver lib (rlib; no link)
-scripts/build-trust-vc-driver.sh check    # type-check only
-scripts/build-trust-vc-driver.sh test     # build + run the feature tests
+targo --unverified check -p trust-vc-driver --features rustc-driver   # type-check only
+targo --unverified test  -p trust-vc-driver --features rustc-driver   # build + run the feature tests
+targo --unverified build -p trust-vc-driver --features rustc-driver --bin trust-vc-driver
 ```
 
-What the script wires up (all paths are auto-discovered from
-`rustc +trust --print sysroot`), with `RUSTC_BOOTSTRAP=1` to permit
-`#![feature(rustc_private)]` on the fork rustc:
+The bin and every test binary link `librustc_driver-<hash>` from the
+compiler's `<sysroot>/lib`; `build.rs` bakes an rpath to that directory into
+them (so no `DYLD_LIBRARY_PATH`) and exports the sysroot as
+`VC_DRIVER_COMPILER_SYSROOT`, which the driver tests pass as `--sysroot`.
 
-* `-L <build>/<host>/stage2-rustc/<host>/release/deps` — `librustc_*.{rlib,rmeta}`
-  and `librustc_driver.dylib`;
-* `-L <build>/<host>/rustc-private-sysroots/<tool-sysroot>/host` — the host
-  proc-macro dylibs (`rustc_macros`, `derive_where`, `tracing_attributes`),
-  selected by matching the `librustc_middle` build hash to the deps dir;
-* `-L native=$(llvm-config --libdir)` and `-L native=$(brew --prefix zstd)/lib`
-  — `Polly`/`zstd`/… that linking `rustc_driver` into a binary pulls in.
-
-`build`/`check` scope the `-L` flags to the driver crate (`cargo rustc -- …`) so
-the dependency graph stays cached; `test` must put them on global `RUSTFLAGS`
-(they have to reach every test binary that links the feature-on lib).
-
-> Toolchain note: `src/driver.rs` targets the **Trust toolchain rustc API**
-> (`rustc 1.96.0-dev`): `rustc_driver::run_compiler`, `tcx.hir_free_items()` /
-> `hir_item` / `hir_attrs`, and `Attribute::name()`. These are the accessors the
-> module's own API-stability caveat anticipated would move when the pin bumped
-> off the original stock nightly; stock nightlies are the wrong toolchain here
-> (their rustc internals differ from the fork's — see the root
-> `rust-toolchain.toml`).
+> Toolchain note: `src/driver.rs` targets the **Trust toolchain rustc API**:
+> `rustc_driver::run_compiler`, `tcx.hir_free_items()` / `hir_item` /
+> `hir_attrs`, and `Attribute::name()`. These are the accessors the module's own
+> API-stability caveat anticipated would move when the pin bumped off the
+> original stock nightly; stock nightlies are the wrong toolchain here (their
+> rustc internals differ from the fork's). The accessor set was re-built against
+> the installed Trust toolchain (`1.99.0-dev`, 321aaeda7) on 2026-09-28, after
+> last being built against `1.96.0-dev`. Print the live one with
+> `trustc --version` rather than reading a number out of this note.
 
 > Status: the driver layer's **signature lowering is wired** (parameter/return
 > types come from `tcx.fn_sig`); THIR **body and `requires`/`ensures` lowering**
@@ -100,7 +94,5 @@ the dependency graph stays cached; `test` must put them on global `RUSTFLAGS`
 ## Why this is additive and safe
 
 `trust-vc-driver` is a workspace member, but the `rustc-driver` feature is **off
-by default**, so a root `targo --unverified build`/`targo --unverified test` compiles only the stable
-`lower` layer and the evidence gate is undisturbed. The nightly pin lives in this
-crate's own `rust-toolchain.toml`, which only applies when targo is invoked from
-inside this directory.
+by default**, so a root `targo --unverified build`/`targo --unverified test`
+compiles only the `lower` layer and the evidence gate is undisturbed.

@@ -1,0 +1,7 @@
+exit: 1
+outcome: "verus-rejected"
+diagnostics:
+  error - The verifier does not yet support the following Rust feature: destructuring assignment @[7]
+functions:
+  test rejected -
+vcir:

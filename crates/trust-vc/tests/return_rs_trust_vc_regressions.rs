@@ -403,10 +403,6 @@ fn return_rs_error_fragments(case: &str) -> Option<&'static [&'static str]> {
             "ambiguous multi-path return extraction",
             "if-let explicit return path",
         ],
-        "return_from_let_else_contract" => &[
-            "Failed to lower obligation 'return_value'",
-            "unresolved variable `value`",
-        ],
         "return_from_call_argument_contract" => &[
             "ambiguous multi-path return extraction",
             "unsupported nested explicit return path",

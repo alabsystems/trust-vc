@@ -13,11 +13,8 @@ fn fixture(name: &str) -> String {
 }
 
 fn assert_not_verified(file: &str, function: &str) {
-    match verify_function_from_file(&fixture(file), function) {
-        Ok(VerifyResult::Verified) => {
-            panic!("QUARANTINE BREACH: `{function}` from `{file}` must remain fail closed")
-        }
-        Ok(_) | Err(_) => {}
+    if let Ok(VerifyResult::Verified) = verify_function_from_file(&fixture(file), function) {
+        panic!("QUARANTINE BREACH: `{function}` from `{file}` must remain fail closed")
     }
 }
 

@@ -54,6 +54,9 @@ pub(crate) struct EvidenceArgs {
     pub(crate) port_manifest_only: bool,
     pub(crate) update_verus_tests_manifest: bool,
     pub(crate) refresh_trust_vc_corpus_evidence: bool,
+    /// Accepted-entry `upstream_path`s whose `obligation_fingerprints` are to be
+    /// re-pinned from THIS run after a proven rendering-only drift.
+    pub(crate) repin_obligation_rendering_drift: Vec<String>,
     pub(crate) corpus_triage_report: bool,
     pub(crate) scaffold_verus_port_stubs: bool,
     pub(crate) verus_command: Option<String>,
@@ -226,6 +229,45 @@ impl EvidenceReport {
                 corpus.replacement_summary.accepted_expected_case_count
             ));
             out.push_str(&format!(
+                "  - {}\n  - of which PROGRAM-correspondence SCOPED (counterexample, LAYER 2): `{}` = **{:.1}% of the accepted-case total**\n",
+                corpus.replacement_summary.layer1_clause(),
+                corpus
+                    .replacement_summary
+                    .accepted_expected_cases_counterexample,
+                corpus
+                    .replacement_summary
+                    .program_correspondence_scoped_percent()
+            ));
+            out.push_str(&format!(
+                "    - {}\n",
+                corpus
+                    .replacement_summary
+                    .counterexample_established_clause()
+            ));
+            out.push_str(&format!("  - {}\n", outstanding_review_findings_line()));
+            out.push_str(&format!(
+                "  - of which pinned by obligation COUNT and port-derived fingerprints only (verified), establishing NOTHING about the port's PROGRAM: `{}` = {:.1}%\n",
+                corpus.replacement_summary.accepted_expected_cases_verified,
+                corpus.replacement_summary.verified_only_percent()
+            ));
+            out.push_str(&format!(
+                "    - of which AUTHOR-pinned (a chosen `min_obligations` and real engine fingerprints): `{}`\n",
+                corpus
+                    .replacement_summary
+                    .accepted_expected_cases_verified_author_pinned()
+            ));
+            out.push_str(&format!(
+                "    - of which SCHEMA-FIXED, pinned by NOTHING (`cargo_trust_vc_integration_test`: the schema forces `verified` / `min_obligations: 0` / no fingerprints, and the engine never runs): `{}`\n",
+                corpus
+                    .replacement_summary
+                    .accepted_expected_cases_verified_schema_fixed
+            ));
+            out.push_str(&format!(
+                "  - of which pinned by diagnostic patterns (error), establishing NOTHING about the port's PROGRAM: `{}` = {:.1}%\n",
+                corpus.replacement_summary.accepted_expected_cases_error,
+                corpus.replacement_summary.error_only_percent()
+            ));
+            out.push_str(&format!(
                 "- Unsupported gaps: `{}`\n",
                 corpus.replacement_summary.unsupported_gap_entries
             ));
@@ -353,6 +395,18 @@ impl EvidenceReport {
                 "- Skipped entries: `{}`\n",
                 corpus_run.skipped_entries
             ));
+            out.push_str(&format!(
+                "- Unscheduled declared paths: `{}`\n",
+                corpus_run.unscheduled_paths.len()
+            ));
+            for unscheduled in &corpus_run.unscheduled_paths {
+                out.push_str(&format!(
+                    "  - `{}` ({}): {}\n",
+                    escape_md(&unscheduled.trust_vc_path),
+                    escape_md(&unscheduled.upstream_path),
+                    escape_md(&unscheduled.reasons.join("; "))
+                ));
+            }
         }
 
         if !self.blocking_reasons.is_empty() {
@@ -558,6 +612,30 @@ pub(crate) struct VerusCorpusReport {
     pub ignored_upstream_cases: Vec<IgnoredUpstreamCaseEvidence>,
     #[serde(default)]
     pub upstream_case_extraction_gaps: Vec<String>,
+    /// Every declared, gate-accepted DECREASE in what an expected case commits
+    /// to having proven, one line each.
+    ///
+    /// Not a failure — a decrease without a matching waiver is refused outright
+    /// — but never silent either: a case that proves less than the committed
+    /// manifest said it did is reported on every run, so the accepted-case
+    /// count can be read next to how much proof content was given up to reach
+    /// it.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub proof_content_decrease_waivers: Vec<String>,
+    /// What an accepted case does and does NOT establish, carried in the
+    /// machine output next to the counts it qualifies.
+    ///
+    /// The correspondence rule decides on SOURCE TEXT, not on the encoded
+    /// obligation the solver saw, and it reaches COUNTEREXAMPLE cases only.
+    /// Five rounds of tightening have each been laundered by the next reader of
+    /// this number — the fifth by walking round the rule entirely, through the
+    /// `verified` cases it never looks at. The claim is therefore weakened to
+    /// what the gate can actually establish, and the bound ships with the
+    /// number so the two cannot be separated.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub accepted_case_correspondence_bound: String,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub porting_next_action: Option<VerusCorpusPortingAction>,
@@ -567,8 +645,28 @@ pub(crate) struct VerusCorpusReport {
     pub unsupported_gap_evidence: Vec<VerusManifestEntryEvidence>,
     #[serde(default)]
     pub accepted_trust_vc_source_hashes: Vec<AcceptedTrustVcSourceHashes>,
+    /// Declared port paths that were NOT scheduled for a corpus run, and why.
+    ///
+    /// An entry whose port-path checks fail (a STALE `trust_vc_source_hashes`
+    /// pin is the common one) produces no run candidate, so it vanishes from
+    /// the corpus layer's attempted/passed/failed arithmetic entirely. A
+    /// dropped entry and an entry that does not exist then look the same, which
+    /// is a measurement hole in its own right: the denominator silently
+    /// shrinks. These rows keep it visible and keep the corpus run from
+    /// reporting itself clean while they exist.
+    #[serde(default)]
+    pub unscheduled_ported_paths: Vec<UnscheduledTrustVcPath>,
     #[serde(skip)]
     pub(crate) run_candidates: Vec<TrustVcCorpusRunCandidate>,
+}
+
+/// One declared port path the corpus run never attempted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct UnscheduledTrustVcPath {
+    pub upstream_path: String,
+    pub classification: String,
+    pub trust_vc_path: String,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -577,12 +675,211 @@ pub(crate) struct VerusReplacementSummary {
     pub accepted_executable_entries: usize,
     pub accepted_trust_vc_path_count: usize,
     pub accepted_expected_case_count: usize,
+    /// The accepted-case total SPLIT BY WHAT ACTUALLY PINS EACH CASE to
+    /// upstream, because the three are not the same evidence and the total
+    /// reads as the strongest of them.
+    ///
+    /// * `counterexample` — the only bucket the source-level correspondence
+    ///   rule reaches: claim, premises, bindings, hypotheses, definitions and
+    ///   statements against the upstream case region.
+    /// * `verified` — pinned by an obligation COUNT and an engine-derived
+    ///   fingerprint set and NOTHING ELSE. No rule compares the port's source
+    ///   to upstream's here. This is the weakest bucket and, on this corpus,
+    ///   the largest. It is ALSO not one kind of evidence: see
+    ///   `accepted_expected_cases_verified_schema_fixed`.
+    /// * `error` — pinned by diagnostic patterns.
+    ///
+    /// Emitted beside `accepted_expected_case_count` in every rendering of the
+    /// summary, so a reader cannot pick up the total without the split.
+    #[serde(default)]
+    pub accepted_expected_cases_counterexample: usize,
+    #[serde(default)]
+    pub accepted_expected_cases_verified: usize,
+    /// The sub-bucket of `accepted_expected_cases_verified` whose `verified`
+    /// verdict and `min_obligations` the SCHEMA wrote rather than an author:
+    /// every expected case of a `cargo_trust_vc_integration_test` entry.
+    ///
+    /// `append_expected_case_obligation_pin_failures` REQUIRES
+    /// `expected_verdict: verified` and `min_obligations: 0` and REFUSES any
+    /// `obligation_fingerprints` for those entries, and
+    /// `run_trust_vc_corpus_cargo_trust_vc_integration_test` never invokes the
+    /// engine — it synthesizes `verified` / count 0 from a passing
+    /// `cargo test --exact`. So for these cases the obligation count pins
+    /// NOTHING, and the sentence "pinned by an obligation COUNT" is false of
+    /// them. Rendered next to the verified count for exactly that reason; see
+    /// clause (2b) of `ACCEPTED_CASE_CORRESPONDENCE_BOUND`.
+    #[serde(default)]
+    pub accepted_expected_cases_verified_schema_fixed: usize,
+    #[serde(default)]
+    pub accepted_expected_cases_error: usize,
+    /// What the counterexample bucket ESTABLISHES, as opposed to what it
+    /// COVERS — `accepted_expected_cases_counterexample` minus the cases the
+    /// rule cannot decide at all.
+    ///
+    /// `None` means NOT MEASURED, and that is the honest rendering: the
+    /// measurement reads the pinned Verus checkout, so a run without
+    /// `--verus-path` (the manifest-only triage lane) has no established count
+    /// and must not print its scope as one. Filled in by
+    /// `measure_upstream_read_establishment` wherever a checkout is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_counterexample_established: Option<usize>,
+    /// Counterexample cases for which NO premise window can be drawn on
+    /// UPSTREAM's own side — a mark on the HEADER of a function with no body —
+    /// which `premise_correspondence` REFUSES as un-checkable rather than
+    /// passing vacuously.
+    ///
+    /// A header mark over a body is NOT in this bucket: its window is that
+    /// body, so it is checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_counterexample_refused_uncheckable: Option<usize>,
+    /// Counterexample cases for which NO upstream text is readable at all,
+    /// because `upstream_case_regions` cannot see the upstream case's
+    /// declaration form. Such a case can only FAIL its cross-check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_counterexample_unreadable_upstream_case: Option<usize>,
     pub unsupported_gap_entries: usize,
     pub unclassified_entries: usize,
     pub not_applicable_entries: usize,
     pub accepted_known_gap_entries: usize,
     pub accepted_entries_missing_trust_vc_paths: usize,
     pub accepted_entries_missing_expected_cases: usize,
+}
+
+impl VerusReplacementSummary {
+    /// The share of accepted expected cases whose PROGRAM is compared with
+    /// upstream's at all, as a percentage of `accepted_expected_case_count`.
+    ///
+    /// RENAMED in round 8, because `correspondence_scoped_percent` read as
+    /// "the fraction of cases checked against upstream" and that is FALSE: the
+    /// per-case upstream block in `load_corpus_report_with_options` checks
+    /// every accepted case's DECLARATION against upstream's source (verdict,
+    /// mapped-case count, upstream-asserted messages). What this percentage
+    /// scopes is the SECOND layer only — the source-level correspondence rule
+    /// over the port's program, which `append_counterexample_identity_failures`
+    /// runs for `counterexample` cases and no other.
+    ///
+    /// SCOPE, not result, and the name still says so: this is how many cases
+    /// that rule COVERS. How many of them it ESTABLISHES is smaller and is
+    /// measured against the pinned checkout by
+    /// `measure_upstream_read_establishment`;
+    /// `counterexample_established_clause` renders the pair, or an explicit NOT
+    /// MEASURED. See `ACCEPTED_CASE_CORRESPONDENCE_BOUND`.
+    pub fn program_correspondence_scoped_percent(&self) -> f64 {
+        self.percent_of_total(self.accepted_expected_cases_counterexample)
+    }
+
+    pub fn verified_only_percent(&self) -> f64 {
+        self.percent_of_total(self.accepted_expected_cases_verified)
+    }
+
+    /// The `verified` cases an AUTHOR actually pinned — a `min_obligations`
+    /// they chose and fingerprints of obligations the engine really built.
+    ///
+    /// Derived, never stored, so the two sub-counts cannot drift apart: the
+    /// remainder of `accepted_expected_cases_verified` after the schema-fixed
+    /// sub-bucket.
+    pub fn accepted_expected_cases_verified_author_pinned(&self) -> usize {
+        self.accepted_expected_cases_verified
+            .saturating_sub(self.accepted_expected_cases_verified_schema_fixed)
+    }
+
+    pub fn error_only_percent(&self) -> f64 {
+        self.percent_of_total(self.accepted_expected_cases_error)
+    }
+
+    fn percent_of_total(&self, part: usize) -> f64 {
+        if self.accepted_expected_case_count == 0 {
+            return 0.0;
+        }
+        100.0 * part as f64 / self.accepted_expected_case_count as f64
+    }
+
+    /// The accepted-case total and its split, as ONE phrase, so the gate detail
+    /// line cannot print the total without the fraction that was
+    /// correspondence-scoped.
+    ///
+    /// This is the renderer for `verus_corpus_manifest_gate_detail` — the line
+    /// a reader quotes. The two markdown renderers print the same numbers as
+    /// indented bullets under the total, through
+    /// `program_correspondence_scoped_percent` and its siblings, and
+    /// `scripts/corpus_coverage.py` prints its own block of the same beside its
+    /// own accepted numbers.
+    ///
+    /// The verified bucket is printed SPLIT. The phrase that travelled before
+    /// said "verified = obligation-count-pinned only", which is FALSE for the
+    /// schema-fixed sub-bucket — the count there is written by the schema, not
+    /// by an author. A travelling sentence that is wrong about a quarter of its
+    /// own bucket is worse than one that is merely coarse, so the sub-split
+    /// travels as the correction to that clause. It carries no second
+    /// percentage: both sub-buckets answer "how much was checked against
+    /// upstream" identically, with zero, and the one percentage that must
+    /// survive being quoted is the correspondence-scoped one, beside the
+    /// established count it is not.
+    pub fn accepted_case_split_phrase(&self) -> String {
+        format!(
+            "{} accepted expected cases, {}, and {} of them are PROGRAM-correspondence SCOPED ({} counterexample, {:.1}% of the total, {}; {} verified = {} obligation-count-pinned + {} SCHEMA-FIXED with no pin at all, {:.1}%, establishing NOTHING about the port's PROGRAM; {} error = diagnostic-pattern-pinned, {:.1}%, plus upstream's asserted message where upstream asserts one)",
+            self.accepted_expected_case_count,
+            self.layer1_clause(),
+            self.accepted_expected_cases_counterexample,
+            self.accepted_expected_cases_counterexample,
+            self.program_correspondence_scoped_percent(),
+            self.counterexample_established_clause(),
+            self.accepted_expected_cases_verified,
+            self.accepted_expected_cases_verified_author_pinned(),
+            self.accepted_expected_cases_verified_schema_fixed,
+            self.verified_only_percent(),
+            self.accepted_expected_cases_error,
+            self.error_only_percent(),
+        )
+    }
+
+    /// LAYER 1's scope, or an explicit NOT RUN.
+    ///
+    /// Layer 1 covers EVERY accepted case, but only in a lane that actually has
+    /// the upstream checkout: `--port-manifest-only` reads no upstream source
+    /// at all, so printing "every one of them checked against upstream" there
+    /// would be the same overstatement in the opposite direction from the one
+    /// this bound was corrected for.
+    ///
+    /// The MEASURED arm names only the two checks that really do run on every
+    /// accepted case — resolution and verdict. Round 9's finding was this line
+    /// crediting all of the layer's sub-checks to the layer's denominator, so
+    /// the narrower ones are named as narrower and sent to the bound for their
+    /// populations rather than being listed as though they were corpus-wide. The discriminator is the same `Option` the
+    /// established count uses: it is `Some` exactly when a `--verus-path` was
+    /// supplied and the upstream files were read.
+    pub fn layer1_clause(&self) -> String {
+        if self.accepted_counterexample_established.is_some() {
+            "EVERY ONE of them LAYER-1 checked against upstream (upstream case RESOLVED and declared verdict COMPARED on every one; the mapped-case count, upstream-asserted messages, warning and forbidden patterns only on the narrower populations clause (L1) of the bound prints beside each)".to_string()
+        } else {
+            "LAYER-1 upstream checks NOT RUN here (no --verus-path, so no upstream source was read at either layer)".to_string()
+        }
+    }
+
+    /// The counterexample bucket's ESTABLISHED half, or an explicit NOT
+    /// MEASURED.
+    ///
+    /// The recurring error this phrase exists to stop is a SCOPE count read as
+    /// an ESTABLISHED count, so the scope number never appears here without
+    /// either the established number beside it or a statement that nothing
+    /// measured it.
+    pub fn counterexample_established_clause(&self) -> String {
+        match (
+            self.accepted_counterexample_established,
+            self.accepted_counterexample_refused_uncheckable,
+            self.accepted_counterexample_unreadable_upstream_case,
+        ) {
+            (Some(established), Some(refused), Some(unreadable)) => format!(
+                "of which {} PROGRAM-ESTABLISHED = {:.1}% of the total ({} REFUSED as un-checkable, {} with no readable upstream case)",
+                established,
+                self.percent_of_total(established),
+                refused,
+                unreadable
+            ),
+            _ => "PROGRAM-ESTABLISHED count NOT MEASURED here (no --verus-path, so no upstream source was read at either layer)"
+                .to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -735,6 +1032,42 @@ impl CorpusTriageReport {
         out.push_str(&format!(
             "- Accepted expected cases: `{}`\n",
             self.replacement_summary.accepted_expected_case_count
+        ));
+        // The split is not decoration: `counterexample` is the ONLY bucket the
+        // source-level correspondence rule reaches, and `verified` is pinned by
+        // an obligation count alone. Printing the total without them reads as
+        // the strongest evidence applying to all of them.
+        out.push_str(&format!(
+            "  - {}\n  - of which PROGRAM-correspondence SCOPED (counterexample, LAYER 2): `{}` = **{:.1}% of the accepted-case total**\n",
+            self.replacement_summary.layer1_clause(),
+            self.replacement_summary
+                .accepted_expected_cases_counterexample,
+            self.replacement_summary.program_correspondence_scoped_percent()
+        ));
+        out.push_str(&format!(
+            "    - {}\n",
+            self.replacement_summary.counterexample_established_clause()
+        ));
+        out.push_str(&format!("  - {}\n", outstanding_review_findings_line()));
+        out.push_str(&format!(
+            "  - of which pinned by obligation COUNT and port-derived fingerprints only (verified), establishing NOTHING about the port's PROGRAM: `{}` = {:.1}%\n",
+            self.replacement_summary.accepted_expected_cases_verified,
+            self.replacement_summary.verified_only_percent()
+        ));
+        out.push_str(&format!(
+            "    - of which AUTHOR-pinned (a chosen `min_obligations` and real engine fingerprints): `{}`\n",
+            self.replacement_summary
+                .accepted_expected_cases_verified_author_pinned()
+        ));
+        out.push_str(&format!(
+            "    - of which SCHEMA-FIXED, pinned by NOTHING (`cargo_trust_vc_integration_test`: the schema forces `verified` / `min_obligations: 0` / no fingerprints, and the engine never runs): `{}`\n",
+            self.replacement_summary
+                .accepted_expected_cases_verified_schema_fixed
+        ));
+        out.push_str(&format!(
+            "  - of which pinned by diagnostic patterns (error), establishing NOTHING about the port's PROGRAM: `{}` = {:.1}%\n",
+            self.replacement_summary.accepted_expected_cases_error,
+            self.replacement_summary.error_only_percent()
         ));
         out.push_str(&format!(
             "- Unsupported gaps: `{}`\n",
@@ -933,6 +1266,11 @@ pub(crate) struct TrustVcCorpusRunReport {
     pub passed_paths: usize,
     pub failed_paths: usize,
     pub skipped_entries: usize,
+    /// Declared port paths that were never attempted, carried from the manifest
+    /// layer so the corpus layer publishes its own SHORTFALL next to its
+    /// attempted/passed/failed counts.
+    #[serde(default)]
+    pub unscheduled_paths: Vec<UnscheduledTrustVcPath>,
     pub results: Vec<TrustVcCorpusRunResult>,
 }
 
@@ -942,6 +1280,9 @@ impl TrustVcCorpusRunReport {
             && self.passed_paths == self.attempted_paths
             && self.failed_paths == 0
             && self.skipped_entries == 0
+            // A run that never scheduled a declared port measured less than it
+            // was asked to; it is not clean, whatever the paths it did run say.
+            && self.unscheduled_paths.is_empty()
     }
 
     fn command_mode_paths(&self) -> Vec<&str> {
@@ -1002,10 +1343,187 @@ pub(crate) struct TrustVcCorpusObservedCase {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostic_context: Vec<String>,
+    /// The diagnostics ATTACHED TO THE FAILURE this case reports, one entry per
+    /// diagnostic — the verdict detail, the localized failure, and each failing
+    /// obligation for the engine lane; one entry per compiler diagnostic or
+    /// per no-cheating finding for the fixture lanes.
+    ///
+    /// `diagnostic_context` additionally carries surrounding SOURCE LINES, and
+    /// a declared `expected_error_patterns` value must never be satisfied by
+    /// the port's own source text, nor by straddling two entries of a joined
+    /// blob. Upstream's `assert_vir_error_msg` checks ONE error's message; this
+    /// is the field that makes that checkable.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_diagnostics: Vec<String>,
+    /// WHICH obligation failed, and WHERE — the identity a counterexample case
+    /// is checked against.
+    ///
+    /// `obligation_count` is the TOTAL captured obligation count, so a port
+    /// function with three asserts counted as covered no matter which of the
+    /// three failed. Upstream's `assert_one_fails` pins the failure to a source
+    /// line carrying `FAILS`; this is the field that makes that checkable.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing_obligations: Vec<ObservedFailingObligation>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
+
+/// One failing obligation, named and located.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ObservedFailingObligation {
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// The source line the location names, verbatim. `None` when the location
+    /// is absent or the source could not be read — which fails the marker
+    /// check, never passes it.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_text: Option<String>,
+    /// The engine status this entry was built from (`Counterexample`,
+    /// `NotProved`, `Error`, `Unknown`, or the localized failure's verdict
+    /// kind).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    /// The UNKNOWN-CATEGORY the engine recorded for this obligation, when it
+    /// recorded one (`incompleteness`, `timeout`, ...).
+    ///
+    /// An obligation that carries one was NOT DECIDED: the engine reached a
+    /// non-decision and said which kind. A genuine, model-bearing refutation
+    /// never carries a category (`VerifyResult::unknown_category` is `None`
+    /// for `Counterexample`), so this field is what separates "the solver
+    /// refuted it" from "the solver could not decide it" at the evidence
+    /// boundary — the distinction `VerifyResult::NotProved` exists to preserve
+    /// and which the certificate status alone used to destroy.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_category: Option<String>,
+    /// Every source line of the STATEMENT the location starts, which is this
+    /// gate's proxy for upstream's error SPAN.
+    ///
+    /// Upstream's `assert_one_fails` searches every text line of the relevant
+    /// span (`relevant_error_span(..).text.iter().find(|x| x.text.contains(
+    /// "FAILS"))`), so a marker trailing a wrapped multi-line assertion counts
+    /// there. Reading only `line_text` was stricter than the spec this rule
+    /// mirrors. The statement ends at the first line where the delimiter depth
+    /// returns to zero, so a single-line statement captures exactly one line
+    /// and can never borrow a neighbour's marker.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub span_text: Vec<String>,
+    /// The `let` bindings IN SCOPE where the engine located this obligation:
+    /// the enclosing function's body up to, but not including, the refuted
+    /// statement.
+    ///
+    /// `span_text` is the CONCLUSION. This is the PREMISE. A statement's claim
+    /// is not determined by its own text — `assert(5 <= i)` is upstream's
+    /// unprovable claim under `let i = choose|i: int| f(i);` and a ground
+    /// falsehood under `let i = 0;` — so a rule that compares only the
+    /// statement lets a port keep upstream's marked line byte-for-byte and
+    /// rewrite everything that gives it meaning. Read from the same source
+    /// file, at the same location, by the same engine output.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_bindings: Vec<SourceBinding>,
+    /// The HYPOTHESES the enclosing function states, as `kind:conjunct`
+    /// entries — the other half of the premise, and the half a `let` scan
+    /// cannot see. A port that simply DROPS `#[requires(0 <= z)]` refutes
+    /// upstream's marked `ensures` clause for a reason upstream never offers.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub context_hypotheses: BTreeSet<String>,
+    /// The canonicalized bodies of the function DEFINITIONS the refuted claim
+    /// reaches, from the port file the engine located it in.
+    ///
+    /// The third premise a port author can rewrite while leaving the marked
+    /// line alone — and the one a `let` scan and a clause scan both miss,
+    /// because it lives outside the function entirely.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_definitions: BTreeMap<String, String>,
+    /// The canonicalized non-`let` statements the enclosing function runs
+    /// BEFORE the refuted one.
+    ///
+    /// The fourth premise: an `assume!` or a lemma call above the marked line
+    /// establishes as much as a binding does.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub context_statements: BTreeSet<String>,
+}
+
+impl ObservedFailingObligation {
+    /// True when the engine REFUTED this obligation, which is what upstream
+    /// counts as an error.
+    ///
+    /// A refutation is a DECISION: the engine looked for a model of the
+    /// obligation's negation and FOUND one.
+    ///
+    /// `Error` is not one. An encoding refusal or an infrastructure fault is a
+    /// non-decision exactly as an incompleteness is — `trust_vc_core`'s own
+    /// `VerifyResult::is_failure` excludes `Error` for that reason ("an
+    /// infrastructure fault rather than a verdict") — and a case may no more
+    /// spend a crashed obligation as its one refutation than a timed-out one.
+    /// It is collected as UNDECIDED below, so it still fails the case loudly
+    /// rather than vanishing.
+    fn is_refutation(&self) -> bool {
+        self.status == "Counterexample" && self.unknown_category.is_none()
+    }
+
+    /// True when the engine left this obligation UNDECIDED.
+    ///
+    /// Four spellings, all meaning "the solver did not decide this":
+    ///
+    /// * `Unknown` — a resource/timeout non-decision;
+    /// * `NotProved` — a model-less incompleteness non-decision, the
+    ///   certificate-layer mirror of [`trust_vc_core::VerifyResult::NotProved`];
+    /// * `Error` — an infrastructure/encoding fault, which decides nothing;
+    /// * ANY status carrying an `unknown_category`. This is the load-bearing
+    ///   one. The engine reports a genuine theory incompleteness as a
+    ///   verification FAILURE with NO MODEL (design-unknown-as-failure.md),
+    ///   and the certificate layer used to stamp that `Counterexample` — so
+    ///   "exactly 1 refuted obligation, as upstream `assert_one_fails`
+    ///   requires" was satisfiable by an obligation the solver never decided,
+    ///   and this predicate could never fire for that class. Measured on
+    ///   `real.rs::real_nonlinear2`. A genuine, model-bearing counterexample
+    ///   carries no category at all (`VerifyResult::unknown_category` is
+    ///   `None` for `Counterexample`), so reading the category costs a real
+    ///   refutation nothing and fails closed on every non-decision, however it
+    ///   is spelled.
+    fn is_undecided(&self) -> bool {
+        self.status == "Unknown"
+            || self.status == "NotProved"
+            || self.status == "Error"
+            || self.unknown_category.is_some()
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} {} {}{} @{}",
+            self.kind,
+            self.name,
+            self.status,
+            self.unknown_category
+                .as_deref()
+                .map(|category| format!("({category})"))
+                .unwrap_or_default(),
+            self.location.as_deref().unwrap_or("<unlocated>")
+        )
+    }
+}
+
+/// Upstream's failure marker (`rust_verify_test/tests/common/mod.rs`
+/// `assert_one_fails` / `assert_fails`): the relevant error span must sit on a
+/// source line containing this string.
+const UPSTREAM_FAILS_MARKER: &str = "FAILS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TrustVcCorpusRunCandidate {
@@ -1017,6 +1535,18 @@ pub(crate) struct TrustVcCorpusRunCandidate {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub trust_vc_check_args: Vec<String>,
     expected_cases: Vec<VerusExpectedCase>,
+    /// UPSTREAM's own `FAILS`-marked source lines, normalized, keyed by
+    /// upstream case id — read from the Verus checkout, never from this repo.
+    ///
+    /// The `FAILS` marker on a PORTED line is written by the port author, so on
+    /// its own it anchors nothing: a red counterexample case could be turned
+    /// green by moving that comment onto whatever line the engine happens to
+    /// report. Requiring the marked line to CORRESPOND to a line upstream also
+    /// marks costs a change to the program under test, not a change to a
+    /// comment.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    upstream_fails_marked_lines: BTreeMap<String, Vec<UpstreamFailsMark>>,
 }
 
 #[derive(Debug)]
@@ -1075,6 +1605,10 @@ struct GeneratedVerusManifest {
     schema_version: u32,
     manifest_id: String,
     description: String,
+    /// The standing bound on what an accepted case establishes, written into
+    /// the manifest verbatim so the number and its qualification live in ONE
+    /// file. See `ACCEPTED_CASE_CORRESPONDENCE_BOUND`.
+    correspondence_bound: String,
     upstream: GeneratedUpstream,
     gate: GeneratedGate,
     entries: Vec<VerusManifestEntry>,
@@ -1100,6 +1634,15 @@ struct JsonVerusManifest {
     schema_version: u32,
     manifest_id: String,
     description: String,
+    /// The standing bound on what an accepted case establishes.
+    ///
+    /// Schema v2 requires it VERBATIM (`validate_json_manifest_schema`): the
+    /// accepted-case count and the statement of what it does not establish
+    /// travel in one file, and neither can be dropped or softened without the
+    /// gate refusing to load the manifest at all. `#[serde(default)]` only so a
+    /// schema-v1 manifest, which predates the field, still parses.
+    #[serde(default)]
+    correspondence_bound: String,
     upstream: JsonUpstream,
     gate: JsonGate,
     entries: Vec<VerusManifestEntry>,
@@ -1183,6 +1726,39 @@ struct VerusExpectedCase {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     expected_warning_patterns: Vec<String>,
+    /// The declared, reviewed exception to the PROOF-CONTENT RATCHET.
+    ///
+    /// `min_obligations` and `obligation_fingerprints` are what a case commits
+    /// to having PROVEN. Nothing used to stop either from being rewritten
+    /// DOWNWARD: `--refresh-trust-vc-corpus-evidence` wrote whatever the run
+    /// observed, so a port that deleted proof content re-pinned itself to the
+    /// smaller number and the gate accepted it (measured: `scope.rs::test4_fails`
+    /// went from 6 obligations to 2 and was accepted).
+    ///
+    /// So a decrease against the COMMITTED manifest is now refused unless this
+    /// field declares it, naming the count it descends FROM and why. It is not
+    /// a waiver of the proof — the case still has to reproduce everything it
+    /// now pins — it is a demand that losing proof content be a deliberate,
+    /// reviewable line in the manifest diff rather than a silent re-pin.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obligation_decrease_waiver: Option<ObligationDecreaseWaiver>,
+}
+
+/// A declared decrease in what an expected case commits to having proven.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ObligationDecreaseWaiver {
+    /// The `min_obligations` the case descends FROM.
+    ///
+    /// Pinned, not free text, and checked twice: it must exceed the case's
+    /// current `min_obligations` (so a waiver can never be pre-armed at the
+    /// current count and left lying in wait), and when a decrease is actually
+    /// detected it must EQUAL the committed count being descended from (so one
+    /// waiver authorizes one decrease and not every later one).
+    from_min_obligations: usize,
+    /// Why the case proves less than it did. Non-empty.
+    reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1224,12 +1800,42 @@ const VERUS_REPO_URL: &str = "https://github.com/verus-lang/verus";
 const TRUST_VC_REPO_URL: &str = "https://github.com/alabsystems/trust-vc";
 const REQUIRED_AY_CRATES: &[&str] = &["ay-core", "ay-dpll", "ay-frontend", "ay-sys"];
 const SUPPORTED_TRUST_VC_CHECK_ARGS: &[&str] = &["--no-cheating"];
+/// STOCK-AS-ORACLE (docs/rulings.md: kept, pinned, never a blocker): the stock
+/// toolchain upstream Verus pins in its `rust-toolchain.toml` at the manifest's
+/// `upstream.ref`, the release whose `librustc_driver` its binaries load
+/// (`scripts/verus_suite/suite_common.py` `RUST_TOOLCHAIN`, held equal by a
+/// test).
+const VERUS_ORACLE_TOOLCHAIN: &str = "1.95.0";
+/// STOCK-AS-ORACLE: this runs upstream Verus's OWN test suite inside the Verus
+/// checkout (`--run-verus`), the third-party baseline the replacement evidence
+/// is compared against, not an ALab build. `vargo`/`cargo` there build Verus
+/// with the toolchain Verus's `rust-toolchain.toml` names: the command unsets
+/// the Trust channel the sanitized environment exports, and
+/// `RUSTUP_AUTO_INSTALL=0` keeps rustup from downloading it. It runs only after
+/// [`verus_oracle_not_run`] has found that file naming
+/// [`VERUS_ORACLE_TOOLCHAIN`] and rustup holding it.
 const DEFAULT_VERUS_TEST_COMMAND: &str =
-    "/bin/bash --noprofile --norc -c 'export PATH=\"$(dirname \"$CARGO\"):$PATH\"; git sparse-checkout disable; cd source && ./tools/get-z3.sh && source ../tools/activate && vargo test -p rust_verify_test && cargo test -p cargo-verus --features integration-tests'";
+    "/bin/bash --noprofile --norc -c 'export PATH=\"$(dirname \"$CARGO\"):$PATH\" RUSTUP_AUTO_INSTALL=0; unset RUSTUP_TOOLCHAIN; git sparse-checkout disable; cd source && ./tools/get-z3.sh && source ../tools/activate && vargo test -p rust_verify_test && cargo test -p cargo-verus --features integration-tests'";
 const AY_REPO_URL: &str = "https://github.com/alabsystems/ay";
 const DEFAULT_GIT_COMMAND: &str = "/usr/bin/git";
 const DEFAULT_SH_COMMAND: &str = "/bin/sh";
 const SANITIZED_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
+/// The rustup channel this repo pins (rust-toolchain.toml): the Trust toolchain.
+const TRUST_TOOLCHAIN_CHANNEL: &str = "trust";
+
+/// The evidence failure for a rustup active toolchain (the first token of
+/// `rustup show active-toolchain`) that is not the pinned Trust channel, or
+/// `None` when it is. Owner directive 2026-09-28: replacement evidence builds
+/// with the Trust toolchain. An ambient `RUSTUP_TOOLCHAIN=stable` (or any other
+/// override) would otherwise resolve a stock cargo through the same proxy and
+/// still hash cleanly.
+fn non_trust_active_toolchain_failure(active_toolchain: &str) -> Option<String> {
+    (active_toolchain != TRUST_TOOLCHAIN_CHANNEL).then(|| {
+        format!(
+            "rustup active toolchain `{active_toolchain}` is not the Trust channel `{TRUST_TOOLCHAIN_CHANNEL}` that rust-toolchain.toml pins"
+        )
+    })
+}
 const CORPUS_BLOCKER_SUMMARY_LIMIT: usize = 5;
 
 /// Active rustup toolchain facts, detected once at runner startup, that the
@@ -1619,20 +2225,42 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
     }
 
     if args.run_trust_vc {
+        // Per-unit Trust verification scoping for THIS REPO's workspace:
+        // workspace members (and their test targets) are the units under test
+        // and stay verified at `advisory`; third-party dependencies are merely
+        // linked and are switched off. Unscoped, measured 2026-09-16, this gate
+        // never reaches a first-party crate at all — it fails compiling
+        // `unicode-ident` (lib) under the compiler default.
+        let workspace_check = with_trust_per_unit_scope(
+            trust_per_unit_scope_args(),
+            &["check", "--workspace", "--locked", "--offline"],
+        );
+        let workspace_check = workspace_check
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         gates.push(run_gate_with_owned_env(
             "cargo check --workspace --locked --offline",
             true,
             &args.crate_root,
             &args.cargo_command,
-            &["check", "--workspace", "--locked", "--offline"],
+            &workspace_check,
             &cargo_env,
         ));
+        let workspace_test = with_trust_per_unit_scope(
+            trust_per_unit_scope_args(),
+            &["test", "--workspace", "--locked", "--offline"],
+        );
+        let workspace_test = workspace_test
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         gates.push(run_gate_with_owned_env(
             "cargo test --workspace --locked --offline",
             true,
             &args.crate_root,
             &args.cargo_command,
-            &["test", "--workspace", "--locked", "--offline"],
+            &workspace_test,
             &cargo_env,
         ));
     } else if args.port_manifest_only {
@@ -1651,16 +2279,11 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
 
     if args.run_verus {
         if let Some(verus_path) = &args.verus_path {
-            let verus_command = args
-                .verus_command
-                .as_deref()
-                .unwrap_or(DEFAULT_VERUS_TEST_COMMAND);
-            gates.push(run_shell_gate(
-                "upstream Verus tests",
-                true,
+            gates.push(upstream_verus_gate(
                 verus_path,
-                verus_command,
+                args.verus_command.as_deref(),
                 &cargo_env,
+                &verus_oracle_rustup(),
             ));
         } else {
             gates.push(GateResult {
@@ -1815,6 +2438,28 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
         gates.push(gate);
     }
 
+    if !args.repin_obligation_rendering_drift.is_empty() {
+        let gate = match corpus_path.as_deref() {
+            Some(manifest_path) => repin_obligation_rendering_drift_gate(
+                manifest_path,
+                &args.canonical_manifest_path,
+                &args.repin_obligation_rendering_drift,
+                trust_vc_corpus.as_ref(),
+            ),
+            None => GateResult {
+                name: "TrustVc corpus obligation rendering re-pin".to_string(),
+                required: true,
+                status: GateStatus::Failed,
+                detail: Some(
+                    "--repin-obligation-rendering-drift requires a Verus corpus manifest"
+                        .to_string(),
+                ),
+                command: None,
+            },
+        };
+        gates.push(gate);
+    }
+
     let final_dirty = git_dirty(&args.crate_root).unwrap_or(true);
     gates.push(trust_vc_worktree_gate(
         "TrustVc worktree clean after evidence commands",
@@ -1852,6 +2497,10 @@ pub(crate) fn run_evidence(args: &EvidenceArgs) -> Result<EvidenceReport, Eviden
     if args.refresh_trust_vc_corpus_evidence {
         blocking_reasons
             .push("--refresh-trust-vc-corpus-evidence cannot prove replacement".to_string());
+    }
+    if !args.repin_obligation_rendering_drift.is_empty() {
+        blocking_reasons
+            .push("--repin-obligation-rendering-drift cannot prove replacement".to_string());
     }
     if !args.strict {
         blocking_reasons.push("replacement verdict requires --strict".to_string());
@@ -1970,13 +2619,13 @@ fn write_report_files(args: &EvidenceArgs, report: &EvidenceReport) -> Result<()
 
 fn verus_corpus_manifest_gate_detail(corpus: &VerusCorpusReport) -> String {
     let mut detail = format!(
-        "schema v{}, {} upstream tests, {} entries, replacement summary: {} accepted executable entries, {} accepted TrustVc path bindings, {} accepted expected cases, {} unsupported gaps, {} unclassified gaps, {} not-applicable entries, {} accepted entries with known gaps; {} duplicates, {} invalid, {} missing, {} extra, {} unsupported, {} failing classifications, {} port path failures, {} upstream case failures, {} upstream extraction gaps",
+        "schema v{}, {} upstream tests, {} entries, replacement summary: {} accepted executable entries, {} accepted TrustVc path bindings, {}, {} unsupported gaps, {} unclassified gaps, {} not-applicable entries, {} accepted entries with known gaps; {} duplicates, {} invalid, {} missing, {} extra, {} unsupported, {} failing classifications, {} port path failures, {} upstream case failures, {} upstream extraction gaps",
         corpus.manifest_schema_version,
         corpus.upstream_test_count,
         corpus.entry_count,
         corpus.replacement_summary.accepted_executable_entries,
         corpus.replacement_summary.accepted_trust_vc_path_count,
-        corpus.replacement_summary.accepted_expected_case_count,
+        corpus.replacement_summary.accepted_case_split_phrase(),
         corpus.replacement_summary.unsupported_gap_entries,
         corpus.replacement_summary.unclassified_entries,
         corpus.replacement_summary.not_applicable_entries,
@@ -2149,6 +2798,16 @@ fn cargo_gate_env(args: &EvidenceArgs) -> Vec<(String, String)> {
             cargo_gate_home(args).to_string_lossy().into_owned(),
         ),
     ]
+}
+
+/// The Cargo an evidence command runs: the `CARGO` its environment names
+/// (always set by `cargo_gate_env`), else the evidence lane's default — never a
+/// bare `cargo` resolved from PATH (owner directive 2026-09-28).
+fn evidence_env_cargo(env: &[(String, String)]) -> String {
+    env.iter()
+        .find(|(key, _)| key == "CARGO")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(crate::default_cargo_command)
 }
 
 fn cargo_gate_home(args: &EvidenceArgs) -> PathBuf {
@@ -2914,6 +3573,9 @@ fn collect_cargo_evidence(args: &EvidenceArgs) -> CargoEvidence {
             .next()
             .map(str::to_string);
         if let Some(active_toolchain) = active_toolchain {
+            if let Some(failure) = non_trust_active_toolchain_failure(&active_toolchain) {
+                evidence.failures.push(failure);
+            }
             evidence.rustup_active_toolchain = Some(active_toolchain);
         } else {
             evidence
@@ -3079,6 +3741,88 @@ fn evidence_cargo_home_isolated_gate(args: &EvidenceArgs) -> GateResult {
         }),
         command: None,
     }
+}
+
+/// The required gate "upstream Verus tests". A custom `--verus-command` brings
+/// its own toolchain (and cannot prove replacement); the default command runs
+/// only when [`verus_oracle_not_run`] finds the pinned oracle, and is otherwise
+/// a skipped required gate, which still blocks a replacement claim: an absent
+/// oracle is never read as a pass.
+fn upstream_verus_gate(
+    verus_path: &Path,
+    verus_command: Option<&str>,
+    cargo_env: &[(String, String)],
+    rustup: &str,
+) -> GateResult {
+    const NAME: &str = "upstream Verus tests";
+    if let Some(command) = verus_command {
+        return run_shell_gate(NAME, true, verus_path, command, cargo_env);
+    }
+    match verus_oracle_not_run(verus_path, rustup) {
+        Some(not_run) => skipped_gate(NAME, true, &not_run),
+        None => run_shell_gate(
+            NAME,
+            true,
+            verus_path,
+            DEFAULT_VERUS_TEST_COMMAND,
+            cargo_env,
+        ),
+    }
+}
+
+/// The rustup the Verus-oracle probe asks: the sanitized environment's.
+fn verus_oracle_rustup() -> String {
+    // The synthetic proven e2e runs a fake Verus that needs no stock toolchain.
+    #[cfg(test)]
+    if let Some(fake) = std::env::var_os(TEST_VERUS_ORACLE_RUSTUP_ENV) {
+        return fake.to_string_lossy().into_owned();
+    }
+    sanitized_toolchain_env()
+        .and_then(|toolchain| toolchain.rustup_bin_dir.as_deref())
+        .map(|dir| Path::new(dir).join("rustup").to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rustup".to_string())
+}
+
+#[cfg(test)]
+const TEST_VERUS_ORACLE_RUSTUP_ENV: &str = "TRUST_VC_TEST_VERUS_ORACLE_RUSTUP";
+
+/// The `NOT RUN` detail when the default Verus command cannot run as pinned,
+/// else `None`: the Verus checkout's `rust-toolchain.toml` must name
+/// [`VERUS_ORACLE_TOOLCHAIN`] (a moved `upstream.ref` shows here, not as a
+/// dyld or build failure), and rustup must hold it. Nothing installs it.
+fn verus_oracle_not_run(verus_root: &Path, rustup: &str) -> Option<String> {
+    let channel = fs::read_to_string(verus_root.join("rust-toolchain.toml"))
+        .ok()
+        .or_else(|| {
+            // A sparse checkout need not materialize it; the checked-out commit has it.
+            git_stdout_bytes(verus_root, &["show", "HEAD:rust-toolchain.toml"])
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        })
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let value = line
+                    .trim()
+                    .strip_prefix("channel")?
+                    .trim_start()
+                    .strip_prefix('=')?;
+                parse_toml_string(value)
+            })
+        });
+    if channel.as_deref() != Some(VERUS_ORACLE_TOOLCHAIN) {
+        let named = channel.map_or_else(|| "no channel".to_string(), |c| format!("`{c}`"));
+        return Some(format!(
+            "NOT RUN: oracle rustc {VERUS_ORACLE_TOOLCHAIN}: the Verus checkout's rust-toolchain.toml names {named}"
+        ));
+    }
+    let probe = run_command_with_env(
+        verus_root,
+        rustup,
+        &["which", "--toolchain", VERUS_ORACLE_TOOLCHAIN, "rustc"],
+        &[("RUSTUP_AUTO_INSTALL", "0")],
+    );
+    (probe.exit_code != Some(0))
+        .then(|| format!("NOT RUN: oracle rustc {VERUS_ORACLE_TOOLCHAIN} not installed"))
 }
 
 fn skipped_gate(name: &str, required: bool, detail: &str) -> GateResult {
@@ -3713,6 +4457,15 @@ fn cargo_config_paths(crate_root: &Path, cargo_home: Option<&Path>) -> Vec<PathB
     let mut paths = Vec::new();
     let mut seen = BTreeSet::new();
     push_unique_path(&mut paths, &mut seen, crate_root.join("Cargo.toml"));
+    // Corpus fixture manifests. Added 2026-09-16: this control scanned the ROOT
+    // manifest only, so a `rustflags` override hidden in one of the ported
+    // cargo fixtures' own manifests was invisible to the very gate whose
+    // subject matter it is (a `.cargo/config.toml` carrying the same line was
+    // already caught). The fixtures are the units under test; their manifests
+    // must be as override-free as the root's.
+    for path in corpus_fixture_manifest_paths(crate_root) {
+        push_unique_path(&mut paths, &mut seen, path);
+    }
     for path in effective_cargo_config_paths(crate_root) {
         push_unique_path(&mut paths, &mut seen, path);
     }
@@ -3822,8 +4575,45 @@ fn cargo_manifest_override_in_file(path: &Path) -> bool {
             return false;
         }
         let lower = line.to_ascii_lowercase();
-        lower.starts_with("[patch.") || lower.starts_with("[replace]")
+        lower.starts_with("[patch.")
+            || lower.starts_with("[replace]")
+            // A manifest can also carry compiler flags, through cargo's
+            // `profile-rustflags` feature (`[profile.dev] rustflags = [...]`,
+            // `[profile.dev.package."*"]`, `[profile.dev.build-override]`).
+            // That is a rustflags override in a manifest and this control
+            // missed it until 2026-09-16.
+            || lower.starts_with("rustflags")
+            || (lower.starts_with("cargo-features") && lower.contains("profile-rustflags"))
     })
+}
+
+/// Every `Cargo.toml` under `<crate_root>/evals` — the ported corpus fixtures.
+fn corpus_fixture_manifest_paths(crate_root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    collect_corpus_fixture_manifest_paths(&crate_root.join("evals"), &mut paths);
+    paths
+}
+
+fn collect_corpus_fixture_manifest_paths(dir: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if file_type.is_dir() {
+            if matches!(name.as_ref(), ".git" | "target" | ".trust_vc") {
+                continue;
+            }
+            collect_corpus_fixture_manifest_paths(&path, paths);
+        } else if name == "Cargo.toml" {
+            paths.push(path);
+        }
+    }
 }
 
 fn path_starts_with(path: &Path, parent: &Path) -> bool {
@@ -3997,7 +4787,20 @@ fn load_corpus_report_with_options(
     let mut seen_entries = BTreeSet::new();
     let mut duplicate_entries = Vec::new();
     let mut classification_counts = BTreeMap::new();
-    let replacement_summary = verus_replacement_summary(&manifest.entries);
+    let mut replacement_summary = verus_replacement_summary(&manifest.entries);
+    // SCOPE comes from the manifest; ESTABLISHED can only be measured against
+    // upstream, so it is filled in exactly when a checkout is available and is
+    // rendered as NOT MEASURED otherwise. A scope count printed as though it
+    // were an established one is the error this split exists to stop.
+    if let Some(verus_path) = verus_path {
+        let measured = measure_upstream_read_establishment(&manifest.entries, verus_path);
+        replacement_summary.accepted_counterexample_established =
+            Some(measured.counterexample_established());
+        replacement_summary.accepted_counterexample_refused_uncheckable =
+            Some(measured.counterexample_refused_uncheckable);
+        replacement_summary.accepted_counterexample_unreadable_upstream_case =
+            Some(measured.counterexample_unreadable_upstream_case);
+    }
     let mut unsupported_entries = Vec::new();
     let mut failing_entries = Vec::new();
     let mut port_path_failures = Vec::new();
@@ -4009,12 +4812,20 @@ fn load_corpus_report_with_options(
     let porting_next_action =
         verus_corpus_porting_next_action(&manifest, manifest_path, crate_root);
     let mut accepted_trust_vc_source_hashes = Vec::new();
+    let mut unscheduled_ported_paths: Vec<UnscheduledTrustVcPath> = Vec::new();
     let mut run_candidates = Vec::new();
+    let mut proof_content_decrease_waivers = Vec::new();
     let git_head_available = git_rev_parse(crate_root, "HEAD").is_some();
     if git_head_available {
         match repo_relative_string(crate_root, manifest_path) {
             Ok(manifest_rel) => match git_head_path_kind(crate_root, &manifest_rel) {
-                Ok(Some(GitHeadPathKind::Blob)) => {}
+                Ok(Some(GitHeadPathKind::Blob)) => append_proof_content_ratchet_findings(
+                    crate_root,
+                    &manifest_rel,
+                    &manifest.entries,
+                    &mut invalid_entries,
+                    &mut proof_content_decrease_waivers,
+                ),
                 Ok(Some(GitHeadPathKind::Tree)) => invalid_entries.push(format!(
                     "manifest path must be a tracked HEAD file, got tree `{manifest_rel}`"
                 )),
@@ -4181,6 +4992,26 @@ fn load_corpus_report_with_options(
                     "{}: expected_cases entry `{}` must declare min_obligations >= 1 unless expected_verdict is error",
                     entry.upstream_path, expected_case.case_id
                 ));
+            }
+            if let Some(waiver) = &expected_case.obligation_decrease_waiver {
+                if waiver.reason.trim().is_empty() {
+                    port_path_failures.push(format!(
+                        "{}: expected_cases entry `{}` declares an obligation_decrease_waiver with an empty reason",
+                        entry.upstream_path, expected_case.case_id
+                    ));
+                }
+                // A waiver that descends from a count no larger than the
+                // current one describes no decrease, so it can only be a
+                // waiver looking for one.
+                if waiver.from_min_obligations < expected_case.min_obligations {
+                    port_path_failures.push(format!(
+                        "{}: expected_cases entry `{}` declares an obligation_decrease_waiver from_min_obligations {} below its own min_obligations {}",
+                        entry.upstream_path,
+                        expected_case.case_id,
+                        waiver.from_min_obligations,
+                        expected_case.min_obligations
+                    ));
+                }
             }
             if expected_case.expected_verdict == VerusExpectedVerdict::Error
                 && expected_case.min_obligations == 0
@@ -4422,14 +5253,75 @@ fn load_corpus_report_with_options(
                         if upstream_case.ignored {
                             continue;
                         }
-                        let mapped_count = entry
+                        let mapped_cases = entry
                             .expected_cases
                             .iter()
                             .filter(|expected_case| {
                                 upstream_case_id(expected_case) == upstream_case.case_id
                             })
-                            .count();
-                        if mapped_count < upstream_case.expected_occurrences {
+                            .collect::<Vec<_>>();
+                        let mapped_count = mapped_cases.len();
+                        // Upstream `assert_fails(e, N)` is `assert_eq!(err.errors.len(), N)`
+                        // — EXACTLY N FAILURES IN ONE PROGRAM. What this rule
+                        // once compared against N was the number of mapped port
+                        // CASES, which is the same number only when every mapped
+                        // function fails. Upstream routinely writes a failing
+                        // case as a MULTI-FUNCTION program in which one function
+                        // fails and the rest verify (`z3_restart.rs`'s
+                        // `multiset_basics`: six proof fns, one trailing
+                        // `assert(false) // FAILS`), and the corpus convention is
+                        // one port function per upstream function. Under the old
+                        // reading such a case was unportable by construction: the
+                        // five verifying functions had to be declared
+                        // `counterexample` (a lie) or dropped (a deletion), and
+                        // six mapped cases could never equal one failure.
+                        //
+                        // So the exact count is taken on the mapped cases that
+                        // DECLARE a failure, which is upstream's own assertion
+                        // transported to a split port, and the remaining mapped
+                        // cases are held to `verified` by the verdict rule below.
+                        // Where a port maps exactly N cases and all N fail — every
+                        // other counterexample case in this corpus — the two
+                        // readings coincide exactly.
+                        //
+                        // The split is then CEILINGED by upstream's own program:
+                        // a port may spend at most as many cases on an upstream
+                        // case as upstream declares functions in it, so the new
+                        // room cannot be spent on cases upstream does not have.
+                        // For an `Ok(())` upstream case there is no failure count
+                        // at all, and `>=` stands as before.
+                        if upstream_case.expected_verdict == VerusExpectedVerdict::Counterexample {
+                            let failing_count = mapped_cases
+                                .iter()
+                                .filter(|expected_case| {
+                                    expected_case.expected_verdict
+                                        == VerusExpectedVerdict::Counterexample
+                                })
+                                .count();
+                            if failing_count != upstream_case.expected_occurrences {
+                                upstream_case_failures.push(format!(
+                                    "{}: upstream Verus harness case `{}` fails exactly {} obligation(s), so exactly {} of its mapped TrustVc expected case(s) may declare a failure, but {} of {} do",
+                                    entry.upstream_path,
+                                    upstream_case.case_id,
+                                    upstream_case.expected_occurrences,
+                                    upstream_case.expected_occurrences,
+                                    failing_count,
+                                    mapped_count
+                                ));
+                            }
+                            if mapped_count > upstream_case.expected_occurrences
+                                && upstream_case.program_function_count > 0
+                                && mapped_count > upstream_case.program_function_count
+                            {
+                                upstream_case_failures.push(format!(
+                                    "{}: upstream Verus harness case `{}` declares {} function(s), so its port may be split across at most that many mapped TrustVc expected case(s), but manifest maps {}",
+                                    entry.upstream_path,
+                                    upstream_case.case_id,
+                                    upstream_case.program_function_count,
+                                    mapped_count
+                                ));
+                            }
+                        } else if mapped_count < upstream_case.expected_occurrences {
                             upstream_case_failures.push(format!(
                                 "{}: upstream Verus harness case `{}` requires at least {} mapped TrustVc expected case(s), but manifest maps {}",
                                 entry.upstream_path,
@@ -4458,7 +5350,34 @@ fn load_corpus_report_with_options(
                     for expected_case in &entry.expected_cases {
                         let upstream_id = upstream_case_id(expected_case);
                         if let Some(upstream_case) = upstream_cases_by_id.get(upstream_id) {
-                            if expected_case.expected_verdict != upstream_case.expected_verdict {
+                            // A PORT case's verdict is a property of ONE port
+                            // FUNCTION; an UPSTREAM case's verdict is a property
+                            // of its whole PROGRAM. The two coincide wherever the
+                            // program is one function, and on an `Ok(())` case
+                            // wherever it is many — every function verifies. They
+                            // cannot coincide on every mapped case of a
+                            // MULTI-FUNCTION FAILING case: `assert_one_fails`
+                            // says exactly one of the program's obligations is
+                            // refuted, so the port functions carrying upstream's
+                            // other functions must VERIFY, and requiring them to
+                            // declare `counterexample` would require the manifest
+                            // to state a falsehood.
+                            //
+                            // `verified` is therefore admissible under a
+                            // counterexample upstream case, and ONLY `verified`:
+                            // `error` is still refused, the exact FAILING-case
+                            // count above pins how many of the mapped cases may
+                            // claim the refutation, and the program-shape ceiling
+                            // pins how many cases the case may be split into at
+                            // all. Nothing here admits a `counterexample` under a
+                            // verified upstream case, which stays a mismatch.
+                            let verdict_admissible = expected_case.expected_verdict
+                                == upstream_case.expected_verdict
+                                || (upstream_case.expected_verdict
+                                    == VerusExpectedVerdict::Counterexample
+                                    && expected_case.expected_verdict
+                                        == VerusExpectedVerdict::Verified);
+                            if !verdict_admissible {
                                 upstream_case_failures.push(format!(
                                     "{}: expected_cases entry `{}` declares `{}`, but upstream Verus harness case `{}` expects `{}`",
                                     entry.upstream_path,
@@ -4583,7 +5502,22 @@ fn load_corpus_report_with_options(
                 }
             }
             if port_path_failures.len() == entry_port_path_failure_start {
-                run_candidates.extend(run_candidates_for_manifest_entry(entry, options));
+                run_candidates.extend(run_candidates_for_manifest_entry(
+                    entry, options, verus_path,
+                ));
+            } else {
+                // The entry is DROPPED from the corpus run. Record which paths
+                // went unmeasured and why, so the run report cannot present a
+                // short denominator as a complete one.
+                let reasons = port_path_failures[entry_port_path_failure_start..].to_vec();
+                for trust_vc_path in &entry.trust_vc_paths {
+                    unscheduled_ported_paths.push(UnscheduledTrustVcPath {
+                        upstream_path: entry.upstream_path.clone(),
+                        classification: entry.classification.clone(),
+                        trust_vc_path: trust_vc_path.clone(),
+                        reasons: reasons.clone(),
+                    });
+                }
             }
         }
     }
@@ -4607,10 +5541,13 @@ fn load_corpus_report_with_options(
         upstream_case_failures,
         ignored_upstream_cases,
         upstream_case_extraction_gaps,
+        proof_content_decrease_waivers,
+        accepted_case_correspondence_bound: ACCEPTED_CASE_CORRESPONDENCE_BOUND.to_string(),
         porting_next_action,
         accepted_executable_ports,
         unsupported_gap_evidence,
         accepted_trust_vc_source_hashes,
+        unscheduled_ported_paths,
         run_candidates,
     })
 }
@@ -5231,10 +6168,2349 @@ fn expected_case_trust_vc_paths<'a>(
     }
 }
 
+/// UPSTREAM's own `FAILS`-marked source lines, normalized, keyed by upstream
+/// case id.
+///
+/// Read from the VERUS CHECKOUT — the file this repo is ported FROM — because
+/// the marker on a ported line is written by the port author and anchors
+/// nothing on its own. Upstream test files are a flat sequence of
+/// `test_verify_one_file! { #[test] <name> verus_code! { .. } => .. }`
+/// invocations, so a case's region runs from its `#[test] <name>` to the next
+/// one.
+///
+/// Best-effort: a missing `--verus-path`, an unreadable file or a case with no
+/// marker yields no entry, and the caller then FAILS the case rather than
+/// waiving the cross-check.
+fn upstream_fails_marked_lines_by_case(
+    verus_path: Option<&Path>,
+    upstream_path: &str,
+) -> BTreeMap<String, Vec<UpstreamFailsMark>> {
+    let mut marked: BTreeMap<String, Vec<UpstreamFailsMark>> = BTreeMap::new();
+    let Some(verus_path) = verus_path else {
+        return marked;
+    };
+    let Ok(source) = fs::read_to_string(verus_path.join(upstream_path)) else {
+        return marked;
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    for (case_id, region) in upstream_case_regions(&lines) {
+        marked.entry(case_id.clone()).or_default();
+        // The PROGRAM, not the Rust test that runs it — see
+        // `upstream_program_region`. A no-op for the macro form, whose region
+        // opens on the program block already.
+        let program = upstream_program_region(region);
+        for (offset, line) in program.iter().enumerate() {
+            if !line_carries_upstream_fails_marker(line) {
+                continue;
+            }
+            let normalized = normalized_marked_source_line(line);
+            if normalized.is_empty() {
+                // A comment-only line mentioning the marker carries no code to
+                // correspond to.
+                continue;
+            }
+            marked
+                .entry(case_id.clone())
+                .or_default()
+                .push(upstream_mark_from_region(program, offset, normalized));
+        }
+    }
+    marked.retain(|_, marks| !marks.is_empty());
+    marked
+}
+
+/// The `#[test] <name>` REGIONS of one upstream test file, in file order.
+///
+/// ONE reader, so the `FAILS` extractor and anything that MEASURES the corpus
+/// against upstream cut the file the same way and cannot disagree about which
+/// upstream case a port is being compared to.
+///
+/// IT READS BOTH FORMS UPSTREAM WRITES, since round 11.
+/// `upstream_harness_case_name_on_line` reads the name off the `#[test]` line
+/// itself, which is what `test_verify_one_file!` and its siblings expand to;
+/// `upstream_harness_case_name_at` additionally reads the PLAIN form — a bare
+/// `#[test]` line with `fn name()` on a following line — which upstream's
+/// hand-written `harness.rs` uses for 4 of its 6 cases. Those four used to
+/// declare a case this reader never saw, so no upstream text was readable for
+/// them and every upstream cross-check of such a case could only FAIL; clause
+/// (1) of `ACCEPTED_CASE_CORRESPONDENCE_BOUND` counted that as the whole of
+/// `harness.rs::harness_false`'s cost, and clause (5) named closing it as one
+/// of the two cheap fixes in the way of the counts. It is closed here and the
+/// bound's numbers move with it. Pinned by
+/// `the_region_reader_sees_both_upstream_test_declaration_forms`.
+///
+/// The plain form is recognised CONSERVATIVELY — a `#[test]` line that carries
+/// nothing else, then attributes, comments and blank lines, then a `fn` item
+/// within a short window — so an ordinary `#[test]` in a file that has nothing
+/// to do with this corpus cannot mint a region out of unrelated code.
+fn upstream_case_regions<'a>(lines: &'a [&'a str]) -> Vec<(String, &'a [&'a str])> {
+    let mut case_starts: Vec<(String, usize)> = Vec::new();
+    for index in 0..lines.len() {
+        if let Some(case_id) = upstream_harness_case_name_at(lines, index) {
+            case_starts.push((case_id, index));
+        }
+    }
+    case_starts
+        .iter()
+        .enumerate()
+        .map(|(position, (case_id, start))| {
+            let end = case_starts
+                .get(position + 1)
+                .map(|(_, next)| *next)
+                .unwrap_or(lines.len());
+            (case_id.clone(), &lines[*start..end])
+        })
+        .collect()
+}
+
+/// One upstream `FAILS` marker, with every text and every premise the gate
+/// compares it by, read from the case REGION it sits in.
+///
+/// One reader, used by the extractor and by the tests that mirror it, so a
+/// test can never assert against a mark the corpus run would not build.
+fn upstream_mark_from_region(
+    region: &[&str],
+    offset: usize,
+    normalized: String,
+) -> UpstreamFailsMark {
+    let region_source = region.join("\n");
+    // The premise window ends where the marked STATEMENT begins, not where the
+    // marker sits — upstream marks the clause line of a multi-line statement,
+    // and the port's refutation is located at that statement's first line. Both
+    // windows must exclude the refuted statement itself or they are not
+    // comparable.
+    let statement_start = upstream_statement_bounds(region, offset)
+        .map(|(start, _)| start)
+        .unwrap_or(offset);
+    let prefix = enclosing_function_prefix_lines(&region_source, statement_start + 1);
+    let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    // The SAME reader `enclosing_function_prefix_lines` consults, asked the
+    // question it answers implicitly: is the window empty because there is no
+    // window, or because the program runs nothing before the mark?
+    let region_lines: Vec<&str> = region_source.lines().collect();
+    let enclosing = enclosing_function(&region_lines, statement_start + 1);
+    let marked_on_function_header = enclosing.is_some_and(|(_, inside_body)| !inside_body);
+    // The one shape that still has NO window: a header mark on a function with
+    // no body. The window for every other header mark is that body.
+    let window_undrawable = enclosing.is_some_and(|(item_start, inside_body)| {
+        !inside_body && enclosing_function_body_end(&region_lines, item_start).is_none()
+    });
+    let header = enclosing_function_header_lines(&region_source, offset + 1);
+    let header_refs: Vec<&str> = header.iter().map(String::as_str).collect();
+    let line_core = canonical_claim_core(region[offset]);
+    let statement_core = canonical_claim_core(&upstream_statement_lines(region, offset));
+    let bindings = canonical_let_bindings(&prefix_refs);
+    let mut seed = identifiers_in(&line_core);
+    seed.extend(identifiers_in(&statement_core));
+    UpstreamFailsMark {
+        normalized,
+        line_core,
+        statement_core,
+        definitions: reachable_definitions(region, &seed, &bindings),
+        statements: body_statement_cores(&prefix_refs),
+        bindings,
+        clause_kind: upstream_clause_kind(region, offset),
+        hypotheses: hypothesis_atoms(&header_refs),
+        marked_on_function_header,
+        window_undrawable,
+    }
+}
+
+/// The VERUS PROGRAM inside one upstream case region — the text whose
+/// statements, bindings and clauses are the premises of a marked claim.
+///
+/// The two declaration forms wrap the program differently, and the premise
+/// readers have to be handed the same thing for both or the plain form reports
+/// the Rust TEST FUNCTION's statements as the program's:
+///
+/// * the MACRO form's region opens on `#[test] <name> verus_code! {`, so the
+///   region already IS the program block and this returns it unchanged — every
+///   macro-form case in the corpus takes this branch and nothing about it
+///   moves;
+/// * the PLAIN form's region opens on a bare `#[test]` above `fn <name>()`,
+///   and the program sits inside a `verus_code! { .. }` argument several lines
+///   down. `enclosing_function` correctly refuses to re-anchor on an `fn`
+///   nested inside an already-open body, so without this narrowing the
+///   enclosing function of `assert(false); // FAILS` came out as upstream's
+///   Rust test `fn harness_false()`, and its premise window as
+///   `["\"harness_false\"", "leterr=verify_one_file(", "verus_code{"]` —
+///   harness scaffolding no port runs and none should.
+///
+/// Narrowing is gated on the plain form, so it cannot move a macro-form case
+/// even if that case nests a macro block of its own.
+fn upstream_program_region<'a>(region: &'a [&'a str]) -> &'a [&'a str] {
+    let Some(first) = region.first() else {
+        return region;
+    };
+    if !line_is_bare_test_attribute(first) {
+        return region;
+    }
+    let Some(open) = region
+        .iter()
+        .position(|line| line_opens_macro_block(code_before_line_comment(line)))
+    else {
+        return region;
+    };
+    let mut depth = 0i32;
+    for (index, line) in region.iter().enumerate().skip(open) {
+        for ch in code_before_line_comment(line).chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &region[open..=index];
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    &region[open..]
+}
+
+/// Whether a line opens a MACRO INVOCATION with a brace-delimited body, the
+/// `verus_code! {` shape upstream wraps an embedded program in.
+///
+/// `!` followed by a brace, so a call macro (`assert!(..)`, `vec![..]`) is not
+/// one.
+fn line_opens_macro_block(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'!'
+            && bytes[index + 1..]
+                .iter()
+                .find(|next| !next.is_ascii_whitespace())
+                == Some(&b'{')
+    })
+}
+
+/// Whether a line carries upstream's `FAILS` MARKER, as opposed to merely
+/// containing those five letters.
+///
+/// Upstream's convention is a trailing comment on the marked line
+/// (`assert(false); // FAILS`), and every marker in the accepted corpus is
+/// written that way. A bare `contains` also matched the word where it appears
+/// inside a STRING LITERAL of upstream's own assertion — measured across the
+/// 46 accepted upstream files, exactly one line, and it is upstream
+/// `harness.rs`'s harness_false checking its own diagnostic:
+///
+///     assert!(err.errors[0].spans.first().expect("span").text[0].text.contains("FAILS"));
+///
+/// That line is not a claim upstream marks; it is the assertion that the marker
+/// was reported. Counting it minted a second `UpstreamFailsMark` for the case
+/// whose premise window is the whole of the Rust test function, which changed
+/// no verdict (the claim comparison is a search, and no port refutes that line)
+/// but did make the bound's thin-window measurement call the case thicker than
+/// the mark it actually matches on. So the marker is taken from the trailing
+/// COMMENT, or from code OUTSIDE any string or char literal, and never from
+/// inside a literal.
+fn line_carries_upstream_fails_marker(line: &str) -> bool {
+    let code = code_before_line_comment(line);
+    if line[code.len()..].contains(UPSTREAM_FAILS_MARKER) {
+        return true;
+    }
+    let bytes = code.as_bytes();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if in_string || in_char => {
+                index += 2;
+                continue;
+            }
+            b'"' if !in_char => in_string = !in_string,
+            b'\'' if !in_string => in_char = !in_char,
+            // Byte-sliced, not `code[index..]`: this arm is evaluated at every
+            // byte, and a multi-byte character would make a `&str` slice panic
+            // on a non-boundary index.
+            _ if !in_string
+                && !in_char
+                && bytes[index..].starts_with(UPSTREAM_FAILS_MARKER.as_bytes()) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// The case name declared AT `lines[index]`, in either form upstream writes.
+///
+/// Upstream's `rust_verify_test` suite declares a case two ways, and the gate
+/// has to cut the file the same way for both or a hand-written case has no
+/// upstream text at all:
+///
+/// * the SAME-LINE form, `#[test] <name> verus_code! {`, which is what
+///   `test_verify_one_file!` and its siblings expand to; and
+/// * the PLAIN form, a bare `#[test]` line with `fn <name>()` below it, which
+///   `harness.rs` writes by hand for 4 of its 6 cases.
+///
+/// The plain branch is deliberately narrow. It fires only on a `#[test]` line
+/// that carries nothing else (further attributes on the same line are allowed
+/// and skipped, exactly as the same-line reader allows them), then looks past
+/// attribute, comment and blank lines for an `fn` item within a short window.
+/// A `#[test]` followed by anything else declares no region, so this cannot
+/// mint a case out of unrelated code.
+fn upstream_harness_case_name_at(lines: &[&str], index: usize) -> Option<String> {
+    let line = lines[index];
+    if let Some(case_id) = upstream_harness_case_name_on_line(line) {
+        return Some(case_id);
+    }
+    if !line_is_bare_test_attribute(line) {
+        return None;
+    }
+    // STOPS at the first line that is neither skippable nor an `fn`, rather
+    // than searching on: a `#[test]` above something else declares no case, and
+    // walking past it would attribute unrelated code to one.
+    for next in lines
+        .iter()
+        .skip(index + 1)
+        .take(PLAIN_TEST_ATTRIBUTE_LOOKAHEAD_LINES)
+    {
+        let trimmed = next.trim();
+        if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//") {
+            continue;
+        }
+        return upstream_test_function_name(trimmed);
+    }
+    None
+}
+
+/// How far below a bare `#[test]` the plain-form reader will look for the `fn`
+/// it attaches to. Long enough for the attributes and doc comments upstream
+/// puts between them, short enough that a stray `#[test]` cannot reach into an
+/// unrelated item.
+const PLAIN_TEST_ATTRIBUTE_LOOKAHEAD_LINES: usize = 8;
+
+/// Whether a line is a `#[test]` attribute and NOTHING ELSE — the plain form's
+/// opener. `#[test] <name> ..` is the same-line form and is read by
+/// `upstream_harness_case_name_on_line` instead, so it is refused here.
+fn line_is_bare_test_attribute(line: &str) -> bool {
+    let Some(mut rest) = line.trim().strip_prefix("#[test]") else {
+        return false;
+    };
+    rest = rest.trim_start();
+    // `#[test] #[ignore]`, the same shape the same-line reader skips.
+    while let Some(after) = rest.strip_prefix("#[") {
+        let Some(close) = after.find(']') else {
+            return false;
+        };
+        rest = after[close + 1..].trim_start();
+    }
+    rest.is_empty()
+}
+
+/// The name of the `fn` item a line opens, if it opens one.
+fn upstream_test_function_name(line: &str) -> Option<String> {
+    let mut rest = line.trim_start();
+    loop {
+        let stripped = rest
+            .strip_prefix("pub(crate) ")
+            .or_else(|| rest.strip_prefix("pub "))
+            .or_else(|| rest.strip_prefix("async "))
+            .or_else(|| rest.strip_prefix("unsafe "))
+            .or_else(|| rest.strip_prefix("const "));
+        match stripped {
+            Some(after) => rest = after.trim_start(),
+            None => break,
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?.trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// The case name an upstream `#[test] <name> ..` line declares, if any.
+fn upstream_harness_case_name_on_line(line: &str) -> Option<String> {
+    let mut rest = line.split_once("#[test]")?.1.trim_start();
+    // `#[test] #[ignore] name ..`
+    while let Some(after) = rest.strip_prefix("#[") {
+        let close = after.find(']')?;
+        rest = after[close + 1..].trim_start();
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// The code a source line carries, with its trailing `//` comment removed.
+///
+/// The `//` is only a comment opener OUTSIDE a string or char literal —
+/// `assert!(url == "http://x");` carries no comment at all — so a naive
+/// `rfind("//")` could truncate two different assertions down to the same
+/// prefix and make them compare equal.
+fn code_before_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if in_string || in_char => {
+                index += 2;
+                continue;
+            }
+            b'"' if !in_char => in_string = !in_string,
+            b'\'' if !in_string => in_char = !in_char,
+            b'/' if !in_string && !in_char && bytes.get(index + 1) == Some(&b'/') => {
+                return &line[..index];
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    line
+}
+
+/// A source line reduced to the code it carries, so an upstream line and its
+/// port can be compared without spelling either dialect into the gate.
+///
+/// The trailing comment (which is where the marker lives) is dropped, all
+/// whitespace is dropped, the `trust_vc::` path prefix is dropped, and a macro
+/// bang is dropped where it follows an identifier and opens a delimiter — so
+/// `trust_vc::assert!(5 <= i); // FAILS` and `assert(5 <= i); // FAILS`
+/// normalize alike, while the logical `!` in `assert!(!(x >= 0.0))` survives.
+fn normalized_marked_source_line(line: &str) -> String {
+    // The numeric-literal SUFFIX rule is applied here, on the line that still
+    // carries its whitespace, because a suffix is read off a literal and a
+    // literal is identified by a TOKEN BOUNDARY — which compaction destroys.
+    // `0int <= x implies 1int <= f1(x)` compacts to `0int<=ximplies1int<=f1(x)`,
+    // in which `1int` is no longer token-initial (it follows the `s` of the
+    // `implies` KEYWORD) and so kept a suffix upstream's `1` never had. The
+    // same rewrite still runs inside `canonical_claim_pass`, which is where a
+    // suffix exposed by a LATER rewrite is caught; running it twice is free
+    // because it is idempotent, and it can only ever equate a literal with the
+    // same literal minus a suffix that names its type.
+    let compact: String =
+        strip_numeric_literal_suffixes(&code_before_line_comment(line).replace("trust_vc::", ""))
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+    let bytes: Vec<char> = compact.chars().collect();
+    let mut out = String::with_capacity(compact.len());
+    for (index, ch) in bytes.iter().enumerate() {
+        if *ch == '!'
+            && index > 0
+            && (bytes[index - 1].is_alphanumeric() || bytes[index - 1] == '_')
+            && matches!(bytes.get(index + 1), Some('(') | Some('[') | Some('{'))
+        {
+            continue;
+        }
+        out.push(*ch);
+    }
+    out
+}
+
+/// A claim reduced to the CANONICAL FORM the two surfaces share.
+///
+/// [`normalized_marked_source_line`] answers "what code does this line carry",
+/// which decides correspondence only while the port is SPELLED like upstream.
+/// R1 retired exactly that requirement, and the native surface deliberately
+/// breaks it: `!(P) || Q` for `P ==> Q`, `assert_by_nonlinear!(..)` for
+/// `assert(..) by(nonlinear_arith)`, an `#[ensures(..)]` attribute for a
+/// `ensures` clause line, `1usize` for `1`, `Multiset::<V>::` for `Multiset::`.
+///
+/// So the gate canonicalizes BOTH sides through the SAME rewrites and then
+/// demands EQUALITY. Nothing here is a waiver, and this is the property the
+/// whole cross-check rests on: every rewrite maps a SURFACE SPELLING onto the
+/// claim it spells, so
+///
+/// * two texts that canonicalize alike make the same claim, and
+/// * no text can be rewritten into a claim it does not make — none of these
+///   rewrites can introduce, delete or re-associate an operand.
+///
+/// That is why widening the normalizer is not the same move as waiving the
+/// check: `assert!(false)` canonicalizes to `assert(false)` and to nothing
+/// else, so it corresponds to no upstream line that says anything else, in any
+/// dialect.
+fn canonical_claim_core(text: &str) -> String {
+    let compact: String = text.lines().map(normalized_marked_source_line).collect();
+    let mut current = compact;
+    // Every pass strictly removes surface syntax, so the fixpoint is reached in
+    // a couple of rounds; the bound is a guard against a future non-reducing
+    // rule, not a semantic limit.
+    for _ in 0..8 {
+        let next = canonical_claim_pass(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn canonical_claim_pass(text: &str) -> String {
+    let mut current = strip_numeric_literal_suffixes(text);
+    current = strip_turbofish(&current);
+    current = strip_trailing_statement_separators(&current);
+    current = strip_trailing_empty_proof_block(&current);
+    current = rewrite_proof_macro_to_upstream_form(&current);
+    current = rewrite_plain_proof_macro_to_upstream_form(&current);
+    current = rewrite_ext_eq_to_upstream_form(&current);
+    current = rewrite_spec_fn_ctor_to_upstream_form(&current);
+    current = rewrite_binder_macro_to_upstream_form(&current);
+    current = unwrap_contract_attribute(&current);
+    current = expand_implications(&current);
+    strip_redundant_outer_parentheses(&current)
+}
+
+/// The QUANTIFIER/CHOICE binders, whose native spelling is a macro taking a
+/// closure and whose upstream spelling writes the closure bare.
+///
+/// `choose_tuple` and the `assert .. by` proof macros are deliberately absent:
+/// the first really is a call taking a closure on BOTH surfaces, and the second
+/// is rewritten by [`rewrite_proof_macro_to_upstream_form`].
+const BINDER_MACRO_HEADS: &[&str] = &["choose", "forall", "exists"];
+
+/// `choose(|i: int| f(i))` spelled back into upstream's `(choose|i: int| f(i))`.
+///
+/// MEASURED GAP, and it is the one a round-4 report described wrongly. The port
+/// writes `trust_vc::choose!(|i: int| f(i))`, which normalizes to
+/// `choose(|i:int|f(i))`; upstream writes `choose|i: int| f(i)`, which
+/// normalizes to `choose|i:int|f(i)`. Those are not equal, so a FAITHFUL port
+/// of `choose.rs` failed the premise comparison on a SPELLING — not because the
+/// binding channel discriminated anything.
+///
+/// The parentheses are kept, not dropped, and that is load-bearing: a binder's
+/// body runs to the end of the expression, so `choose(|n: nat| f(n)) >= 0`
+/// rewritten to `choose|n: nat| f(n) >= 0` would RE-ASSOCIATE `>= 0` into the
+/// body and make two different claims canonicalize alike. Upstream writes the
+/// parentheses itself for exactly that reason (`(choose|n: nat| cnatf(n)) >=
+/// 0`), so moving the head inside them lands on upstream's own text. A binder
+/// that IS the whole expression then differs only by a redundant outer pair,
+/// which [`strip_redundant_outer_parentheses`] removes on both surfaces.
+fn rewrite_binder_macro_to_upstream_form(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    'outer: while index < chars.len() {
+        let starts_token =
+            index == 0 || !(chars[index - 1].is_alphanumeric() || chars[index - 1] == '_');
+        if starts_token {
+            for head in BINDER_MACRO_HEADS {
+                let head_chars: Vec<char> = head.chars().collect();
+                if !chars[index..].starts_with(&head_chars) {
+                    continue;
+                }
+                let open = index + head_chars.len();
+                if chars.get(open) != Some(&'(') {
+                    continue;
+                }
+                // Only a CLOSURE argument is a binder body; a call whose first
+                // argument is anything else is a call, and stays one.
+                if chars.get(open + 1) != Some(&'|') {
+                    continue;
+                }
+                let Some(close) = matching_delimiter(&chars, open) else {
+                    continue;
+                };
+                let inner: String = chars[open + 1..close].iter().collect();
+                out.push('(');
+                out.push_str(head);
+                out.push_str(&inner);
+                out.push(')');
+                index = close + 1;
+                continue 'outer;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// One text, with a parenthesis pair that wraps the WHOLE of it removed.
+///
+/// Wrapping an entire expression in parentheses changes no operand and no
+/// association, so `(P)` and `P` are one claim — and the two surfaces disagree
+/// about the wrap whenever one spells a binder as a macro call and the other
+/// writes it bare. Applied to BOTH surfaces through the same canonicalizer.
+fn strip_redundant_outer_parentheses(text: &str) -> String {
+    let mut current = text.to_string();
+    for _ in 0..8 {
+        let chars: Vec<char> = current.chars().collect();
+        if chars.first() != Some(&'(') {
+            break;
+        }
+        match matching_delimiter(&chars, 0) {
+            Some(close) if close == chars.len() - 1 => {
+                current = chars[1..close].iter().collect();
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Index of the delimiter matching the opener at `open`, if there is one.
+fn matching_delimiter(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (index, ch) in chars.iter().enumerate().skip(open) {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Splits on `separator` at delimiter depth zero.
+fn split_at_top_level(text: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if ch == separator && depth == 0 {
+            parts.push(std::mem::take(&mut current));
+            continue;
+        }
+        current.push(ch);
+    }
+    parts.push(current);
+    parts
+}
+
+/// The suffixes a Rust/Verus numeric literal may carry.
+///
+/// A suffix names the literal's TYPE, never its value, so dropping it maps two
+/// spellings of the same number onto the same number — `1usize` and `1` are the
+/// same operand, and upstream writes one where the port writes the other.
+const NUMERIC_LITERAL_SUFFIXES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "int",
+    "nat", "f32", "f64",
+];
+
+fn strip_numeric_literal_suffixes(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let starts_token = index == 0
+            || !(chars[index - 1].is_alphanumeric()
+                || chars[index - 1] == '_'
+                || chars[index - 1] == '.');
+        if !(starts_token && chars[index].is_ascii_digit()) {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len()
+            && (chars[index].is_alphanumeric() || chars[index] == '_' || chars[index] == '.')
+        {
+            index += 1;
+        }
+        let token: String = chars[start..index].iter().collect();
+        out.push_str(strip_one_numeric_literal_suffix(&token));
+    }
+    out
+}
+
+fn strip_one_numeric_literal_suffix(token: &str) -> &str {
+    // A hex literal's digits include `f`, `b` and `e`, so a suffix is only read
+    // off a DECIMAL literal; `0xfff` keeps every character it has.
+    if token.starts_with("0x") || token.starts_with("0X") {
+        return token;
+    }
+    for suffix in NUMERIC_LITERAL_SUFFIXES {
+        if let Some(base) = token.strip_suffix(suffix) {
+            if !base.is_empty()
+                && base
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ch == '_' || ch == '.')
+            {
+                return base;
+            }
+        }
+    }
+    token
+}
+
+/// Drops an EXPLICIT type argument list (`::<..>`).
+///
+/// A turbofish states a type the compiler otherwise infers; it names no operand
+/// and changes no claim, and the two surfaces differ on when it is required
+/// (`Multiset::<V>::singleton` vs `Multiset::singleton`).
+fn strip_turbofish(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == ':'
+            && chars.get(index + 1) == Some(&':')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            let mut depth = 0i32;
+            let mut scan = index + 2;
+            let mut closed = None;
+            while scan < chars.len() {
+                match chars[scan] {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            closed = Some(scan);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                scan += 1;
+            }
+            if let Some(closed) = closed {
+                index = closed + 1;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_trailing_statement_separators(text: &str) -> String {
+    text.trim_end_matches([';', ',']).to_string()
+}
+
+/// Drops a trailing EMPTY proof block.
+///
+/// Upstream's `assert(..) by(nonlinear_arith) requires .. { }` carries an empty
+/// proof body where the macro surface has none. An empty block proves nothing
+/// and assumes nothing, so the two statements make the same claim. A NON-empty
+/// block is left alone: it carries proof steps, and dropping those would equate
+/// two different statements.
+///
+/// The BARE `by` left behind by `assert(..) by {}` goes with it, and only then.
+/// That shape names no proof MODE and states no `requires`, so once the empty
+/// block is gone the keyword introduces nothing — it is the same ruling one
+/// token further, not a second one. The guard is deliberately narrow: the
+/// remainder must end in the keyword `by` itself, so `assert(P) by(bit_vector)
+/// {}` (ends `)`) and `assert(P) by(nonlinear_arith) requires x < 3 {}` (ends
+/// `3`) are untouched, and a mode or a narrowed hypothesis list can never be
+/// dropped. Measured need: upstream `maps.rs::test1_fails2` marks
+/// `assert(equal(m1, m2)) by {} // FAILS`, which canonicalized to
+/// `assert(equal(m1,m2))by` — a text NO port spelling can produce, so the case
+/// could only ever fail its cross-check.
+fn strip_trailing_empty_proof_block(text: &str) -> String {
+    let Some(rest) = text.strip_suffix("{}").filter(|rest| !rest.is_empty()) else {
+        return text.to_string();
+    };
+    match rest.strip_suffix("by") {
+        Some(before) if !before.is_empty() && !ends_with_identifier_char(before) => {
+            before.to_string()
+        }
+        _ => rest.to_string(),
+    }
+}
+
+/// Whether `text` ends in a character that would make a following `by` part of
+/// one identifier (`standby`, `_by`, `x2by`) rather than the keyword.
+fn ends_with_identifier_char(text: &str) -> bool {
+    text.chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+/// The trust-vc proof macros, spelled back into UPSTREAM's `assert .. by(..)`
+/// form.
+///
+/// The rewrite PRESERVES the proof mode — `assert_by_nonlinear!(P)` becomes
+/// `assert(P) by(nonlinear_arith)`, not `assert(P)` — so a port that reaches
+/// for a different mode than upstream still fails to correspond.
+///
+/// Longest name first: `assert_by_compute_only` also has `assert_by_compute` as
+/// a prefix.
+const PROOF_MACRO_MODES: &[(&str, &str)] = &[
+    ("assert_by_nonlinear", "nonlinear_arith"),
+    ("assert_by_bit_vector", "bit_vector"),
+    ("assert_by_compute_only", "compute_only"),
+    ("assert_by_compute", "compute"),
+];
+
+fn rewrite_proof_macro_to_upstream_form(text: &str) -> String {
+    for (macro_name, mode) in PROOF_MACRO_MODES {
+        let Some(rest) = text.strip_prefix(macro_name) else {
+            continue;
+        };
+        if !rest.starts_with('(') {
+            continue;
+        }
+        let chars: Vec<char> = rest.chars().collect();
+        let Some(close) = matching_delimiter(&chars, 0) else {
+            continue;
+        };
+        if close != chars.len() - 1 {
+            continue;
+        }
+        let inner: String = chars[1..close].iter().collect();
+        // `assert_by_nonlinear!(P; requires ..)` separates the asserted
+        // proposition from its scoped clauses with `;`, where upstream simply
+        // writes the clauses after `by(..)`.
+        let mut parts = split_at_top_level(&inner, ';');
+        let proposition = parts.remove(0);
+        let clauses = parts.concat();
+        return format!("assert({proposition})by({mode}){clauses}");
+    }
+    text.to_string()
+}
+
+/// The native surface's SPEC-CLOSURE CONSTRUCTOR, dropped so the closure it
+/// wraps is compared against the closure upstream writes bare.
+///
+/// `Set::mk_map` takes a `SpecFn<T, V>`, not an `Fn`, and the encoder requires
+/// the argument to be written as `SpecFn::new(..)` literally (its own refusal
+/// reads "Set::mk_map expects exactly one SpecFn::new(...) argument"). Upstream
+/// spells the same argument as a bare closure — `s1.mk_map(|k: int| 10 * k)` —
+/// so the wrapper is a REQUIRED SPELLING of the native surface and nothing
+/// else.
+///
+/// The rewrite introduces, deletes and re-associates nothing: the one argument
+/// survives verbatim, and a `SpecFn::new` call that does not hold exactly one
+/// top-level argument is left alone. It is the same move
+/// `rewrite_binder_macro_to_upstream_form` makes for `choose!`/`forall!`.
+/// Measured need: `evals/verus/ported/maps.rs` binds
+/// `let m1 = s1.mk_map(SpecFn::new(|k: int| 10int * k));` for upstream's
+/// `let m1 = s1.mk_map(|k: int| 10 * k);`, and without this the binding channel
+/// refuses a FAITHFUL port on the wrapper alone.
+fn rewrite_spec_fn_ctor_to_upstream_form(text: &str) -> String {
+    const HEAD: &[char] = &['S', 'p', 'e', 'c', 'F', 'n', ':', ':', 'n', 'e', 'w', '('];
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let starts_token =
+            index == 0 || !(chars[index - 1].is_alphanumeric() || chars[index - 1] == '_');
+        if starts_token && chars[index..].starts_with(HEAD) {
+            let open = index + HEAD.len() - 1;
+            if let Some(close) = matching_delimiter(&chars, open) {
+                let inner: String = chars[open + 1..close].iter().collect();
+                let parts = split_at_top_level(&inner, ',');
+                if parts.len() == 1 && !parts[0].trim().is_empty() {
+                    out.push_str(parts[0].trim());
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// The two PLAIN proof macros — the ones that name no proof MODE — spelled
+/// back into UPSTREAM's own `assert(P) by { .. }` / `assert forall|x: T| P by
+/// { .. }`.
+///
+/// [`rewrite_proof_macro_to_upstream_form`] covers the MODE-CARRYING family
+/// (`assert_by_nonlinear!`, `assert_by_bit_vector!`, `assert_by_compute*!`) and
+/// deliberately covers nothing else, so the two plain spellings —
+/// `assert_by!(P, { .. })` and `assert_forall_by!(|x: T| P, { .. })`, which are
+/// the whole subject of `evals/verus/ported/assert_forall_by.rs` — reached the
+/// comparison unrewritten and could correspond to no upstream text in ANY
+/// dialect, on either the claim channel or the statement channel.
+///
+/// THIS IS VERUS'S OWN DESUGARING, RUN BACKWARDS, and that is the entire
+/// justification. In the pinned checkout `source/builtin_macros/src/syntax.rs`
+/// lowers the `verus!` surface to the `verus_builtin` calls this undoes:
+///
+/// * `:2894` — `assert(P) by { B }` (no prover name, no `requires`) becomes
+///   `verus_builtin::assert_by(P, { B })`;
+/// * `:2952` — `assert forall|x: T| P by { B }` becomes
+///   `verus_builtin::assert_forall_by(|x: T| ..)`.
+///
+/// So the target text is not a text this gate invents to make two things meet
+/// in the middle: it is the text upstream itself writes for the statement the
+/// macro spells, and upstream's own corpus writes the desugared form directly
+/// at least once (`expand_errors.rs:207`, `assert_by(true,
+/// {reveal(is_good_message_10);});`). Applying the rewrite to BOTH surfaces
+/// therefore maps upstream's two spellings of one statement onto each other,
+/// which is what the canonicalizer is for.
+///
+/// It introduces, deletes and re-associates nothing:
+///
+/// * the asserted proposition and the proof block survive VERBATIM and in
+///   order, and the `by` that joins them is the keyword the macro's name
+///   already carries;
+/// * the binder survives verbatim, COMMAS INCLUDED — the split is at the LAST
+///   top-level comma, exactly as `parse_closure_form_assert_forall_by` splits
+///   it, so `|i: int, j: int|` keeps its own comma and is never truncated to
+///   `|i: int|`;
+/// * no proof MODE is ever synthesised: this emits a BARE `by`, so a port that
+///   reaches for `assert_by!` where upstream wrote `by(nonlinear_arith)` still
+///   fails to correspond;
+/// * a call whose shape is not the macro's own surface is left ALONE — a
+///   sibling macro that merely shares the prefix (`assert_by_contradiction!`, a
+///   wholly different proof principle) is not touched, a missing or non-block
+///   proof argument is not touched, and a head that is not closure-shaped is
+///   not touched.
+///
+/// The `assert forall|x: T| P by { B }` argument form — which the macro also
+/// accepts, and which `parse_verus_assert_forall_by` routes by the leading
+/// `assert`/`forall` keyword — is UNWRAPPED rather than rebuilt, because its
+/// argument already IS upstream's text. The bare-`forall` spelling of that same
+/// argument gains upstream's leading `assert` keyword and nothing else.
+fn rewrite_plain_proof_macro_to_upstream_form(text: &str) -> String {
+    if let Some(inner) = whole_macro_call_argument(text, "assert_by") {
+        let Some((proposition, proof_block)) = split_condition_and_proof_block(&inner) else {
+            return text.to_string();
+        };
+        return format!("assert({proposition})by{proof_block}");
+    }
+    if let Some(inner) = whole_macro_call_argument(text, "assert_forall_by") {
+        // The VERUS-FORM argument: already upstream's own statement, so the
+        // wrapper comes off and not one character of the argument moves.
+        if let Some(rest) = inner.strip_prefix("assert") {
+            if rest.starts_with("forall|") {
+                return inner;
+            }
+            return text.to_string();
+        }
+        if inner.starts_with("forall|") {
+            return format!("assert{inner}");
+        }
+        // The CLOSURE-FORM argument: `|binders| condition, { proof_block }`.
+        let Some((closure, proof_block)) = split_condition_and_proof_block(&inner) else {
+            return text.to_string();
+        };
+        if !closure_head_is_binder_shaped(&closure) {
+            return text.to_string();
+        }
+        return format!("assertforall{closure}by{proof_block}");
+    }
+    text.to_string()
+}
+
+/// The argument list of `name(..)` when `text` is EXACTLY that one call.
+///
+/// Anchored at both ends: a text that merely contains the call, or a longer
+/// identifier that happens to start with `name` (`assert_by_contradiction`),
+/// yields `None`.
+fn whole_macro_call_argument(text: &str, name: &str) -> Option<String> {
+    let rest = text.strip_prefix(name)?;
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let chars: Vec<char> = rest.chars().collect();
+    let close = matching_delimiter(&chars, 0)?;
+    if close != chars.len() - 1 {
+        return None;
+    }
+    Some(chars[1..close].iter().collect())
+}
+
+/// `<condition>, { <proof block> }` split at the LAST top-level comma.
+///
+/// The split point is the one `parse_closure_form_assert_forall_by` uses, and
+/// for the same reason: a Rust expression has no top-level comma of its own,
+/// while a multi-variable BINDER does, so splitting anywhere earlier would
+/// truncate `|i: int, j: int|` to `|i: int|` and equate two different
+/// quantifications. The tail must be a balanced brace group and the head must
+/// be non-empty, or this is not the macro's surface and the caller leaves the
+/// text alone.
+fn split_condition_and_proof_block(inner: &str) -> Option<(String, String)> {
+    let mut parts = split_at_top_level(inner, ',');
+    // A trailing comma is part of the macro surface, not a separator.
+    if parts.len() > 1 && parts.last().is_some_and(|last| last.is_empty()) {
+        parts.pop();
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let proof_block = parts.pop()?;
+    let condition = parts.join(",");
+    if condition.is_empty() {
+        return None;
+    }
+    let block_chars: Vec<char> = proof_block.chars().collect();
+    if block_chars.first() != Some(&'{')
+        || matching_delimiter(&block_chars, 0) != Some(block_chars.len() - 1)
+    {
+        return None;
+    }
+    Some((condition, proof_block))
+}
+
+/// Whether `head` is `|binders| condition` — the closure surface the macro
+/// takes — rather than some other first argument.
+fn closure_head_is_binder_shaped(head: &str) -> bool {
+    let chars: Vec<char> = head.chars().collect();
+    if chars.first() != Some(&'|') {
+        return false;
+    }
+    // The binder list closes at the NEXT `|`, which is where
+    // `parse_closure_form_assert_forall_by` closes it too; the condition after
+    // it must be non-empty.
+    match chars.iter().skip(1).position(|ch| *ch == '|') {
+        Some(offset) => offset + 2 < chars.len(),
+        None => false,
+    }
+}
+
+/// The trust-vc EXTENSIONAL-EQUALITY macro, spelled back into upstream's `=~=`
+/// operator.
+///
+/// `trust_vc::ext_eq!(A, B)` is the native spelling of Verus's `A =~= B` — the
+/// same move `rewrite_proof_macro_to_upstream_form` makes for `assert .. by`.
+/// The rewrite introduces, deletes and re-associates nothing: both operands
+/// survive verbatim and in order, and the connective is the one the macro
+/// names. Measured need: `evals/verus/ported/z3_restart.rs` writes
+/// `trust_vc::assert!(trust_vc::ext_eq!(a.sub(b).add(b), a));` for upstream's
+/// `assert(a.sub(b).add(b) =~= a);`, and without this the two spellings of one
+/// statement compare unequal.
+fn rewrite_ext_eq_to_upstream_form(text: &str) -> String {
+    const HEAD: &[char] = &['e', 'x', 't', '_', 'e', 'q', '('];
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let starts_token =
+            index == 0 || !(chars[index - 1].is_alphanumeric() || chars[index - 1] == '_');
+        if starts_token && chars[index..].starts_with(HEAD) {
+            let open = index + HEAD.len() - 1;
+            if let Some(close) = matching_delimiter(&chars, open) {
+                let inner: String = chars[open + 1..close].iter().collect();
+                let parts = split_at_top_level(&inner, ',');
+                if parts.len() == 2 {
+                    out.push_str(parts[0].trim());
+                    out.push_str("=~=");
+                    out.push_str(parts[1].trim());
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// The contract ATTRIBUTE heads whose argument is the clause upstream writes
+/// bare inside a `requires`/`ensures` block.
+const CONTRACT_ATTRIBUTE_HEADS: &[&str] = &[
+    "ensures",
+    "requires",
+    "invariant",
+    "decreases",
+    "recommends",
+];
+
+/// `#[ensures(P)]` reduced to the clause `P` upstream writes as a bare line.
+///
+/// Upstream's marked line inside an `ensures` block is `x * z < y * z,` — the
+/// block head is on an earlier line and the marker is on the CLAUSE. The port
+/// spells the same clause as an attribute. Dropping the attribute head leaves
+/// the clause, which is the operand both surfaces agree on.
+fn unwrap_contract_attribute(text: &str) -> String {
+    let Some(inner) = text
+        .strip_prefix("#[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return text.to_string();
+    };
+    for head in CONTRACT_ATTRIBUTE_HEADS {
+        let Some(rest) = inner.strip_prefix(head) else {
+            continue;
+        };
+        if !rest.starts_with('(') {
+            continue;
+        }
+        let chars: Vec<char> = rest.chars().collect();
+        if matching_delimiter(&chars, 0) != Some(chars.len() - 1) {
+            continue;
+        }
+        return chars[1..chars.len() - 1].iter().collect();
+    }
+    text.to_string()
+}
+
+/// `P ==> Q` rewritten as `!(P) || Q`, at every delimiter depth.
+///
+/// Implication is the one connective the two surfaces spell differently, and
+/// the rewrite is the DEFINITION of implication, so it moves no operand: the
+/// antecedent and consequent survive verbatim, in order.
+///
+/// `==>` is right-associative and lowest-precedence in Verus, so `A ==> B ==> C`
+/// is `A ==> (B ==> C)`; the fold below reproduces that, and parenthesizes every
+/// nested consequent so the canonical form of a chain is unambiguous.
+fn expand_implications(text: &str) -> String {
+    let segments = split_at_top_level_implication(text);
+    if segments.len() >= 2 {
+        let expanded: Vec<String> = segments
+            .iter()
+            .map(|part| expand_implications(part))
+            .collect();
+        let mut folded = expanded[expanded.len() - 1].clone();
+        for (position, antecedent) in expanded[..expanded.len() - 1].iter().enumerate().rev() {
+            folded = if position + 2 == expanded.len() {
+                format!("!({antecedent})||{folded}")
+            } else {
+                format!("!({antecedent})||({folded})")
+            };
+        }
+        return folded;
+    }
+    // No implication at this level: descend into each delimited group, so an
+    // implication nested inside `assert(..)` is expanded too.
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        if matches!(chars[index], '(' | '[' | '{') {
+            if let Some(close) = matching_delimiter(&chars, index) {
+                let inner: String = chars[index + 1..close].iter().collect();
+                out.push(chars[index]);
+                out.push_str(&expand_implications(&inner));
+                out.push(chars[close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn split_at_top_level_implication(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        let is_implication = depth == 0
+            && chars[index] == '='
+            && chars.get(index + 1) == Some(&'=')
+            && chars.get(index + 2) == Some(&'>')
+            // `<==>` is BICONDITIONAL, a different connective: its `==>` is not
+            // an implication arrow and must not be split on.
+            && (index == 0 || chars[index - 1] != '<');
+        if is_implication {
+            parts.push(std::mem::take(&mut current));
+            index += 3;
+            continue;
+        }
+        current.push(chars[index]);
+        index += 1;
+    }
+    parts.push(current);
+    parts
+}
+
+/// UPSTREAM's own `FAILS` marker, with the two texts it can be compared to.
+///
+/// Both come out of the pinned Verus checkout: a port selects neither and
+/// authors neither.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct UpstreamFailsMark {
+    /// The marked line, normalized. This is the marker's IDENTITY for the
+    /// per-upstream-case injectivity accounting, so two port cases cannot
+    /// spend one upstream marker twice.
+    normalized: String,
+    /// Canonical claim core of the marked LINE alone.
+    line_core: String,
+    /// Canonical claim core of the STATEMENT the marked line sits in.
+    ///
+    /// Upstream marks the CLAUSE line of a multi-line statement
+    /// (`requires x < 0xfff // FAILS` under an `assert(..) by(nonlinear_arith)`),
+    /// where the port writes the whole statement on one line. The statement is
+    /// still upstream's own text, read from the checkout.
+    statement_core: String,
+    /// The `let` bindings in scope where upstream marks the failure — the
+    /// enclosing function's body, in upstream's own case region, up to the
+    /// marked line.
+    ///
+    /// This is the environment the port's premises are compared against. Read
+    /// from the pinned Verus checkout, so a port neither authors it nor
+    /// selects it.
+    #[serde(default)]
+    bindings: Vec<SourceBinding>,
+    /// The contract clause list the marked line sits in (`requires`,
+    /// `ensures`, ...), when it sits in one.
+    ///
+    /// `unwrap_contract_attribute` deliberately drops the clause KIND from the
+    /// compared text, because upstream writes the keyword on a previous line
+    /// and marks the bare clause — so the texts can only be compared without
+    /// it. The kind is therefore carried and compared SEPARATELY, against the
+    /// engine's own obligation kind, so `#[requires(P)]` can no longer stand
+    /// in for upstream's marked `ensures` clause `P`.
+    #[serde(default)]
+    clause_kind: Option<String>,
+    /// The HYPOTHESES upstream's own marked function states, read from the
+    /// pinned checkout's `requires`/`invariant`/`decreases`/`recommends`
+    /// clause list, as the same `kind:conjunct` entries the port's attributes
+    /// are read into.
+    #[serde(default)]
+    hypotheses: BTreeSet<String>,
+    /// The canonicalized bodies of the definitions upstream's OWN marked claim
+    /// reaches, read from its case region in the pinned checkout.
+    #[serde(default)]
+    definitions: BTreeMap<String, String>,
+    /// The canonicalized non-`let` statements upstream's own case runs before
+    /// its marked line.
+    #[serde(default)]
+    statements: BTreeSet<String>,
+    /// Whether upstream's marked line sits on the enclosing function's HEADER
+    /// rather than in its body.
+    ///
+    /// A mark in a signature clause list and a mark on a body statement draw
+    /// their premise window from different places — the whole body for the
+    /// first (a contract obligation is discharged against everything the body
+    /// runs), the statements before the mark for the second — and
+    /// `enclosing_function_prefix_lines` reads this same structural fact to
+    /// decide which. It is carried here because the establishment measurement
+    /// reports the two populations separately.
+    ///
+    /// `nonlinear.rs::test_requires` is the case that separates a clause from a
+    /// header: its marked line is a `requires` clause, so `clause_kind` is
+    /// `Some`, but the clause belongs to a body-level `assert(..)
+    /// by(nonlinear_arith)` and its window is the statements before that
+    /// assert — of which there are none, because it is the function's first.
+    #[serde(default)]
+    marked_on_function_header: bool,
+    /// Whether NO premise window could be drawn for this mark at all.
+    ///
+    /// True only when upstream marks a function HEADER and that function has no
+    /// BODY to read — a bodyless signature, which upstream can write and which
+    /// no port can be compared against, because the text that makes a contract
+    /// clause refutable is missing on upstream's own side. That case is REFUSED
+    /// by `premise_correspondence` rather than passed vacuously.
+    ///
+    /// It is 0 of the accepted corpus today: every clause-marked upstream case
+    /// here has a body, and since that body is now the window, all three of
+    /// them are CHECKED rather than refused.
+    #[serde(default)]
+    window_undrawable: bool,
+}
+
+/// The lines of the STATEMENT that `marker` sits in, within one upstream case's
+/// region.
+///
+/// A statement STARTS at the region's first code line, or after a code line
+/// ending in `;`, `{` or `}`; it ENDS at the first line at or after the marker
+/// where the delimiter depth is back to zero and the code closes (`;`, `}` or a
+/// trailing `,`). This is a lexical approximation, and it is only ever used to
+/// offer upstream's own text as a comparison target — a wrong span yields a
+/// string nothing matches, never a false correspondence.
+fn upstream_statement_lines(region: &[&str], marker: usize) -> String {
+    let Some((start, end)) = upstream_statement_bounds(region, marker) else {
+        return String::new();
+    };
+    region[start..=end].join("\n")
+}
+
+/// The first and last line index of the statement `marker` sits in.
+///
+/// The START is what the premise window needs and what it used to get wrong.
+/// Upstream marks the CLAUSE line of a multi-line statement, so the lines
+/// "before the marked line" included the statement's OWN first line — while the
+/// port, whose refutation is located at the statement's first line, contributed
+/// nothing. `nonlinear.rs::test_requires` measured exactly that: upstream's
+/// statement set carried `assert(..)by(nonlinear_arith)`, a fragment of the
+/// marked statement itself, which the port could never present. A comparison
+/// between two differently-drawn windows is not a comparison.
+fn upstream_statement_bounds(region: &[&str], marker: usize) -> Option<(usize, usize)> {
+    const MAX_STATEMENT_LINES: usize = 40;
+    if marker >= region.len() {
+        return None;
+    }
+    let mut start = 0usize;
+    let mut previous_end: Option<char> = None;
+    for (index, line) in region.iter().enumerate().take(marker + 1) {
+        let code = code_before_line_comment(line).trim();
+        if code.is_empty() {
+            continue;
+        }
+        if matches!(previous_end, None | Some(';') | Some('{') | Some('}')) {
+            start = index;
+        }
+        previous_end = code.chars().last();
+    }
+    let mut depth = 0i32;
+    let mut end = start;
+    for (index, line) in region
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(MAX_STATEMENT_LINES)
+    {
+        let code = code_before_line_comment(line);
+        for ch in code.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        end = index;
+        if index >= marker
+            && depth <= 0
+            && matches!(
+                code.trim().chars().last(),
+                Some(';') | Some('}') | Some(',')
+            )
+        {
+            break;
+        }
+    }
+    Some((start, end))
+}
+
+/// Every source line of the STATEMENT starting at `line`, which is this gate's
+/// proxy for upstream's error span.
+///
+/// The statement ends at the first line where the delimiter depth returns to
+/// zero, so a single-line statement yields exactly one line and can never
+/// borrow the next statement's marker.
+fn statement_span_lines(source: &str, line: usize) -> Vec<String> {
+    const MAX_SPAN_LINES: usize = 24;
+    let lines: Vec<&str> = source.lines().collect();
+    let Some(start) = line.checked_sub(1) else {
+        return Vec::new();
+    };
+    if start >= lines.len() {
+        return Vec::new();
+    }
+    let mut span = Vec::new();
+    let mut depth = 0i32;
+    for text in lines.iter().skip(start).take(MAX_SPAN_LINES) {
+        span.push(text.trim_end().to_string());
+        let code = code_before_line_comment(text);
+        for ch in code.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 && !code.trim().is_empty() {
+            break;
+        }
+    }
+    span
+}
+
+/// A `let` binding a source region establishes, as this gate compares them.
+///
+/// A refuted claim's meaning is NOT carried by its own text. `assert(5 <= i)`
+/// is upstream's claim when `i` came from `choose|i: int| f(i)`, and a ground
+/// falsehood when `i` came from `0` — the same statement, byte for byte, under
+/// two different premises. The statement is the conclusion; a `let` is the
+/// premise, and a premise is exactly what a port author can rewrite without
+/// touching the marked line at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceBinding {
+    /// The identifier this binding introduces.
+    pub name: String,
+    /// The bound expression, through the SAME canonicalizer the claim goes
+    /// through, so `trust_vc::choose!(|i: int| f(i))` and
+    /// `choose|i: int| f(i)` are ONE premise — and `0` is not either of them.
+    ///
+    /// CORRECTION (this round): that sentence was written before the
+    /// canonicalizer could make it true. The two spellings normalized to
+    /// `choose(|i:int|f(i))` and `choose|i:int|f(i)` and compared UNEQUAL, so
+    /// every `choose.rs` probe that "the binding channel refused" was refused
+    /// on a SPELLING — a faithful port of those same cases was refused too, and
+    /// on this corpus the binding channel has never been observed
+    /// discriminating, only refusing. [`rewrite_binder_macro_to_upstream_form`]
+    /// closes the gap; do not read a refusal as a discrimination without
+    /// reading the REASON.
+    pub init_core: String,
+}
+
+/// The identifiers a canonicalized text mentions.
+///
+/// Deliberately syntactic and over-approximate: a name that is really a type,
+/// a field or a function costs only a binding lookup that finds nothing on
+/// both sides, which the correspondence rule treats as "neither side binds
+/// it".
+fn identifiers_in(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !(chars[index].is_alphabetic() || chars[index] == '_') {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+            index += 1;
+        }
+        let token: String = chars[start..index].iter().collect();
+        if token != "_" {
+            names.insert(token);
+        }
+    }
+    names
+}
+
+/// The binder keywords a `let` pattern may carry, which name a MODE and never
+/// an identifier.
+const LET_PATTERN_MODIFIERS: &[&str] = &["mut", "ref", "ghost", "tracked"];
+
+/// One `let` statement, split into the names it binds and the CANONICAL form
+/// of the expression it binds them to.
+///
+/// A destructuring `let (i, j) = choose|i: int, j: int| f2(i, j);` binds both
+/// names to the same initializer, which is the strongest thing that can be
+/// said without evaluating the projection — and it is enough, because the
+/// comparison is against upstream's own destructuring of the same expression.
+fn parse_let_statement(statement: &str) -> Option<Vec<SourceBinding>> {
+    let (pattern, init_core) = split_let_statement(statement)?;
+    let names: Vec<String> = identifiers_in(&pattern)
+        .into_iter()
+        .filter(|name| !LET_PATTERN_MODIFIERS.contains(&name.as_str()))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(
+        names
+            .into_iter()
+            .map(|name| SourceBinding {
+                name,
+                init_core: init_core.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// A `let` statement split into its PATTERN and the canonical form of its
+/// initializer, or `None` when this reader cannot bracket one.
+fn split_let_statement(statement: &str) -> Option<(String, String)> {
+    let rest = statement.trim().strip_prefix("let")?;
+    if !rest.starts_with(|ch: char| ch.is_whitespace() || ch == '(') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let chars: Vec<char> = rest.chars().collect();
+    let mut depth = 0i32;
+    let mut assign = None;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '=' if depth == 0 => {
+                let previous = index.checked_sub(1).map(|prior| chars[prior]);
+                let next = chars.get(index + 1).copied();
+                // `==`, `!=`, `<=`, `>=`, `=>` are not the binding's `=`.
+                if !matches!(previous, Some('=') | Some('!') | Some('<') | Some('>'))
+                    && !matches!(next, Some('=') | Some('>'))
+                {
+                    assign = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    // A `let` with no initializer (`let x: int;`, a `let ... else` head that
+    // did not parse) binds no expression this gate can compare.
+    let assign = assign?;
+    let pattern: String = chars[..assign].iter().collect();
+    let initializer: String = chars[assign + 1..].iter().collect();
+    let initializer = initializer.trim().trim_end_matches(';').trim();
+    if initializer.is_empty() {
+        return None;
+    }
+    // The type ascription names the binding's TYPE, never its value — the same
+    // reason `strip_turbofish` and `strip_numeric_literal_suffixes` drop one —
+    // and the port needs one (`let i: int = ..`) where upstream infers it.
+    let pattern = split_at_top_level(&pattern, ':')
+        .first()
+        .cloned()
+        .unwrap_or(pattern);
+    Some((pattern, canonical_claim_core(initializer)))
+}
+
+/// Whether this segment is `let _ = <plain path>;` — a Rust unused-binding
+/// suppressor and nothing else.
+///
+/// The native port needs one where upstream does not: `verus!` does not warn
+/// about an unused shadowed binding and plain Rust does, so `evals/verus/
+/// ported/scope.rs` writes `let _ = x;` after each shadowing `let` and
+/// upstream writes nothing. It binds NO name, so no later statement can refer
+/// to it, and its initializer is a bare path, so evaluating it can raise no
+/// obligation and state no `ensures` — it establishes no premise on either
+/// surface and is excluded from both channels.
+///
+/// The restriction to a bare path is the whole of the justification, and it is
+/// deliberately narrow: `let _ = lemma(x);` DOES establish a premise (the
+/// call's own `ensures`), so it stays a compared statement.
+fn is_inert_let_discard(segment: &str) -> bool {
+    let Some((pattern, init_core)) = split_let_statement(segment) else {
+        return false;
+    };
+    let binds_nothing = identifiers_in(&pattern)
+        .iter()
+        .all(|name| LET_PATTERN_MODIFIERS.contains(&name.as_str()));
+    binds_nothing
+        && !init_core.is_empty()
+        && init_core
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '_')
+        && init_core.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+}
+
+/// One top-level statement of a source region, as both premise channels read
+/// it.
+///
+/// `balanced` is false for a segment whose delimiters never closed inside the
+/// scan window — a block OPENER (`if i == 0 {`, a `let y = {` whose block runs
+/// past the window). An opener is a premise in its own right and is offered to
+/// the statement channel, but it is never parsed as a binding: only part of its
+/// initializer is present, so parsing it would compare half a `let` against
+/// upstream's whole one.
+struct StatementSegment {
+    text: String,
+    balanced: bool,
+}
+
+/// The TOP-LEVEL statements these lines contain, one per segment.
+///
+/// ONE segmenter for both premise channels, because they used to disagree and
+/// the disagreement was a hole. Each read its own lines: `canonical_let_bindings`
+/// only started at a line whose trimmed code began with `let` and then parsed
+/// the WHOLE line as ONE binding, while `body_statement_cores` skipped any core
+/// that began with `let`. So a line carrying more than one statement —
+///
+///     let _z: int = 0; let i: int = 0;
+///     let _z: int = 0; assume!(i == 0);
+///
+/// — read as a single binding of `_z` and as NO statement at all: the rebinding
+/// of `i` and the `assume!` were invisible to BOTH channels, which is exactly
+/// the environment rewrite the premise comparison exists to catch.
+///
+/// Splitting at `;` is done at delimiter depth ZERO, so the inner `;`s of
+/// `let y = { let mut x = 5; x };` stay inside the one binding they belong to.
+fn source_statement_segments(lines: &[&str]) -> Vec<StatementSegment> {
+    const MAX_STATEMENT_SPAN: usize = 24;
+    let mut segments = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let code = code_before_line_comment(lines[index]);
+        let trimmed = code.trim();
+        if trimmed.is_empty()
+            || trimmed == "{"
+            || trimmed == "}"
+            || opens_function_item(code)
+            || trimmed.starts_with("#[")
+        {
+            index += 1;
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut end = index;
+        let mut balanced = false;
+        for (scan, line) in lines
+            .iter()
+            .enumerate()
+            .skip(index)
+            .take(MAX_STATEMENT_SPAN)
+        {
+            for ch in code_before_line_comment(line).chars() {
+                match ch {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            end = scan;
+            if depth <= 0 {
+                balanced = true;
+                break;
+            }
+        }
+        // A statement that does not close inside this window is the BLOCK the
+        // refutation is nested in — an `if` guard, a loop head, a bare block —
+        // and its opener is a premise: `if i == 0 {` pins a falsifying model as
+        // surely as `let i: int = 0;` does. Emit the opener line on its own
+        // rather than skipping it, so an inserted branch has to appear on
+        // upstream's side too. A port that nests where upstream nests presents
+        // the same opener on both sides and still corresponds.
+        let span_end = if balanced { end } else { index };
+        let joined: String = lines[index..=span_end]
+            .iter()
+            .map(|text| code_before_line_comment(text).trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for piece in split_at_top_level(&joined, ';') {
+            let text = piece.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            segments.push(StatementSegment { text, balanced });
+        }
+        index = span_end + 1;
+    }
+    segments
+}
+
+/// Every `let` binding the given lines establish, in source order.
+fn canonical_let_bindings(lines: &[&str]) -> Vec<SourceBinding> {
+    source_statement_segments(lines)
+        .iter()
+        .filter(|segment| segment.balanced)
+        .filter_map(|segment| parse_let_statement(&segment.text))
+        .flatten()
+        .collect()
+}
+
+/// True when this source line OPENS a function item.
+fn opens_function_item(code: &str) -> bool {
+    const ITEM_MODIFIERS: &[&str] = &[
+        "pub(crate)",
+        "pub(super)",
+        "pub",
+        "unsafe",
+        "async",
+        "const",
+        "extern",
+        "default",
+        "proof",
+        "spec",
+        "exec",
+        "open",
+        "closed",
+        "broadcast",
+    ];
+    let mut rest = code.trim_start();
+    loop {
+        if rest.starts_with("fn ") {
+            return true;
+        }
+        let Some(modifier) = ITEM_MODIFIERS.iter().find(|modifier| {
+            rest.strip_prefix(**modifier)
+                .is_some_and(|after| after.starts_with(char::is_whitespace))
+        }) else {
+            return false;
+        };
+        rest = rest[modifier.len()..].trim_start();
+    }
+}
+
+/// The lines of the function body that PRECEDE `line`, i.e. the bindings that
+/// are in scope where the engine located its refutation.
+///
+/// `line` is 1-based. The enclosing function is the last item opener seen at
+/// delimiter depth zero before it, so a port file's shared `spec fn`s and the
+/// other cases' functions are outside the window: this is the environment the
+/// refuted statement is read in, and nothing else.
+///
+/// THE WINDOW STARTS AT THE BODY, NOT AT THE ITEM OPENER, and that is the one
+/// thing this reader gets to decide. `enclosing_function_header_lines` reads
+/// `item_start` up to AND INCLUDING the line that opens the body as the
+/// HEADER — which is exactly where upstream writes its `requires` clause
+/// list — so a window that also started at `item_start` read the SAME clause
+/// list a second time, through the statement channel, as though the function
+/// had RUN it. Upstream's
+///
+///     proof fn test3_fails(b1: u32, b2: u32)
+///         requires b1 != b2
+///     {
+///         assert((b1 << 10) == (b2 << 10)) by(bit_vector) requires b1 == b2;  // FAILS
+///
+/// then presented `requires b1 != b2` as a body statement, and NO port
+/// spelling could answer it: the port states the same hypothesis as a
+/// `#[trust_vc::requires(..)]` attribute, `source_statement_segments` skips an
+/// attribute line by construction, and the hypothesis channel ALREADY compares
+/// that clause — `premise_correspondence` reads it out of
+/// `enclosing_function_header_lines` on both surfaces. So the clause was
+/// double-counted: compared correctly once as a hypothesis, and again as a
+/// statement the port could never run.
+///
+/// The two windows now PARTITION the function text — header through the `{`,
+/// body after it — so no line reaches both channels and none reaches neither.
+/// This LOSES NO STATEMENT: whatever the body-opening line carries after its
+/// brace is kept and offered to the statement channel, which is strictly more
+/// than the old window did (it handed `source_statement_segments` a line that
+/// `opens_function_item` then dropped whole, so `fn f() { assume!(x == 0);`
+/// was invisible).
+///
+/// It is not a relaxation of the statement channel either. The channel still
+/// compares as EQUALITY over the body, in both directions; what changes is
+/// only that a SIGNATURE clause is no longer read as a body statement on
+/// either surface.
+fn enclosing_function_prefix_lines(source: &str, line: usize) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let Some((item_start, inside_body)) = enclosing_function(&lines, line) else {
+        return Vec::new();
+    };
+    // `line` is on the function's HEADER — its attributes, its signature, its
+    // clause list. No `let` is in scope THERE, and this used to return an empty
+    // window for that reason. But the obligation a contract clause states is
+    // discharged against the whole function BODY: an `ensures` holds at every
+    // return, so every statement the body runs is one of its premises. An empty
+    // window made that body reach NO channel at all — which is why a
+    // clause-marked case had to be REFUSED as un-checkable, and why a port
+    // could keep upstream's clause byte-for-byte and put three ground
+    // `assume!`s under it with no channel objecting.
+    //
+    // So a header line's window is the function's BODY, in full. Both surfaces
+    // are read by this one function, so upstream's empty body and the port's
+    // empty body still meet, and a port body upstream does not have now lands
+    // in the statement set, which compares as EQUALITY.
+    let target = if inside_body {
+        line.saturating_sub(1).min(lines.len())
+    } else {
+        // The body's CLOSING line, so the window is the body and nothing after
+        // it. A function with no body to draw (none in this corpus, but a
+        // bodyless signature is a shape upstream can write) keeps the empty
+        // window, and `premise_correspondence` refuses that case rather than
+        // passing it.
+        match enclosing_function_body_end(&lines, item_start) {
+            Some(end) => end,
+            None => return Vec::new(),
+        }
+    };
+    // The body opens on the first line from the item opener that carries a
+    // `{` — the same rule `enclosing_function_header_lines` stops on, so the
+    // two windows meet exactly on that line and do not overlap. A body-located
+    // window stops BEFORE its target line (the refuted statement); a
+    // header-located one stops ON it (the body's closing brace), so that
+    // closing line has to be inside the search or a one-line body would read as
+    // no body at all.
+    let search_end = if inside_body { target } else { target + 1 };
+    let Some(body_open) = (item_start..search_end)
+        .find(|index| code_before_line_comment(lines[*index]).contains('{'))
+    else {
+        return Vec::new();
+    };
+    let mut window = Vec::new();
+    if let Some((_, tail)) = code_before_line_comment(lines[body_open]).split_once('{') {
+        // On a ONE-LINE body the opener IS the closer, so the tail carries the
+        // body's own closing brace: everything from the last `}` on is the
+        // close, not a statement.
+        let tail = if !inside_body && body_open == target {
+            tail.rsplit_once('}').map_or(tail, |(head, _)| head)
+        } else {
+            tail
+        };
+        if !tail.trim().is_empty() {
+            window.push(tail.trim_end().to_string());
+        }
+    }
+    window.extend(
+        lines[(body_open + 1).min(target)..target]
+            .iter()
+            .map(|text| text.trim_end().to_string()),
+    );
+    window
+}
+
+/// The line index on which the BODY of the item opened at `item_start` closes,
+/// or `None` when that item has no body at all.
+///
+/// Brace depth from the item opener, so a signature spread over several lines,
+/// a one-line `fn f() {}` and a body with nested blocks all land on the same
+/// answer. Line COMMENTS are stripped first, exactly as every other reader in
+/// this module does, so a brace inside a comment cannot close a body.
+fn enclosing_function_body_end(lines: &[&str], item_start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (index, text) in lines.iter().enumerate().skip(item_start) {
+        for ch in code_before_line_comment(text).chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => {
+                    depth -= 1;
+                    if opened && depth <= 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// The function `line` belongs to: its opener index, and whether `line` is in
+/// its BODY rather than on its header.
+///
+/// Three positions have to come out right, and the two surfaces disagree about
+/// which of them a contract clause takes:
+///
+/// * inside a body (`assert(..); // FAILS`) — the opener above it, body open;
+/// * in a SIGNATURE, which is where upstream puts its `requires`/`ensures`
+///   clause list — still the opener above it, body not yet open;
+/// * on an ATTRIBUTE, which is where the port puts the same clause — the
+///   opener BELOW it, because the attribute precedes its item.
+///
+/// The two surfaces also nest a function at different delimiter depths — a
+/// port file's items sit at depth 0, upstream's inside `verus_code! {` — so
+/// "is the body open" is measured RELATIVE to the opener, never against a
+/// fixed zero.
+fn enclosing_function(lines: &[&str], line: usize) -> Option<(usize, bool)> {
+    let target = line.checked_sub(1)?.min(lines.len());
+    // BRACE depth only. A body opens with `{`, and a parameter list does not —
+    // reading `(`/`[` here would make `proof fn f(x: int)` look like a body
+    // that opened and closed on its signature line, and would then attribute
+    // upstream's own `requires` clause list to the NEXT item. Measured: it
+    // attributed the port's `#[requires]` attributes to the previous one-line
+    // `fn test4(x: int, d: int) {}` and red two faithful nonlinear cases.
+    let mut braces = 0i32;
+    let mut anchor: Option<(usize, i32)> = None;
+    let mut body_opened = false;
+    let mut body_closed = false;
+    for (index, text) in lines.iter().enumerate().take(target) {
+        let code = code_before_line_comment(text);
+        // A `fn` nested inside an open body is a closure or an inner item, not
+        // a new enclosing function for anything outside it.
+        if opens_function_item(code) && !(body_opened && !body_closed) {
+            anchor = Some((index, braces));
+            body_opened = false;
+            body_closed = false;
+        }
+        let item_braces = anchor.map(|(_, item_braces)| item_braces);
+        for ch in code.chars() {
+            match ch {
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                _ => continue,
+            }
+            // A one-line `fn f() {}` opens AND closes within the line, so the
+            // test has to run per character, not per line.
+            if let Some(item_braces) = item_braces {
+                if braces > item_braces {
+                    body_opened = true;
+                } else if body_opened {
+                    body_closed = true;
+                }
+            }
+        }
+    }
+    match anchor {
+        // The item above is still open at `line`: its body, or its signature.
+        Some((item_start, _)) if !body_closed => Some((item_start, body_opened)),
+        // The item above has ENDED, so `line` is on the next item's header.
+        _ => lines
+            .iter()
+            .enumerate()
+            .skip(target)
+            .find(|(_, text)| opens_function_item(code_before_line_comment(text)))
+            .map(|(index, _)| (index, false)),
+    }
+}
+
+/// The HEADER of the function `line` belongs to: the attributes written above
+/// it and the signature up to the line that opens its body.
+///
+/// This is where the two surfaces put a function's HYPOTHESES — the port as
+/// `#[trust_vc::requires(P)]` attributes, upstream as a `requires` clause list
+/// in the signature — and a hypothesis is a premise exactly as a `let` is.
+/// Dropping one makes the marked conclusion easier to refute without touching
+/// its text.
+fn enclosing_function_header_lines(source: &str, line: usize) -> Vec<String> {
+    const MAX_HEADER_LINES: usize = 48;
+    let lines: Vec<&str> = source.lines().collect();
+    let Some((item_start, _)) = enclosing_function(&lines, line) else {
+        return Vec::new();
+    };
+    // Back over the attributes, comments and blank lines that belong to this
+    // item, stopping at whatever ended the previous one.
+    let mut start = item_start;
+    while start > 0 {
+        let code = code_before_line_comment(lines[start - 1]);
+        let trimmed = code.trim();
+        // Whatever ENDED the previous item, or OPENED the block this item sits
+        // in — upstream's own `#[test] <name> verus_code! {` is the second
+        // shape, and walking past it would swallow the neighbouring case.
+        if trimmed.ends_with(';')
+            || trimmed.ends_with('}')
+            || trimmed.ends_with('{')
+            || opens_function_item(code)
+        {
+            break;
+        }
+        if item_start - (start - 1) > MAX_HEADER_LINES {
+            break;
+        }
+        start -= 1;
+    }
+    let mut header: Vec<String> = lines[start..item_start]
+        .iter()
+        .map(|text| text.trim_end().to_string())
+        .collect();
+    for text in lines.iter().skip(item_start).take(MAX_HEADER_LINES) {
+        header.push(text.trim_end().to_string());
+        // The body opens here; everything after it is statements, not clauses.
+        if code_before_line_comment(text).contains('{') {
+            break;
+        }
+    }
+    header
+}
+
+/// The canonicalized statements these lines run, EXCLUDING the ones the
+/// binding channel owns.
+///
+/// The bindings above are one way to establish a premise; a statement is the
+/// other. `trust_vc::assume!(i == 0);` above the marked line pins a falsifying
+/// model exactly as `let i: int = 0;` does, and would otherwise be invisible.
+/// A `let` that PARSES is deliberately skipped here: it is compared by
+/// INITIALIZER instead, because the two surfaces disagree about the type
+/// ascription and about a macro's parentheses, and a binding must correspond
+/// across that.
+///
+/// A `let` that does NOT parse — a block opener, a `let x: int;` with no
+/// initializer, a `let ... else` head this reader could not bracket — is NOT
+/// skipped. It reaches the statement channel verbatim instead, so a `let` the
+/// binding channel cannot compare still has to appear on upstream's side. The
+/// former `!core.starts_with("let")` filter dropped exactly these on the floor.
+fn body_statement_cores(lines: &[&str]) -> BTreeSet<String> {
+    let mut statements = BTreeSet::new();
+    for segment in source_statement_segments(lines) {
+        if segment.balanced
+            && (parse_let_statement(&segment.text).is_some() || is_inert_let_discard(&segment.text))
+        {
+            continue;
+        }
+        let core = canonical_claim_core(&segment.text);
+        if !core.is_empty() {
+            statements.insert(core);
+        }
+    }
+    statements
+}
+
+/// The BODY of the function item named `name`, canonicalized, if these lines
+/// define one.
+///
+/// Only the body is read. The two surfaces declare the SAME definition
+/// differently — upstream writes `spec fn f(i: int) -> bool { .. }`, the port
+/// writes `#[trust_vc::spec] fn f(i: int) -> bool { .. }` — and the body is
+/// what both spell the same way and what a rewrite would have to change.
+fn function_definition_core(lines: &[&str], name: &str) -> Option<String> {
+    const MAX_DEFINITION_LINES: usize = 64;
+    let declares = |code: &str| -> bool {
+        if !opens_function_item(code) {
+            return false;
+        }
+        let Some(after) = code.split("fn ").nth(1) else {
+            return false;
+        };
+        let declared: String = after
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+            .collect();
+        declared == name
+    };
+    let start = lines
+        .iter()
+        .position(|text| declares(code_before_line_comment(text)))?;
+    let mut depth = 0i32;
+    let mut opened = false;
+    let mut end = start;
+    for (scan, line) in lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(MAX_DEFINITION_LINES)
+    {
+        for ch in code_before_line_comment(line).chars() {
+            match ch {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        end = scan;
+        if opened && depth <= 0 {
+            break;
+        }
+    }
+    if !opened {
+        return None;
+    }
+    let item: String = lines[start..=end]
+        .iter()
+        .map(|text| code_before_line_comment(text).trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let chars: Vec<char> = item.chars().collect();
+    let open = chars.iter().position(|ch| *ch == '{')?;
+    let close = matching_delimiter(&chars, open)?;
+    let body: String = chars[open + 1..close].iter().collect();
+    Some(canonical_claim_core(&body))
+}
+
+/// Every function definition the claim REACHES, canonicalized.
+///
+/// A claim depends on the definitions of the names it mentions exactly as it
+/// depends on the bindings of its variables: `assert(f1(3) > 4)` is upstream's
+/// unprovable claim under `spec fn f1(i: int) -> int { i + 1 }` and a ground
+/// falsehood under `{ i - 100 }`. The set is closed: a definition's own body
+/// brings in the definitions IT mentions.
+fn reachable_definitions(
+    lines: &[&str],
+    seed: &BTreeSet<String>,
+    bindings: &[SourceBinding],
+) -> BTreeMap<String, String> {
+    let mut names = seed.clone();
+    let mut definitions: BTreeMap<String, String> = BTreeMap::new();
+    for _ in 0..8 {
+        let mut grown = names.clone();
+        for binding in bindings {
+            if names.contains(&binding.name) {
+                grown.extend(identifiers_in(&binding.init_core));
+            }
+        }
+        let mut found: Vec<(String, String)> = Vec::new();
+        for name in &names {
+            if definitions.contains_key(name) {
+                continue;
+            }
+            if let Some(core) = function_definition_core(lines, name) {
+                grown.extend(identifiers_in(&core));
+                found.push((name.clone(), core));
+            }
+        }
+        definitions.extend(found);
+        if grown == names {
+            break;
+        }
+        names = grown;
+    }
+    definitions
+}
+
+/// The clause keywords that state a function's HYPOTHESES.
+///
+/// `ensures` is deliberately absent: it is the GOAL side, and the marked claim
+/// itself is the text that carries it.
+const HYPOTHESIS_CLAUSE_KEYWORDS: &[&str] = &["requires", "invariant", "decreases", "recommends"];
+
+/// The clause keyword a signature line opens, if any.
+fn clause_keyword_prefix(trimmed: &str) -> Option<&'static str> {
+    UPSTREAM_CLAUSE_KEYWORDS.iter().copied().find(|keyword| {
+        trimmed == *keyword
+            || trimmed
+                .strip_prefix(*keyword)
+                .is_some_and(|after| after.starts_with(|ch: char| ch.is_whitespace() || ch == '('))
+    })
+}
+
+/// `#[requires(P)]` split into its clause KIND and its clause text.
+fn contract_attribute_parts(compact: &str) -> Option<(&'static str, String)> {
+    let inner = compact.strip_prefix("#[")?.strip_suffix(']')?;
+    for head in CONTRACT_ATTRIBUTE_HEADS {
+        let Some(rest) = inner.strip_prefix(head) else {
+            continue;
+        };
+        if !rest.starts_with('(') {
+            continue;
+        }
+        let chars: Vec<char> = rest.chars().collect();
+        if matching_delimiter(&chars, 0) != Some(chars.len() - 1) {
+            continue;
+        }
+        return Some((head, chars[1..chars.len() - 1].iter().collect()));
+    }
+    None
+}
+
+/// A canonical claim split into its top-level conjuncts.
+///
+/// Splitting is what lets one surface write `requires x <= y, 0 <= z,` and the
+/// other `#[requires(x <= y && 0 <= z)]` and still state the SAME hypotheses:
+/// conjunction is associative and commutative, so the set of conjuncts is the
+/// content both spellings share. No conjunct is dropped, introduced or
+/// re-associated.
+fn conjunction_atoms(core: &str) -> Vec<String> {
+    let mut atoms = Vec::new();
+    for part in split_at_top_level_conjunction(core) {
+        let mut atom = part.trim().to_string();
+        while atom.starts_with('(') && atom.ends_with(')') {
+            let chars: Vec<char> = atom.chars().collect();
+            if matching_delimiter(&chars, 0) != Some(chars.len() - 1) {
+                break;
+            }
+            atom = chars[1..chars.len() - 1].iter().collect();
+        }
+        if !atom.is_empty() {
+            atoms.push(atom);
+        }
+    }
+    atoms
+}
+
+fn split_at_top_level_conjunction(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0
+            && chars[index] == '&'
+            && chars.get(index + 1) == Some(&'&')
+            && chars.get(index + 2) != Some(&'&')
+        {
+            parts.push(std::mem::take(&mut current));
+            index += 2;
+            continue;
+        }
+        current.push(chars[index]);
+        index += 1;
+    }
+    parts.push(current);
+    parts
+}
+
+/// The HYPOTHESES a function header states, as `kind:conjunct` entries.
+///
+/// One reader for BOTH surfaces: the port writes `#[trust_vc::requires(P)]`
+/// attributes and upstream writes a `requires` clause list, and each is read
+/// through the same canonicalizer into the same entries. Every entry is
+/// machine-derived — the port's from its own source at the refutation site,
+/// upstream's from the pinned checkout.
+fn hypothesis_atoms(lines: &[&str]) -> BTreeSet<String> {
+    const MAX_CLAUSE_LINES: usize = 24;
+    let mut atoms = BTreeSet::new();
+    let mut current: Option<&'static str> = None;
+    let mut index = 0usize;
+    while index < lines.len() {
+        let code = code_before_line_comment(lines[index]);
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        if trimmed.starts_with("#[") {
+            // An attribute may wrap; take it to its balanced end.
+            let mut depth = 0i32;
+            let mut end = index;
+            let mut balanced = false;
+            for (scan, line) in lines.iter().enumerate().skip(index).take(MAX_CLAUSE_LINES) {
+                for ch in code_before_line_comment(line).chars() {
+                    match ch {
+                        '(' | '[' | '{' => depth += 1,
+                        ')' | ']' | '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                end = scan;
+                if depth <= 0 {
+                    balanced = true;
+                    break;
+                }
+            }
+            if !balanced {
+                // Never SKIP lines on a text this reader could not bracket:
+                // a skipped `requires` would read as a hypothesis upstream does
+                // not state, which is the wrong direction to fail in.
+                index += 1;
+                continue;
+            }
+            let compact: String = lines[index..=end]
+                .iter()
+                .map(|line| normalized_marked_source_line(line))
+                .collect();
+            if let Some((kind, body)) = contract_attribute_parts(&compact) {
+                if HYPOTHESIS_CLAUSE_KEYWORDS.contains(&kind) {
+                    for atom in conjunction_atoms(&canonical_claim_core(&body)) {
+                        atoms.insert(format!("{kind}:{atom}"));
+                    }
+                }
+            }
+            current = None;
+            index = end + 1;
+            continue;
+        }
+        if let Some(keyword) = clause_keyword_prefix(trimmed) {
+            let rest = trimmed[keyword.len()..].trim().trim_end_matches(',').trim();
+            current = HYPOTHESIS_CLAUSE_KEYWORDS
+                .contains(&keyword)
+                .then_some(keyword);
+            if let (Some(kind), false) = (current, rest.is_empty()) {
+                for atom in conjunction_atoms(&canonical_claim_core(rest)) {
+                    atoms.insert(format!("{kind}:{atom}"));
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(kind) = current {
+            // A clause of the open list, possibly wrapped over several lines.
+            let mut depth = 0i32;
+            let mut end = index;
+            let mut balanced = false;
+            for (scan, line) in lines.iter().enumerate().skip(index).take(MAX_CLAUSE_LINES) {
+                let scanned = code_before_line_comment(line);
+                for ch in scanned.chars() {
+                    match ch {
+                        '(' | '[' | '{' => depth += 1,
+                        ')' | ']' | '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                end = scan;
+                if depth <= 0 {
+                    balanced = true;
+                    break;
+                }
+            }
+            if !balanced {
+                current = None;
+                index += 1;
+                continue;
+            }
+            let clause: String = lines[index..=end]
+                .iter()
+                .map(|line| code_before_line_comment(line).trim())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let clause = clause.trim().trim_end_matches(',').trim().to_string();
+            // The signature's body opener ends the clause list.
+            if clause.contains('{') {
+                current = None;
+                index = end + 1;
+                continue;
+            }
+            for atom in conjunction_atoms(&canonical_claim_core(&clause)) {
+                atoms.insert(format!("{kind}:{atom}"));
+            }
+            index = end + 1;
+            continue;
+        }
+        index += 1;
+    }
+    atoms
+}
+
+/// The clause-list keywords upstream writes above a marked clause line.
+const UPSTREAM_CLAUSE_KEYWORDS: &[&str] = &[
+    "requires",
+    "ensures",
+    "invariant",
+    "decreases",
+    "recommends",
+];
+
+/// The KIND of contract clause upstream's marked line sits in, when it sits in
+/// one.
+///
+/// Upstream writes the keyword on its own line and the clauses under it:
+///
+/// ```text
+///     ensures
+///         x * z < y * z, // FAILS
+/// ```
+///
+/// so the keyword is found by walking back over the clause list. A marked line
+/// that is a statement (`assert(..); // FAILS`) sits in no clause list and
+/// yields `None`.
+fn upstream_clause_kind(region: &[&str], offset: usize) -> Option<String> {
+    let clause_head = |code: &str| -> Option<String> {
+        let trimmed = code.trim();
+        UPSTREAM_CLAUSE_KEYWORDS
+            .iter()
+            .find(|keyword| {
+                trimmed == **keyword
+                    || trimmed
+                        .strip_prefix(**keyword)
+                        .is_some_and(|after| after.starts_with(char::is_whitespace))
+            })
+            .map(|keyword| (*keyword).to_string())
+    };
+    if let Some(kind) = clause_head(code_before_line_comment(region.get(offset)?)) {
+        return Some(kind);
+    }
+    let mut index = offset;
+    while index > 0 {
+        index -= 1;
+        let code = code_before_line_comment(region[index]);
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(kind) = clause_head(code) {
+            return Some(kind);
+        }
+        // Still inside the clause list only while the previous line is another
+        // clause; anything that ends a statement or opens a body is not.
+        if !trimmed.ends_with(',') {
+            return None;
+        }
+    }
+    None
+}
+
+/// The contract clause an ENGINE obligation kind belongs to, if any.
+///
+/// The kind is the engine's own [`ObligationKind`] name, not a re-reading of
+/// the port's source: it is what the encoder actually raised the obligation
+/// for. `assert`/`assert_by` belong to no clause list and yield `None`.
+fn obligation_clause_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "requires" => Some("requires"),
+        "ensures" | "loop_ensures" => Some("ensures"),
+        "loop_invariant" | "invariant_except_break" => Some("invariant"),
+        "measure_decreases" | "measure_non_negative" => Some("decreases"),
+        "recommends" => Some("recommends"),
+        _ => None,
+    }
+}
+
 fn run_candidates_for_manifest_entry(
     entry: &VerusManifestEntry,
     options: CorpusLoadOptions,
+    verus_path: Option<&Path>,
 ) -> Vec<TrustVcCorpusRunCandidate> {
+    let upstream_fails_marked_lines =
+        upstream_fails_marked_lines_by_case(verus_path, &entry.upstream_path);
     let mut candidates = if !expected_cases_use_trust_vc_paths(&entry.expected_cases) {
         vec![TrustVcCorpusRunCandidate {
             upstream_path: entry.upstream_path.clone(),
@@ -5243,6 +8519,7 @@ fn run_candidates_for_manifest_entry(
             trust_vc_paths: entry.trust_vc_paths.clone(),
             trust_vc_check_args: entry.trust_vc_check_args.clone(),
             expected_cases: entry.expected_cases.clone(),
+            upstream_fails_marked_lines: upstream_fails_marked_lines.clone(),
         }]
     } else {
         let mut expected_cases_by_path: BTreeMap<String, Vec<VerusExpectedCase>> = BTreeMap::new();
@@ -5264,6 +8541,7 @@ fn run_candidates_for_manifest_entry(
                     trust_vc_paths: vec![trust_vc_path],
                     trust_vc_check_args: entry.trust_vc_check_args.clone(),
                     expected_cases,
+                    upstream_fails_marked_lines: upstream_fails_marked_lines.clone(),
                 },
             )
             .collect()
@@ -5401,8 +8679,635 @@ fn run_trust_vc_corpus_with_trust_vc_binary_and_env(
         passed_paths,
         failed_paths,
         skipped_entries,
+        unscheduled_paths: corpus.unscheduled_ported_paths.clone(),
         results,
     }
+}
+
+/// The PROOF-CONTENT RATCHET, as one rule with two call sites.
+///
+/// `min_obligations` and `obligation_fingerprints` are what an expected case
+/// commits to having PROVEN, and nothing pinned them against being rewritten
+/// DOWNWARD. Two levers were measured: `--refresh-trust-vc-corpus-evidence`
+/// wrote whatever the run observed, so a port that deleted proof content
+/// re-pinned itself to the smaller number; and a hand-edit of the manifest did
+/// the same with no run at all. Both are the same defect — a port may not be
+/// allowed to DELETE proof content and keep its accepted status — and this
+/// closes it independently of whether the correspondence rule can be laundered.
+///
+/// `previous` is the committed state at the other call site's authority: the
+/// pre-refresh file for the refresh, the `HEAD` blob for the gate.
+///
+/// Returns the reason a decrease is refused, or `None` when there is no
+/// decrease or a matching waiver declares it.
+fn obligation_content_decrease_reason(
+    previous_min_obligations: usize,
+    previous_fingerprints: &[String],
+    expected_case: &VerusExpectedCase,
+) -> Option<String> {
+    let mut decreases = Vec::new();
+    if expected_case.min_obligations < previous_min_obligations {
+        decreases.push(format!(
+            "min_obligations falls {previous_min_obligations} -> {}",
+            expected_case.min_obligations
+        ));
+    }
+    // The fingerprint SET is deliberately not compared by identity, only by
+    // size. A fingerprint is an ENGINE-derived hash of the encoded obligation,
+    // so every encoder change churns the whole corpus's fingerprints without
+    // any port losing a thing; a rule that red-flagged that churn would be
+    // waived wholesale on the next engine change, and a control nobody can
+    // keep is not a control. What a port cannot do is end up pinning FEWER
+    // obligations than it committed to.
+    if expected_case.obligation_fingerprints.len() < previous_fingerprints.len() {
+        decreases.push(format!(
+            "pinned obligations fall {} -> {}",
+            previous_fingerprints.len(),
+            expected_case.obligation_fingerprints.len()
+        ));
+    }
+    if decreases.is_empty() {
+        return None;
+    }
+    let decreases = decreases.join("; ");
+    match &expected_case.obligation_decrease_waiver {
+        // The waiver is pinned to the count being descended FROM, so it
+        // authorizes THIS decrease and not the next one: once this decrease is
+        // committed the committed count becomes the new, smaller number, the
+        // waiver no longer matches it, and a further decrease is refused until
+        // the waiver is re-authored.
+        Some(waiver)
+            if waiver.from_min_obligations == previous_min_obligations
+                && !waiver.reason.trim().is_empty() => None,
+        Some(waiver) => Some(format!(
+            "{decreases}, and its `obligation_decrease_waiver` does not authorize it \
+             (declares from_min_obligations {}, committed count is {previous_min_obligations})",
+            waiver.from_min_obligations
+        )),
+        None => Some(format!(
+            "{decreases}; a port may not delete proof content and keep its accepted status. \
+             An intentional decrease must declare an `obligation_decrease_waiver` \
+             {{\"from_min_obligations\": {previous_min_obligations}, \"reason\": \"..\"}} on this case"
+        )),
+    }
+}
+
+/// The standing bound on what an accepted case establishes — the WEAKENED
+/// claim, after five adversarial rounds each of which laundered the previous
+/// round's strengthening, and then corrected once more because the weakened
+/// claim was itself still overstated.
+///
+/// Read with the accepted-case count, never apart from it, and note that there
+/// are TWO layers. LAYER 1, the per-case upstream block in
+/// `load_corpus_report_with_options`, reads upstream's source for EVERY
+/// accepted case and compares its DECLARATION (verdict, mapped-case count,
+/// upstream-asserted messages). LAYER 2, the source-level correspondence rule,
+/// reaches COUNTEREXAMPLE cases only (`append_counterexample_identity_failures`
+/// returns before anything else when the expected verdict is not
+/// `counterexample`), so four accepted cases in five have no PROGRAM-level
+/// check. The per-verdict split ships in `VerusReplacementSummary`, and
+/// `VerusReplacementSummary::accepted_case_split_phrase` is the ONE renderer
+/// every printed accepted-case count goes through, so the total can never be
+/// read without the fraction that is PROGRAM-correspondence SCOPED, nor that
+/// fraction without the smaller one it ESTABLISHES.
+///
+/// THE NUMBERS IN THIS TEXT ARE MEASURED, NOT ASSERTED. They are recomputed
+/// from the pinned manifest and compared against this constant by
+/// `the_bound_carries_the_measured_accepted_case_split`, so the bound cannot
+/// drift from the corpus it describes.
+///
+/// This text is also pinned into the manifest itself
+/// (`correspondence_bound`, schema v2), so the number and its bound travel in
+/// one file and neither can be dropped without the gate refusing.
+/// The heading of the bound's LAST section, where a review finding against the
+/// bound's own prose is DISCLOSED verbatim instead of blocking the branch or
+/// being lost.
+///
+/// The section is part of the bound's single string, so it reaches the
+/// manifest through the same byte-identical `correspondence_bound` check as
+/// every other sentence and there is no second channel to forget. Appending a
+/// finding is therefore one edit here plus a re-stamp, and
+/// `the_bound_carries_its_outstanding_review_findings_section` pins the shape.
+const OUTSTANDING_REVIEW_FINDINGS_HEADING: &str = "(6) OUTSTANDING REVIEW FINDINGS";
+
+/// Where an appended finding goes: everything after this marker, to the end of
+/// the bound, is the findings list.
+const OUTSTANDING_REVIEW_FINDINGS_MARKER: &str = " FINDINGS: ";
+
+/// The sentinel that means the list is EMPTY. It is deleted when the first
+/// finding is appended and restored when the last one is fixed, so "no
+/// findings" is always a stated fact and never an absent section.
+const NO_OUTSTANDING_REVIEW_FINDINGS: &str = "NONE OUTSTANDING.";
+
+/// The one line every rendered accepted-case block carries: what review has
+/// found against the bound above and nobody has folded into it yet.
+///
+/// Rendered in BOTH lanes and in both states, including the empty one. A
+/// disclosure that only appears when it is non-empty trains a reader to read
+/// its absence as "nothing to say", which is the same thing as hiding it.
+fn outstanding_review_findings_line() -> String {
+    match outstanding_review_findings(ACCEPTED_CASE_CORRESPONDENCE_BOUND) {
+        Some(findings) if findings == NO_OUTSTANDING_REVIEW_FINDINGS => {
+            "OUTSTANDING REVIEW FINDINGS against this bound, disclosed and not folded into its prose: NONE".to_string()
+        }
+        Some(findings) => format!(
+            "OUTSTANDING REVIEW FINDINGS against this bound, disclosed and NOT folded into its prose: {findings}"
+        ),
+        None => "OUTSTANDING REVIEW FINDINGS section MISSING from the bound \u{2014} it is required, and its absence is itself the finding".to_string(),
+    }
+}
+
+/// The findings list of a bound: everything after the marker.
+///
+/// Returns `None` when the section is absent, which is itself a finding — the
+/// schema check requires the bound VERBATIM, so an absent section means the
+/// constant lost it.
+fn outstanding_review_findings(bound: &str) -> Option<&str> {
+    let heading = bound.rfind(OUTSTANDING_REVIEW_FINDINGS_HEADING)?;
+    let marker = bound[heading..].find(OUTSTANDING_REVIEW_FINDINGS_MARKER)?;
+    Some(bound[heading + marker + OUTSTANDING_REVIEW_FINDINGS_MARKER.len()..].trim())
+}
+
+const ACCEPTED_CASE_CORRESPONDENCE_BOUND: &str = "WHAT AN ACCEPTED CASE ESTABLISHES, and what it does NOT. Read it with every accepted-case count; the count alone reads as the strongest of several unequal kinds of evidence. THERE ARE TWO LAYERS, and the error this text has now been corrected for three times is describing ONE of them as though it were both. EVERY CHECK NAMED BELOW PRINTS THE POPULATION IT RUNS ON, because the fourth correction — round 9's — was a sentence that attributed three unequal sub-checks to one layer's denominator. HEADLINE: LAYER 1 checks a case's DECLARATION against upstream's source and COVERS 259 of 259 accepted expected cases (100.0%), and ITS SUB-CHECKS DO NOT SHARE THAT DENOMINATOR. Corpus-wide, on all 259 of 259: the declared upstream case RESOLVES to a real, non-`#[ignore]`d upstream case, and the DECLARED VERDICT IS ADMISSIBLE FOR upstream's — EQUAL to it, except that a port case mapped to a MULTI-FUNCTION upstream FAILURE case may declare `verified` for one of the functions upstream does not fail, which the exact failing-case count of (c) then pins. Narrower, each on the population printed with it: the mapped-case COUNT is compared per UPSTREAM case over the 223 the corpus maps — EXACTLY on the 50 that state a failure count, counting the mapped cases that DECLARE a failure, `>=` on the other 173; upstream's ASSERTED DIAGNOSTIC MESSAGES are required on 16 of the 25 error cases, 16 strings in all, and on nothing else; an upstream VERIFIER WARNING on the 1 upstream case that asserts one; an upstream FORBIDDEN diagnostic-context pattern on the 1 upstream case that states one, 1 pattern in all; and the cargo-fixture requirement on the 4 of the 259 whose upstream case is a RUST-error case. AN EARLIER REVISION OF THIS HEADLINE said that every one of the 259 has `its declared verdict, its mapped-case count and upstream's own asserted messages` read out of the checkout and compared. That gave all three the denominator 259, which is right for one of them and wrong for the other two; it is corrected above and retracted here rather than quietly rewritten. LAYER 2 checks the port's PROGRAM against upstream's program and COVERS 51 of 259 (19.7%), of which 51 (19.7%) survive to establish anything. So: every accepted case, 259 of 259, has its upstream case RESOLVED and its declared VERDICT compared, with the five narrower LAYER-1 checks applying only to the populations just named; 51 additionally have their PROGRAM checked, of which 51 survive; the other 208 (80.3%) have their DECLARATION checked and their PROGRAM not; and LAYER 2, the program-level one, is the LAUNDERABLE layer, which is why most of this bound's length is spent on it. An earlier revision of this text also said the other 208 cases establish NOTHING about upstream, and that a verified case is tied to upstream by nothing that reads upstream's source. BOTH WERE FALSE, in the pessimistic direction, and both are corrected here. EVERY BUCKET BELOW STATES BOTH NUMBERS — what the rule COVERS (its scope) and what it ESTABLISHES (scope minus whatever is refused, unreadable, synthesized or otherwise not really checked) — and where the two differ the reason is in the same sentence. A SCOPE count presented as an ESTABLISHED count is one failure mode of this text; ONE LAYER's scope presented as the whole of the gate's upstream reading is the second; and a SUB-CHECK's result presented on its LAYER's population — the headline error just retracted — is the third. Every quantified sentence below therefore prints the population it runs on, even where that population is the whole corpus. Every number in it is recomputed — from the pinned manifest by `the_bound_carries_the_measured_accepted_case_split`, and from the pinned Verus checkout by `the_bound_states_scope_and_established_for_every_bucket` — so none of them can be hand-written or drift. (L1) LAYER 1 — PER-CASE UPSTREAM CHECKS — COVERS 259 of 259 = 100.0%, ESTABLISHES on all 259 a RESOLVED upstream case and a DECLARED VERDICT equal to upstream's, plus checks (c) through (g) on the smaller populations each of them names, and NOTHING about any port's PROGRAM. The upstream harness-case block in `load_corpus_report_with_options` runs for EVERY accepted entry: it reads the entry's upstream file with the AST reader `upstream_verus_harness_cases` (a `syn` parse, NOT the line-based region reader of (1)), and per expected case it requires (a) the declared `upstream_case_id` to name a case that EXISTS upstream and is not `#[ignore]`d, on pain of `expected_cases entry ... does not match an upstream Verus harness case` — 0 of the 259 fail to resolve, and in the other direction each of the 223 non-ignored upstream cases in the 46 accepted files must be mapped by at least one port case or the entry fails with `expected_cases missing upstream Verus case`; (b) THE DECLARED VERDICT TO BE ADMISSIBLE FOR upstream's extracted verdict, on all 259 — EQUAL to it, with ONE exception, which is not a hole but the only way a multi-function failing case can be ported at all: upstream's verdict is a property of its whole PROGRAM and a port case's is a property of ONE FUNCTION, so where upstream's program refutes N obligations across M functions the other mapped port cases declare `verified`, and ONLY `verified` — `error` is still refused, and a `counterexample` under a VERIFIED upstream case is still a mismatch; (c) the number of mapped port cases THAT DECLARE A FAILURE to equal upstream's `expected_occurrences` — counted per UPSTREAM case, over the 223, and not per port case: EXACTLY on the 50 upstream cases where upstream states a failure count, `>=` on the other 173 where it states none. Upstream's `assert_fails(e, N)` is `assert_eq!(err.errors.len(), N)`: N FAILURES IN ONE PROGRAM. Comparing N against the number of mapped port CASES was the same number only while every mapped function failed, and it made a multi-function failing case UNPORTABLE BY CONSTRUCTION — `z3_restart.rs`'s `multiset_basics` is six proof fns with one trailing `assert(false) // FAILS`, and its five verifying functions could only be declared `counterexample` (a falsehood) or dropped (a deletion), while six mapped cases could never equal one failure. The remaining mapped cases must declare `verified` (that is (b)'s exception, and the two rules are one rule read from two ends), and the split is CEILINGED by upstream's own program: at most as many mapped cases as upstream declares FUNCTIONS in that case, counted at the top level of its `verus_code!` block by `program_function_count` out of the pinned checkout, so the room this opens cannot be spent on cases upstream does not have; (d) every diagnostic message upstream ASSERTS to be declared verbatim — 16 upstream-asserted strings across 16 of the 25 error cases, and nothing required of the other 9 or of any case outside that bucket; (e) every verifier WARNING upstream content-checks to be declared, on the 1 upstream case that asserts one and on no other, with the converse refused too (a port may not declare a warning upstream does not assert); (f) an upstream RUST-error case to map to a cargo fixture, so a rustc diagnostic is never modelled as a verifier counterexample — on the 4 of the 259 whose upstream case is a Rust-error one; and (g) every FORBIDDEN diagnostic-context pattern upstream states to be declared, on the 1 upstream case that states one, 1 pattern in all, with the converse refused too. (g) WAS MISSING FROM THIS LIST UNTIL ROUND 9. The gate has been running it all along, so the omission understated LAYER 1 rather than overstating it — but a list that reads as exhaustive and is not is the same defect as a denominator that does not fit its check, and it is recorded here rather than silently filled. On the 16 cases of (d) this composes into a real port-to-upstream tie in the RUN lane: `append_expected_error_pattern_failures` then requires every declared pattern to appear in ONE failure-attached diagnostic the PORT itself emitted, so upstream's exact asserted string has to come out of trust-vc's own run. WHAT LAYER 1 DOES NOT ESTABLISH, and it is the entire subject of (1): nothing about whether the port's PROGRAM reproduces upstream's program. A FAITHFUL DECLARATION OVER AN UNFAITHFUL BODY PASSES THIS LAYER — replace the port's function with one that trivially fails and keep `counterexample`, or one that trivially succeeds and keep `verified`, and (a) through (g) are all still satisfied. Layer 1 constrains the manifest ROW; Layer 2 constrains the SOURCE. LAYER 1 IS LIVE, NOT DORMANT, AND IT IS STILL RED: this worktree's own `--verus-path ../verus` run returns 1 `upstream_case_failures`, split 0 verdict, 0 occurrence-count, 1 missing-diagnostic-pattern. The one left is on an ERROR case: `real.rs::test_reject_mixed` declares a substring where upstream asserts the whole `The verifier does not yet support the following Rust feature: ...` message. The six that are GONE were all on `z3_restart.rs`'s `multiset_basics` — five verdict mismatches on port cases declaring `verified` under an upstream case that fails, and one occurrence-count mismatch (exactly 1 mapped case allowed, 6 mapped) — and they went by fixing the RULE, not the manifest: upstream's `multiset_basics` is a SIX-FUNCTION program with ONE failure, which the old readings of (b) and (c) made unportable, and not one declared verdict moved. `upstream_case_failures.is_empty()` is a conjunct of the corpus manifest gate's pass condition, so every one of the 1 remaining BLOCKS; none is waived, and the count and its split are recounted from the gate's own report rather than written down. (0) SCOPE OF LAYER 2 — WHICH CASES HAVE THEIR PROGRAM CHECKED AT ALL. The source-level correspondence rule governs COUNTEREXAMPLE cases ONLY: `append_counterexample_identity_failures` returns on its second line unless the expected verdict is `counterexample`, so every claim comparison, every premise channel and the vacuity guard sit behind that return. Measured on this manifest: 259 accepted expected cases = 51 counterexample (19.7%) + 183 verified (70.7%) + 25 error (9.7%). Four accepted cases in five have no program-level check at all: their upstream case is resolved and their verdict compared, plus whichever of (c) through (g) their own population falls inside, and nothing more. Of those 183 verified, 48 are SCHEMA-FIXED and carry no pin of any kind — see (2b). (1) COUNTEREXAMPLE / LAYER 2 — COVERS 51 of 259 = 19.7%, ESTABLISHES 51 of 259 = 19.7%. What an established case establishes, stated of each of those 51 and of no case outside them: the port refutes upstream's marked claim, in a function that runs upstream's statements and binds what upstream binds, every compared text machine-read from the pinned Verus checkout. The gap between COVERS and ESTABLISHES is EMPTY, and it was two kinds. 0 are REFUSED as un-checkable — the CLAUSE-MARKED class, whose marked line sits on the enclosing function's HEADER on both surfaces, was refused for as long as `enclosing_function_prefix_lines` returned an EMPTY window for a header line: both premise windows were then empty BY CONSTRUCTION and the whole function BODY — which is what makes a clause refutable at all — reached no channel, so `nonlinear.rs::test1_fails`, `nonlinear.rs::test2_fails` and the witness `z3_restart.rs::test2_fails` established nothing, and that witness's empty upstream body admitted ground `assume!`s that collapse the nonlinear claim with no failure of any kind. IT IS FIXED AT THE WINDOW, NOT AT THE REFUSAL: a contract obligation is discharged against everything the function body runs — an `ensures` holds at every return — so a header mark's premise window is that BODY, drawn by the same reader on both surfaces. The ground-`assume!` launder then lands in the port's statement set against upstream's empty one, and the statement channel compares as EQUALITY, so it FAILS a real comparison instead of being refused (`a_clause_marked_obligation_is_checked_against_the_function_body` pins both halves). What is still refused, fail-closed and with no member in this corpus, is the shape where UPSTREAM ITSELF has no body to read: a header mark on a bodyless signature, where the text that makes a clause refutable is missing on upstream's own side. And 0 more can only FAIL the cross-check, never pass it — a second kind that had exactly one member, `harness.rs::harness_false`, until ROUND 11 EMPTIED IT. `upstream_case_regions` — the LINE-BASED reader this layer and the provenance measurement in (3) use, and NOT Layer 1's AST reader — took a case name off the `#[test]` LINE ONLY, which is the form `test_verify_one_file!` expands to, and upstream's hand-written `harness.rs` puts a plain `#[test]` above `fn harness_false()`. It now reads that second form too, and narrows a plain-form region to the `verus_code! { .. }` block the Rust test function wraps the program in, so the premises compared are the Verus function's and not the test harness's `let err = verify_one_file(`. 0 of that file's 6 upstream cases are now invisible to it, and none anywhere in the accepted macro corpus: 0 of 162. They were never invisible to LAYER 1, which parses the file and reads all six — which is exactly why each layer needs its own blindness statement, and why an earlier revision calling these 4 invisible to every upstream reader in this gate was wrong. Inside the 51 it does NOT establish that the port reproduces upstream's proof OBLIGATION, and it does not discriminate: BLOCK STRUCTURE and statement ORDER, because the binding channel compares name/initializer PAIRS as a SET and the statement channel is a SET too — witness `scope.rs::test1_fails`, which IS upstream's block-scope case: delete the inner block, flatten every binding into one sequence, and both sets are unchanged, the case passes, and the refresh re-stamps the hash; the SIGNATURE and type environment (`fn f(x: u8)` for upstream's `fn f(x: int)`); anything outside the enclosing function and the definitions the claim calls; and a `let` whose block outruns the reader's 24-line window. Weaker still on 19 of the 51, and this is COVERED-BUT-THIN rather than covered-but-not-established: upstream binds nothing and runs nothing before its marked line, so its premise window is empty — and on 15 of those 19 the claim reaches no definition either, leaving the claim text and the hypothesis list as the whole comparison. Those 19 are not refused, because the statement channel compares as EQUALITY and so forces the port's own prefix to be empty too; the count is stated because `checked` and `checked against something` are not the same claim. (An earlier prose count of 8 in this branch's probe was the sub-count that also reaches no definition; both rules are now in code, in `measure_upstream_read_establishment`. Both figures then MOVED, 12 to 16 and 8 to 12, for TWO fixes that landed in the same integration and are additive on the single-branch measurements (12->15/8->11 and 12->13/8->9 respectively): `enclosing_function_prefix_lines` stopped starting its window at the item opener — a signature `requires` clause was being read as a body statement as well as a hypothesis, so three upstream windows that are genuinely empty had looked non-empty — and the LINE-BASED region reader learned upstream's plain `#[test]` form, which admits `harness.rs::harness_false` into this layer at all, with an upstream prefix that is empty. The gate admits MORE weakness on those four, not less.) (2) VERIFIED — LAYER 1 COVERS 183 of 259 = 70.7%, LAYER 2 COVERS 0 of 183 AND ESTABLISHES NOTHING ABOUT THE PORT'S PROGRAM: THE LARGEST HOLE and the MAJORITY of accepted cases, because a verified case is tied to its upstream case by NOTHING THAT READS UPSTREAM'S PROGRAM. Its DECLARATION is checked all the same, and with its own populations: the declared `verified` must equal upstream's own verdict on all 183, and the mapped-case count must satisfy upstream's — `>=` where the upstream case states no failure count, EXACTLY where it does, which is the rule that reaches the 5 of the 183 verified cases whose upstream case is a counterexample one. That is how the 5 `z3_restart.rs` verdict findings and the 1 count finding named above were raised, and — once the rule was corrected to count the mapped cases that DECLARE a failure — how they were retired without one declared verdict moving — so this is a PROGRAM-level hole, not the absence of any upstream check. One more of the narrow checks reaches into this bucket and the list would read as exhaustive without it: (e) applies to the 1 of the 183 whose upstream case asserts a verifier warning. What the two halves establish about the PORT differs, and the weaker half is invisible in the word `verified`. (2a) AUTHOR-PINNED, 135 of 183 — COVERS 135, ESTABLISHES 135 PORT-SIDE obligation pins and zero PROGRAM-level correspondence: the engine really runs, really encodes the PORT's obligations and really reports `verified`, and the case is pinned by an obligation COUNT (`min_obligations`, greater than 0 on every one of the 135) plus engine-derived fingerprints of the PORT'S OWN obligations (present on every one of the 135) — which encode nothing about upstream's program. So a verified port whose body is deleted, with `min_obligations` lowered to match and the fingerprints re-stamped and the port committed, is ACCEPTED — and LAYER 1 does not stop it, because deleting a body changes neither the declared verdict nor the mapped-case count. (2b) SCHEMA-FIXED, 48 of 183 — all 48 cases of the 6 `cargo_trust_vc_integration_test` entries (upstream's `source/cargo-verus/tests/*`) — COVERS 48, ESTABLISHES ZERO PROOF CONTENT BY CONSTRUCTION: here THE COUNT PINS NOTHING BECAUSE THE SCHEMA WROTE IT. `append_expected_case_obligation_pin_failures` REQUIRES `expected_verdict` `verified`, REQUIRES `min_obligations` 0 and REFUSES any `obligation_fingerprints` on these entries, so neither field records an author decision at all; and `run_trust_vc_corpus_cargo_trust_vc_integration_test` never invokes the engine — it SYNTHESIZES `verdict: verified, obligation_count: 0, fingerprints: []` whenever `cargo test --test <target> -- --exact <case_id>` reports exactly one pass. The word `verified` on these 48 rows is a schema placeholder, not an engine verdict, and no proof obligation exists anywhere in their evidence. What they DO establish is real and different in kind, and it is 48 CLI-BEHAVIOUR WITNESSES, not 48 proofs: a `#[test]` of exactly that name exists in the declared `crates/cargo-trust-vc/tests/*.rs` file, is not `#[ignore]`, and passes — evidence for the `cargo verus` argument-forwarding compat layer. LAYER 1 still applies to all 48, in the corpus-wide half it applies everywhere: the upstream case is enumerated by `upstream_cargo_verus_integration_test_cases`, and the declared verdict and the case count are compared against it. The deleted-body sentence in (2a) applies to these with LESS resistance, not more: emptying such a test's body makes it pass, and NO OBLIGATION PIN MOVES, because there is none — the only manifest field that changes is the `trust_vc_source_hashes` sha256 of the port file, which all 46 accepted entries carry alike and which the refresh re-stamps to whatever the file now says, so it separates these 48 from nothing. The ratchet of (4) compares `min_obligations` and `obligation_fingerprints` and nothing else, so it is structurally silent on all 48 ALWAYS, not merely after a commit; for the 135 of (2a) it does at least refuse the decrease while it is uncommitted. Read `accepted_expected_cases_verified` next to `accepted_expected_case_count`, and `accepted_expected_cases_verified_schema_fixed` next to that. (3) ERROR — LAYER 1 COVERS 25 of 259 = 9.7%, LAYER 2 COVERS 0, and the bucket ESTABLISHES 25 PORT-SIDE diagnostic pins plus, on 16 of the 25, an upstream-asserted message that must come out of the port's own run. The 25 is not a scope standing in for a result here: 25 of the 25 declare at least one `expected_error_patterns` entry, so the pin is non-vacuous on every one of them. What a diagnostic-pattern pin DOES establish, on each of those 25: the port's own run emits a failure-attached diagnostic containing every declared pattern, all of them in ONE diagnostic (`append_expected_error_pattern_failures`, which refuses a pattern satisfied by the port's source text or by two unrelated entries between them). What it does NOT: no rule compares the port's PROGRAM with upstream's for an error case, and a pattern the PORT invents is neither required nor forbidden by anything. HOW MUCH OF LAYER 1 IS UPSTREAM-SOURCED FOR THIS BUCKET, measured with the gate's own readers rather than assumed: 16 of the 25 error cases have an upstream case that ASSERTS a diagnostic message, and for those LAYER 1 already requires upstream's exact string — 16 strings in all — to be DECLARED, and the run lane requires it to APPEAR in the port's own failure diagnostic; the other 9 have no upstream-asserted message whatever, because upstream marks the line `// FAILS` and calls `assert_one_fails`, and the extractor re-keys such a case to `error` when upstream runs it with `--no-cheating` — so those 9 are upstream REFUTATION cases the port runs on trust-vc's own `--no-cheating` CLI surface, and for them Layer 1 checks the verdict and the count and nothing else. Seen from the PORT's side instead of upstream's, with a deliberately generous substring scan of the literals upstream asserts in the case's own region: of the 48 declared `expected_error_patterns` only 19 appear inside a string literal upstream itself asserts; by case, 15 of the 25 have every declared pattern so sourced; 10 of the 25 — every `no_cheating.rs` case — declare the PORT'S OWN strings (its fixture path `src/<case>.rs`, plus trust-vc's own wording: `admitted proof`, `trusted function body`, `source assumption`, `nested`), and for 9 of those 10 upstream asserts no message whatever; and 0 of the 25 (`harness.rs::harness_invalid_rust`) names an upstream case the LINE-BASED region reader cannot see — it was the one such case until round 11 taught that reader upstream's plain `#[test]` form, LAYER 1's AST reader read it throughout, and its one upstream-asserted pattern is now sourced on both readers. The 29 declared patterns that are NOT upstream text are a manifest-authoring question no rule asks. (4) THE PROOF-CONTENT RATCHET IS A TRIP-WIRE ON AN UNCOMMITTED DIFF, not a refusal by construction. It compares the WORKING manifest against `git show HEAD`, so it refuses a refresh or a hand-edit that would lower a pin exactly while the decrease is UNCOMMITTED; commit the lowered pin and the working manifest equals HEAD, there is nothing to compare against, and it is silent about that case forever after. What it buys is real and smaller: a lowered pin must be a line in a reviewed diff. (5) WHAT WOULD CLOSE THE CLASS — the class here is LAYER 2, the program-level one; Layer 1 is already corpus-wide. One route closes (1) and (2a) together, because an author-pinned verified case has no refuted claim but does have an obligation set — and it reaches (2b) only once those 48 upstream cases are ported as PROOF cases rather than as CLI-behaviour tests, which is a corpus re-key, not an engine change: correspondence on the ENCODED OBLIGATION, hypotheses plus goal, which the engine already builds for the port. It needs (a) a Verus-to-IR import so upstream's case has an encoding to compare against — `verus!` source through the trust-vc frontend into trust-ir is the self-contained shape, `.vir` interop the Phase-2 alternative; (b) a per-CASE entry point, which the corpus already provides: it extracts the upstream case region today; (c) obligation-SET comparison in the calculus rather than in strings — alpha-equivalence plus the normalizer the canonicalizer already implements for the deliberate native-surface differences, set equality on hypotheses, entailment-or-equality on the goal; and (d) a pinned Verus build or a vendored corpus at the manifest's upstream ref. ONE smaller thing is still in the way of the counts above and is cheap by comparison: the 29 declared error patterns that are the port's own wording have no upstream channel, because Layer 1 checks upstream's 16 asserted strings in the upstream-to-port direction only. The OTHER one — the LINE-BASED region reader learning upstream's plain `#[test]` + `fn name()` form — was done in round 11, and `harness.rs`'s four hand-written cases are readable to LAYER 2 and to the provenance measurement now, as they always were to LAYER 1. Not another source-level rule over the port: five rounds of those were each laundered by the next reviewer. (6) OUTSTANDING REVIEW FINDINGS — FOUND BY REVIEW, NOT YET FOLDED INTO THE PROSE ABOVE. This section exists so that a finding against this text never has to choose between blocking the branch and disappearing. A finding recorded here is DISCLOSED, not fixed: every sentence above still says exactly what it said, and the finding says what is wrong with it. A bound that carries its own outstanding review comment is more honest than one that hides it, and it is not a substitute for fixing the prose — a finding leaves this list only by being FIXED above, in the commit that removes it. HOW TO APPEND ONE: add it verbatim as a new `[R<round>] ` entry immediately after `FINDINGS:` in `ACCEPTED_CASE_CORRESPONDENCE_BOUND` in `crates/cargo-trust-vc/src/evidence.rs`, deleting the `NONE OUTSTANDING.` sentinel if it is still there; then re-stamp `evals/verus/verus-tests.json` with `--refresh-trust-vc-corpus-evidence`, or copy the constant across by hand. The schema's byte-identical `correspondence_bound` check carries this section into the manifest exactly as it carries every other sentence — it is one string, so there is no second channel to forget — and `the_bound_carries_its_outstanding_review_findings_section` pins the section's shape, its position at the very end of the bound, and the sentinel. FINDINGS: [R10] The corpus-wide LAYER-1 claims still credit 72 of the 259 with a comparison that carries no upstream content. For the 6 cargo_trust_vc_integration_test entries (48 cases) upstream_cargo_verus_integration_test_cases builds every upstream case with expected_verdict Verified and expected_occurrences 1 HARD-CODED (evidence.rs:14733-14752), and for the 16 /cargo-tests/ fixture entries (24 cases) upstream_cargo_fixture_cases mints ONE upstream case per entry NAMED AFTER THE FILE STEM, also Verified and 1, reading no upstream assertion whatever - it checks only that the source file and the fixture Cargo.toml exist (evidence.rs:14839-14870). So 64 of the 223 mapped upstream cases carry a verdict the extractor ASSIGNED rather than one upstream states, and on those 72 port cases the headline (\"on all 259 of 259: the declared upstream case RESOLVES to a real, non-#[ignore]d upstream case, and the DECLARED VERDICT EQUALS upstream's\") and (L1)(b) (\"on all 259\") hold only in the sense that a constant equals a constant: all 72 declare verified, the schema INDEPENDENTLY REQUIRES verified on the 48, so (b) cannot fail there at all; (c) compares >= 1 against a single minted case, which any non-empty mapping satisfies (vstd_macro_usage/src/lib.rs spends 5 port cases on the one minted case `lib`); and on 4 of those 16 entries (5 cases) the extractor reports Verified for fixtures upstream itself files under cargo-tests/unverified/. Three smaller items of the same family: (L1) describes the reader as \"a syn parse\" for every accepted entry, which is untrue of those 16, where nothing is parsed; the one genuinely upstream-reading check those 16 entries do get - append_cargo_fixture_inventory_failures, comparing package name, dependency set and bin/lib layout against upstream's Cargo.toml - is named nowhere in the bound, so LAYER 1 is understated there in the same breath as it is overstated; and (L1)(a)'s requirement that the declared upstream_case_id name a case \"not #[ignore]d ... on pain of `expected_cases entry ... does not match an upstream Verus harness case`\" IS NOT ENFORCED - that failure is raised from a set built over ALL upstream cases, ignored ones included, and a unit test pins that a port case covering an ignored upstream case must NOT fail - so half of (a) describes a guard the gate does not have, exercised by 0 of the 259 today.";
+
+/// The gate-side half of the proof-content ratchet: the working manifest's
+/// expected cases against the COMMITTED ones.
+///
+/// The refresh path refuses to WRITE a decrease; this refuses to RUN on one,
+/// which is what covers a hand-edit that never went through a refresh at all.
+/// `HEAD` is the authority because it is the reviewed state: lowering a pin is
+/// then a line in a commit somebody signed, not a number that moved.
+///
+/// CORRECTION — the worker report and the corpus README both called this a
+/// refusal BY CONSTRUCTION, and it is not. The comparison is
+/// working-tree-against-`HEAD`, so it refuses a decrease exactly while the
+/// decrease is UNCOMMITTED. Commit the lowered pin and the working manifest
+/// equals `HEAD`, there is nothing left to ratchet against, and this function
+/// is silent about that case forever after (measured in adversarial review
+/// round 5: the same edit that produces the refusal below produces no finding
+/// at all once committed). What it actually is: a trip-wire on a DIFF, which
+/// forces a committed decrease to be a reviewable line rather than a silent
+/// edit — worth having, and strictly weaker than the sentence it replaces.
+/// Making it monotone across commits needs a high-water mark stored in the
+/// entry itself, which a port author also controls, so it moves the launder
+/// one step rather than closing it; the closing move is the encoded-obligation
+/// route named in `ACCEPTED_CASE_CORRESPONDENCE_BOUND`.
+///
+/// A manifest that is not a tracked `HEAD` blob reaches no ratchet — there is
+/// nothing to ratchet against — and that is not a hole here because the gate
+/// already refuses an untracked manifest a few lines above.
+fn append_proof_content_ratchet_findings(
+    crate_root: &Path,
+    manifest_rel: &str,
+    entries: &[VerusManifestEntry],
+    invalid_entries: &mut Vec<String>,
+    waivers: &mut Vec<String>,
+) {
+    let committed = match git_stdout_bytes(crate_root, &["show", &format!("HEAD:{manifest_rel}")]) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            invalid_entries.push(format!(
+                "failed to read committed manifest `HEAD:{manifest_rel}` for the proof-content ratchet: {error}"
+            ));
+            return;
+        }
+    };
+    let committed: JsonVerusManifest = match serde_json::from_slice(&committed) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            invalid_entries.push(format!(
+                "failed to parse committed manifest `HEAD:{manifest_rel}` for the proof-content ratchet: {error}"
+            ));
+            return;
+        }
+    };
+    let mut committed_cases: BTreeMap<(&str, &str), &VerusExpectedCase> = BTreeMap::new();
+    for entry in &committed.entries {
+        for expected_case in &entry.expected_cases {
+            committed_cases.insert(
+                (entry.upstream_path.as_str(), expected_case.case_id.as_str()),
+                expected_case,
+            );
+        }
+    }
+    for entry in entries {
+        for expected_case in &entry.expected_cases {
+            let Some(previous) = committed_cases
+                .get(&(entry.upstream_path.as_str(), expected_case.case_id.as_str()))
+            else {
+                // A case HEAD does not carry is new; there is nothing it can
+                // have descended from.
+                continue;
+            };
+            match obligation_content_decrease_reason(
+                previous.min_obligations,
+                &previous.obligation_fingerprints,
+                expected_case,
+            ) {
+                Some(reason) => invalid_entries.push(format!(
+                    "{}: expected case `{}` proves less than the committed manifest does: {reason}",
+                    entry.upstream_path, expected_case.case_id
+                )),
+                None => {
+                    if expected_case.min_obligations < previous.min_obligations
+                        || expected_case.obligation_fingerprints.len()
+                            < previous.obligation_fingerprints.len()
+                    {
+                        let declared = expected_case
+                            .obligation_decrease_waiver
+                            .as_ref()
+                            .map(|waiver| waiver.reason.trim().to_string())
+                            .unwrap_or_default();
+                        waivers.push(format!(
+                            "{}: expected case `{}` min_obligations {} -> {} under a declared waiver: {declared}",
+                            entry.upstream_path,
+                            expected_case.case_id,
+                            previous.min_obligations,
+                            expected_case.min_obligations
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What a `--repin-obligation-rendering-drift` pass changed.
+#[derive(Debug, Default)]
+struct RepinRenderingDriftSummary {
+    entries: usize,
+    cases: usize,
+    fingerprints: usize,
+}
+
+fn repin_obligation_rendering_drift_gate(
+    run_manifest_path: &Path,
+    canonical_manifest_path: &Path,
+    upstream_paths: &[String],
+    run_report: Option<&TrustVcCorpusRunReport>,
+) -> GateResult {
+    match repin_obligation_rendering_drift_manifest(
+        run_manifest_path,
+        canonical_manifest_path,
+        upstream_paths,
+        run_report,
+    ) {
+        Ok(summary) => GateResult {
+            name: "TrustVc corpus obligation rendering re-pin".to_string(),
+            required: true,
+            status: GateStatus::Passed,
+            detail: Some(format!(
+                "re-pinned {} obligation fingerprint(s) across {} case(s) in {} entry/entries; \
+                 min_obligations, verdicts and classifications untouched",
+                summary.fingerprints, summary.cases, summary.entries
+            )),
+            command: None,
+        },
+        Err(error) => GateResult {
+            name: "TrustVc corpus obligation rendering re-pin".to_string(),
+            required: true,
+            status: GateStatus::Failed,
+            detail: Some(error.to_string()),
+            command: None,
+        },
+    }
+}
+
+/// The failure shape this mode is allowed to clear.
+///
+/// `append_trust_vc_corpus_case_failures` emits exactly this sentence for an
+/// obligation-fingerprint mismatch and a different sentence for every other
+/// defect, so a result whose failures are ALL of this shape had a correct
+/// verdict, a satisfied obligation floor and matching diagnostics — the pins
+/// are the only thing that moved.
+const OBLIGATION_FINGERPRINT_FAILURE_MARKER: &str = " expected obligation fingerprints [";
+
+/// Re-pins `obligation_fingerprints` for the named accepted entries from the
+/// conditions THIS run observed, for the one case the all-or-nothing
+/// `--refresh-trust-vc-corpus-evidence` cannot serve: a rendering change in the
+/// engine.
+///
+/// A fingerprint is `sha256(obligation.condition())`. When the engine changes
+/// how it RENDERS a condition without changing the obligation, every pin over
+/// that condition goes red — and the refresh path, which demands a PASSING
+/// corpus run, can never be reached, because those very pins are what fails the
+/// run. That circle is why `assert_forall_by.rs` sat red with three unexplained
+/// hashes.
+///
+/// This mode breaks the circle without weakening the pin. It refuses unless,
+/// for every named entry:
+///
+///   * the entry actually FAILED this run, and every one of its failures is an
+///     obligation-fingerprint mismatch — so no verdict, obligation floor,
+///     diagnostic or warning expectation was in play;
+///   * every case's observed verdict still equals its DECLARED verdict and the
+///     observed obligation count still clears `min_obligations`;
+///   * every case that moves had a non-empty pin already and the new pin has
+///     the SAME cardinality — a changed obligation COUNT is a changed
+///     obligation set, not a re-rendering, and belongs in a full refresh.
+///
+/// It writes `obligation_fingerprints` and nothing else: `min_obligations` is
+/// never raised or lowered, no verdict or classification is touched, and no
+/// entry outside `upstream_paths` is read back out. Whether a drift is really
+/// rendering-only is the operator's judgement, evidenced outside this function
+/// (for the 2026-09-20 case, by recovering both condition texts by preimage and
+/// by reverting the single commit that moved them); the flag records that
+/// judgement, it does not make it.
+fn repin_obligation_rendering_drift_manifest(
+    run_manifest_path: &Path,
+    canonical_manifest_path: &Path,
+    upstream_paths: &[String],
+    run_report: Option<&TrustVcCorpusRunReport>,
+) -> Result<RepinRenderingDriftSummary, EvidenceError> {
+    if canonical_manifest_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        != Some("json")
+    {
+        return Err(EvidenceError::new(
+            "--repin-obligation-rendering-drift requires a JSON manifest",
+        ));
+    }
+    let run_report = run_report.ok_or_else(|| {
+        EvidenceError::new(
+            "--repin-obligation-rendering-drift requires --run-trust-vc-corpus so the new fingerprints come from an observed run",
+        )
+    })?;
+    // The re-pin lands in the CANONICAL manifest even when the run was measured
+    // through a FILTERED copy (`--manifest`), because a filtered copy is a
+    // measurement device and the canonical file is the record. The identity
+    // guard below is what makes that safe: an entry may only be re-pinned when
+    // the copy the run used and the canonical file agree on it EXACTLY, so a
+    // doctored copy can never move a canonical pin.
+    let text = fs::read_to_string(canonical_manifest_path).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to read manifest `{}` for obligation rendering re-pin: {err}",
+            canonical_manifest_path.display()
+        ))
+    })?;
+    let manifest: JsonVerusManifest = serde_json::from_str(&text).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to parse JSON manifest `{}` for obligation rendering re-pin: {err}",
+            canonical_manifest_path.display()
+        ))
+    })?;
+    validate_json_manifest_schema(&manifest)?;
+    let run_entries = repin_run_manifest_entries(run_manifest_path, canonical_manifest_path)?;
+    let observed_cases_by_key = observed_cases_by_upstream_and_case(run_report)?;
+
+    // (upstream_path, case_id) -> the new pin. Collected for EVERY named entry
+    // before anything is written, so a refusal on the last entry leaves the
+    // manifest untouched.
+    let mut edits: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut summary = RepinRenderingDriftSummary::default();
+    let mut seen_paths = BTreeSet::new();
+
+    for upstream_path in upstream_paths {
+        if !seen_paths.insert(upstream_path.clone()) {
+            continue;
+        }
+        let results = run_report
+            .results
+            .iter()
+            .filter(|result| &result.upstream_path == upstream_path)
+            .collect::<Vec<_>>();
+        if results.is_empty() {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: no TrustVc corpus result in this run to re-pin from"
+            )));
+        }
+        if results.iter().any(|result| {
+            result.execution_mode == TrustVcCorpusExecutionMode::CargoTrustVcIntegrationTest
+        }) {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: executed as a cargo-trust-vc integration test, which produces no obligation fingerprints; refusing to re-pin"
+            )));
+        }
+        let failures = results
+            .iter()
+            .flat_map(|result| result.failures.iter())
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: passed this run, so there is no fingerprint drift to re-pin"
+            )));
+        }
+        if let Some(other) = failures
+            .iter()
+            .find(|failure| !failure.contains(OBLIGATION_FINGERPRINT_FAILURE_MARKER))
+        {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: refusing to re-pin — this run reports a failure that is not an obligation-fingerprint mismatch: {other}"
+            )));
+        }
+
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| &entry.upstream_path == upstream_path)
+            .ok_or_else(|| {
+                EvidenceError::new(format!("{upstream_path}: no manifest entry to re-pin"))
+            })?;
+        if !requires_trust_vc_paths(&entry.classification) {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: classification `{}` carries no accepted evidence pins to re-pin",
+                entry.classification
+            )));
+        }
+        if entry.evidence_kind == VerusEvidenceKind::CargoTrustVcIntegrationTest {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: declared evidence_kind is a cargo-trust-vc integration test, which carries no obligation fingerprints"
+            )));
+        }
+        if let Some(run_entries) = run_entries.as_ref() {
+            let run_entry = run_entries.get(upstream_path).ok_or_else(|| {
+                EvidenceError::new(format!(
+                    "{upstream_path}: the manifest this run used has no such entry; refusing to re-pin the canonical manifest from it"
+                ))
+            })?;
+            let canonical_entry = serde_json::to_value(entry).map_err(|err| {
+                EvidenceError::new(format!(
+                    "{upstream_path}: failed to compare canonical manifest entry: {err}"
+                ))
+            })?;
+            if run_entry != &canonical_entry {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: the manifest this run used declares a DIFFERENT entry than `{}`; refusing to re-pin a canonical pin from a modified copy",
+                    canonical_manifest_path.display()
+                )));
+            }
+        }
+
+        let mut entry_changed = false;
+        for expected_case in &entry.expected_cases {
+            let key = (upstream_path.clone(), expected_case.case_id.clone());
+            let observed_case = observed_cases_by_key.get(&key).ok_or_else(|| {
+                EvidenceError::new(format!(
+                    "{upstream_path}: no observed TrustVc corpus case `{}` to re-pin from",
+                    expected_case.case_id
+                ))
+            })?;
+            // The three invariants the pin is NOT allowed to paper over. They
+            // are re-checked here rather than inferred from the failure list so
+            // a future change to the failure wording cannot silently widen this
+            // mode.
+            let expected_verdict = expected_verdict_label(expected_case.expected_verdict);
+            if observed_case.verdict != expected_verdict {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` observed verdict {} but declares {}; refusing to re-pin",
+                    expected_case.case_id, observed_case.verdict, expected_verdict
+                )));
+            }
+            if observed_case.obligation_count < expected_case.min_obligations {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` observed {} obligation(s), below the declared floor {}; refusing to re-pin",
+                    expected_case.case_id,
+                    observed_case.obligation_count,
+                    expected_case.min_obligations
+                )));
+            }
+            let mut observed_fingerprints = observed_case.obligation_fingerprints.clone();
+            observed_fingerprints.sort();
+            observed_fingerprints.dedup();
+            if let Some(invalid) = observed_fingerprints
+                .iter()
+                .find(|fingerprint| !valid_sha256_digest_label(fingerprint))
+            {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` produced invalid obligation fingerprint `{invalid}`",
+                    expected_case.case_id
+                )));
+            }
+            let mut declared_fingerprints = expected_case.obligation_fingerprints.clone();
+            declared_fingerprints.sort();
+            if declared_fingerprints == observed_fingerprints {
+                continue;
+            }
+            if declared_fingerprints.is_empty() {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` has no declared obligation fingerprints; that is a first pin, not a rendering re-pin",
+                    expected_case.case_id
+                )));
+            }
+            if declared_fingerprints.len() != observed_fingerprints.len() {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` declares {} obligation fingerprint(s) and observed {}; a changed obligation COUNT is a changed obligation set, not a re-rendering",
+                    expected_case.case_id,
+                    declared_fingerprints.len(),
+                    observed_fingerprints.len()
+                )));
+            }
+            if observed_fingerprints.len() < expected_case.min_obligations {
+                return Err(EvidenceError::new(format!(
+                    "{upstream_path}: case `{}` would re-pin {} unique fingerprint(s), below the declared floor {}",
+                    expected_case.case_id,
+                    observed_fingerprints.len(),
+                    expected_case.min_obligations
+                )));
+            }
+            summary.fingerprints += observed_fingerprints.len();
+            summary.cases += 1;
+            entry_changed = true;
+            edits.insert(key, observed_fingerprints);
+        }
+        if !entry_changed {
+            return Err(EvidenceError::new(format!(
+                "{upstream_path}: every declared fingerprint already matches this run; nothing to re-pin"
+            )));
+        }
+        summary.entries += 1;
+    }
+
+    // Applied over the TYPED model, re-parsed from the same text: `serde_json`'s
+    // `Value` is key-SORTED without the `preserve_order` feature, so editing the
+    // untyped tree would rewrite all 13k lines of the manifest in alphabetical
+    // order and bury the three lines that actually moved. The typed model
+    // round-trips in declaration order, is `deny_unknown_fields` (so nothing can
+    // be silently dropped), and is the same model the full refresh writes.
+    let mut document: JsonVerusManifest = serde_json::from_str(&text).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to re-read manifest `{}` as JSON for obligation rendering re-pin: {err}",
+            canonical_manifest_path.display()
+        ))
+    })?;
+    let mut applied = 0usize;
+    for entry in &mut document.entries {
+        if !seen_paths.contains(&entry.upstream_path) {
+            continue;
+        }
+        let upstream_path = entry.upstream_path.clone();
+        for case in &mut entry.expected_cases {
+            let Some(fingerprints) = edits.get(&(upstream_path.clone(), case.case_id.clone()))
+            else {
+                continue;
+            };
+            case.obligation_fingerprints = fingerprints.clone();
+            applied += 1;
+        }
+    }
+    if applied != edits.len() {
+        return Err(EvidenceError::new(format!(
+            "obligation rendering re-pin resolved {applied} of {} case(s) in the manifest JSON; refusing to write a partial re-pin",
+            edits.len()
+        )));
+    }
+    let json = serde_json::to_string_pretty(&document).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to serialize re-pinned manifest `{}`: {err}",
+            canonical_manifest_path.display()
+        ))
+    })?;
+    fs::write(canonical_manifest_path, format!("{json}\n")).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to write re-pinned manifest `{}`: {err}",
+            canonical_manifest_path.display()
+        ))
+    })?;
+    Ok(summary)
+}
+
+/// The entries of the manifest the corpus run actually read, keyed by
+/// `upstream_path` — `None` when that WAS the canonical manifest.
+///
+/// Used only to prove that a filtered measurement copy declares the entry
+/// identically to the canonical record before a canonical pin is moved.
+fn repin_run_manifest_entries(
+    run_manifest_path: &Path,
+    canonical_manifest_path: &Path,
+) -> Result<Option<BTreeMap<String, serde_json::Value>>, EvidenceError> {
+    let same = match (
+        run_manifest_path.canonicalize(),
+        canonical_manifest_path.canonicalize(),
+    ) {
+        (Ok(run), Ok(canonical)) => run == canonical,
+        _ => run_manifest_path == canonical_manifest_path,
+    };
+    if same {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(run_manifest_path).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to read the manifest this run used `{}`: {err}",
+            run_manifest_path.display()
+        ))
+    })?;
+    let manifest: JsonVerusManifest = serde_json::from_str(&text).map_err(|err| {
+        EvidenceError::new(format!(
+            "failed to parse the manifest this run used `{}`: {err}",
+            run_manifest_path.display()
+        ))
+    })?;
+    let mut by_path = BTreeMap::new();
+    for entry in &manifest.entries {
+        let value = serde_json::to_value(entry).map_err(|err| {
+            EvidenceError::new(format!(
+                "failed to read entry `{}` from the manifest this run used: {err}",
+                entry.upstream_path
+            ))
+        })?;
+        by_path.insert(entry.upstream_path.clone(), value);
+    }
+    Ok(Some(by_path))
 }
 
 fn refresh_trust_vc_corpus_evidence_gate(
@@ -5580,13 +9485,40 @@ fn refresh_trust_vc_corpus_evidence_manifest(
                     entry.upstream_path, expected_case.case_id
                 )));
             }
+            // PROOF-CONTENT RATCHET. The refresh writes what the run
+            // observed, which is exactly how a port that deleted proof content
+            // re-pinned itself downward and stayed accepted. Refuse the whole
+            // refresh instead — the manifest is written once, at the end, so
+            // refusing here leaves it untouched.
+            let previous_min_obligations = expected_case.min_obligations;
+            let previous_fingerprints = std::mem::take(&mut expected_case.obligation_fingerprints);
             expected_case.min_obligations = fingerprints.len();
             expected_case.obligation_fingerprints = fingerprints;
+            if let Some(reason) = obligation_content_decrease_reason(
+                previous_min_obligations,
+                &previous_fingerprints,
+                expected_case,
+            ) {
+                return Err(EvidenceError::new(format!(
+                    "{}: refusing to refresh case `{}`: {reason}",
+                    entry.upstream_path, expected_case.case_id
+                )));
+            }
             summary.obligation_cases += 1;
             summary.obligation_fingerprints += expected_case.obligation_fingerprints.len();
         }
     }
 
+    // A refresh re-stamps the bound rather than writing back whatever it read:
+    // the one text that qualifies the accepted-case count may be re-worded only
+    // where the constant lives, never by editing the manifest. This is a
+    // keep-current, NOT a repair: `validate_json_manifest_schema` above already
+    // refused a manifest whose bound was wrong, so a refresh never reaches here
+    // with one to fix. The refusal message says so rather than sending a reader
+    // to a flag that cannot help.
+    if manifest.schema_version >= 2 {
+        manifest.correspondence_bound = ACCEPTED_CASE_CORRESPONDENCE_BOUND.to_string();
+    }
     let json = serde_json::to_string_pretty(&manifest).map_err(|err| {
         EvidenceError::new(format!(
             "failed to serialize refreshed manifest `{}`: {err}",
@@ -6198,11 +10130,8 @@ fn run_direct_source_typecheck_lockfile(
     scratch: &Path,
     env: &[(String, String)],
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
     let manifest_path = scratch.join("Cargo.toml");
     let manifest = manifest_path.to_string_lossy().into_owned();
     run_command_with_env_capture(
@@ -6223,11 +10152,8 @@ fn run_direct_source_typecheck(
     scratch: &Path,
     env: &[(String, String)],
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
     let manifest_path = scratch.join("Cargo.toml");
     let manifest = manifest_path.to_string_lossy().into_owned();
     let mut env = env.to_vec();
@@ -6235,9 +10161,13 @@ fn run_direct_source_typecheck(
         "CARGO_TARGET_DIR".to_string(),
         crate_root.join("target").to_string_lossy().into_owned(),
     ));
-    run_command_with_env_capture(
-        crate_root,
-        cargo,
+    // Per-unit Trust verification scoping. The unit under test is the scratch
+    // crate, whose modules ARE the normalized `evals/verus/ported/*.rs` bodies,
+    // so it stays verified at `advisory`; the two first-party libraries it
+    // links (`trust-vc-types`, `trust-vc-std`) are merely linked at this site
+    // and fall under the `"*"` rule with everything else.
+    let args = with_trust_per_unit_scope(
+        trust_per_unit_scope_args(),
         &[
             "check",
             "--manifest-path",
@@ -6246,8 +10176,9 @@ fn run_direct_source_typecheck(
             "--locked",
             "--offline",
         ],
-        &borrowed_env(&env),
-    )
+    );
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_command_with_env_capture(crate_root, cargo, &args, &borrowed_env(&env))
 }
 
 #[derive(Debug, Clone)]
@@ -6267,6 +10198,11 @@ fn run_trust_vc_corpus_direct(
     let mut source_errors = Vec::new();
     let expected_case_ids = expected_case_ids(&candidate.expected_cases);
     let expected_obligation_count = expected_obligation_count(&candidate.expected_cases);
+    let declared_case_ids = candidate
+        .expected_cases
+        .iter()
+        .map(|expected_case| expected_case.case_id.clone())
+        .collect::<BTreeSet<_>>();
     for trust_vc_path in &candidate.trust_vc_paths {
         let path = match validate_repo_trust_vc_path(crate_root, trust_vc_path) {
             Ok(path) => path,
@@ -6276,9 +10212,19 @@ fn run_trust_vc_corpus_direct(
             }
         };
         if path.is_file() {
-            scan_trust_vc_corpus_file(&path, &mut functions, &mut source_errors);
+            scan_trust_vc_corpus_file(
+                &path,
+                &declared_case_ids,
+                &mut functions,
+                &mut source_errors,
+            );
         } else if path.is_dir() {
-            scan_trust_vc_corpus_dir(&path, &mut functions, &mut source_errors);
+            scan_trust_vc_corpus_dir(
+                &path,
+                &declared_case_ids,
+                &mut functions,
+                &mut source_errors,
+            );
         } else {
             failures.push(format!("missing path {}", path.display()));
         }
@@ -6291,20 +10237,14 @@ fn run_trust_vc_corpus_direct(
         .iter()
         .map(verify::verify_one_detailed)
         .collect::<Vec<_>>();
-    let mut observed_cases = verifications
+    let observed_cases = verifications
         .iter()
         .map(|verification| observed_case_from_verification(crate_root, verification))
         .collect::<Vec<_>>();
-    let source_error_indices_used = append_source_error_observed_cases(
-        crate_root,
-        candidate,
-        &mut observed_cases,
-        &source_errors,
-    );
-    for (index, source_error) in source_errors.iter().enumerate() {
-        if !source_error_indices_used.contains(&index) {
-            failures.push(source_error_failure(crate_root, source_error));
-        }
+    // Every source error is a FAILURE. It may never be promoted into an
+    // observed case: an observed case is engine output, not gate output.
+    for source_error in &source_errors {
+        failures.push(source_error_failure(crate_root, source_error));
     }
     if functions.is_empty()
         && observed_cases.is_empty()
@@ -6381,6 +10321,7 @@ fn append_trust_vc_corpus_case_failures(
             failures.push(format!("duplicate observed case {}", observed_case.case_id));
         }
     }
+    let mut upstream_marked_line_claims: Vec<(&str, String)> = Vec::new();
     for expected_case in &candidate.expected_cases {
         let Some(observed_case) = observed_by_id.get(expected_case.case_id.as_str()) else {
             failures.push(format!("missing expected case {}", expected_case.case_id));
@@ -6422,10 +10363,19 @@ fn append_trust_vc_corpus_case_failures(
             )),
             _ => {}
         }
+        if let Some(claimed) = append_counterexample_identity_failures(
+            candidate,
+            expected_case,
+            observed_case,
+            failures,
+        ) {
+            upstream_marked_line_claims.push((expected_case.case_id.as_str(), claimed));
+        }
         append_expected_error_pattern_failures(expected_case, observed_case, failures);
         append_forbidden_diagnostic_context_failures(expected_case, observed_case, failures);
         append_expected_warning_failures(expected_case, observed_case, failures);
     }
+    append_upstream_marked_line_claim_failures(candidate, &upstream_marked_line_claims, failures);
     for observed_case in observed_cases {
         if !expected_by_id.contains_key(observed_case.case_id.as_str()) {
             failures.push(format!(
@@ -6539,6 +10489,628 @@ fn observed_case_matches_declared_trust_vc_path(
     }
 }
 
+/// Checks a counterexample case's FAILING-OBLIGATION IDENTITY against upstream's
+/// rule.
+///
+/// Upstream `assert_one_fails` (`rust_verify_test/tests/common/mod.rs`) is
+/// `assert_eq!(err.errors.len(), 1)` plus "the relevant span sits on a line
+/// containing FAILS", and `assert_fails(e, N)` is the same for exactly N
+/// errors — the manifest spends those N on N mapped port cases, so each port
+/// case owes exactly ONE failure, on a marked line.
+///
+/// Without this, a case passed on `obligation_count` alone: a port function
+/// with three asserts counted as covered when the WRONG one failed.
+///
+/// Three things separate this from a marker check that a port author could
+/// satisfy by moving a comment:
+///
+/// * an UNDECIDED obligation is not an error, so it is counted apart and is its
+///   own failure rather than inflating the failure count — and "undecided"
+///   means what the ENGINE decided, not what the certificate status is named:
+///   a model-less incompleteness (`VerifyResult::NotProved`) is a NON-DECISION
+///   even though it is a verification FAILURE, and it may never be spent as
+///   the case's one required refutation;
+/// * the marker may sit on any line of the failing statement, which is what
+///   upstream searches (the whole relevant span), not just the located line —
+///   but it is a LOCATOR ONLY, never a comparison text (below);
+/// * the REFUTED STATEMENT must CORRESPOND to a line, or a statement, upstream
+///   also marks. The port's marker is port-authored evidence; the upstream
+///   marker is not, and the gate reads it straight from the Verus checkout.
+///   With no upstream marked line to compare against, the case FAILS — the
+///   cross-check is never waived.
+///
+/// WHAT CORRESPONDS IS THE CLAIM THE ENGINE REFUTED. The engine names the
+/// obligation it refuted and locates it, and `span_text` is the statement at
+/// that location, whole. That single text is the port's side of the comparison.
+/// The marked LINE is not, and must not be: it is any line of the span carrying
+/// `FAILS`, so it is a FRAGMENT of the refuted claim chosen by the port author,
+/// and comparing a fragment let a port bury upstream's claim inside a bigger,
+/// trivially false statement (`#[ensures(false && ( <upstream clause> ))]`) and
+/// spend the trivial refutation as upstream's.
+///
+/// Correspondence is NOT byte-parity. Comparing marked lines verbatim demands
+/// that the port be SPELLED like upstream, which is exactly what R1 retired and
+/// what the native surface deliberately breaks: `!(P) || Q` for `P ==> Q`,
+/// `assert_by_bit_vector!(..)` for `assert(..) by(bit_vector)`, an
+/// `#[ensures(..)]` attribute for a clause line, `1usize` for `1`. So BOTH
+/// sides are put through the same content-preserving rewrites
+/// ([`canonical_claim_core`]) and must then be EQUAL. Line wrapping is free on
+/// both sides: the canonicalizer joins a span's lines with no separator, so a
+/// statement spelled across five lines canonicalizes exactly as the same
+/// statement spelled on one.
+///
+/// That is a widening of the rule, not a waiver of it, and the difference is
+/// the whole point: a case never DECLARES what it corresponds to. Every text
+/// compared here is machine-derived — the port's from the engine's own located
+/// refutation, upstream's from the pinned Verus checkout — so a port that
+/// reproduces nothing upstream claims (`assert!(false)`) corresponds to nothing,
+/// in any dialect.
+///
+/// Returns the upstream marked line this case CORRESPONDS TO, so the caller can
+/// enforce that the mapped port cases of one upstream case do not claim one
+/// upstream line more often than upstream marks it.
+fn append_counterexample_identity_failures(
+    candidate: &TrustVcCorpusRunCandidate,
+    expected_case: &VerusExpectedCase,
+    observed_case: &TrustVcCorpusObservedCase,
+    failures: &mut Vec<String>,
+) -> Option<String> {
+    if expected_case.expected_verdict != VerusExpectedVerdict::Counterexample {
+        return None;
+    }
+    if observed_case.verdict != expected_verdict_label(VerusExpectedVerdict::Counterexample) {
+        // The verdict mismatch is already reported; identity is not measurable.
+        return None;
+    }
+    let undecided = observed_case
+        .failing_obligations
+        .iter()
+        .filter(|obligation| obligation.is_undecided())
+        .collect::<Vec<_>>();
+    if !undecided.is_empty() {
+        failures.push(format!(
+            "{} left {} obligation(s) UNDECIDED, which upstream's error count never admits: {:?}",
+            expected_case.case_id,
+            undecided.len(),
+            undecided
+                .iter()
+                .map(|obligation| obligation.describe())
+                .collect::<Vec<_>>()
+        ));
+    }
+    let refuted = observed_case
+        .failing_obligations
+        .iter()
+        .filter(|obligation| obligation.is_refutation())
+        .collect::<Vec<_>>();
+    if refuted.len() != 1 {
+        failures.push(format!(
+            "{} expected exactly 1 refuted obligation (upstream assert_one_fails), observed {}: {:?}",
+            expected_case.case_id,
+            refuted.len(),
+            refuted
+                .iter()
+                .map(|obligation| obligation.describe())
+                .collect::<Vec<_>>()
+        ));
+        return None;
+    }
+    let obligation = refuted[0];
+    if obligation.span_text.is_empty() {
+        failures.push(format!(
+            "{} refuted obligation `{} {}` has no readable source line (location {:?}), so the upstream `{}` marker cannot be checked",
+            expected_case.case_id,
+            obligation.kind,
+            obligation.name,
+            obligation.location,
+            UPSTREAM_FAILS_MARKER
+        ));
+        return None;
+    }
+    let Some(marked_line) = obligation
+        .span_text
+        .iter()
+        .find(|text| text.contains(UPSTREAM_FAILS_MARKER))
+    else {
+        failures.push(format!(
+            "{} refuted obligation `{} {}` is at {} whose statement does not carry the upstream `{}` marker: {:?}",
+            expected_case.case_id,
+            obligation.kind,
+            obligation.name,
+            obligation.location.as_deref().unwrap_or("<unlocated>"),
+            UPSTREAM_FAILS_MARKER,
+            obligation
+                .span_text
+                .iter()
+                .map(|text| text.trim().to_string())
+                .collect::<Vec<_>>()
+        ));
+        return None;
+    };
+    let normalized = normalized_marked_source_line(marked_line);
+    if normalized.is_empty() {
+        failures.push(format!(
+            "{} carries the `{}` marker on a comment-only line (`{}`), which corresponds to no upstream code",
+            expected_case.case_id,
+            UPSTREAM_FAILS_MARKER,
+            marked_line.trim()
+        ));
+        return None;
+    }
+    let upstream_case_id = upstream_case_id(expected_case);
+    let Some(upstream_marked) = candidate
+        .upstream_fails_marked_lines
+        .get(upstream_case_id)
+        .filter(|lines| !lines.is_empty())
+    else {
+        failures.push(format!(
+            "{} cannot cross-check its `{}` marker: no upstream marked line was read for upstream case `{}` in `{}` (the corpus run needs --verus-path, and the upstream case must carry the marker upstream asserts on)",
+            expected_case.case_id,
+            UPSTREAM_FAILS_MARKER,
+            upstream_case_id,
+            candidate.upstream_path
+        ));
+        return None;
+    };
+
+    // CORRESPONDENCE, canonicalized rather than spelled — and ANCHORED ON THE
+    // REFUTED CLAIM, not on the line the marker happens to sit on.
+    //
+    // The port's comparison text is ONE text and the engine chooses it: the
+    // STATEMENT the refutation is located at. `span_text` begins at the
+    // obligation's own `source_location` and runs to the end of that statement,
+    // so `span_text.join` is the claim the engine refuted, whole, and nothing
+    // else. It is compared against two texts read from the pinned Verus
+    // checkout — upstream's marked line and the statement that line sits in —
+    // because the two surfaces disagree about how much of a statement fits on
+    // one line, not about what the statement claims.
+    //
+    // THE MARKED LINE IS NOT ONE OF THE COMPARISON TEXTS, and this is the whole
+    // property. `marked_line` is any line of the span that carries `FAILS`
+    // (upstream searches the whole relevant span, so this gate does too), which
+    // makes it a line INSIDE the refuted claim — a fragment the port author
+    // chooses. Comparing that fragment to upstream let a port bury upstream's
+    // claim inside a bigger, TRIVIALLY FALSE statement and spend the trivial
+    // refutation as upstream's:
+    //
+    //     #[trust_vc::ensures(
+    //         false && (
+    //         x * z < y * z // FAILS      <- matched upstream's clause line
+    //     ))]
+    //
+    // Here the engine refutes `false && (x * z < y * z)`, which any model
+    // refutes, while the marker points at the nonlinear claim upstream actually
+    // asks a solver to refute. Canonicalizing the WHOLE located statement
+    // yields `false&&(x*z<y*z)`, which is not upstream's claim in any dialect,
+    // so the case fails. Wrapping costs a faithful port nothing:
+    // `canonical_claim_core` joins the span's lines with no separator, so a
+    // statement spelled across five lines canonicalizes exactly as the same
+    // statement spelled on one.
+    //
+    // Every text compared here is machine-derived: one from the engine's own
+    // located refutation, two from the pinned Verus checkout. The manifest
+    // selects none of them and authors none of them.
+    let refuted_statement = obligation.span_text.join("\n");
+    let port_core = canonical_claim_core(&refuted_statement);
+    let claim_matches: Vec<&UpstreamFailsMark> = upstream_marked
+        .iter()
+        .filter(|mark| {
+            !port_core.is_empty()
+                && (port_core == mark.line_core || port_core == mark.statement_core)
+        })
+        .collect();
+    if claim_matches.is_empty() {
+        failures.push(format!(
+            "{} refutes the statement at {} (`{}`), which canonicalizes to `{}` and corresponds to no `{}`-marked line or statement of upstream case `{}` in `{}`: {:?}",
+            expected_case.case_id,
+            obligation.location.as_deref().unwrap_or("<unlocated>"),
+            obligation
+                .span_text
+                .iter()
+                .map(|text| text.trim().to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            port_core,
+            UPSTREAM_FAILS_MARKER,
+            upstream_case_id,
+            candidate.upstream_path,
+            upstream_marked
+                .iter()
+                .map(|mark| mark.line_core.clone())
+                .collect::<Vec<_>>()
+        ));
+        return None;
+    }
+
+    // PREMISE CORRESPONDENCE — the claim is only half of what was refuted.
+    //
+    // Everything above decides that the port's refuted STATEMENT is upstream's
+    // marked claim. That is not enough, and this is the round-3 hole: a
+    // statement's claim is not determined by its own text. Left as the only
+    // comparison, a port may keep upstream's marked line BYTE-IDENTICAL and
+    // rewrite the environment it is read in —
+    //
+    //     let i: int = choose|i: int| f(i);   ->   let i: int = 0;
+    //     assert(5 <= i); // FAILS                 assert(5 <= i); // FAILS
+    //
+    // — turning six obligations the engine cannot decide at all into six ground
+    // falsehoods it refutes at once, with the word `choose` gone from the file.
+    // Measured: `choose.rs` went from 13 failures to 1 under exactly that edit.
+    //
+    // So the premises are compared too, and both halves of "premise" are read:
+    //
+    // * the `let` BINDINGS in scope at the refutation — the port's from the
+    //   enclosing function body the engine located the obligation in, the
+    //   upstream ones from the enclosing function of its own marked line, in
+    //   the pinned checkout; and
+    // * the HYPOTHESES the enclosing function states — `#[requires(P)]`
+    //   attributes on one surface, a `requires` clause list on the other, read
+    //   through one reader into `kind:conjunct` entries.
+    //
+    // Both are machine-derived from the two surfaces, exactly as the claim is:
+    // the manifest still authors nothing and selects nothing.
+    //
+    // The check is a CORRESPONDENCE, not a spelling: the initializer goes
+    // through the same canonicalizer as the claim (so `trust_vc::choose!(|i:
+    // int| f(i))` is `choose|i: int| f(i)` — true only since
+    // `rewrite_binder_macro_to_upstream_form`; before it, that spelling gap
+    // refused faithful ports and was mistaken for the channel discriminating),
+    // a type ascription is dropped on both sides, and a hypothesis set is
+    // compared as CONJUNCTS, so a port may merge `requires x <= y, 0 <= z,`
+    // into one `#[requires(x <= y && 0 <= z)]` and still correspond.
+    let Some(matched) = claim_matches
+        .iter()
+        .copied()
+        .find(|mark| premise_correspondence(obligation, mark).is_ok())
+    else {
+        let reasons: Vec<String> = claim_matches
+            .iter()
+            .filter_map(|mark| premise_correspondence(obligation, mark).err())
+            .collect();
+        failures.push(format!(
+            "{} refutes `{}` at {}, which is upstream case `{}`'s marked CLAIM but not under upstream's PREMISES: {}",
+            expected_case.case_id,
+            port_core,
+            obligation.location.as_deref().unwrap_or("<unlocated>"),
+            upstream_case_id,
+            reasons.join("; ")
+        ));
+        return None;
+    };
+    Some(matched.normalized.clone())
+}
+
+/// Whether the port refuted upstream's marked claim UNDER UPSTREAM'S PREMISES.
+///
+/// A claim's meaning is fixed by the environment it is read in, so this
+/// compares the two parts of that environment a port author can rewrite while
+/// leaving the marked line untouched: the `let` bindings of every identifier
+/// the claim depends on, and the hypotheses the enclosing function states.
+///
+/// The binding comparison is closed over the bindings themselves — `let a =
+/// choose..; let b = a + 1; assert(b > 5)` puts `a` in the claim's premise set
+/// although the claim names only `b` — and is directional in the one way that
+/// matters: every binding the port makes must be one upstream makes, and every
+/// identifier upstream binds the port must bind. A port that binds nothing
+/// where upstream binds (taking the value as a parameter instead) is refused
+/// for the same reason as one that binds it to a different value: neither is
+/// upstream's program.
+///
+/// WHAT THIS DOES NOT COMPARE — read every acceptance with these in view, and
+/// do not describe the rule as establishing that the port reproduces upstream's
+/// proof obligation. It decides on SOURCE TEXT, which is not the obligation the
+/// solver saw:
+///
+/// * the SIGNATURE and the type environment. A port may keep upstream's
+///   statements, bindings and hypotheses byte-identical and declare
+///   `fn f(x: u8)` where upstream declares `fn f(x: int)`; `x * z < y * z` over
+///   `u8` is a far cheaper refutation than over `int` and nothing here sees the
+///   difference. `strip_numeric_literal_suffixes` erases width from the claim
+///   itself for the same reason it erases it from a literal;
+/// * anything outside the enclosing function and the definitions the claim
+///   calls — datatype declarations, trait impls, `broadcast` lemmas in scope;
+/// * statement ORDER and multiplicity: the statement channel is a SET;
+/// * BLOCK STRUCTURE, for the same reason and one worse. The binding channel
+///   compares name/initializer PAIRS as a SET, so an inner `{ let mut x = 5; x
+///   = 50; }` and the same two lines flattened into the enclosing sequence
+///   present the SAME pair set and the SAME statement set. Measured on
+///   `scope.rs::test1_fails` — which is upstream's block-scope case, the one
+///   file whose entire subject is scope: deleting the inner block and
+///   flattening every binding leaves both channels unmoved, the case passes,
+///   and the refresh re-stamps the hash;
+/// * a `let` whose block runs past this reader's 24-line window, which reaches
+///   neither channel on either surface.
+///
+/// The complete answer is not a further source-level rule. It is to decide
+/// correspondence on the ENCODED OBLIGATION — hypotheses plus goal, which the
+/// engine already builds — which needs a Verus-to-IR import so upstream's case
+/// has an encoding to compare against, not another patch here.
+fn premise_correspondence(
+    obligation: &ObservedFailingObligation,
+    mark: &UpstreamFailsMark,
+) -> Result<(), String> {
+    // The clause KIND, which `unwrap_contract_attribute` has to drop from the
+    // compared text (upstream writes the keyword on a previous line and marks
+    // the bare clause). Read here instead from the ENGINE's own obligation
+    // kind, so `#[requires(P)]` can no longer stand in for upstream's marked
+    // `ensures` clause `P`. Compared only when both sides name a clause: an
+    // `assert`/`assert_by` obligation belongs to no clause list, which is the
+    // shape upstream's `assert(..) by(nonlinear_arith) requires .. // FAILS`
+    // legitimately takes.
+    if let (Some(port_kind), Some(upstream_kind)) = (
+        obligation_clause_kind(&obligation.kind),
+        mark.clause_kind.as_deref(),
+    ) {
+        if port_kind != upstream_kind {
+            return Err(format!(
+                "the port raises it as a `{port_kind}` obligation where upstream marks a `{upstream_kind}` clause"
+            ));
+        }
+    }
+    if obligation.context_hypotheses != mark.hypotheses {
+        let dropped: Vec<&String> = mark
+            .hypotheses
+            .difference(&obligation.context_hypotheses)
+            .collect();
+        let added: Vec<&String> = obligation
+            .context_hypotheses
+            .difference(&mark.hypotheses)
+            .collect();
+        return Err(format!(
+            "the enclosing function states hypotheses {:?} where upstream's states {:?} (missing {:?}, extra {:?})",
+            obligation.context_hypotheses, mark.hypotheses, dropped, added
+        ));
+    }
+    let mut names = identifiers_in(&mark.line_core);
+    names.extend(identifiers_in(&mark.statement_core));
+    for _ in 0..8 {
+        let mut grown = names.clone();
+        for binding in obligation
+            .context_bindings
+            .iter()
+            .chain(mark.bindings.iter())
+        {
+            if names.contains(&binding.name) {
+                grown.extend(identifiers_in(&binding.init_core));
+            }
+        }
+        for (name, core) in obligation
+            .context_definitions
+            .iter()
+            .chain(mark.definitions.iter())
+        {
+            if names.contains(name) {
+                grown.extend(identifiers_in(core));
+            }
+        }
+        if grown == names {
+            break;
+        }
+        names = grown;
+    }
+    // STATEMENT CORRESPONDENCE, compared as EQUALITY — not as a subset.
+    //
+    // A subset said only "the port runs nothing upstream does not run", which
+    // an EMPTY body satisfies for free. That was the round-4 hole's operative
+    // half: gut the function to the marked line alone and the statement channel
+    // has no objection, because deleting is not adding. Deleting upstream's
+    // statements is exactly the attack — `scope.rs`'s five failing cases were
+    // reduced to a bare `assert!(false); // FAILS` and the file went from 12
+    // failures to 0 — so the port must run upstream's statements, ALL of them
+    // and nothing else.
+    //
+    // This costs a faithful port nothing: both sides are read by ONE segmenter
+    // out of the same window (the enclosing function's body before the
+    // refutation) and through the same canonicalizer, so a port that runs
+    // upstream's program presents upstream's set.
+    if obligation.context_statements != mark.statements {
+        let missing: Vec<&String> = mark
+            .statements
+            .difference(&obligation.context_statements)
+            .collect();
+        let extra: Vec<&String> = obligation
+            .context_statements
+            .difference(&mark.statements)
+            .collect();
+        return Err(format!(
+            "the statements the function runs before the refuted one do not correspond: upstream's case also runs {missing:?}, and the port additionally runs {extra:?}"
+        ));
+    }
+    // How many of the claim's identifiers either side actually BINDS or
+    // DEFINES. Zero means the two premise channels below compare nothing at
+    // all — see the vacuity guard at the end of this function.
+    let mut compared_names = 0usize;
+    for name in &names {
+        let (Some(port), Some(upstream)) = (
+            obligation.context_definitions.get(name),
+            mark.definitions.get(name),
+        ) else {
+            continue;
+        };
+        compared_names += 1;
+        if port != upstream {
+            return Err(format!(
+                "the port defines `{name}` as `{port}` where upstream's case defines it as `{upstream}`"
+            ));
+        }
+    }
+    for name in &names {
+        let port: BTreeSet<&str> = obligation
+            .context_bindings
+            .iter()
+            .filter(|binding| &binding.name == name)
+            .map(|binding| binding.init_core.as_str())
+            .collect();
+        let upstream: BTreeSet<&str> = mark
+            .bindings
+            .iter()
+            .filter(|binding| &binding.name == name)
+            .map(|binding| binding.init_core.as_str())
+            .collect();
+        if port.is_empty() && upstream.is_empty() {
+            continue;
+        }
+        compared_names += 1;
+        if port.is_empty() {
+            return Err(format!(
+                "upstream binds `{name}` to {upstream:?} and the port binds it nowhere in the function the refutation is in"
+            ));
+        }
+        if upstream.is_empty() {
+            return Err(format!(
+                "the port binds `{name}` to {port:?} and upstream's case binds it nowhere"
+            ));
+        }
+        let stray: Vec<&&str> = port.difference(&upstream).collect();
+        if !stray.is_empty() {
+            return Err(format!(
+                "the port binds `{name}` to {stray:?} where upstream binds it to {upstream:?}"
+            ));
+        }
+    }
+    // VACUITY GUARD — a check that cannot discriminate must REFUSE, not accept.
+    //
+    // Everything above except the statement set is keyed on the identifiers the
+    // CLAIM reaches. `assert(false)` reaches none, and it is upstream's own
+    // marked line across much of this corpus, so for an identifier-free claim
+    // the clause-kind test is the only thing that ran and the premise
+    // comparison reported a safety it never established. A port could then
+    // delete every shadowing binding and every other statement upstream runs,
+    // keep one `assert!(false); // FAILS`, and correspond.
+    //
+    // So when nothing was compared — no hypothesis on either side, and not one
+    // identifier of the claim bound or defined by either side — the case must
+    // satisfy something else, and what it must satisfy is the whole premise
+    // environment: the statement sets are already equal above, and here the
+    // BINDING sets must correspond too, in full rather than by reachability.
+    // `let i = choose|i: int| f(i); assert(false); // FAILS` and `let i: int =
+    // 0; assert(false); // FAILS` run the same statements and are not the same
+    // program; this is what separates them.
+    //
+    // Nothing here weakens the reachable-name comparison: when the claim does
+    // reach a bound name, that comparison ran and this guard does not apply.
+    if compared_names == 0 && obligation.context_hypotheses.is_empty() && mark.hypotheses.is_empty()
+    {
+        let port: BTreeSet<(&str, &str)> = obligation
+            .context_bindings
+            .iter()
+            .map(|binding| (binding.name.as_str(), binding.init_core.as_str()))
+            .collect();
+        let upstream: BTreeSet<(&str, &str)> = mark
+            .bindings
+            .iter()
+            .map(|binding| (binding.name.as_str(), binding.init_core.as_str()))
+            .collect();
+        if port != upstream {
+            let missing: Vec<&(&str, &str)> = upstream.difference(&port).collect();
+            let extra: Vec<&(&str, &str)> = port.difference(&upstream).collect();
+            return Err(format!(
+                "the claim reaches no identifier either side binds and neither side states a hypothesis, so nothing but the premise ENVIRONMENT distinguishes this refutation: upstream's case also binds {missing:?}, and the port additionally binds {extra:?}"
+            ));
+        }
+    }
+    // SECOND VACUITY GUARD — the one premise window that still cannot be
+    // drawn, which is no longer the clause-marked class.
+    //
+    // A CLAUSE-MARKED upstream case (`ensures P // FAILS` in the signature
+    // clause list) used to reach here with EMPTY bindings and statements
+    // whatever upstream's function body did, because
+    // `enclosing_function_prefix_lines` returned an empty window for a header
+    // line — no `let` is in scope on a signature. Measured on
+    // `z3_restart.rs::test2_fails` (upstream `requires x > y, 3 <= z; ensures
+    // y * z > x // FAILS` over an EMPTY body): the faithful port and the same
+    // port with three ground `assume!`s in its body — which collapse the
+    // nonlinear postcondition to an arithmetic falsehood — presented
+    // BYTE-IDENTICAL binding, statement and hypothesis channels. The whole
+    // class was therefore REFUSED as un-checkable, which established nothing
+    // about three of the corpus's counterexample cases.
+    //
+    // FIXED AT THE WINDOW, NOT AT THE REFUSAL. A contract obligation is
+    // discharged against everything the body runs — an `ensures` holds at every
+    // return — so the window for a header mark is now that BODY, read by the
+    // same function on both surfaces. The launder that motivated the refusal is
+    // caught by a real comparison: the grounded port's three `assume!`s land in
+    // its statement set, upstream's stays empty, and the statement channel
+    // above compares as EQUALITY. Pinned by
+    // `a_clause_marked_obligation_is_checked_against_the_function_body`.
+    //
+    // What remains un-checkable is the shape where UPSTREAM ITSELF has no body
+    // to read: a header mark on a bodyless signature. There the text that makes
+    // a contract clause refutable is missing on upstream's own side, so no port
+    // can be compared against it. It is 0 of the accepted corpus today, and it
+    // is refused rather than passed vacuously so that a future case of that
+    // shape fails closed.
+    //
+    // `nonlinear.rs::test_requires` stays OUT of this branch for the reason it
+    // always did: it marks a `requires` clause of a BODY-level `assert(..)
+    // by(nonlinear_arith)`, so it is not a header mark at all, and its window
+    // is the statements before that assert.
+    if mark.window_undrawable {
+        return Err(format!(
+            "upstream marks this failure on the HEADER of a function with NO BODY (its `{}` clause list), so upstream's own side carries none of the text that makes a contract clause refutable and no window can be drawn on either surface. This case is UN-CHECKABLE by source-level correspondence, not corresponding — see `correspondence_bound` in the manifest, clause (1), and the encoded-obligation route in clause (5)",
+            mark.clause_kind.as_deref().unwrap_or("contract")
+        ));
+    }
+    Ok(())
+}
+
+/// Enforces that the mapped port cases of ONE upstream case do not claim an
+/// upstream `FAILS`-marked line more often than upstream marks it.
+///
+/// Upstream `assert_fails(e, N)` spends N errors on N marked lines, and the
+/// manifest spends those N on N mapped port cases — so the claims must inject
+/// into upstream's marked lines, counting multiplicity (upstream really does
+/// repeat a line such as `assert(false);` within one case, and two port cases
+/// may legitimately claim it twice when upstream marks it twice).
+///
+/// Without this, N port cases could all correspond to the SAME upstream line
+/// and one reproduced obligation would cover N.
+fn append_upstream_marked_line_claim_failures(
+    candidate: &TrustVcCorpusRunCandidate,
+    claims: &[(&str, String)],
+    failures: &mut Vec<String>,
+) {
+    let mut claims_by_upstream_case: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for (case_id, claimed) in claims {
+        let Some(expected_case) = candidate
+            .expected_cases
+            .iter()
+            .find(|expected| expected.case_id == *case_id)
+        else {
+            continue;
+        };
+        claims_by_upstream_case
+            .entry(upstream_case_id(expected_case))
+            .or_default()
+            .push((case_id, claimed.as_str()));
+    }
+    for (upstream_case, case_claims) in claims_by_upstream_case {
+        let Some(upstream_marked) = candidate.upstream_fails_marked_lines.get(upstream_case) else {
+            continue;
+        };
+        let mut claimed_counts: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (case_id, claimed) in case_claims {
+            claimed_counts.entry(claimed).or_default().push(case_id);
+        }
+        for (claimed, case_ids) in claimed_counts {
+            let available = upstream_marked
+                .iter()
+                .filter(|mark| mark.normalized == claimed)
+                .count();
+            if case_ids.len() > available {
+                failures.push(format!(
+                    "upstream case `{}` marks `{}` {} time(s), but {} port case(s) claim it: {:?}",
+                    upstream_case,
+                    claimed,
+                    available,
+                    case_ids.len(),
+                    case_ids
+                ));
+            }
+        }
+    }
+}
+
 fn append_expected_error_pattern_failures(
     expected_case: &VerusExpectedCase,
     observed_case: &TrustVcCorpusObservedCase,
@@ -6549,21 +11121,31 @@ fn append_expected_error_pattern_failures(
     {
         return;
     }
-    if observed_case.diagnostic_context.is_empty() {
+    if observed_case.failure_diagnostics.is_empty() {
         failures.push(format!(
-            "{} expected error diagnostic patterns {:?}, but no diagnostic context was captured",
+            "{} expected error diagnostic patterns {:?}, but no failure-attached diagnostic was captured",
             expected_case.case_id, expected_case.expected_error_patterns
         ));
         return;
     }
-    let joined_context = observed_case.diagnostic_context.join("\n");
-    for pattern in &expected_case.expected_error_patterns {
-        if !joined_context.contains(pattern) {
-            failures.push(format!(
-                "{} diagnostic context did not contain expected error pattern {:?}",
-                expected_case.case_id, pattern
-            ));
-        }
+    // Upstream `assert_vir_error_msg` asserts ONE error whose message contains
+    // the expected text, so every declared pattern must be satisfied by ONE AND
+    // THE SAME failure diagnostic. Matching against `diagnostic_context.join()`
+    // let a pattern be satisfied by the port's own source text, or by two
+    // unrelated entries between them — which is close to vacuous for the short
+    // patterns the corpus declares (`admit`, `assume`, `nested`, ...).
+    if !observed_case.failure_diagnostics.iter().any(|entry| {
+        expected_case
+            .expected_error_patterns
+            .iter()
+            .all(|pattern| entry.contains(pattern))
+    }) {
+        failures.push(format!(
+            "{} no single failure diagnostic contained all expected error patterns {:?}; failure diagnostics: {:?}",
+            expected_case.case_id,
+            expected_case.expected_error_patterns,
+            observed_case.failure_diagnostics
+        ));
     }
 }
 
@@ -6736,6 +11318,8 @@ fn run_trust_vc_corpus_cargo_trust_vc_integration_test(
                         obligation_count: 0,
                         obligation_fingerprints: Vec::new(),
                         diagnostic_context: Vec::new(),
+                        failure_diagnostics: Vec::new(),
+                        failing_obligations: Vec::new(),
                         warnings: Vec::new(),
                     });
                 } else {
@@ -6810,14 +11394,14 @@ fn run_cargo_trust_vc_integration_test_case(
     case_id: &str,
     env: &[(String, String)],
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
-    run_command_with_env_capture(
-        crate_root,
-        cargo,
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
+    // Per-unit Trust verification scoping. This compiles THIS REPO's workspace
+    // (one `cargo-trust-vc` integration-test target and everything it links),
+    // so workspace members are the units under test and third-party
+    // dependencies are merely linked.
+    let args = with_trust_per_unit_scope(
+        trust_per_unit_scope_args(),
         &[
             "test",
             "--locked",
@@ -6830,8 +11414,9 @@ fn run_cargo_trust_vc_integration_test_case(
             "--exact",
             case_id,
         ],
-        &borrowed_env(env),
-    )
+    );
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_command_with_env_capture(crate_root, cargo, &args, &borrowed_env(env))
 }
 
 fn cargo_test_output_reports_exactly_one_pass(stdout: &str) -> bool {
@@ -7407,7 +11992,9 @@ fn run_trust_vc_corpus_cargo_fixture_source_errors(
                 verdict: expected_verdict_label(VerusExpectedVerdict::Error).to_string(),
                 obligation_count: 0,
                 obligation_fingerprints: Vec::new(),
+                failure_diagnostics: diagnostic_context.clone(),
                 diagnostic_context,
+                failing_obligations: Vec::new(),
                 warnings: Vec::new(),
             });
         }
@@ -7480,11 +12067,8 @@ fn run_cargo_fetch_for_fixture(
     fixture_root: &Path,
     env: &[(String, String)],
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
     let lock_path = fixture_root.join("Cargo.lock");
     let lock_snapshot = match fs::read(&lock_path) {
         Ok(contents) => contents,
@@ -7529,16 +12113,351 @@ fn run_cargo_fetch_for_fixture(
     captured
 }
 
+/// Trust verification policy flag that keeps the pipeline ON for a unit and
+/// downgrades everything it reports — completeness gaps AND refutations — from
+/// errors to warnings.
+///
+/// MEASURED 2026-09-16 (`evals/verus/ported/cargo_spec_def`, one scoped
+/// `cargo check --all-targets`, full log censused rather than its tail): the
+/// downgrade really does cover REFUTATIONS, not only completeness gaps. The
+/// run emits `note: Trust verification: 0 proved, 1 failed, ...` with
+/// `= note: [unreach] FAILED (ay-in-process); counterexample: x = 0` on
+/// `spec_def::double`, carried by a `warning:` whose own text reads "Level 0
+/// safety refutations are DOWNGRADED to warnings (not build errors)", and
+/// three `Level 0 summary: 1 failed` lines. So a refutation inside a unit
+/// scoped here does NOT fail the `cargo check` phase, and the FATAL
+/// `cargo trust-vc check` phase that follows is what actually gates these
+/// fixtures.
+const TRUST_ADVISORY_POLICY_FLAG: &str = "-Ztrust-policy=advisory";
+
+/// Trust verification policy flag that compiles a unit with the pipeline OFF
+/// (the compiler then reports "compiled WITHOUT Trust verification - 0
+/// obligations checked" for that unit).
+const TRUST_VERIFY_OFF_FLAG: &str = "-Ztrust-verify=off";
+
+/// The PER-UNIT Trust verification scope every cargo compile site the evidence
+/// gate drives shares, injected as `cargo --config` arguments.
+///
+/// EVERY COMPILE SITE THE GATE DRIVES, and the scope each one gets:
+///   1. `run_cargo_check_for_fixture` — a corpus cargo FIXTURE. Base scope plus
+///      the fixture's corpus path-dependency siblings, see
+///      `cargo_fixture_verification_scope_args`.
+///   2. `run_cargo_check_for_source_diagnostics` — the same FIXTURE compile,
+///      delegating to (1); no separate policy.
+///   3. `run_cargo_fixture_dependency_sidecar_build` — a corpus FIXTURE again
+///      (the `spec_def`-shaped producer that `cargo_spec_use` /
+///      `cargo_unverified_spec_use` import), built under `RUSTC_WRAPPER`. Gets
+///      (1)'s scope keyed on the PRODUCER root. The wrapper does not eat the
+///      scope: `run_cargo_rustc_wrapper` (`lib.rs`) hands cargo's `rustc_args`
+///      through verbatim to `run_rustc_directly`, so the profile rustflags
+///      cargo computed still reach the compiler.
+///   4. `run_direct_source_typecheck` — a DIRECT-SOURCE port: a scratch crate
+///      whose modules are the normalized `evals/verus/ported/*.rs` bodies. Base
+///      scope: the scratch crate is the unit under test; the two first-party
+///      libraries it links (`trust-vc-types`, `trust-vc-std`) are merely linked
+///      here and fall under the `"*"` rule.
+///   5. the `--run-trust_vc` `cargo check --workspace` gate — THIS REPO's
+///      workspace. Base scope: workspace members are the units under test,
+///      third-party dependencies are merely linked.
+///   6. the `--run-trust_vc` `cargo test --workspace` gate — THIS REPO's
+///      workspace, same base scope as (5).
+///   7. `run_cargo_trust_vc_integration_test_case` — THIS REPO's workspace
+///      again (`cargo test -p cargo-trust-vc --test <target>`), same base
+///      scope; this is the `cargo_trust_vc_integration_test` evidence lane.
+///
+/// Not compile sites, and deliberately left alone: the root and per-fixture
+/// `cargo fetch --locked` gates, `run_direct_source_typecheck_lockfile`
+/// (`cargo generate-lockfile`), `run_current_trust_vc_on_cargo_fixture` (runs
+/// the trust-vc BINARY, not rustc), `run_trust_vc_corpus_command` (no manifest
+/// entry declares a command template), and the `--run-verus` shell gate (it
+/// builds UPSTREAM Verus under upstream's own toolchain, not ours).
+///
+/// WHY THE FLAGS LIVE HERE AND NOT IN A FILE. The Trust compiler verifies every
+/// unit it compiles, so a gate `cargo` invocation otherwise dies inside
+/// third-party crates and never reaches the code under test — measured
+/// 2026-09-16 on the workspace gate itself, which fails compiling
+/// `unicode-ident` (lib) with "0 failed, 1 unknown or timed out" before any
+/// first-party crate starts. The policy must therefore be expressed per unit,
+/// and CLAUDE.md's rule is that it belongs in the build tool that can address a
+/// single unit, never in a config table that cannot. The two file placements
+/// are both wrong here, measured:
+///   * a `.cargo/config.toml` anywhere under the repo is caught by this file's
+///     own `active_cargo_config_override_detected` (it walks every repo-local
+///     `.cargo/config.toml` and blocks on a `rustflags` line) — and rightly so;
+///   * a fixture's own `Cargo.toml` re-keys that accepted corpus entry's
+///     `trust_vc_source_hashes` directory digest, moving every accepted cargo
+///     fixture entry from one failure class into another whose only sanctioned
+///     repair needs an already-green corpus run. (Counted 2026-09-16: 18
+///     `cargo_*` directories exist; 15 are mapped by `ported` entries and are
+///     what this gate compiles, 2 by `unsupported-gap` entries that
+///     `requires_trust_vc_paths` never runs, and `cargo_literal_out_of_range`
+///     by nothing at all.)
+///
+/// Injecting them here leaves every fixture directory byte-identical and puts
+/// the exact policy in `command.args` of the recorded evidence, so the scoping
+/// is disclosed per run rather than hidden in a file the gate does not report.
+///
+/// THE LADDER, weakest rung first, applied per unit:
+///   1. `strict` (the compiler default) — kept for nothing here, see below;
+///   2. `-Ztrust-policy=advisory` — the pipeline still runs and still reports;
+///   3. `-Ztrust-verify=off` — the pipeline does not run at all.
+///
+/// WHAT `profile.dev.rustflags` REACHES, measured 2026-09-16 on the workspace
+/// gate (site 5) and no longer a guess: a workspace member's OWN BUILD SCRIPT
+/// is covered by it, not by the `"*"` rule — the run reports `warning: Trust
+/// Level 0 safety verification incomplete for
+/// `build_script_build::emit_unauthenticated_build_identity`` and six more
+/// `build_script_build::…` functions, all of which live in
+/// `crates/trust-vc-core/build.rs`. Third-party build scripts are a different
+/// unit class and do land in the `"*"` off set.
+///
+/// WHAT IT COSTS, measured 2026-09-16 and NOT hidden: the workspace gate at
+/// this scope is slow. About 22 min of cumulative wall clock got it past the
+/// whole third-party closure and into first-party units
+/// (`trust-vc-merge-contract`, `trust-vc-kernel`, `trust-vc-merge-runner`,
+/// `trust-vc-core`'s build script) with warnings only and no build failure, and
+/// it had still not finished. That is a real cost, but the comparison is not
+/// against a fast green gate: UNSCOPED this gate does not run at all — it dies
+/// compiling `unicode-ident` (lib) — so the scope moves it from "cannot run" to
+/// "runs, slowly".
+///
+/// ONE WAY THIS SCHEME IS SILENTLY VOIDED: a `RUSTFLAGS` or
+/// `CARGO_ENCODED_RUSTFLAGS` in the environment REPLACES profile rustflags for
+/// every unit, with no diagnostic — including the crate under test. The gate
+/// lane is guarded (a set `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` is already a
+/// blocking reason in `replacement_blocking_reasons`), but an ad-hoc local
+/// `cargo check` of one of these fixtures is not.
+fn trust_per_unit_scope_args() -> Vec<String> {
+    vec![
+        // `profile-rustflags` is a cargo unstable feature; without this the
+        // `--config profile.*.rustflags` entries below are rejected outright
+        // (config profile is not valid / feature `profile-rustflags` is
+        // required), so the scoping can never fail open into a silent no-op.
+        "-Zprofile-rustflags".to_string(),
+        "--config".to_string(),
+        format!("profile.dev.rustflags=[\"{TRUST_ADVISORY_POLICY_FLAG}\"]"),
+        "--config".to_string(),
+        format!("profile.dev.package.\"*\".rustflags=[\"{TRUST_VERIFY_OFF_FLAG}\"]"),
+    ]
+}
+
+/// Prepend the per-unit scope to a cargo argument list. cargo only accepts `-Z`
+/// and `--config` BEFORE the subcommand, so the scope always goes in front.
+fn with_trust_per_unit_scope(scope: Vec<String>, args: &[&str]) -> Vec<String> {
+    let mut all = scope;
+    all.extend(args.iter().map(|arg| (*arg).to_string()));
+    all
+}
+
+/// PER-UNIT Trust verification scoping for a compile site whose subject is a
+/// corpus cargo FIXTURE root: the base scope plus the fixture's corpus
+/// siblings. Used by `run_cargo_check_for_fixture` (the fixture itself) and by
+/// `run_cargo_fixture_dependency_sidecar_build` (keyed on the producer root).
+///
+/// WHAT EACH SCOPE IS AND WHY IT IS THE WEAKEST THAT WORKS:
+///   * `profile.dev` (the DEFAULT, so: the fixture crate under test and its
+///     test targets; also a build script of its own — no `cargo_*` fixture has
+///     one, but the workspace gate measured that class and it IS covered, see
+///     `trust_per_unit_scope_args`) — `advisory`. Verification stays ON for the crate the fixture exists to
+///     test. `advisory` is NOT "reports everything it would have reported": it
+///     downgrades REFUTATIONS to warnings too — see
+///     `TRUST_ADVISORY_POLICY_FLAG` for the measured
+///     `spec_def::double` counterexample that proves it. `strict` is not usable
+///     yet — measured on `cargo_transitive1`, whose own units at the compiler
+///     default fail with "Trust full verification failed for
+///     `transitive1::main`: native typed-TrustIr lowering did not complete" —
+///     because the compiler's native pipeline cannot discharge these fixtures'
+///     macro-expanded spec/contract obligations. That is the subject of the
+///     `cargo trust-vc check` phase that follows, which stays FATAL and is what
+///     actually gates these fixtures.
+///   * `profile.dev.package."*"` (everything the fixture merely LINKS — cargo's
+///     `"*"` never matches a workspace member) — `off`. Not a preference:
+///     `advisory` on this class does not compile. Measured 2026-09-16 by
+///     holding every dependency of `cargo_transitive1` at `advisory`: the
+///     compiler ICEs after 240 s on `num-traits-0.2.19`'s build script —
+///     `thread 'rustc' panicked at compiler/rustc_errors/src/lib.rs:478:17:
+///     `trimmed_def_paths` called, diagnostics were expected but none were
+///     emitted` — and cargo reports "could not compile `num-traits` (build
+///     script)". (The same policy on `proc-macro2-1.0.106/build.rs` does NOT
+///     ICE, so this is unit-specific, not class-wide; `off` is what covers the
+///     whole class.) It also matches this repo's own committed ruling in
+///     `.cargo/config.toml`: trust-vc IS the verifier tool, so its own crates
+///     and their third-party deps build with the pass off, and verifying them
+///     is the separate explicit `trust-vc evidence` lane.
+///   * `profile.dev.package."<corpus sibling>"` — back to `advisory`. A fixture
+///     that depends on another corpus fixture (`spec_use` -> `spec_def`,
+///     `transitive3` -> `transitive2` -> `transitive1`) would otherwise have
+///     that sibling silently switched off by the `"*"` rule above even though
+///     it is corpus code under test. Derived from the manifests, never
+///     hardcoded, and only for path dependencies that resolve inside
+///     `<crate_root>/evals`.
+fn cargo_fixture_verification_scope_args(crate_root: &Path, fixture_root: &Path) -> Vec<String> {
+    let mut args = trust_per_unit_scope_args();
+    for name in corpus_path_dependency_package_names(crate_root, fixture_root) {
+        args.push("--config".to_string());
+        args.push(format!(
+            "profile.dev.package.\"{name}\".rustflags=[\"{TRUST_ADVISORY_POLICY_FLAG}\"]"
+        ));
+    }
+    args
+}
+
+/// Package names of every path dependency, transitively, that resolves inside
+/// `<crate_root>/evals` — i.e. corpus code under test that a fixture links.
+/// These are restored to `advisory` after the `"*"` off-switch above.
+fn corpus_path_dependency_package_names(crate_root: &Path, fixture_root: &Path) -> Vec<String> {
+    let corpus_root = crate_root.join("evals");
+    let corpus_root = corpus_root.canonicalize().unwrap_or(corpus_root);
+    let mut names = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![fixture_root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let dir = dir.canonicalize().unwrap_or(dir);
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        for dep_dir in manifest_path_dependency_dirs(&dir.join("Cargo.toml"), &dir) {
+            let dep_dir = dep_dir.canonicalize().unwrap_or(dep_dir);
+            if !dep_dir.starts_with(&corpus_root) {
+                continue;
+            }
+            if let Some(name) = manifest_package_name(&dep_dir.join("Cargo.toml")) {
+                // The name is interpolated into a `--config` TOML key, so take
+                // only cargo-shaped names; anything else is skipped rather than
+                // quoted into a malformed key.
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                {
+                    names.insert(name);
+                }
+            }
+            pending.push(dep_dir);
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// Directories named by `path = "..."` dependency entries in a manifest,
+/// resolved against `base`. Line-scanned on purpose: these are the corpus's own
+/// small fixture manifests, and the gate must not grow a TOML dependency to
+/// read them.
+fn manifest_path_dependency_dirs(manifest_path: &Path, base: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    let mut in_dependency_table = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            let header = line
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or("")
+                .trim();
+            in_dependency_table = header.split('.').any(|segment| {
+                matches!(
+                    segment,
+                    "dependencies" | "dev-dependencies" | "build-dependencies"
+                )
+            });
+            continue;
+        }
+        if !in_dependency_table {
+            continue;
+        }
+        if let Some(value) = toml_path_value(line) {
+            dirs.push(base.join(value));
+        }
+    }
+    dirs
+}
+
+/// The `[package] name` of a manifest, line-scanned.
+fn manifest_package_name(manifest_path: &Path) -> Option<String> {
+    let text = fs::read_to_string(manifest_path).ok()?;
+    let mut in_package_table = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_package_table = line.starts_with("[package]");
+            continue;
+        }
+        if !in_package_table {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('"') {
+                    if let Some(end) = rest.find('"') {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The string value of a `path = "..."` key anywhere in one manifest line
+/// (inline dependency tables put it mid-line).
+fn toml_path_value(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(offset) = line[search_from..].find("path") {
+        let index = search_from + offset;
+        let preceded_by_key_char = index > 0
+            && (bytes[index - 1].is_ascii_alphanumeric()
+                || matches!(bytes[index - 1], b'_' | b'-'));
+        if !preceded_by_key_char {
+            let rest = line[index + "path".len()..].trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('"') {
+                    if let Some(end) = rest.find('"') {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+        search_from = index + "path".len();
+    }
+    None
+}
+
 fn run_cargo_check_for_fixture(
     crate_root: &Path,
     fixture_root: &Path,
     env: &[(String, String)],
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
+    // Per-unit Trust verification scoping, in front of the subcommand because
+    // cargo only accepts `-Z` and `--config` there. See
+    // `cargo_fixture_verification_scope_args` for what each scope is and why it
+    // is the weakest one measured to work.
+    let check_args = with_trust_per_unit_scope(
+        cargo_fixture_verification_scope_args(crate_root, fixture_root),
+        &[
+            "check",
+            "--message-format=json",
+            "--all-targets",
+            "--locked",
+            "--offline",
+        ],
+    );
+    let check_args = check_args.iter().map(String::as_str).collect::<Vec<_>>();
     let lock_path = fixture_root.join("Cargo.lock");
     let lock_snapshot = match fs::read(&lock_path) {
         Ok(contents) => contents,
@@ -7546,13 +12465,7 @@ fn run_cargo_check_for_fixture(
             return cargo_fixture_command_not_run(
                 cargo,
                 fixture_root,
-                &[
-                    "check",
-                    "--message-format=json",
-                    "--all-targets",
-                    "--locked",
-                    "--offline",
-                ],
+                &check_args,
                 &format!(
                     "accepted cargo fixture must include Cargo.lock for locked offline evidence: {}",
                     lock_path.display()
@@ -7563,13 +12476,7 @@ fn run_cargo_check_for_fixture(
             return cargo_fixture_command_not_run(
                 cargo,
                 fixture_root,
-                &[
-                    "check",
-                    "--message-format=json",
-                    "--all-targets",
-                    "--locked",
-                    "--offline",
-                ],
+                &check_args,
                 &format!(
                     "accepted cargo fixture must include Cargo.lock for locked offline evidence; failed to read {}: {err}",
                     lock_path.display()
@@ -7577,49 +12484,33 @@ fn run_cargo_check_for_fixture(
             );
         }
     };
-    let target_dir = cargo_fixture_target_dir(crate_root, fixture_root);
-    match fs::remove_dir_all(&target_dir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => {
-            return cargo_fixture_command_not_run(
-                cargo,
-                fixture_root,
-                &[
-                    "check",
-                    "--message-format=json",
-                    "--all-targets",
-                    "--locked",
-                    "--offline",
-                ],
-                &format!(
-                    "failed to remove stale cargo fixture target dir {}: {err}",
-                    target_dir.display()
-                ),
-            );
+    let target_dir = match CargoFixtureScratchTargetDir::claim(
+        crate_root,
+        cargo_fixture_target_dir(crate_root, fixture_root),
+        "cargo fixture",
+    ) {
+        Ok(target_dir) => target_dir,
+        Err(error) => {
+            return cargo_fixture_command_not_run(cargo, fixture_root, &check_args, &error);
         }
-    }
+    };
     let mut cargo_env = env.to_vec();
     cargo_env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
     cargo_env.push((
         "CARGO_TARGET_DIR".to_string(),
-        target_dir.to_string_lossy().into_owned(),
+        target_dir.path().to_string_lossy().into_owned(),
     ));
-    let mut captured = run_command_with_env_capture(
-        fixture_root,
-        cargo,
-        &[
-            "check",
-            "--message-format=json",
-            "--all-targets",
-            "--locked",
-            "--offline",
-        ],
-        &borrowed_env(&cargo_env),
-    );
-    match cargo_dep_info_sources(&target_dir, fixture_root) {
+    let mut captured =
+        run_command_with_env_capture(fixture_root, cargo, &check_args, &borrowed_env(&cargo_env));
+    match cargo_dep_info_sources(target_dir.path(), fixture_root) {
         Ok(sources) => captured.cargo_dep_info_sources = sources,
         Err(error) => captured.cargo_dep_info_error = Some(error),
+    }
+    if let Err(error) = target_dir.release() {
+        if captured.command.exit_code == Some(0) {
+            captured.command.exit_code = Some(127);
+        }
+        append_command_stderr(&mut captured.command, &error);
     }
     if let Err(err) = restore_cargo_lock_snapshot(&lock_path, &lock_snapshot) {
         if captured.command.exit_code == Some(0) {
@@ -7684,12 +12575,166 @@ fn cargo_fixture_target_dir(crate_root: &Path, fixture_root: &Path) -> PathBuf {
         .chars()
         .take(16)
         .collect::<String>();
+    cargo_fixture_scratch_runs_root(crate_root)
+        .join(evidence_process_run_id())
+        .join(format!("fixture-{digest}"))
+}
+
+/// Where every evidence process keeps the cargo target directories of the
+/// fixture builds it is running, under one run directory per process
+/// (`evidence_process_run_id`).
+fn cargo_fixture_scratch_runs_root(crate_root: &Path) -> PathBuf {
     crate_root
         .join("target")
         .join("trust-vc-corpus-fixtures")
         .join("runs")
-        .join(evidence_process_run_id())
-        .join(format!("fixture-{digest}"))
+}
+
+/// The cargo target directory of ONE fixture build.
+///
+/// A build starts from an empty directory. Dep-info and sidecar collection
+/// read every file under the directory, and cargo skips a unit whose
+/// fingerprint still matches, so anything an earlier build left there could
+/// answer for this one; a fresh directory is what makes the evidence this
+/// build's own. Reusing a directory keyed on the fixture's contents would
+/// keep that risk and trade it for a key that must name every input cargo
+/// and the rustc wrapper read, so each build pays for a full build instead.
+///
+/// The directory is removed as soon as its evidence has been read
+/// (`release`), and dropping the guard removes it on every other exit, so a
+/// finished build keeps nothing on disk. What a killed process leaves behind
+/// is reaped by the next build (`reap_exited_cargo_fixture_runs`).
+struct CargoFixtureScratchTargetDir {
+    path: PathBuf,
+    released: bool,
+}
+
+impl CargoFixtureScratchTargetDir {
+    /// Claims `path` for one build: reaps what exited evidence processes left
+    /// under `crate_root`, then clears `path` itself. `kind` names the build
+    /// in the error.
+    fn claim(crate_root: &Path, path: PathBuf, kind: &str) -> Result<Self, String> {
+        reap_exited_cargo_fixture_runs(&cargo_fixture_scratch_runs_root(crate_root))?;
+        remove_dir_all_if_present(&path).map_err(|err| {
+            format!(
+                "failed to remove stale {kind} target dir {}: {err}",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path,
+            released: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Removes the directory once its evidence has been read out of it.
+    fn release(mut self) -> Result<(), String> {
+        self.released = true;
+        remove_dir_all_if_present(&self.path).map_err(|err| {
+            format!(
+                "failed to remove cargo target dir {} after reading its evidence: {err}",
+                self.path.display()
+            )
+        })
+    }
+}
+
+impl Drop for CargoFixtureScratchTargetDir {
+    fn drop(&mut self) {
+        if !self.released {
+            // An early return or a panic before the evidence was read. A
+            // removal that fails here is retried by the reaper once this
+            // process has exited.
+            let _ = remove_dir_all_if_present(&self.path);
+        }
+    }
+}
+
+/// Removes the scratch that exited evidence processes left under
+/// `runs_root`.
+///
+/// A run directory is named for the process that owns it, and a running
+/// process removes each target directory as soon as it has read the
+/// evidence, so what remains under a process that has exited was left by a
+/// kill or a crash and nothing can read it again. Left alone: the caller's
+/// own run directory; a run whose process id still names a running process
+/// (a later process may have reused the id, and the run is reaped once that
+/// one exits too); and an entry whose name identifies no owner.
+fn reap_exited_cargo_fixture_runs(runs_root: &Path) -> Result<(), String> {
+    let list_error = |err: std::io::Error| {
+        format!(
+            "failed to list cargo fixture scratch runs {}: {err}",
+            runs_root.display()
+        )
+    };
+    let entries = match fs::read_dir(runs_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(list_error(err)),
+    };
+    let own_pid = std::process::id();
+    for entry in entries {
+        let entry = entry.map_err(list_error)?;
+        let Some(owner) = entry.file_name().to_str().and_then(cargo_fixture_run_owner) else {
+            continue;
+        };
+        if owner == own_pid || evidence_process_is_running(owner) {
+            continue;
+        }
+        let run_dir = entry.path();
+        remove_dir_all_if_present(&run_dir).map_err(|err| {
+            format!(
+                "failed to reap cargo fixture scratch {} left by exited process {owner}: {err}",
+                run_dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The process a run directory belongs to, when its name is exactly what
+/// `evidence_process_run_id` gives that process.
+fn cargo_fixture_run_owner(name: &str) -> Option<u32> {
+    let pid = name.strip_prefix("pid-")?.parse::<u32>().ok()?;
+    (pid != 0 && name == format!("pid-{pid}")).then_some(pid)
+}
+
+#[cfg(unix)]
+fn evidence_process_is_running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: signal 0 delivers nothing; `kill` only reports whether `pid`
+    // names a process, and it reads and writes none of our memory. `pid` is
+    // positive, so it names one process and never a process group.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM: the process exists but belongs to another user.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn evidence_process_is_running(_pid: u32) -> bool {
+    // Without a liveness probe no run can be shown to have exited.
+    true
+}
+
+fn remove_dir_all_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        // Another process reaping the same exited run can remove entries
+        // under this walk; what matters is that the directory is gone.
+        Err(err) => match fs::symlink_metadata(path) {
+            Err(gone) if gone.kind() == ErrorKind::NotFound => Ok(()),
+            _ => Err(err),
+        },
+    }
 }
 
 fn cargo_dep_info_sources(
@@ -8044,34 +13089,52 @@ fn prepare_cargo_fixture_dependency_sidecars(
     let mut commands = Vec::new();
     let mut artifacts = Vec::new();
     for producer in producers {
+        let target_dir = match CargoFixtureScratchTargetDir::claim(
+            crate_root,
+            cargo_fixture_dependency_sidecar_target_dir(crate_root, fixture_root, &producer.root),
+            "dependency sidecar",
+        ) {
+            Ok(target_dir) => target_dir,
+            Err(error) => {
+                return Err(CargoFixtureDependencySidecarError {
+                    message: format!(
+                        "{}: dependency sidecar build for `{}` was not run: {error}",
+                        report_path_string(fixture_root, crate_root),
+                        producer.alias
+                    ),
+                    commands,
+                });
+            }
+        };
         let output = run_cargo_fixture_dependency_sidecar_build(
             crate_root,
-            fixture_root,
             trust_vc_binary,
             env,
             &producer,
+            target_dir.path(),
         );
         let command = output.command.clone();
         commands.push(command.clone());
-        if command.exit_code != Some(0) {
-            return Err(CargoFixtureDependencySidecarError {
-                message: format!(
-                    "{}: dependency sidecar build for `{}` failed with {}",
-                    report_path_string(fixture_root, crate_root),
-                    producer.alias,
-                    display_exit_code(command.exit_code)
-                ),
-                commands,
-            });
-        }
-        match dependency_sidecar_artifact_from_target(
-            crate_root,
-            &producer,
-            &cargo_fixture_dependency_sidecar_target_dir(crate_root, fixture_root, &producer.root),
-        ) {
-            Ok(artifact) => artifacts.push(artifact),
-            Err(message) => {
+        let artifact = if command.exit_code == Some(0) {
+            dependency_sidecar_artifact_from_target(crate_root, &producer, target_dir.path())
+        } else {
+            Err(format!(
+                "{}: dependency sidecar build for `{}` failed with {}",
+                report_path_string(fixture_root, crate_root),
+                producer.alias,
+                display_exit_code(command.exit_code)
+            ))
+        };
+        match (artifact, target_dir.release()) {
+            (Ok(artifact), Ok(())) => artifacts.push(artifact),
+            (Err(message), Ok(())) | (Ok(_), Err(message)) => {
                 return Err(CargoFixtureDependencySidecarError { message, commands });
+            }
+            (Err(message), Err(release_error)) => {
+                return Err(CargoFixtureDependencySidecarError {
+                    message: format!("{message}; {release_error}"),
+                    commands,
+                });
             }
         }
     }
@@ -8209,17 +13272,26 @@ fn required_dependency_sidecar_producer(
 
 fn run_cargo_fixture_dependency_sidecar_build(
     crate_root: &Path,
-    fixture_root: &Path,
     trust_vc_binary: &Path,
     env: &[(String, String)],
     producer: &CargoFixtureDependencySidecarProducer,
+    target_dir: &Path,
 ) -> CapturedCommandResult {
-    let cargo = env
-        .iter()
-        .find(|(key, _)| key == "CARGO")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("cargo");
-    let args = ["check", "--lib", "--locked", "--offline"];
+    let cargo = evidence_env_cargo(env);
+    let cargo = cargo.as_str();
+    // Per-unit Trust verification scoping, keyed on the PRODUCER root: this
+    // compile site's subject is a corpus fixture too (the `spec_def`-shaped
+    // crate that `cargo_spec_use` / `cargo_unverified_spec_use` import), so it
+    // gets exactly the scope `run_cargo_check_for_fixture` gives a fixture.
+    // Before 2026-09-16 this site ran a bare `cargo check --lib` with the
+    // compiler default, so it died inside third-party units and those two
+    // fixtures could not pass end to end however well the fixture itself
+    // checked.
+    let args = with_trust_per_unit_scope(
+        cargo_fixture_verification_scope_args(crate_root, &producer.root),
+        &["check", "--lib", "--locked", "--offline"],
+    );
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let lock_path = producer.root.join("Cargo.lock");
     let lock_snapshot = match fs::read(&lock_path) {
         Ok(contents) => contents,
@@ -8246,24 +13318,6 @@ fn run_cargo_fixture_dependency_sidecar_build(
             );
         }
     };
-    let target_dir =
-        cargo_fixture_dependency_sidecar_target_dir(crate_root, fixture_root, &producer.root);
-    match fs::remove_dir_all(&target_dir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => {
-            return cargo_fixture_command_not_run(
-                cargo,
-                &producer.root,
-                &args,
-                &format!(
-                    "failed to remove stale dependency sidecar target dir {}: {err}",
-                    target_dir.display()
-                ),
-            );
-        }
-    }
-
     let mut cargo_env = env.to_vec();
     cargo_env.retain(|(key, _)| {
         key != "CARGO_TARGET_DIR"
@@ -8373,10 +13427,7 @@ fn cargo_fixture_dependency_sidecar_target_dir(
         .chars()
         .take(16)
         .collect::<String>();
-    crate_root
-        .join("target")
-        .join("trust-vc-corpus-fixtures")
-        .join("runs")
+    cargo_fixture_scratch_runs_root(crate_root)
         .join(evidence_process_run_id())
         .join(format!("dependency-sidecars-{digest}"))
 }
@@ -9113,10 +14164,12 @@ fn observed_cases_from_no_cheating_json(
             finding_groups.iter().enumerate().find(|(index, group)| {
                 !used_groups.contains(index)
                     && group.file == expected_file
-                    && expected_case
-                        .expected_error_patterns
-                        .iter()
-                        .all(|pattern| group.diagnostic_context.contains(pattern))
+                    && group.findings.iter().any(|finding| {
+                        expected_case
+                            .expected_error_patterns
+                            .iter()
+                            .all(|pattern| finding.contains(pattern))
+                    })
             })
         else {
             continue;
@@ -9128,7 +14181,9 @@ fn observed_cases_from_no_cheating_json(
             verdict: expected_verdict_label(VerusExpectedVerdict::Error).to_string(),
             obligation_count: 0,
             obligation_fingerprints: Vec::new(),
-            diagnostic_context: vec![group.diagnostic_context.clone()],
+            diagnostic_context: group.findings.clone(),
+            failure_diagnostics: group.findings.clone(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         });
     }
@@ -9143,7 +14198,9 @@ fn observed_cases_from_no_cheating_json(
             verdict: expected_verdict_label(VerusExpectedVerdict::Error).to_string(),
             obligation_count: 0,
             obligation_fingerprints: Vec::new(),
-            diagnostic_context: vec![group.diagnostic_context.clone()],
+            diagnostic_context: group.findings.clone(),
+            failure_diagnostics: group.findings.clone(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         });
     }
@@ -9153,7 +14210,10 @@ fn observed_cases_from_no_cheating_json(
 
 struct NoCheatingFindingGroup {
     file: String,
-    diagnostic_context: String,
+    /// One entry per FINDING. Joining these would hand a declared pattern a
+    /// blob to straddle; the gate matches a pattern set against a single
+    /// finding.
+    findings: Vec<String>,
 }
 
 fn no_cheating_finding_groups(
@@ -9172,7 +14232,7 @@ fn no_cheating_finding_groups(
             contexts.sort();
             NoCheatingFindingGroup {
                 file,
-                diagnostic_context: contexts.join("\n"),
+                findings: contexts,
             }
         })
         .collect()
@@ -9277,14 +14337,22 @@ fn observed_cases_from_trust_vc_certificate(
             obligation_count: obligation_fingerprints.len(),
             obligation_fingerprints,
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         });
     }
     Ok(observed_cases)
 }
 
+/// The same capture rule, over the certificate JSON's snake_case status label.
+/// `not_proved` is `ObligationStatus::NotProved`; see
+/// `captured_obligation_fingerprints` for why it counts as captured.
 fn captured_certificate_obligation_status(status: &str) -> bool {
-    matches!(status, "verified" | "counterexample" | "unknown" | "error")
+    matches!(
+        status,
+        "verified" | "counterexample" | "not_proved" | "unknown" | "error"
+    )
 }
 
 fn failed_trust_vc_corpus_run_result(
@@ -9316,8 +14384,20 @@ fn failed_trust_vc_corpus_run_result(
     }
 }
 
+/// Scans one ported source file into ENGINE INPUT.
+///
+/// This function may only ever REMOVE functions that are not declared corpus
+/// cases. The gate never manufactures a verdict here: a declared case is
+/// verified by `verify::verify_one_detailed` or it is missing, and missing is a
+/// failure. (Before 2026-09-16 a gate-side syn scan removed
+/// `#[trust_vc::proof] unsafe fn` from the engine input and then synthesised an
+/// `error` observed case carrying the gate's own sentence as its only
+/// diagnostic context — evidence the proof calculus never produced. The
+/// rejection now lives in the engine, in
+/// `trust_vc_core`'s VC extraction, where Verus puts it.)
 fn scan_trust_vc_corpus_file(
     path: &Path,
+    declared_case_ids: &BTreeSet<String>,
     functions: &mut Vec<scan::AnnotatedFunction>,
     source_errors: &mut Vec<TrustVcCorpusSourceError>,
 ) {
@@ -9343,18 +14423,13 @@ fn scan_trust_vc_corpus_file(
             return;
         }
     };
-    let static_errors = trust_vc_corpus_static_source_errors(path, &ast);
-    let blocked_case_ids = static_errors
-        .iter()
-        .filter_map(|error| error.case_id.clone())
-        .collect::<BTreeSet<_>>();
-    source_errors.extend(static_errors);
     let signature_only_helpers = signature_only_proof_helper_names(&ast);
     let mut file_functions = scan::scan_file(path);
     file_functions.retain(|function| {
-        !blocked_case_ids.contains(&function.name)
-            && !is_trust_vc_corpus_helper_only_function(function)
-            && !signature_only_helpers.contains(&function.name)
+        // A DECLARED case is never filtered: it must reach the engine.
+        declared_case_ids.contains(&function.name)
+            || (!is_trust_vc_corpus_helper_only_function(function)
+                && !signature_only_helpers.contains(&function.name))
     });
     functions.extend(file_functions);
 }
@@ -9408,43 +14483,6 @@ fn is_trust_vc_corpus_helper_only_function(function: &scan::AnnotatedFunction) -
                 "spec" | "decreases" | "opaque" | "inline" | "rlimit" | "broadcast" | "trigger"
             )
         })
-}
-
-fn trust_vc_corpus_static_source_errors(
-    path: &Path,
-    ast: &syn::File,
-) -> Vec<TrustVcCorpusSourceError> {
-    let mut errors = Vec::new();
-    collect_trust_vc_corpus_static_source_errors(path, &ast.items, &mut errors);
-    errors
-}
-
-fn collect_trust_vc_corpus_static_source_errors(
-    path: &Path,
-    items: &[syn::Item],
-    errors: &mut Vec<TrustVcCorpusSourceError>,
-) {
-    for item in items {
-        match item {
-            syn::Item::Fn(func)
-                if function_has_trust_vc_attr(&func.attrs, "proof")
-                    && func.sig.unsafety.is_some() =>
-            {
-                errors.push(TrustVcCorpusSourceError {
-                    trust_vc_path: path.to_path_buf(),
-                    case_id: Some(func.sig.ident.to_string()),
-                    detail: "'unsafe' only makes sense on exec-mode functions".to_string(),
-                });
-            }
-            syn::Item::Fn(_) => {}
-            syn::Item::Mod(module) => {
-                if let Some((_, inner_items)) = &module.content {
-                    collect_trust_vc_corpus_static_source_errors(path, inner_items, errors);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn function_has_trust_vc_attr(attrs: &[syn::Attribute], name: &str) -> bool {
@@ -9530,7 +14568,56 @@ fn manual_verus_harness_case(
         forbidden_diagnostic_patterns: Vec::new(),
         expected_occurrences: 1,
         warning_patterns: Vec::new(),
+        program_function_count: verus_program_block(func.block.to_token_stream())
+            .map(|program| program_function_count(program.stream()))
+            .unwrap_or_default(),
     }))
+}
+
+/// The `verus_code! { .. }` PROGRAM block a test case wraps, wherever it sits.
+///
+/// The macro form (`test_verify_one_file! { #[test] name verus_code! { .. } }`)
+/// carries it directly; the plain form (`#[test] fn name() { let err =
+/// verify_one_file(verus_code! { .. }); .. }`) nests it inside the Rust test
+/// function. One finder for both, so a program-shape measurement can never be
+/// read off the harness code of one form and off the Verus program of the
+/// other.
+fn verus_program_block(tokens: TokenStream) -> Option<proc_macro2::Group> {
+    let top: Vec<TokenTree> = tokens.into_iter().collect();
+    for (index, token) in top.iter().enumerate() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        let name = ident.to_string();
+        if name != "verus_code" && name != "code" {
+            continue;
+        }
+        if !matches!(top.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == '!') {
+            continue;
+        }
+        if let Some(TokenTree::Group(group)) = top.get(index + 2) {
+            if group.delimiter() == Delimiter::Brace {
+                return Some(group.clone());
+            }
+        }
+    }
+    top.iter().find_map(|token| match token {
+        TokenTree::Group(group) => verus_program_block(group.stream()),
+        _ => None,
+    })
+}
+
+/// How many FUNCTIONS a Verus program block declares at its TOP LEVEL.
+///
+/// Top level only, and that is what makes the number a ceiling rather than a
+/// tally: a method inside an `impl`, a function inside a module and a closure
+/// inside a body are all nested, none of them is an upstream case's own
+/// function, and none is counted.
+fn program_function_count(program: TokenStream) -> usize {
+    program
+        .into_iter()
+        .filter(|token| matches!(token, TokenTree::Ident(ident) if *ident == "fn"))
+        .count()
 }
 
 fn manual_harness_has_positive_is_ok_assert(func: &syn::ItemFn) -> bool {
@@ -9706,17 +14793,6 @@ fn source_error_failure(crate_root: &Path, source_error: &TrustVcCorpusSourceErr
     )
 }
 
-fn source_error_matches_expected_case(
-    source_error: &TrustVcCorpusSourceError,
-    expected_case: &VerusExpectedCase,
-) -> bool {
-    source_error_matches_expected_case_patterns(
-        source_error,
-        expected_case,
-        &expected_case.expected_error_patterns,
-    )
-}
-
 fn source_error_matches_expected_case_patterns(
     source_error: &TrustVcCorpusSourceError,
     expected_case: &VerusExpectedCase,
@@ -9819,55 +14895,9 @@ fn match_source_error_pattern_sets_from(
     false
 }
 
-fn append_source_error_observed_cases(
-    crate_root: &Path,
-    candidate: &TrustVcCorpusRunCandidate,
-    observed_cases: &mut Vec<TrustVcCorpusObservedCase>,
-    source_errors: &[TrustVcCorpusSourceError],
-) -> BTreeSet<usize> {
-    if source_errors.is_empty() {
-        return BTreeSet::new();
-    }
-    let mut observed_ids = observed_cases
-        .iter()
-        .map(|case| case.case_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut source_errors_used = BTreeSet::new();
-    for expected_case in &candidate.expected_cases {
-        if expected_case.expected_verdict != VerusExpectedVerdict::Error
-            || observed_ids.contains(&expected_case.case_id)
-        {
-            continue;
-        }
-        let Some((index, source_error)) =
-            source_errors
-                .iter()
-                .enumerate()
-                .find(|(index, source_error)| {
-                    !source_errors_used.contains(index)
-                        && source_error.case_id.as_deref() == Some(expected_case.case_id.as_str())
-                        && source_error_matches_expected_case(source_error, expected_case)
-                })
-        else {
-            break;
-        };
-        source_errors_used.insert(index);
-        observed_ids.insert(expected_case.case_id.clone());
-        observed_cases.push(TrustVcCorpusObservedCase {
-            case_id: expected_case.case_id.clone(),
-            trust_vc_path: report_path_string(&source_error.trust_vc_path, crate_root),
-            verdict: expected_verdict_label(VerusExpectedVerdict::Error).to_string(),
-            obligation_count: 0,
-            obligation_fingerprints: Vec::new(),
-            diagnostic_context: vec![source_error.detail.clone()],
-            warnings: Vec::new(),
-        });
-    }
-    source_errors_used
-}
-
 fn scan_trust_vc_corpus_dir(
     dir: &Path,
+    declared_case_ids: &BTreeSet<String>,
     functions: &mut Vec<scan::AnnotatedFunction>,
     source_errors: &mut Vec<TrustVcCorpusSourceError>,
 ) {
@@ -9889,9 +14919,9 @@ fn scan_trust_vc_corpus_dir(
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            scan_trust_vc_corpus_dir(&path, functions, source_errors);
+            scan_trust_vc_corpus_dir(&path, declared_case_ids, functions, source_errors);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            scan_trust_vc_corpus_file(&path, functions, source_errors);
+            scan_trust_vc_corpus_file(&path, declared_case_ids, functions, source_errors);
         }
     }
 }
@@ -10057,8 +15087,198 @@ fn observed_case_from_verification(
         obligation_count: obligation_fingerprints.len(),
         obligation_fingerprints,
         diagnostic_context: diagnostic_context_from_verification(crate_root, verification),
+        failure_diagnostics: failure_diagnostics_from_verification(verification),
+        failing_obligations: failing_obligations_from_verification(crate_root, verification),
         warnings: verification.warnings.clone(),
     }
+}
+
+/// Names and locates every obligation the engine did not verify.
+///
+/// A REFUTATION (`Counterexample`/`Error`) is upstream's "error"; an
+/// `Unknown` is an undecided obligation, which upstream's error count never
+/// admits and which must not inflate the failure count — each entry carries
+/// the status it was built from so the two are counted apart.
+///
+/// When no obligation carries a refuting status but the verdict IS a failure,
+/// the localized failure stands in — it is still engine output naming one site.
+/// An unlocated failure yields an empty `span_text`, which can only FAIL the
+/// marker check.
+fn failing_obligations_from_verification(
+    crate_root: &Path,
+    verification: &verify::FunctionVerification,
+) -> Vec<ObservedFailingObligation> {
+    let mut failing = Vec::new();
+    // Obligation-level failure records attributed to a NAMED obligation —
+    // a refutation OR a model-less non-proof. Either suppresses the
+    // localized-failure stand-in below, which carries no obligation name.
+    let mut attributed = 0usize;
+    for obligation in &verification.obligations {
+        if !matches!(
+            obligation.status,
+            verify::ObligationStatus::Counterexample
+                | verify::ObligationStatus::NotProved
+                | verify::ObligationStatus::Unknown
+                | verify::ObligationStatus::Error
+        ) {
+            continue;
+        }
+        if !matches!(obligation.status, verify::ObligationStatus::Unknown) {
+            attributed += 1;
+        }
+        failing.push(observed_failing_obligation(
+            crate_root,
+            obligation.name.clone(),
+            obligation.kind.clone(),
+            obligation.location.clone(),
+            // The engine's own STRUCTURED position when it recorded one. Read
+            // in preference to re-splitting `location` on colons below: this
+            // gate turns the position into a LINE and compares it against
+            // upstream's `FAILS` marker, so a parse that quietly yields `None`
+            // would report "no readable source line" for a located obligation.
+            obligation.source_location.clone(),
+            format!("{:?}", obligation.status),
+            obligation.unknown_category.clone(),
+        ));
+    }
+    if attributed == 0 {
+        if let Some(failure) = &verification.verdict.localized_failure {
+            if failure.result != verify::VerdictKind::Verified {
+                failing.push(observed_failing_obligation(
+                    crate_root,
+                    failure.label.clone(),
+                    failure.phase.clone(),
+                    failure.location.clone(),
+                    // The localized failure is carried as a rendered string
+                    // only; it is parsed below, as before.
+                    None,
+                    format!("{:?}", failure.result),
+                    failure.unknown_category.clone(),
+                ));
+            }
+        }
+    }
+    failing
+}
+
+fn observed_failing_obligation(
+    crate_root: &Path,
+    name: String,
+    kind: String,
+    location: Option<String>,
+    source_location: Option<trust_vc_core::SourceLocation>,
+    status: String,
+    unknown_category: Option<String>,
+) -> ObservedFailingObligation {
+    let parsed = source_location
+        .and_then(|structured| Some((PathBuf::from(structured.file()?), structured.line())))
+        .or_else(|| location.as_deref().and_then(parse_diagnostic_location))
+        .and_then(|(path, line)| {
+            let path = if path.is_absolute() {
+                path
+            } else {
+                crate_root.join(path)
+            };
+            let source = fs::read_to_string(&path).ok()?;
+            let prefix = enclosing_function_prefix_lines(&source, line);
+            let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+            let header = enclosing_function_header_lines(&source, line);
+            let header_refs: Vec<&str> = header.iter().map(String::as_str).collect();
+            let span = statement_span_lines(&source, line);
+            let bindings = canonical_let_bindings(&prefix_refs);
+            let file_lines: Vec<&str> = source.lines().collect();
+            let definitions = reachable_definitions(
+                &file_lines,
+                &identifiers_in(&canonical_claim_core(&span.join("\n"))),
+                &bindings,
+            );
+            Some((
+                line,
+                span,
+                bindings,
+                hypothesis_atoms(&header_refs),
+                definitions,
+                body_statement_cores(&prefix_refs),
+            ))
+        });
+    let span_text = parsed
+        .as_ref()
+        .map(|(_, span, _, _, _, _)| span.clone())
+        .unwrap_or_default();
+    let context_bindings = parsed
+        .as_ref()
+        .map(|(_, _, bindings, _, _, _)| bindings.clone())
+        .unwrap_or_default();
+    let context_hypotheses = parsed
+        .as_ref()
+        .map(|(_, _, _, hypotheses, _, _)| hypotheses.clone())
+        .unwrap_or_default();
+    let context_definitions = parsed
+        .as_ref()
+        .map(|(_, _, _, _, definitions, _)| definitions.clone())
+        .unwrap_or_default();
+    let context_statements = parsed
+        .as_ref()
+        .map(|(_, _, _, _, _, statements)| statements.clone())
+        .unwrap_or_default();
+    ObservedFailingObligation {
+        name,
+        kind,
+        location,
+        line: parsed.as_ref().map(|(line, _, _, _, _, _)| *line),
+        line_text: span_text.first().cloned(),
+        status,
+        unknown_category,
+        span_text,
+        context_bindings,
+        context_hypotheses,
+        context_definitions,
+        context_statements,
+    }
+}
+
+/// The diagnostics the ENGINE attached to this function's failure, one entry
+/// each and with no source-line context mixed in.
+fn failure_diagnostics_from_verification(
+    verification: &verify::FunctionVerification,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+    if let Some(detail) = &verification.verdict.detail {
+        entries.push(format!("detail: {detail}"));
+    }
+    if let Some(failure) = &verification.verdict.localized_failure {
+        entries.push(format!(
+            "localized_failure: {} {} {:?}",
+            failure.phase, failure.label, failure.result
+        ));
+    }
+    for obligation in &verification.obligations {
+        if !matches!(
+            obligation.status,
+            verify::ObligationStatus::Counterexample
+                | verify::ObligationStatus::NotProved
+                | verify::ObligationStatus::Unknown
+                | verify::ObligationStatus::Error
+        ) {
+            continue;
+        }
+        entries.push(format!(
+            "obligation: {} {} {:?}{}",
+            obligation.kind,
+            obligation.name,
+            obligation.status,
+            obligation
+                .location
+                .as_deref()
+                .map(|location| format!(" at {location}"))
+                .unwrap_or_default()
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    entries
+        .into_iter()
+        .filter(|entry| seen.insert(entry.clone()))
+        .collect()
 }
 
 fn diagnostic_context_from_verification(
@@ -10079,9 +15299,14 @@ fn diagnostic_context_from_verification(
         }
     }
     for obligation in &verification.obligations {
+        // `NotProved` belongs here with the rest: splitting it out of
+        // `Counterexample` changed what the status is NAMED, never whether the
+        // obligation failed, and dropping it would quietly shrink the text the
+        // expected/forbidden diagnostic-pattern checks read.
         if !matches!(
             obligation.status,
             verify::ObligationStatus::Counterexample
+                | verify::ObligationStatus::NotProved
                 | verify::ObligationStatus::Unknown
                 | verify::ObligationStatus::Error
         ) {
@@ -10219,6 +15444,15 @@ fn block_line_range(block: &syn::Block) -> (usize, usize) {
     )
 }
 
+/// The obligations the engine actually CAPTURED, which is what
+/// `min_obligations` and the pinned `obligation_fingerprints` commit to.
+///
+/// `NotProved` belongs here: a model-less non-discharge is an obligation the
+/// engine built, encoded and ran — it just did not decide it. Leaving it out
+/// (as the first cut of the `NotProved` split did) silently SHRANK the captured
+/// set, which showed up as spurious `min_obligations` and fingerprint-pin
+/// failures on every case with an incompleteness — measured on choose.rs, where
+/// it turned 12 honest failures into 30.
 fn captured_obligation_fingerprints(verification: &verify::FunctionVerification) -> Vec<String> {
     verification
         .obligations
@@ -10228,6 +15462,7 @@ fn captured_obligation_fingerprints(verification: &verify::FunctionVerification)
                 obligation.status,
                 verify::ObligationStatus::Verified
                     | verify::ObligationStatus::Counterexample
+                    | verify::ObligationStatus::NotProved
                     | verify::ObligationStatus::Unknown
                     | verify::ObligationStatus::Error
             )
@@ -10350,6 +15585,7 @@ fn update_verus_tests_manifest(
         manifest_id: "upstream-verus-corpus".to_string(),
         description: "Evidence manifest for upstream Verus tests used by TrustVc parity gates."
             .to_string(),
+        correspondence_bound: ACCEPTED_CASE_CORRESPONDENCE_BOUND.to_string(),
         upstream: GeneratedUpstream {
             repo: upstream_repo,
             upstream_ref,
@@ -10422,6 +15658,29 @@ fn load_manifest(path: &Path) -> Result<VerusManifest, EvidenceError> {
 }
 
 fn validate_json_manifest_schema(manifest: &JsonVerusManifest) -> Result<(), EvidenceError> {
+    // The bound before anything else. Every count this manifest feeds is read
+    // by somebody who did not write it, and five adversarial rounds have shown
+    // that the qualification is the first thing to go missing. Requiring it
+    // VERBATIM makes "the number" and "what the number does not establish" one
+    // artifact: to weaken the claim you must edit the constant in the gate,
+    // where it is reviewed, not a string in a data file.
+    if manifest.schema_version >= 2
+        && manifest.correspondence_bound != ACCEPTED_CASE_CORRESPONDENCE_BOUND
+    {
+        return Err(EvidenceError::new(format!(
+            "manifest `correspondence_bound` must carry the gate's standing bound on what an accepted case establishes, VERBATIM; {}. Restore it by copying `ACCEPTED_CASE_CORRESPONDENCE_BOUND` from `evidence.rs` into the manifest's top-level `correspondence_bound`; if the bound ITSELF should change, change that constant, where it is reviewed, and copy the new text across in the same commit. (This check runs before the manifest is loaded at all, so `--refresh-trust-vc-corpus-evidence` cannot repair it — a successful refresh re-stamps the field, it does not get past this.) The accepted-case count does not ship without it",
+            if manifest.correspondence_bound.is_empty() {
+                "the field is absent or empty".to_string()
+            } else {
+                format!(
+                    "found a DIFFERENT text of {} bytes (expected {} bytes, starting `{}`)",
+                    manifest.correspondence_bound.len(),
+                    ACCEPTED_CASE_CORRESPONDENCE_BOUND.len(),
+                    &ACCEPTED_CASE_CORRESPONDENCE_BOUND[..60]
+                )
+            }
+        )));
+    }
     if !matches!(manifest.schema_version, 1 | 2) {
         return Err(EvidenceError::new(format!(
             "manifest schema_version must be 1 or 2, got {}",
@@ -10684,6 +15943,300 @@ fn requires_trust_vc_paths(classification: &str) -> bool {
     matches!(classification, "ported" | "unchanged")
 }
 
+/// What the rules that READ UPSTREAM'S SOURCE actually ESTABLISH on this
+/// corpus, measured against the pinned Verus checkout.
+///
+/// SCOPE is a manifest fact and `verus_replacement_summary` counts it. This is
+/// the other half, and it is the half that keeps being read off the first one:
+/// a bucket's scope is how many cases a rule COVERS, not how many it decides.
+/// Every number here is recomputed from the checkout at run time; none is
+/// written down anywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UpstreamReadMeasurement {
+    counterexample_scope: usize,
+    /// Upstream marks the enclosing function's HEADER and its premise window is
+    /// therefore empty BY CONSTRUCTION, which `premise_correspondence` refuses
+    /// as UN-CHECKABLE instead of passing vacuously.
+    counterexample_refused_uncheckable: usize,
+    /// No upstream text is readable for the case at all, because
+    /// `upstream_case_regions` cannot see its declaration form. Such a case can
+    /// only FAIL its cross-check; it can never establish correspondence.
+    counterexample_unreadable_upstream_case: usize,
+    /// Checked, but on less: upstream binds nothing and runs nothing before its
+    /// marked line. Still constrained — the statement channel compares as
+    /// EQUALITY, so the port's own prefix must be empty too — so NOT refused.
+    counterexample_empty_upstream_window: usize,
+    /// Of those, the ones whose claim reaches no definition either, where claim
+    /// plus hypotheses is the whole comparison.
+    counterexample_empty_window_and_no_definitions: usize,
+    /// LAYER 1 SCOPE — accepted expected cases whose declared
+    /// `upstream_case_id` resolves to a case the AST reader
+    /// (`upstream_verus_harness_cases`) enumerates for the entry's upstream
+    /// file, so the per-case upstream block in `load_corpus_report_with_options`
+    /// applies to it. This is EVERY bucket, not only the counterexample one.
+    layer1_scope: usize,
+    /// Accepted cases whose declared `upstream_case_id` names nothing the AST
+    /// reader enumerates. Each is a gate FAILURE (`does not match an upstream
+    /// Verus harness case`), never a silent pass — so it is counted apart from
+    /// the scope rather than inside it.
+    layer1_unresolved_upstream_case: usize,
+    /// Non-ignored upstream cases across the accepted corpus. EVERY one of them
+    /// must be mapped by at least one port case, or the entry fails with
+    /// `expected_cases missing upstream Verus case`.
+    layer1_mapped_upstream_cases: usize,
+    /// Upstream cases whose mapped-port-case count Layer 1 compares EXACTLY,
+    /// not `>=`: upstream states a failure count, and exactly that many port
+    /// cases may be spent on it.
+    layer1_exact_occurrence_cases: usize,
+    /// Upstream cases whose mapped-port-case count Layer 1 compares with `>=`
+    /// and not exactly, because upstream states no failure count. The
+    /// complement of `layer1_exact_occurrence_cases` inside
+    /// `layer1_mapped_upstream_cases`, stated so clause (c) can print its own
+    /// denominator instead of borrowing the layer's.
+    layer1_at_least_occurrence_cases: usize,
+    /// Upstream cases asserting a verifier WARNING that every mapped port case
+    /// must declare verbatim.
+    layer1_warning_asserting_cases: usize,
+    /// Upstream cases asserting a FORBIDDEN diagnostic-context pattern that
+    /// every mapped port case must declare verbatim, with the converse refused.
+    /// Clause (g) — enumerated because (L1)'s list reads as exhaustive and an
+    /// omitted check is a scope error in the same family as an overstated one.
+    layer1_forbidden_pattern_asserting_cases: usize,
+    /// The forbidden diagnostic-context patterns those cases force.
+    layer1_forbidden_patterns_required: usize,
+    /// Accepted expected cases whose resolved upstream case is a RUST-error
+    /// case, so clause (f) requires the port to map it to a cargo fixture.
+    layer1_rust_error_cases: usize,
+    /// Accepted expected cases declaring `verified` whose resolved upstream
+    /// case states a failure count, so the mapped-case comparison in (2) is
+    /// EXACT for them and `>=` for the rest of the verified bucket.
+    layer1_verified_cases_on_exact_count_upstream: usize,
+    /// Accepted expected cases declaring `verified` whose resolved upstream
+    /// case asserts a verifier WARNING, so check (e) has a population inside
+    /// the verified bucket and clause (2)'s list of what it checks would be
+    /// incomplete without it.
+    layer1_verified_cases_with_upstream_warning: usize,
+    /// Accepted ERROR cases with NO upstream-asserted message that nonetheless
+    /// fall inside one of the other narrow LAYER-1 checks — an upstream
+    /// warning, a forbidden diagnostic-context pattern, or a Rust-error case.
+    /// Clause (3) says LAYER 1 checks the verdict and the count for those and
+    /// nothing else; this is that sentence's refutation counter, and it is 0.
+    error_cases_without_message_in_other_narrow_check: usize,
+    /// Accepted ERROR cases declaring at least one `expected_error_patterns`
+    /// entry, so the run-lane diagnostic pin of (3) actually applies to them.
+    error_cases_with_declared_patterns: usize,
+    /// Upstream cases in the accepted MACRO corpus that the LINE-BASED region
+    /// reader (`upstream_case_regions`, which Layer 2 and the error-provenance
+    /// measurement use) cannot see, because upstream wrote a plain `#[test]`
+    /// above `fn name()` instead of the macro's one-line form. Restricted to
+    /// files the region reader is applicable to at all — see
+    /// `upstream_file_read_by_macro_extractor`.
+    region_reader_invisible_upstream_cases: usize,
+    /// Upstream cases in the accepted MACRO corpus, the denominator for the
+    /// line above.
+    ast_reader_upstream_cases: usize,
+    error_scope: usize,
+    /// Accepted ERROR cases whose upstream case ASSERTS at least one diagnostic
+    /// message, so LAYER 1 already requires upstream's exact string to be
+    /// declared — and, in the run lane, to appear in the port's own diagnostic.
+    error_cases_with_upstream_asserted_message: usize,
+    /// The upstream-asserted strings Layer 1 forces those cases to declare.
+    upstream_asserted_error_patterns_required: usize,
+    /// Error cases every one of whose declared patterns appears inside a string
+    /// literal upstream itself asserts in that case's region.
+    error_cases_upstream_asserted_patterns: usize,
+    /// Error cases declaring at least one pattern that is NOT upstream's
+    /// asserted text — the port's own fixture path or its own wording.
+    error_cases_port_authored_patterns: usize,
+    /// Of those, the ones declaring NO upstream-asserted pattern at all —
+    /// where upstream asserts no message for the case, only `assert_one_fails`
+    /// on a `// FAILS` line, so the port re-declares an upstream REFUTATION as
+    /// a diagnostic case and leaves the one bucket that reads upstream.
+    error_cases_with_no_upstream_asserted_pattern: usize,
+    error_cases_unreadable_upstream_case: usize,
+    error_patterns: usize,
+    error_patterns_upstream_asserted: usize,
+}
+
+impl UpstreamReadMeasurement {
+    /// Scope minus what the rule cannot decide at all.
+    fn counterexample_established(&self) -> usize {
+        self.counterexample_scope
+            .saturating_sub(self.counterexample_refused_uncheckable)
+            .saturating_sub(self.counterexample_unreadable_upstream_case)
+    }
+}
+
+/// The double-quoted string literals of one upstream case region.
+///
+/// Lexical and deliberately crude — upstream's `assert_vir_error_msg(err,
+/// "..")` messages are single-line literals — and it is only ever used to tell
+/// a pattern that upstream ASSERTS from one the port authored. A missed literal
+/// counts a pattern as port-authored, which understates upstream provenance
+/// rather than overstating it.
+fn upstream_asserted_string_literals(region: &[&str]) -> Vec<String> {
+    region
+        .join("\n")
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn measure_upstream_read_establishment(
+    entries: &[VerusManifestEntry],
+    verus_path: &Path,
+) -> UpstreamReadMeasurement {
+    let mut measured = UpstreamReadMeasurement::default();
+    for entry in entries {
+        if !requires_trust_vc_paths(&entry.classification) {
+            continue;
+        }
+        let marked = upstream_fails_marked_lines_by_case(Some(verus_path), &entry.upstream_path);
+        let source = fs::read_to_string(verus_path.join(&entry.upstream_path)).unwrap_or_default();
+        let lines: Vec<&str> = source.lines().collect();
+        let regions = upstream_case_regions(&lines);
+        // LAYER 1's reader is the AST one, and it is NOT the line-based region
+        // reader Layer 2 uses: `upstream_verus_harness_cases` parses the file
+        // with `syn`, so it sees a hand-written `#[test]` above `fn name()`
+        // that `upstream_case_regions` cannot. Measuring both here is what
+        // keeps the bound from describing one reader's blindness as the gate's.
+        let upstream_cases = upstream_verus_harness_cases(Some(verus_path), &entry.upstream_path)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if upstream_file_read_by_macro_extractor(&entry.upstream_path) {
+            measured.ast_reader_upstream_cases += upstream_cases.len();
+            measured.region_reader_invisible_upstream_cases += upstream_cases
+                .iter()
+                .filter(|case| !regions.iter().any(|(name, _)| *name == case.case_id))
+                .count();
+        }
+        for upstream_case in &upstream_cases {
+            if upstream_case.ignored {
+                continue;
+            }
+            measured.layer1_mapped_upstream_cases += 1;
+            if upstream_case.expected_verdict == VerusExpectedVerdict::Counterexample {
+                measured.layer1_exact_occurrence_cases += 1;
+            } else {
+                measured.layer1_at_least_occurrence_cases += 1;
+            }
+            if !upstream_case.warning_patterns.is_empty() {
+                measured.layer1_warning_asserting_cases += 1;
+            }
+            if !upstream_case.forbidden_diagnostic_patterns.is_empty() {
+                measured.layer1_forbidden_pattern_asserting_cases += 1;
+                measured.layer1_forbidden_patterns_required +=
+                    upstream_case.forbidden_diagnostic_patterns.len();
+            }
+        }
+        for expected_case in &entry.expected_cases {
+            let upstream_case = upstream_case_id(expected_case);
+            let layer1_case = upstream_cases
+                .iter()
+                .find(|case| case.case_id == upstream_case && !case.ignored);
+            match layer1_case {
+                Some(_) => measured.layer1_scope += 1,
+                None => measured.layer1_unresolved_upstream_case += 1,
+            }
+            if let Some(case) = layer1_case {
+                if case.rust_error {
+                    measured.layer1_rust_error_cases += 1;
+                }
+                if expected_case.expected_verdict == VerusExpectedVerdict::Verified
+                    && case.expected_verdict == VerusExpectedVerdict::Counterexample
+                {
+                    measured.layer1_verified_cases_on_exact_count_upstream += 1;
+                }
+                if expected_case.expected_verdict == VerusExpectedVerdict::Verified
+                    && !case.warning_patterns.is_empty()
+                {
+                    measured.layer1_verified_cases_with_upstream_warning += 1;
+                }
+                if expected_case.expected_verdict == VerusExpectedVerdict::Error
+                    && case.error_patterns.is_empty()
+                    && (!case.warning_patterns.is_empty()
+                        || !case.forbidden_diagnostic_patterns.is_empty()
+                        || case.rust_error)
+                {
+                    measured.error_cases_without_message_in_other_narrow_check += 1;
+                }
+            }
+            if expected_case.expected_verdict == VerusExpectedVerdict::Error {
+                if !expected_case.expected_error_patterns.is_empty() {
+                    measured.error_cases_with_declared_patterns += 1;
+                }
+                if let Some(case) = layer1_case {
+                    if !case.error_patterns.is_empty() {
+                        measured.error_cases_with_upstream_asserted_message += 1;
+                        measured.upstream_asserted_error_patterns_required +=
+                            case.error_patterns.len();
+                    }
+                }
+            }
+            match expected_case.expected_verdict {
+                VerusExpectedVerdict::Counterexample => {
+                    measured.counterexample_scope += 1;
+                    match marked.get(upstream_case).filter(|marks| !marks.is_empty()) {
+                        None => measured.counterexample_unreadable_upstream_case += 1,
+                        Some(marks) => {
+                            let empty_window = marks
+                                .iter()
+                                .all(|mark| mark.bindings.is_empty() && mark.statements.is_empty());
+                            // The refused class is now only the shape where
+                            // UPSTREAM has no body to read at all. A header mark
+                            // over a body draws that body as its window, so it is
+                            // CHECKED — with an empty window when the body is
+                            // empty, which is a fact about upstream's program the
+                            // port's statement set must reproduce.
+                            if marks.iter().all(|mark| mark.window_undrawable) {
+                                measured.counterexample_refused_uncheckable += 1;
+                            } else if empty_window {
+                                measured.counterexample_empty_upstream_window += 1;
+                                if marks.iter().all(|mark| mark.definitions.is_empty()) {
+                                    measured.counterexample_empty_window_and_no_definitions += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                VerusExpectedVerdict::Error => {
+                    measured.error_scope += 1;
+                    measured.error_patterns += expected_case.expected_error_patterns.len();
+                    let Some((_, region)) = regions.iter().find(|(name, _)| name == upstream_case)
+                    else {
+                        measured.error_cases_unreadable_upstream_case += 1;
+                        continue;
+                    };
+                    let literals = upstream_asserted_string_literals(region);
+                    let mut every_pattern_is_upstream_text = true;
+                    let mut any_pattern_is_upstream_text = false;
+                    for pattern in &expected_case.expected_error_patterns {
+                        if literals.iter().any(|literal| literal.contains(pattern)) {
+                            measured.error_patterns_upstream_asserted += 1;
+                            any_pattern_is_upstream_text = true;
+                        } else {
+                            every_pattern_is_upstream_text = false;
+                        }
+                    }
+                    if every_pattern_is_upstream_text {
+                        measured.error_cases_upstream_asserted_patterns += 1;
+                    } else {
+                        measured.error_cases_port_authored_patterns += 1;
+                        if !any_pattern_is_upstream_text {
+                            measured.error_cases_with_no_upstream_asserted_pattern += 1;
+                        }
+                    }
+                }
+                VerusExpectedVerdict::Verified | VerusExpectedVerdict::VerifiedBlocker => {}
+            }
+        }
+    }
+    measured
+}
+
 fn verus_replacement_summary(entries: &[VerusManifestEntry]) -> VerusReplacementSummary {
     let mut summary = VerusReplacementSummary {
         total_entries: entries.len(),
@@ -10694,6 +16247,30 @@ fn verus_replacement_summary(entries: &[VerusManifestEntry]) -> VerusReplacement
             summary.accepted_executable_entries += 1;
             summary.accepted_trust_vc_path_count += entry.trust_vc_paths.len();
             summary.accepted_expected_case_count += entry.expected_cases.len();
+            for expected_case in &entry.expected_cases {
+                match expected_case.expected_verdict {
+                    VerusExpectedVerdict::Counterexample => {
+                        summary.accepted_expected_cases_counterexample += 1;
+                    }
+                    // `verified-blocker` is never valid as accepted evidence,
+                    // but if one ever reaches an accepted entry it is pinned by
+                    // no more than a `verified` case is, so it counts in the
+                    // weak bucket rather than vanishing from the split.
+                    VerusExpectedVerdict::Verified | VerusExpectedVerdict::VerifiedBlocker => {
+                        summary.accepted_expected_cases_verified += 1;
+                        // Not an author's pin: for these entries the schema
+                        // REQUIRES `verified` with `min_obligations: 0` and no
+                        // fingerprints, so the count that clause (2) of the
+                        // bound calls a pin was written by the schema.
+                        if entry.evidence_kind == VerusEvidenceKind::CargoTrustVcIntegrationTest {
+                            summary.accepted_expected_cases_verified_schema_fixed += 1;
+                        }
+                    }
+                    VerusExpectedVerdict::Error => {
+                        summary.accepted_expected_cases_error += 1;
+                    }
+                }
+            }
             if !entry.known_gaps.is_empty() {
                 summary.accepted_known_gap_entries += 1;
             }
@@ -10844,6 +16421,35 @@ struct UpstreamVerusHarnessCase {
     /// must declare each of them, so an upstream warning assertion can never be
     /// silently dropped by a port.
     warning_patterns: Vec<String>,
+    /// How many FUNCTIONS upstream's own program declares at the top level of
+    /// this case's `verus_code! { .. }` block.
+    ///
+    /// An upstream case is ONE program, and upstream routinely writes several
+    /// functions into it — `multiset_basics` is six proof fns. The corpus
+    /// convention is one port function per upstream function, all sharing the
+    /// `upstream_case_id`, so this is the CEILING on how far a port may split
+    /// one upstream case: a split wider than upstream's own program is a port
+    /// inventing cases, not reproducing them. Read from the pinned checkout,
+    /// never declared.
+    ///
+    /// `0` means the reader could not see a program block for this case (the
+    /// cargo-fixture and `cargo-verus` extractors mint cases with no Verus
+    /// program at all), and the ceiling is then not applied.
+    program_function_count: usize,
+}
+
+/// Whether the AST extractor reads this upstream file as `rust_verify_test`
+/// MACRO corpus — the only shape `upstream_case_regions` was ever written for.
+///
+/// The other two shapes (cargo fixture directories, `cargo-verus` integration
+/// tests) are enumerated by extractors of their own and have no case region at
+/// all, so counting them as "region-reader blind spots" would inflate a real
+/// but small limitation into a corpus-wide one. One predicate, consulted by the
+/// dispatch below and by `measure_upstream_read_establishment`, so the two
+/// cannot disagree about which files the region reader is even applicable to.
+fn upstream_file_read_by_macro_extractor(upstream_path: &str) -> bool {
+    !upstream_case_extraction_bypassed(upstream_path)
+        && !upstream_path.starts_with(&format!("{VERUS_CARGO_VERUS_TEST_ROOT}/"))
 }
 
 fn upstream_verus_harness_cases(
@@ -10853,10 +16459,10 @@ fn upstream_verus_harness_cases(
     let Some(verus_path) = verus_path else {
         return Ok(None);
     };
-    if upstream_case_extraction_bypassed(upstream_path) {
-        return upstream_cargo_fixture_cases(verus_path, upstream_path).map(Some);
-    }
-    if upstream_path.starts_with(&format!("{VERUS_CARGO_VERUS_TEST_ROOT}/")) {
+    if !upstream_file_read_by_macro_extractor(upstream_path) {
+        if upstream_case_extraction_bypassed(upstream_path) {
+            return upstream_cargo_fixture_cases(verus_path, upstream_path).map(Some);
+        }
         return upstream_cargo_verus_integration_test_cases(verus_path, upstream_path).map(Some);
     }
     let source_path = verus_path.join(upstream_path);
@@ -10936,6 +16542,10 @@ fn upstream_cargo_verus_integration_test_cases(
             forbidden_diagnostic_patterns: Vec::new(),
             expected_occurrences: 1,
             warning_patterns: Vec::new(),
+            // A `cargo-verus` integration test is a CLI-behaviour case with no
+            // Verus program block at all, so there is no program shape to read
+            // and the split ceiling does not apply.
+            program_function_count: 0,
         })
         .collect())
 }
@@ -11055,6 +16665,10 @@ fn upstream_cargo_fixture_cases(
         forbidden_diagnostic_patterns: Vec::new(),
         expected_occurrences: 1,
         warning_patterns: Vec::new(),
+        // A cargo fixture is a whole crate, not a `verus_code!` block, so it
+        // has no program-block shape to read and the split ceiling does not
+        // apply.
+        program_function_count: 0,
     }])
 }
 
@@ -11375,6 +16989,9 @@ fn cargo_wrapper_explicit_harness_case(
         forbidden_diagnostic_patterns: Vec::new(),
         expected_occurrences: 1,
         warning_patterns: Vec::new(),
+        program_function_count: verus_program_block(func.block.to_token_stream())
+            .map(|program| program_function_count(program.stream()))
+            .unwrap_or_default(),
     }))
 }
 
@@ -11432,6 +17049,8 @@ fn cargo_examples_harness_cases(
             forbidden_diagnostic_patterns: Vec::new(),
             expected_occurrences: 1,
             warning_patterns: Vec::new(),
+            // A cargo EXAMPLE is a crate on disk, not a `verus_code!` block.
+            program_function_count: 0,
         });
     }
     Ok(cases)
@@ -11503,6 +17122,11 @@ struct PendingVerusHarnessCase {
     case_id: String,
     ignored: bool,
     no_cheating: bool,
+    /// Top-level `fn` count of the last PROGRAM block seen before this case's
+    /// verdict arrow — the `verus_code! { .. }` body in both spellings of the
+    /// macro form (`name verus_code! { .. } =>` and the options form's `name
+    /// [..] => verus_code! { .. } =>`).
+    program_function_count: usize,
 }
 
 fn verus_harness_cases_from_tokens(
@@ -11540,6 +17164,7 @@ fn verus_harness_cases_from_tokens(
                     case_id: ident.to_string(),
                     ignored: saw_ignore_attr,
                     no_cheating: false,
+                    program_function_count: 0,
                 });
                 saw_test_attr = false;
                 saw_ignore_attr = false;
@@ -11553,6 +17178,13 @@ fn verus_harness_cases_from_tokens(
                         .any(|option| option == "--no-cheating")
                 {
                     case.no_cheating = true;
+                }
+                // The PROGRAM block. Both macro spellings put it between the
+                // case name and the verdict arrow this loop stops on, so the
+                // last brace group seen while a case is pending is upstream's
+                // own `verus_code! { .. }` body.
+                if group.delimiter() == Delimiter::Brace {
+                    case.program_function_count = program_function_count(group.stream());
                 }
             }
             if token_is_fat_arrow(&tokens, index) {
@@ -11579,6 +17211,7 @@ fn verus_harness_cases_from_tokens(
                             forbidden_diagnostic_patterns,
                             expected_occurrences,
                             warning_patterns,
+                            program_function_count: case.program_function_count,
                         });
                         pending_case = None;
                         index += 2;
@@ -13362,6 +18995,7 @@ mod tests {
         min_obligations: usize,
     ) -> VerusExpectedCase {
         VerusExpectedCase {
+            obligation_decrease_waiver: None,
             case_id: case_id.to_string(),
             upstream_case_id: None,
             trust_vc_path: None,
@@ -13541,8 +19175,27 @@ pub const FOO_RS_EXPECTED_CASES: &[FooExpectedCase] = &[
             passed_paths,
             failed_paths,
             skipped_entries,
+            unscheduled_paths: Vec::new(),
             results: Vec::new(),
         }
+    }
+
+    /// A declared port the run never scheduled is a SHORT DENOMINATOR, not a
+    /// clean run: the attempted/passed counts agree and the gate still fails.
+    #[test]
+    fn trust_vc_corpus_gate_rejects_an_unscheduled_declared_path() {
+        let mut report = corpus_run_report(1, 1, 0, 0);
+        assert!(report.passed(), "the control must be clean");
+
+        report.unscheduled_paths.push(UnscheduledTrustVcPath {
+            upstream_path: "source/rust_verify_test/tests/maps.rs".to_string(),
+            classification: "ported".to_string(),
+            trust_vc_path: "evals/verus/ported/maps.rs".to_string(),
+            reasons: vec!["stale trust_vc_source_hashes pin".to_string()],
+        });
+
+        assert!(!report.passed());
+        assert_eq!(trust_vc_corpus_gate(&report).status, GateStatus::Failed);
     }
 
     #[test]
@@ -13683,7 +19336,29 @@ pub const FOO_RS_EXPECTED_CASES: &[FooExpectedCase] = &[
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-case "$1" in
+# The evidence gate prefixes compile invocations with the per-unit Trust
+# verification scope (`-Zprofile-rustflags --config profile.…`), so the
+# subcommand is the first argument that is not a `-Z`/`--config` entry.
+subcommand=""
+skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = "1" ]; then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    --config)
+      skip_next=1
+      ;;
+    -Z*)
+      ;;
+    *)
+      subcommand="$arg"
+      break
+      ;;
+  esac
+done
+case "$subcommand" in
   fetch|check|test|generate-lockfile)
     exit 0
     ;;
@@ -13699,12 +19374,14 @@ esac
         let trust_vc_path = "evals/verus/ported/adts.rs";
         let case_id = "struct_update_copies_omitted_fields";
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: format!("{VERUS_TEST_ROOT}/synthetic.rs"),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec![trust_vc_path.to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: case_id.to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -13751,10 +19428,16 @@ esac
 
         let child_exe = copy_current_test_binary_under_repo_target(&crate_root);
         let output_dir = temp_dir.join("evidence-output");
+        // The fake Verus needs no stock toolchain, so rustup answers "installed".
+        let fake_rustup = temp_dir.join("fake-rustup/rustup");
+        fs::create_dir_all(temp_dir.join("fake-rustup"))
+            .expect("fake rustup dir should be created");
+        write_fake_rustup(&fake_rustup, &temp_dir.join("fake-rustup/log"), 0);
         let mut command = std::process::Command::new(&child_exe);
         command
             .arg("replacement_evidence_synthetic_success_child")
             .arg("--nocapture")
+            .env(TEST_VERUS_ORACLE_RUSTUP_ENV, &fake_rustup)
             .env(SYNTHETIC_PROVEN_CHILD_ENV, "1")
             .env(SYNTHETIC_PROVEN_CRATE_ROOT_ENV, &crate_root)
             .env(SYNTHETIC_PROVEN_VERUS_ROOT_ENV, &verus_root)
@@ -13813,6 +19496,7 @@ esac
             port_manifest_only: false,
             update_verus_tests_manifest: false,
             refresh_trust_vc_corpus_evidence: false,
+            repin_obligation_rendering_drift: Vec::new(),
             corpus_triage_report: false,
             scaffold_verus_port_stubs: false,
             verus_command: None,
@@ -13919,6 +19603,11 @@ export PATH="$activate_dir:$PATH"
         )
         .expect("synthetic activate script should be written");
         write_executable(&verus_root.join("fake-bin/vargo"), "#!/bin/sh\nexit 0\n");
+        fs::write(
+            verus_root.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = \"{VERUS_ORACLE_TOOLCHAIN}\"\n"),
+        )
+        .expect("synthetic Verus toolchain pin should be written");
         init_git_repo(verus_root);
         git_commit_all(verus_root, "synthetic Verus replacement corpus")
     }
@@ -13966,6 +19655,7 @@ export PATH="$activate_dir:$PATH"
             "schema_version": 2,
             "manifest_id": "upstream-verus-corpus",
             "description": "Synthetic proven replacement evidence corpus.",
+            "correspondence_bound": ACCEPTED_CASE_CORRESPONDENCE_BOUND,
             "upstream": {
                 "repo": VERUS_REPO_URL,
                 "ref": verus_ref,
@@ -14191,6 +19881,8 @@ type OT = impl FunctionsOpaqueFoo;
 
     fn corpus_for_typecheck(candidate: TrustVcCorpusRunCandidate) -> VerusCorpusReport {
         VerusCorpusReport {
+            accepted_case_correspondence_bound: String::new(),
+            proof_content_decrease_waivers: Vec::new(),
             manifest_path: PathBuf::from("verus-tests.json"),
             manifest_schema_version: 1,
             upstream_repo: None,
@@ -14214,6 +19906,7 @@ type OT = impl FunctionsOpaqueFoo;
             accepted_executable_ports: Vec::new(),
             unsupported_gap_evidence: Vec::new(),
             accepted_trust_vc_source_hashes: Vec::new(),
+            unscheduled_ported_paths: Vec::new(),
             run_candidates: vec![candidate],
         }
     }
@@ -14221,6 +19914,7 @@ type OT = impl FunctionsOpaqueFoo;
     #[test]
     fn corpus_manifest_gate_detail_names_actionable_blockers() {
         let mut corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
@@ -14264,6 +19958,7 @@ type OT = impl FunctionsOpaqueFoo;
     #[test]
     fn canonical_manifest_schema_blocker_rejects_schema_v1_for_replacement() {
         let mut corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
@@ -14352,8 +20047,28 @@ fn identity() {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-cmd="$1"
+# `$1` is the per-unit Trust verification scope since 2026-09-16, so recover
+# the subcommand by skipping `-Z…` flags and `--config <value>` pairs.
+cmd=""
 manifest=""
+skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = "1" ]; then
+    skip_next=0
+    continue
+  fi
+  case "$arg" in
+    --config)
+      skip_next=1
+      ;;
+    -Z*)
+      ;;
+    *)
+      cmd="$arg"
+      break
+      ;;
+  esac
+done
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--manifest-path" ]; then
     shift
@@ -14377,12 +20092,14 @@ exit 0
 "#,
         );
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/foo.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "identity".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -14445,12 +20162,14 @@ exit 88
 "#,
         );
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/fixture".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "ok".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -15021,41 +20740,40 @@ ay-sys = { git = "https://github.com/alabsystems/ay", rev = "abc123" }
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn current_git_rev_and_patch_checkout_non_vacuously_agree() {
-        // This repository cannot resolve its committed dependency graph without
-        // the committed sibling patch, so a passing workspace test necessarily
-        // has an available sibling. Assert the REAL checkout composition rather
-        // than returning early merely because Cargo.toml carries Git revs (the
-        // old test did exactly that and therefore never exercised this lane).
+    fn current_git_rev_and_locked_sources_non_vacuously_agree() {
         let repo_root = cargo_trust_vc_repo_root();
         let provenance = collect_ay_manifest_provenance(&repo_root);
+        assert_eq!(provenance.source_model, AYSourceModel::GitRev);
+        assert!(provenance.sibling_identity.is_none());
+        let pin = provenance
+            .pinned_rev
+            .as_deref()
+            .expect("current checkout must declare one immutable AY revision");
+        assert!(REQUIRED_AY_CRATES.iter().all(|crate_name| {
+            provenance
+                .pinned_revs
+                .get(*crate_name)
+                .and_then(|rev| rev.as_deref())
+                == Some(pin)
+                && provenance
+                    .pinned_sources
+                    .get(*crate_name)
+                    .and_then(|source| source.as_deref())
+                    .is_some_and(ay_remote_url_matches)
+        }));
+        assert!(!active_local_ay_patch_detected(&repo_root, None, None));
+        let lock_sources = parse_ay_lock_sources(&repo_root.join("Cargo.lock"));
+        assert!(!lock_sources.is_empty());
+        assert!(lock_sources.iter().all(|entry| entry.source.is_some()));
         assert_eq!(
-            provenance.source_model,
-            AYSourceModel::GitRevWithVerifiedSiblingPath,
-            "the committed Git rev and active sibling patch must both be represented"
+            ay_lock_provenance_gate(&provenance, &lock_sources).status,
+            GateStatus::Passed,
+            "every locked AY source must retain the canonical manifest authority"
         );
-        let identity = provenance
-            .sibling_identity
-            .as_ref()
-            .expect("current checkout must record the compiled sibling identity");
-        assert!(identity.worktree_clean);
-        assert!(ay_remote_url_matches(&identity.origin_url));
         assert_eq!(
-            provenance.pinned_rev.as_deref(),
-            Some(identity.head.as_str())
-        );
-
-        assert!(!active_local_ay_patch_detected(
-            &repo_root,
-            None,
-            Some(identity.repo_root.as_path())
-        ));
-        assert_eq!(
-            ay_latest_private_main_gate_passes(&provenance, Some(&identity.head), false),
-            Some(true),
-            "current checkout must pass only because manifest, public expectation, and sibling agree"
+            ay_latest_private_main_gate_passes(&provenance, None, false),
+            None
         );
     }
 
@@ -15280,6 +20998,7 @@ source = "git+https://github.com/alabsystems/ay?rev=abc123#abc123"
         assert_eq!(init.exit_code, Some(0), "git init failed: {init:?}");
 
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/basic/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -15287,6 +21006,7 @@ source = "git+https://github.com/alabsystems/ay?rev=abc123#abc123"
             trust_vc_paths: vec!["ported/fixture".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "fixture_ok".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -15386,6 +21106,7 @@ source = "git+https://github.com/alabsystems/ay?rev=abc123#abc123"
         assert_eq!(add.exit_code, Some(0), "git add failed: {add:?}");
 
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/basic/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -15393,6 +21114,7 @@ source = "git+https://github.com/alabsystems/ay?rev=abc123#abc123"
             trust_vc_paths: vec!["ported/fixture".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "fixture_ok".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -16725,9 +22447,11 @@ entries:
         let manifest_path = crate_root.join("evals/verus/verus-tests.json");
         fs::write(
             &manifest_path,
-            minimal_valid_json_manifest()
-                .replace("\"schema_version\": 1", "\"schema_version\": 2")
-                .replace("\"abc123\"", &format!("\"{upstream_ref}\"")),
+            stamp_correspondence_bound(
+                &minimal_valid_json_manifest()
+                    .replace("\"schema_version\": 1", "\"schema_version\": 2")
+                    .replace("\"abc123\"", &format!("\"{upstream_ref}\"")),
+            ),
         )
         .expect("manifest should be written");
 
@@ -16758,6 +22482,7 @@ entries:
         let fingerprint =
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         let expected_case = VerusExpectedCase {
+            obligation_decrease_waiver: None,
             case_id: "same_name".to_string(),
             upstream_case_id: None,
             trust_vc_path: Some("ported/right.rs".to_string()),
@@ -16795,6 +22520,7 @@ entries:
     #[test]
     fn corpus_manifest_requires_pins_for_positive_error_obligations() {
         let expected_case = VerusExpectedCase {
+            obligation_decrease_waiver: None,
             case_id: "same_name".to_string(),
             upstream_case_id: None,
             trust_vc_path: Some("ported/right.rs".to_string()),
@@ -17069,10 +22795,16 @@ fn identity(x: i32) -> i32 {
         let stale_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let stale_fingerprint =
             "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        // The stale pin's COUNT matches what the run observes; only the
+        // fingerprint IDENTITY is stale. That is the shape the refresh exists
+        // for — an encoder change rehashes the same obligations — and it is
+        // deliberately not the shape the proof-content ratchet refuses. The
+        // refusing shape is pinned by
+        // `refresh_trust_vc_corpus_evidence_refuses_a_downward_repin`.
         let manifest_path = temp_dir.join("verus-tests.json");
         fs::write(
             &manifest_path,
-            format!(
+            stamp_correspondence_bound(&format!(
                 r##"{{
   "schema_version": 2,
   "manifest_id": "upstream-verus-corpus",
@@ -17104,14 +22836,14 @@ fn identity(x: i32) -> i32 {
         {{
           "case_id": "identity",
           "expected_verdict": "verified",
-          "min_obligations": 9,
+          "min_obligations": 1,
           "obligation_fingerprints": ["{stale_fingerprint}"]
         }}
       ]
     }}
   ]
 }}"##
-            ),
+            )),
         )
         .expect("manifest should be written");
 
@@ -17164,6 +22896,361 @@ fn identity(x: i32) -> i32 {
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
+    /// A fingerprint is `sha256(obligation.condition())`, so an engine change
+    /// that alters only the SPELLING of a condition turns every pin over it red
+    /// while `--refresh-trust-vc-corpus-evidence` — which demands a PASSING run
+    /// — can never be reached, because those same pins are what fails the run.
+    /// (Measured: `7d300d66` moved three `assert_forall_by.rs` pins that way and
+    /// they sat red for two months.) This mode breaks that circle, and these
+    /// tests pin what it will and will not do.
+    fn write_repin_manifest(
+        manifest_path: &Path,
+        source_hash: &str,
+        min_obligations: usize,
+        fingerprints: &[String],
+    ) {
+        let pins = fingerprints
+            .iter()
+            .map(|fingerprint| format!("\"{fingerprint}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            manifest_path,
+            stamp_correspondence_bound(&format!(
+                r##"{{
+  "schema_version": 2,
+  "manifest_id": "upstream-verus-corpus",
+  "description": "Test manifest.",
+  "upstream": {{
+    "repo": "https://github.com/verus-lang/verus",
+    "ref": "abc123",
+    "test_roots": ["source/rust_verify_test/tests"]
+  }},
+  "gate": {{
+    "missing_entry": "fail",
+    "failing_classifications": ["unclassified", "unsupported-gap"]
+  }},
+  "entries": [
+    {{
+      "upstream_path": "source/rust_verify_test/tests/foo.rs",
+      "classification": "ported",
+      "owner_issue": "#123",
+      "reason": "Ported for TrustVc.",
+      "trust_vc_paths": ["ported/foo.rs"],
+      "trust_vc_source_hashes": [
+        {{
+          "path": "ported/foo.rs",
+          "kind": "file",
+          "sha256": "{source_hash}"
+        }}
+      ],
+      "expected_cases": [
+        {{
+          "case_id": "identity",
+          "expected_verdict": "verified",
+          "min_obligations": {min_obligations},
+          "obligation_fingerprints": [{pins}]
+        }}
+      ]
+    }}
+  ]
+}}"##
+            )),
+        )
+        .expect("manifest should be written");
+    }
+
+    /// Builds a one-entry corpus whose port VERIFIES, and returns the
+    /// fingerprints the run actually observes for it.
+    fn repin_fixture(label: &str) -> (PathBuf, PathBuf, String, Vec<String>) {
+        let temp_dir = unique_temp_dir(label);
+        let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
+        fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
+        fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
+        fs::write(upstream_tests.join("foo.rs"), "").expect("upstream test should be written");
+        let trust_vc_path = temp_dir.join("ported/foo.rs");
+        fs::write(
+            &trust_vc_path,
+            r#"
+#[ensures(result == x)]
+fn identity(x: i32) -> i32 {
+    x
+}
+"#,
+        )
+        .expect("ported source should be written");
+        let source_hash =
+            source_file_sha256(&trust_vc_path).expect("ported source hash should be computed");
+        let manifest_path = temp_dir.join("verus-tests.json");
+        // PROBE pass: schema v2 refuses an accepted case with `min_obligations`
+        // and no pins at all, so the probe carries one placeholder pin and is
+        // loaded in refresh mode, where a mismatch does not stop the run. The
+        // point is only to learn the conditions THIS engine renders; the
+        // callers below turn those into the stale / matching shapes they need.
+        let placeholder = format!("sha256:{:064x}", 0xfeed_u32);
+        write_repin_manifest(&manifest_path, &source_hash, 1, &[placeholder]);
+        let corpus = load_corpus_report_with_options(
+            &manifest_path,
+            &temp_dir,
+            Some(&temp_dir),
+            CorpusLoadOptions {
+                refresh_evidence_pins: true,
+            },
+        )
+        .expect("corpus report should load in probe mode");
+        let run_report = run_trust_vc_corpus(&temp_dir, &corpus, None);
+        assert_eq!(
+            run_report.results.len(),
+            1,
+            "fixture should schedule exactly one port path, got {run_report:?}"
+        );
+        let mut observed = run_report.results[0].observed_cases[0]
+            .obligation_fingerprints
+            .clone();
+        observed.sort();
+        observed.dedup();
+        assert!(!observed.is_empty(), "fixture should observe obligations");
+        (temp_dir, manifest_path, source_hash, observed)
+    }
+
+    fn repin_run_report(temp_dir: &Path, manifest_path: &Path) -> TrustVcCorpusRunReport {
+        let corpus = load_corpus_report(manifest_path, temp_dir, Some(temp_dir))
+            .expect("corpus report should load");
+        run_trust_vc_corpus(temp_dir, &corpus, None)
+    }
+
+    #[test]
+    fn repin_obligation_rendering_drift_rewrites_only_the_stale_fingerprints() {
+        let (temp_dir, manifest_path, source_hash, observed) =
+            repin_fixture("trust-vc-evidence-repin-ok");
+        // Same CARDINALITY, different identity: exactly the shape a rendering
+        // change produces.
+        let stale = observed
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("sha256:{:064x}", index + 1))
+            .collect::<Vec<_>>();
+        write_repin_manifest(&manifest_path, &source_hash, 1, &stale);
+        let run_report = repin_run_report(&temp_dir, &manifest_path);
+        assert_eq!(run_report.failed_paths, 1, "stale pins must fail the run");
+
+        let summary = repin_obligation_rendering_drift_manifest(
+            &manifest_path,
+            &manifest_path,
+            &["source/rust_verify_test/tests/foo.rs".to_string()],
+            Some(&run_report),
+        )
+        .expect("a fingerprint-only drift should re-pin");
+        assert_eq!(summary.entries, 1);
+        assert_eq!(summary.cases, 1);
+
+        let json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("manifest should be readable"),
+        )
+        .expect("re-pinned manifest should parse");
+        let case = &json["entries"][0]["expected_cases"][0];
+        let pinned = case["obligation_fingerprints"]
+            .as_array()
+            .expect("fingerprints should be an array")
+            .iter()
+            .map(|value| value.as_str().expect("fingerprint should be a string"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pinned,
+            observed.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        // The obligation FLOOR is never touched by a re-pin — only the identity
+        // of the conditions it already committed to.
+        assert_eq!(case["min_obligations"].as_u64(), Some(1));
+        assert_eq!(case["expected_verdict"].as_str(), Some("verified"));
+
+        assert!(
+            repin_run_report(&temp_dir, &manifest_path).passed(),
+            "the run must be green once the rendering drift is re-pinned"
+        );
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn repin_obligation_rendering_drift_refuses_a_run_that_already_passes() {
+        let (temp_dir, manifest_path, source_hash, observed) =
+            repin_fixture("trust-vc-evidence-repin-green");
+        write_repin_manifest(&manifest_path, &source_hash, 1, &observed);
+        let run_report = repin_run_report(&temp_dir, &manifest_path);
+        assert!(run_report.passed());
+        let error = repin_obligation_rendering_drift_manifest(
+            &manifest_path,
+            &manifest_path,
+            &["source/rust_verify_test/tests/foo.rs".to_string()],
+            Some(&run_report),
+        )
+        .expect_err("a passing run has no drift to re-pin");
+        assert!(
+            error.to_string().contains("no fingerprint drift to re-pin"),
+            "unexpected refusal: {error}"
+        );
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    /// The refusal that keeps this mode from becoming a way to make a red case
+    /// green: it clears FINGERPRINT drift and nothing else, so a run that fails
+    /// for any other reason — here an obligation FLOOR the port no longer
+    /// clears — is refused before a single pin moves.
+    ///
+    /// (The sibling cardinality guard inside the mode is defence in depth:
+    /// schema v2 already requires `min_obligations` to EQUAL the pinned
+    /// fingerprint count, so a manifest cannot declare a different count in the
+    /// first place. Keeping the check means a future schema relaxation cannot
+    /// quietly turn a changed obligation SET into a re-rendering.)
+    #[test]
+    fn repin_obligation_rendering_drift_refuses_a_non_fingerprint_failure() {
+        let (temp_dir, manifest_path, source_hash, observed) =
+            repin_fixture("trust-vc-evidence-repin-floor");
+        // One obligation MORE than the port raises: the run fails the floor,
+        // not the fingerprints.
+        let floor = observed.len() + 1;
+        let stale = (0..floor)
+            .map(|index| format!("sha256:{:064x}", index + 1))
+            .collect::<Vec<_>>();
+        write_repin_manifest(&manifest_path, &source_hash, floor, &stale);
+        let run_report = repin_run_report(&temp_dir, &manifest_path);
+        assert_eq!(run_report.failed_paths, 1);
+        let error = repin_obligation_rendering_drift_manifest(
+            &manifest_path,
+            &manifest_path,
+            &["source/rust_verify_test/tests/foo.rs".to_string()],
+            Some(&run_report),
+        )
+        .expect_err("a failure that is not fingerprint drift must not be re-pinned");
+        assert!(
+            error
+                .to_string()
+                .contains("not an obligation-fingerprint mismatch"),
+            "unexpected refusal: {error}"
+        );
+        let json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("manifest should be readable"),
+        )
+        .expect("manifest should parse");
+        assert_eq!(
+            json["entries"][0]["expected_cases"][0]["obligation_fingerprints"]
+                .as_array()
+                .expect("fingerprints should be an array")
+                .len(),
+            stale.len(),
+            "a refused re-pin must leave the manifest untouched"
+        );
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    /// THE PROOF-CONTENT RATCHET, at the lever that was actually measured:
+    /// `--refresh-trust-vc-corpus-evidence` wrote whatever the run observed, so
+    /// a port that DELETED proof content re-pinned itself to the smaller number
+    /// and the gate accepted it (`scope.rs::test4_fails`, 6 obligations -> 2).
+    /// The refresh now refuses, and refuses before writing anything.
+    #[test]
+    fn refresh_trust_vc_corpus_evidence_refuses_a_downward_repin() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-refresh-downward");
+        let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
+        fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
+        fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
+        fs::write(upstream_tests.join("foo.rs"), "").expect("upstream test should be written");
+        fs::write(
+            temp_dir.join("ported/foo.rs"),
+            r#"
+#[ensures(result == x)]
+fn identity(x: i32) -> i32 {
+    x
+}
+"#,
+        )
+        .expect("ported source should be written");
+        let manifest_path = temp_dir.join("verus-tests.json");
+        let manifest_text = stamp_correspondence_bound(
+            r##"{
+  "schema_version": 2,
+  "manifest_id": "upstream-verus-corpus",
+  "description": "Test manifest.",
+  "upstream": {
+    "repo": "https://github.com/verus-lang/verus",
+    "ref": "abc123",
+    "test_roots": ["source/rust_verify_test/tests"]
+  },
+  "gate": {
+    "missing_entry": "fail",
+    "failing_classifications": ["unclassified", "unsupported-gap"]
+  },
+  "entries": [
+    {
+      "upstream_path": "source/rust_verify_test/tests/foo.rs",
+      "classification": "ported",
+      "owner_issue": "#123",
+      "reason": "Ported for TrustVc.",
+      "trust_vc_paths": ["ported/foo.rs"],
+      "trust_vc_source_hashes": [
+        {
+          "path": "ported/foo.rs",
+          "kind": "file",
+          "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "expected_cases": [
+        {
+          "case_id": "identity",
+          "expected_verdict": "verified",
+          "min_obligations": 9,
+          "obligation_fingerprints": [
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+          ]
+        }
+      ]
+    }
+  ]
+}"##,
+        );
+        fs::write(&manifest_path, &manifest_text).expect("manifest should be written");
+
+        let corpus = load_corpus_report_with_options(
+            &manifest_path,
+            &temp_dir,
+            Some(&temp_dir),
+            CorpusLoadOptions {
+                refresh_evidence_pins: true,
+            },
+        )
+        .expect("corpus report should load in refresh mode");
+        let run_report = run_trust_vc_corpus(&temp_dir, &corpus, None);
+        assert_eq!(run_report.failed_paths, 0);
+
+        let error =
+            refresh_trust_vc_corpus_evidence_manifest(&manifest_path, &corpus, Some(&run_report))
+                .expect_err("a downward re-pin must be refused");
+
+        assert!(
+            error.to_string().contains("min_obligations falls 9 ->"),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("obligation_decrease_waiver"),
+            "{error:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&manifest_path).expect("manifest should be readable"),
+            manifest_text,
+            "a refused refresh must leave the manifest untouched"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
     #[test]
     fn refresh_trust_vc_corpus_evidence_refuses_proof_entry_executed_as_integration_test() {
         // Integrity cross-check: a PROOF entry (evidence_kind = proof_obligation, the
@@ -17187,7 +23274,8 @@ fn identity(x: i32) -> i32 {
         let manifest_path = temp_dir.join("verus-tests.json");
         fs::write(
             &manifest_path,
-            r##"{
+            stamp_correspondence_bound(
+                r##"{
   "schema_version": 2,
   "manifest_id": "upstream-verus-corpus",
   "description": "Test manifest.",
@@ -17216,6 +23304,7 @@ fn identity(x: i32) -> i32 {
     }
   ]
 }"##,
+            ),
         )
         .expect("manifest should be written");
 
@@ -17253,6 +23342,8 @@ fn identity(x: i32) -> i32 {
                 obligation_count: 0,
                 obligation_fingerprints: Vec::new(),
                 diagnostic_context: Vec::new(),
+                failure_diagnostics: Vec::new(),
+                failing_obligations: Vec::new(),
                 warnings: Vec::new(),
             }],
             failures: Vec::new(),
@@ -17393,7 +23484,8 @@ fn identity(x: i32) -> i32 {
 "#,
         )
         .expect("ported source should be written");
-        let original = r##"{
+        let original = stamp_correspondence_bound(
+            r##"{
   "schema_version": 2,
   "manifest_id": "upstream-verus-corpus",
   "description": "Test manifest.",
@@ -17423,9 +23515,10 @@ fn identity(x: i32) -> i32 {
     }
   ]
 }
-"##;
+"##,
+        );
         let manifest_path = temp_dir.join("verus-tests.json");
-        fs::write(&manifest_path, original).expect("manifest should be written");
+        fs::write(&manifest_path, &original).expect("manifest should be written");
         let corpus = load_corpus_report_with_options(
             &manifest_path,
             &temp_dir,
@@ -18802,12 +24895,231 @@ fn only_one_result_failure() {
             report
                 .upstream_case_failures
                 .iter()
-                .any(|failure| failure.contains("requires at least 2 mapped TrustVc expected case")),
-            "multi-failure upstream case must require enough TrustVc mappings: {:?}",
+                .any(|failure| failure
+                    .contains("fails exactly 2 obligation(s), so exactly 2 of its mapped TrustVc expected case(s) may declare a failure, but 1 of 1 do")),
+            "multi-failure upstream case must require exactly as many FAILING TrustVc mappings as upstream asserts failures: {:?}",
             report.upstream_case_failures
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    /// THE MULTI-FUNCTION FAILING CASE, which the occurrence rule used to make
+    /// unportable by construction.
+    ///
+    /// Upstream's `assert_one_fails` counts ERRORS IN ONE PROGRAM, and upstream
+    /// routinely writes that program as several functions of which one fails.
+    /// The corpus convention is one port function per upstream function, so the
+    /// mapped cases are `1 counterexample + (M - 1) verified` — and comparing N
+    /// against the number of MAPPED cases rejected exactly that shape.
+    #[test]
+    fn a_multi_function_failing_upstream_case_may_be_split_one_case_per_function() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-multi-fn-split");
+        let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
+        fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
+        fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
+        fs::write(
+            upstream_tests.join("multi.rs"),
+            r#"
+test_verify_one_file! {
+    #[test] multi_basics verus_code! {
+        proof fn ok_one() {
+            assert(true);
+        }
+
+        proof fn ok_two() {
+            assert(true);
+        }
+
+        proof fn the_one_that_fails() {
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+}
+"#,
+        )
+        .expect("upstream multi test should be written");
+        fs::write(
+            temp_dir.join("ported/multi.rs"),
+            r#"
+#[ensures(true)]
+fn ok_one() {
+}
+
+#[ensures(true)]
+fn ok_two() {
+}
+
+#[ensures(false)]
+fn the_one_that_fails() {
+}
+"#,
+        )
+        .expect("ported multi source should be written");
+        let manifest_path = temp_dir.join("verus-tests.json");
+        fs::write(
+            &manifest_path,
+            multi_function_manifest(&["counterexample", "verified", "verified"]),
+        )
+        .expect("manifest should be written");
+
+        let report = load_corpus_report(&manifest_path, &temp_dir, Some(&temp_dir))
+            .expect("corpus report should load");
+        assert!(
+            report.upstream_case_failures.is_empty(),
+            "one failing mapped case plus one verified case per non-failing upstream function is upstream's own shape: {:?}",
+            report.upstream_case_failures
+        );
+    }
+
+    /// THE CEILING on that permission: a split may not be wider than upstream's
+    /// own program.
+    ///
+    /// Same upstream case, same three mapped cases — but upstream declares only
+    /// TWO functions, so the third mapped case is a case upstream has not got
+    /// and the entry is refused. Without this, the room opened for a
+    /// multi-function split would be room to mint `verified` cases freely.
+    #[test]
+    fn a_split_wider_than_upstreams_own_program_is_refused() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-split-ceiling");
+        let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
+        fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
+        fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
+        fs::write(
+            upstream_tests.join("multi.rs"),
+            r#"
+test_verify_one_file! {
+    #[test] multi_basics verus_code! {
+        proof fn ok_one() {
+            assert(true);
+        }
+
+        proof fn the_one_that_fails() {
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+}
+"#,
+        )
+        .expect("upstream multi test should be written");
+        fs::write(
+            temp_dir.join("ported/multi.rs"),
+            r#"
+#[ensures(true)]
+fn ok_one() {
+}
+
+#[ensures(true)]
+fn ok_two() {
+}
+
+#[ensures(false)]
+fn the_one_that_fails() {
+}
+"#,
+        )
+        .expect("ported multi source should be written");
+        let manifest_path = temp_dir.join("verus-tests.json");
+        fs::write(
+            &manifest_path,
+            multi_function_manifest(&["counterexample", "verified", "verified"]),
+        )
+        .expect("manifest should be written");
+
+        let report = load_corpus_report(&manifest_path, &temp_dir, Some(&temp_dir))
+            .expect("corpus report should load");
+        assert!(
+            report.upstream_case_failures.iter().any(|failure| failure
+                .contains("declares 2 function(s), so its port may be split across at most that many mapped TrustVc expected case(s), but manifest maps 3")),
+            "a split wider than upstream's own program must be refused: {:?}",
+            report.upstream_case_failures
+        );
+    }
+
+    /// The three mapped cases of the two tests above, with their verdicts as
+    /// given, so the two differ ONLY in upstream's program.
+    fn multi_function_manifest(verdicts: &[&str]) -> String {
+        let names = ["the_one_that_fails", "ok_one", "ok_two"];
+        let cases = names
+            .iter()
+            .zip(verdicts)
+            .map(|(name, verdict)| {
+                format!(
+                    r##"        {{
+          "case_id": "{name}",
+          "upstream_case_id": "multi_basics",
+          "expected_verdict": "{verdict}",
+          "min_obligations": 0
+        }}"##
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            r##"{{
+  "schema_version": 1,
+  "manifest_id": "upstream-verus-corpus",
+  "description": "Test manifest.",
+  "upstream": {{
+    "repo": "https://github.com/verus-lang/verus",
+    "ref": "abc123",
+    "test_roots": ["source/rust_verify_test/tests"]
+  }},
+  "gate": {{
+    "missing_entry": "fail",
+    "failing_classifications": ["unclassified", "unsupported-gap"]
+  }},
+  "entries": [
+    {{
+      "upstream_path": "source/rust_verify_test/tests/multi.rs",
+      "classification": "ported",
+      "owner_issue": "#123",
+      "reason": "One upstream program, one port function per upstream function.",
+      "trust_vc_paths": ["ported/multi.rs"],
+      "expected_cases": [
+{cases}
+      ]
+    }}
+  ]
+}}
+"##
+        )
+    }
+
+    /// The CEILING's input, read off the real pinned checkout rather than a
+    /// fixture, so a reader that silently returned 0 — which switches the
+    /// ceiling off — fails here instead of passing everything.
+    #[test]
+    fn the_real_multiset_basics_case_reports_its_six_upstream_functions() {
+        let verus = pinned_verus_checkout();
+        if !verus
+            .join("source/rust_verify_test/tests/z3_restart.rs")
+            .is_file()
+        {
+            panic!(
+                "this test reads the pinned Verus checkout, expected at `{}`. Clone upstream at the manifest's `upstream.ref` beside this repo, or point TRUST_VC_VERUS_PATH at it.",
+                verus.display()
+            );
+        }
+        let cases = upstream_verus_harness_cases(
+            Some(&verus),
+            "source/rust_verify_test/tests/z3_restart.rs",
+        )
+        .expect("upstream z3_restart.rs should be readable")
+        .expect("a checkout was supplied");
+        let case = cases
+            .iter()
+            .find(|case| case.case_id == "multiset_basics")
+            .expect("upstream z3_restart.rs declares `multiset_basics`");
+        assert_eq!(case.expected_verdict, VerusExpectedVerdict::Counterexample);
+        assert_eq!(
+            case.expected_occurrences, 1,
+            "upstream asserts exactly one failure for this six-function program"
+        );
+        assert_eq!(
+            case.program_function_count, 6,
+            "upstream's `multiset_basics` program declares six proof fns, which is the ceiling on its port's split"
+        );
     }
 
     #[test]
@@ -18998,13 +25310,17 @@ fn test_fails() {}
             "Ok upstream cases must not be marked counterexample: {:?}",
             report.upstream_case_failures
         );
+        // An Err upstream case mapped ONLY by `verified` port cases is still
+        // refused, and it is the FAILING-CASE COUNT that refuses it now rather
+        // than the verdict comparison: `verified` is admissible under a
+        // counterexample upstream case only for the functions upstream does not
+        // fail, so a mapping in which NONE of them declares a failure spends
+        // none of upstream's N refutations and blocks.
         assert!(
-            report
-                .upstream_case_failures
-                .iter()
-                .any(|entry| entry.contains("`test_fails` declares `verified`")
-                    && entry.contains("expects `counterexample`")),
-            "Err upstream cases must not be marked verified: {:?}",
+            report.upstream_case_failures.iter().any(|entry| entry
+                .contains("`test_fails` fails exactly 1 obligation(s)")
+                && entry.contains("but 0 of 1 do")),
+            "an Err upstream case with no failing mapped case must be refused: {:?}",
             report.upstream_case_failures
         );
 
@@ -19940,8 +26256,21 @@ fn identity(x: i32) -> i32 {
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
+    /// A counterexample case is NOT carried by its verdict plus an obligation
+    /// count. Upstream `assert_one_fails` pins the failure to a source line
+    /// carrying `FAILS`; this fixture's port carries no marker at all, so the
+    /// case must read RED however well the engine locates the failure.
+    ///
+    /// This test has been through both halves of the same hole. It first
+    /// asserted `passed_paths == 1` on the verdict and fingerprints alone —
+    /// which is the hole the identity check closed. It then asserted that the
+    /// failing obligation was UNLOCATED, recording the engine-side gap that the
+    /// file-context lane attached no `file:line` to anything. That gap is now
+    /// closed too: the postcondition below IS located, on its `ensures` line,
+    /// and the assertions here pin BOTH — the location is present, and the
+    /// absence of a marker still fails the case.
     #[test]
-    fn trust_vc_corpus_execution_accepts_expected_counterexample_cases() {
+    fn trust_vc_corpus_execution_rejects_counterexample_without_an_upstream_marked_failure() {
         let temp_dir = unique_temp_dir("trust-vc-evidence-corpus-counterexample");
         let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
         fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
@@ -19997,11 +26326,44 @@ fn identity_counterexample(x: i32) -> i32 {
             .expect("corpus report should load");
         let run_report = run_trust_vc_corpus(&temp_dir, &corpus, None);
 
-        assert_eq!(run_report.passed_paths, 1);
-        assert_eq!(run_report.failed_paths, 0);
+        assert_eq!(run_report.passed_paths, 0);
+        assert_eq!(run_report.failed_paths, 1);
         let observed_case = &run_report.results[0].observed_cases[0];
         assert_eq!(observed_case.verdict, "counterexample");
         assert_sha256_obligation_fingerprints(observed_case);
+        assert_eq!(
+            observed_case.failing_obligations.len(),
+            1,
+            "the engine still names ONE failing obligation: {:?}",
+            observed_case.failing_obligations
+        );
+        // The engine now answers WHERE: the `#[ensures]` clause is line 2 of the
+        // fixture (line 1 is the leading newline of the raw string).
+        assert_eq!(
+            observed_case.failing_obligations[0].line,
+            Some(2),
+            "the failing postcondition must be located on its `ensures` clause: {:?}",
+            observed_case.failing_obligations
+        );
+        assert!(
+            !run_report.results[0]
+                .failures
+                .iter()
+                .any(|failure| failure.contains("has no readable source line")),
+            "a located failure must not be reported as unlocated: {:?}",
+            run_report.results[0].failures
+        );
+        // ... and being located is NOT enough. The port carries no `FAILS`
+        // marker, so the case still fails — on the marker, which is the rule
+        // this test exists to hold.
+        assert!(
+            run_report.results[0]
+                .failures
+                .iter()
+                .any(|failure| failure.contains("does not carry the upstream `FAILS` marker")),
+            "an unmarked failure must not satisfy a counterexample case: {:?}",
+            run_report.results[0].failures
+        );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
@@ -20090,11 +26452,11 @@ fn extra_local_regression() {}
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "test" ] || [ "$2" != "--locked" ] || [ "$3" != "--offline" ] || [ "$4" != "-p" ] || [ "$5" != "cargo-trust-vc" ] || [ "$6" != "--test" ] || [ "$7" != "late_args_integration" ] || [ "$8" != "--" ] || [ "$9" != "--exact" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -10:1}" != "test" ] || [ "${@: -9:1}" != "--locked" ] || [ "${@: -8:1}" != "--offline" ] || [ "${@: -7:1}" != "-p" ] || [ "${@: -6:1}" != "cargo-trust-vc" ] || [ "${@: -5:1}" != "--test" ] || [ "${@: -4:1}" != "late_args_integration" ] || [ "${@: -3:1}" != "--" ] || [ "${@: -2:1}" != "--exact" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
-case_name="${10}"
+case_name="${@: -1:1}"
 case "$case_name" in
   late_package_arg_after_release|z_flag_with_space_is_accepted) ;;
   *)
@@ -20127,6 +26489,7 @@ printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered o
             "cargo-trust-vc integration tests must not be treated as direct TrustVc source: inputs={direct_inputs:?} failures={direct_failures:?}"
         );
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/cargo-verus/tests/test_late_args.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::CargoTrustVcIntegrationTest,
@@ -20134,6 +26497,7 @@ printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered o
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![
                 VerusExpectedCase {
+                    obligation_decrease_waiver: None,
                     case_id: "late_package_arg_after_release".to_string(),
                     upstream_case_id: None,
                     trust_vc_path: None,
@@ -20146,6 +26510,7 @@ printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered o
                     expected_warning_patterns: Vec::new(),
                 },
                 VerusExpectedCase {
+                    obligation_decrease_waiver: None,
                     case_id: "z_flag_with_space_is_accepted".to_string(),
                     upstream_case_id: None,
                     trust_vc_path: None,
@@ -20283,11 +26648,11 @@ fn z_flag_with_space_is_accepted() {}
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "test" ] || [ "$2" != "--locked" ] || [ "$3" != "--offline" ] || [ "$4" != "-p" ] || [ "$5" != "cargo-trust-vc" ] || [ "$6" != "--test" ] || [ "$7" != "late_args_integration" ] || [ "$8" != "--" ] || [ "$9" != "--exact" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -10:1}" != "test" ] || [ "${@: -9:1}" != "--locked" ] || [ "${@: -8:1}" != "--offline" ] || [ "${@: -7:1}" != "-p" ] || [ "${@: -6:1}" != "cargo-trust-vc" ] || [ "${@: -5:1}" != "--test" ] || [ "${@: -4:1}" != "late_args_integration" ] || [ "${@: -3:1}" != "--" ] || [ "${@: -2:1}" != "--exact" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
-case_name="${10}"
+case_name="${@: -1:1}"
 case "$case_name" in
   late_package_arg_after_release|z_flag_with_space_is_accepted) ;;
   *)
@@ -20354,12 +26719,14 @@ fn late_package_arg_after_release() {}
             .canonicalize()
             .expect("temp dir should canonicalize");
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/cargo-verus/tests/test_late_args.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::CargoTrustVcIntegrationTest,
             trust_vc_paths: vec!["crates/cargo-trust-vc/tests/late_args_integration.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "missing_case".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -20401,12 +26768,14 @@ fn late_package_arg_after_release() {}
         fs::write(temp_dir.join("ported/right.rs"), "").expect("right path should be written");
         fs::write(temp_dir.join("ported/wrong.rs"), "").expect("wrong path should be written");
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/right.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "same_name".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: Some("ported/right.rs".to_string()),
@@ -20429,6 +26798,8 @@ fn late_package_arg_after_release() {}
                     .to_string(),
             ],
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         }];
         let mut failures = Vec::new();
@@ -20456,12 +26827,14 @@ fn late_package_arg_after_release() {}
         let observed_fingerprint =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/right.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "same_name".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: Some("ported/right.rs".to_string()),
@@ -20481,6 +26854,8 @@ fn late_package_arg_after_release() {}
             obligation_count: 1,
             obligation_fingerprints: vec![observed_fingerprint.clone()],
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         }];
         let mut failures = Vec::new();
@@ -20506,12 +26881,14 @@ fn late_package_arg_after_release() {}
         fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
         fs::write(temp_dir.join("ported/right.rs"), "").expect("right path should be written");
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/right.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "same_name".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: Some("ported/right.rs".to_string()),
@@ -20531,6 +26908,8 @@ fn late_package_arg_after_release() {}
             obligation_count: 1,
             obligation_fingerprints: vec!["not-a-sha256".to_string()],
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         }];
         let mut failures = Vec::new();
@@ -20554,12 +26933,14 @@ fn late_package_arg_after_release() {}
         fs::create_dir_all(temp_dir.join("ported")).expect("ported dir should be created");
         fs::write(temp_dir.join("ported/right.rs"), "").expect("right path should be written");
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/right.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "same_name".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: Some("ported/right.rs".to_string()),
@@ -20579,6 +26960,8 @@ fn late_package_arg_after_release() {}
             obligation_count: 1,
             obligation_fingerprints: Vec::new(),
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         }];
         let mut failures = Vec::new();
@@ -20603,12 +26986,14 @@ fn late_package_arg_after_release() {}
         let fingerprint =
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         let candidate = TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/foo.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
             trust_vc_paths: vec!["ported/right.rs".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "same_name".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: Some("ported/right.rs".to_string()),
@@ -20632,6 +27017,8 @@ fn late_package_arg_after_release() {}
             obligation_count: 2,
             obligation_fingerprints: vec![fingerprint.clone(), fingerprint],
             diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: Vec::new(),
             warnings: Vec::new(),
         }];
         let mut failures = Vec::new();
@@ -20648,6 +27035,2948 @@ fn late_package_arg_after_release() {}
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    fn counterexample_case() -> VerusExpectedCase {
+        VerusExpectedCase {
+            obligation_decrease_waiver: None,
+            case_id: "case".to_string(),
+            upstream_case_id: None,
+            trust_vc_path: None,
+            expected_verdict: VerusExpectedVerdict::Counterexample,
+            min_obligations: 1,
+            obligation_fingerprints: Vec::new(),
+            expected_error_patterns: Vec::new(),
+            expected_rust_diagnostic_pattern_sets: Vec::new(),
+            forbidden_diagnostic_patterns: Vec::new(),
+            expected_warning_patterns: Vec::new(),
+        }
+    }
+
+    /// A candidate carrying the UPSTREAM marked lines the port is checked
+    /// against. `upstream_marked` is spelled here the way it is spelled in the
+    /// Verus checkout, and is normalized on the way in exactly as the extractor
+    /// normalizes it.
+    /// One upstream marker, built the way the extractor builds it.
+    fn upstream_mark(line: &str) -> UpstreamFailsMark {
+        UpstreamFailsMark {
+            normalized: normalized_marked_source_line(line),
+            line_core: canonical_claim_core(line),
+            statement_core: canonical_claim_core(line),
+            bindings: Vec::new(),
+            clause_kind: None,
+            hypotheses: BTreeSet::new(),
+            definitions: BTreeMap::new(),
+            statements: BTreeSet::new(),
+            // A bare marked LINE with no region carries no enclosing item, so
+            // it is not a header mark; the real extractor decides this from the
+            // upstream case region.
+            marked_on_function_header: false,
+            window_undrawable: false,
+        }
+    }
+
+    fn counterexample_candidate(upstream_marked: &[&str]) -> TrustVcCorpusRunCandidate {
+        let mut marked = BTreeMap::new();
+        if !upstream_marked.is_empty() {
+            marked.insert(
+                "case".to_string(),
+                upstream_marked
+                    .iter()
+                    .map(|line| upstream_mark(line))
+                    .collect(),
+            );
+        }
+        TrustVcCorpusRunCandidate {
+            upstream_path: format!("{VERUS_TEST_ROOT}/synthetic.rs"),
+            classification: "ported".to_string(),
+            evidence_kind: VerusEvidenceKind::ProofObligation,
+            trust_vc_paths: vec!["ported/foo.rs".to_string()],
+            trust_vc_check_args: Vec::new(),
+            expected_cases: vec![counterexample_case()],
+            upstream_fails_marked_lines: marked,
+        }
+    }
+
+    fn counterexample_observed_case(
+        failing: Vec<ObservedFailingObligation>,
+    ) -> TrustVcCorpusObservedCase {
+        TrustVcCorpusObservedCase {
+            case_id: "case".to_string(),
+            trust_vc_path: "ported/foo.rs".to_string(),
+            verdict: "counterexample".to_string(),
+            obligation_count: 3,
+            obligation_fingerprints: Vec::new(),
+            diagnostic_context: Vec::new(),
+            failure_diagnostics: Vec::new(),
+            failing_obligations: failing,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn failing_obligation(name: &str, line_text: Option<&str>) -> ObservedFailingObligation {
+        obligation_with_status(name, line_text, "Counterexample")
+    }
+
+    fn obligation_with_status(
+        name: &str,
+        line_text: Option<&str>,
+        status: &str,
+    ) -> ObservedFailingObligation {
+        obligation_with_span(
+            name,
+            line_text.map(|text| vec![text.to_string()]).as_deref(),
+            status,
+        )
+    }
+
+    fn obligation_with_span(
+        name: &str,
+        span: Option<&[String]>,
+        status: &str,
+    ) -> ObservedFailingObligation {
+        ObservedFailingObligation {
+            name: name.to_string(),
+            kind: "assert".to_string(),
+            location: span.map(|_| "ported/foo.rs:7:5".to_string()),
+            line: span.map(|_| 7),
+            line_text: span.and_then(|span| span.first().cloned()),
+            status: status.to_string(),
+            unknown_category: None,
+            span_text: span.map(<[String]>::to_vec).unwrap_or_default(),
+            context_bindings: Vec::new(),
+            context_hypotheses: BTreeSet::new(),
+            context_definitions: BTreeMap::new(),
+            context_statements: BTreeSet::new(),
+        }
+    }
+
+    /// A candidate whose upstream marks are read out of a real upstream case
+    /// REGION — the `#[test] <name> verus_code! { .. }` block — by the same
+    /// reader the corpus run uses, so a test can never assert against a mark
+    /// the run would not build.
+    fn candidate_from_upstream_region(region: &str) -> TrustVcCorpusRunCandidate {
+        let lines: Vec<&str> = region.lines().collect();
+        let marks: Vec<UpstreamFailsMark> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(UPSTREAM_FAILS_MARKER))
+            .filter_map(|(offset, line)| {
+                let normalized = normalized_marked_source_line(line);
+                (!normalized.is_empty())
+                    .then(|| upstream_mark_from_region(&lines, offset, normalized))
+            })
+            .collect();
+        let mut marked = BTreeMap::new();
+        if !marks.is_empty() {
+            marked.insert("case".to_string(), marks);
+        }
+        TrustVcCorpusRunCandidate {
+            upstream_path: format!("{VERUS_TEST_ROOT}/synthetic.rs"),
+            classification: "ported".to_string(),
+            evidence_kind: VerusEvidenceKind::ProofObligation,
+            trust_vc_paths: vec!["ported/foo.rs".to_string()],
+            trust_vc_check_args: Vec::new(),
+            expected_cases: vec![counterexample_case()],
+            upstream_fails_marked_lines: marked,
+        }
+    }
+
+    /// The refuted obligation a PORT source raises at `line`, read by the same
+    /// readers `observed_failing_obligation` uses: the statement span, the
+    /// bindings in scope, and the hypotheses the enclosing function states.
+    fn port_obligation(source: &str, line: usize, kind: &str) -> ObservedFailingObligation {
+        let prefix = enclosing_function_prefix_lines(source, line);
+        let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        let header = enclosing_function_header_lines(source, line);
+        let header_refs: Vec<&str> = header.iter().map(String::as_str).collect();
+        let span_text = statement_span_lines(source, line);
+        let bindings = canonical_let_bindings(&prefix_refs);
+        let file_lines: Vec<&str> = source.lines().collect();
+        let definitions = reachable_definitions(
+            &file_lines,
+            &identifiers_in(&canonical_claim_core(&span_text.join("\n"))),
+            &bindings,
+        );
+        ObservedFailingObligation {
+            name: "assertion_0".to_string(),
+            kind: kind.to_string(),
+            location: Some(format!("ported/foo.rs:{line}:5")),
+            line: Some(line),
+            line_text: span_text.first().cloned(),
+            status: "Counterexample".to_string(),
+            unknown_category: None,
+            span_text,
+            context_bindings: bindings,
+            context_hypotheses: hypothesis_atoms(&header_refs),
+            context_definitions: definitions,
+            context_statements: body_statement_cores(&prefix_refs),
+        }
+    }
+
+    fn line_of(source: &str, needle: &str) -> usize {
+        source
+            .lines()
+            .position(|line| line.contains(needle))
+            .expect("needle present")
+            + 1
+    }
+
+    const UPSTREAM_CHOOSE_FAILS_REGION: &str = r#"    #[test] test1_fails1 verus_code! {
+        spec fn f(i: int) -> bool {
+            5 <= i
+        }
+
+        proof fn test_choose() {
+            let i = choose|i: int| f(i);
+            assert(5 <= i); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// THE ROUND-3 LAUNDER. Upstream's marked line is kept BYTE-IDENTICAL and
+    /// only the binding above it is rewritten, turning an obligation the
+    /// engine cannot decide (`5 <= choose|i: int| f(i)`) into a ground
+    /// falsehood it refutes at once (`5 <= 0`).
+    ///
+    /// Measured on the real gate before this rule: `choose.rs` went from 13
+    /// failures to 1 under exactly this edit, across six cases, with the word
+    /// `choose` gone from every laundered body.
+    #[test]
+    fn a_rewritten_binding_cannot_reuse_upstreams_marked_claim() {
+        let port = "#[trust_vc::proof]\nfn test1_fails1() {\n    let i: int = 0;\n    trust_vc::assert!(5 <= i); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= i"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a laundered premise claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("PREMISES") && failure.contains("binds `i`")),
+            "expected a premise-correspondence failure, got {failures:?}"
+        );
+    }
+
+    /// The same claim under UPSTREAM'S OWN binding still corresponds, across
+    /// the surface difference the native dialect insists on: a macro call with
+    /// its closure in parentheses, and an explicit type ascription upstream
+    /// infers.
+    #[test]
+    fn a_faithful_binding_corresponds_through_the_macro_surface() {
+        let port = "#[trust_vc::proof]\nfn test1_fails1() {\n    let i: int = choose|i: int| f(i);\n    trust_vc::assert!(5 <= i); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= i"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert_eq!(failures, Vec::<String>::new());
+        assert!(claimed.is_some(), "a faithful port failed to correspond");
+    }
+
+    /// Taking the value as a PARAMETER instead of binding it is the same
+    /// launder one step out: the claim is upstream's, the premise is not.
+    #[test]
+    fn a_parameter_cannot_stand_in_for_an_upstream_binding() {
+        let port = "#[trust_vc::proof]\nfn test1_fails1(i: int) {\n    trust_vc::assert!(5 <= i); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= i"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("binds it nowhere in the function")),
+            "expected the missing binding to be reported, got {failures:?}"
+        );
+    }
+
+    /// The same launder through a BRANCH GUARD rather than a binding: the
+    /// binding is upstream's own, the marked line is upstream's own, and the
+    /// inserted `if i == 0 {` pins the falsifying model instead.
+    #[test]
+    fn an_inserted_branch_guard_cannot_reuse_upstreams_marked_claim() {
+        let port = "#[trust_vc::proof]\nfn test1_fails1() {\n    let i: int = choose|i: int| f(i);\n    if i == 0 {\n        trust_vc::assert!(5 <= i); // FAILS\n    }\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= i"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "an inserted guard claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("the port additionally runs")
+                    && failure.contains("ifi==0{")),
+            "expected the inserted guard to be reported, got {failures:?}"
+        );
+    }
+
+    /// The same launder respelled as an ASSUMPTION rather than a binding: the
+    /// binding is upstream's own, the marked line is upstream's own, and
+    /// `assume!(i == 0)` pins the falsifying model instead.
+    #[test]
+    fn an_inserted_assumption_cannot_reuse_upstreams_marked_claim() {
+        let port = "#[trust_vc::proof]\nfn test1_fails1() {\n    let i: int = choose|i: int| f(i);\n    trust_vc::assume!(i == 0);\n    trust_vc::assert!(5 <= i); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= i"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "an inserted assumption claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("the port additionally runs")
+                    && failure.contains("assume(i==0)")),
+            "expected the inserted assumption to be reported, got {failures:?}"
+        );
+    }
+
+    /// A statement upstream's own case RUNS is not an added premise: the port
+    /// may reproduce it, and may also legitimately run FEWER of them (upstream
+    /// splits one `verus_code!` function across several port functions).
+    #[test]
+    fn upstreams_own_preceding_statements_still_correspond() {
+        let region = "    #[test] test1_fails2 verus_code! {\n        spec fn f(i: int) -> bool {\n            5 <= i\n        }\n\n        proof fn test_choose() {\n            let i = choose|i: int| f(i);\n            assert(f(7));\n            assert(i == 7); // FAILS\n        }\n    } => Err(err) => assert_one_fails(err)\n";
+        let port = "#[trust_vc::spec]\nfn f(i: int) -> bool {\n    5 <= i\n}\n\n#[trust_vc::proof]\nfn test1_fails2() {\n    let i: int = choose|i: int| f(i);\n    trust_vc::assert!(f(7));\n    trust_vc::assert!(i == 7); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(region);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "i == 7"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert_eq!(failures, Vec::<String>::new());
+        assert!(
+            claimed.is_some(),
+            "a faithful multi-statement port failed to correspond"
+        );
+    }
+
+    /// `trust_vc::ext_eq!(A, B)` is the native spelling of upstream's
+    /// `A =~= B`, so the two statements are ONE statement to the premise
+    /// comparison. Measured on `z3_restart.rs::multiset_basics`, which the
+    /// statement channel red until this rewrite existed.
+    #[test]
+    fn ext_eq_is_the_native_spelling_of_upstream_extensional_equality() {
+        assert_eq!(
+            canonical_claim_core("trust_vc::assert!(trust_vc::ext_eq!(a.sub(b).add(b), a));"),
+            canonical_claim_core("assert(a.sub(b).add(b) =~= a);")
+        );
+        // It is a SPELLING, not a waiver: different operands stay different.
+        assert_ne!(
+            canonical_claim_core("trust_vc::ext_eq!(a.sub(b).add(b), b)"),
+            canonical_claim_core("a.sub(b).add(b) =~= a")
+        );
+    }
+
+    const UPSTREAM_NONLINEAR_FAILS_REGION: &str = r#"    #[test] test1_fails verus_code! {
+        #[verifier(nonlinear)]
+        proof fn wrong_lemma_1(x: int, y: int, z: int)
+            requires
+                x <= y,
+                0 <= z,
+            ensures
+                x * z < y * z, // FAILS
+        {
+        }
+    } => Err(e) => assert_one_fails(e)
+"#;
+
+    /// A clause-marked case reaches every channel INCLUDING the statement one:
+    /// a header mark's premise window is the function BODY, because a contract
+    /// obligation is discharged against everything the body runs. So a faithful
+    /// clause-for-clause port over upstream's own body CORRESPONDS, with no
+    /// failures at all.
+    ///
+    /// These three tests asserted `failures == []` for four rounds, then
+    /// asserted a REFUSAL for three more (the window was empty by construction,
+    /// so the body reached no channel and the check could not discriminate),
+    /// and now assert correspondence again — this time with the body actually
+    /// compared. The launder the refusal stood in for is caught by the
+    /// statement channel, which
+    /// `a_clause_marked_obligation_is_checked_against_the_function_body` pins
+    /// on the very port body that used to be invisible.
+    ///
+    /// Asserting the EMPTY failure list is what keeps each test about its own
+    /// subject: a hypothesis-channel defect would surface here as a hypothesis
+    /// mismatch, so each still discriminates exactly what it was written to
+    /// discriminate.
+    fn assert_corresponds_with_no_failures(failures: &[String], context: &str) {
+        assert!(
+            failures.is_empty(),
+            "{context}: expected correspondence, got {failures:?}"
+        );
+    }
+
+    /// The port's own contract clauses are read as the same hypotheses, and its
+    /// BODY is read as the same (empty) statement set, so the faithful
+    /// nonlinear port corresponds — clause for clause AND body for body.
+    ///
+    /// The second half is what was missing while a header mark drew no window:
+    /// the hypothesis channel does discriminate (see
+    /// `dropping_an_upstream_hypothesis_breaks_correspondence`, still green and
+    /// still reporting a hypothesis mismatch), but the BODY reached no channel,
+    /// so a port body full of ground `assume!`s presented byte-identical
+    /// premise channels and the whole class had to be refused. The window is
+    /// the body now, and
+    /// `a_clause_marked_obligation_is_checked_against_the_function_body`
+    /// measures both directions on it.
+    #[test]
+    fn a_faithful_contract_port_corresponds_clause_for_clause() {
+        let port = "#[trust_vc::verifier(nonlinear)]\n#[trust_vc::requires(x <= y)]\n#[trust_vc::requires(0 <= z)]\n#[trust_vc::ensures(x * z < y * z)] // FAILS\nfn test1_fails(x: int, y: int, z: int) {}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_NONLINEAR_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "ensures(x * z"),
+            "ensures",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert_corresponds_with_no_failures(&failures, "faithful contract port");
+        assert!(
+            claimed.is_some(),
+            "a faithful clause-for-clause port over upstream's own body must claim upstream's marked line"
+        );
+    }
+
+    /// REGRESSION. A one-line `fn test4(x: int, d: int) {}` opens and closes
+    /// its body on one line, and its `#[requires]` attributes were read as the
+    /// NEXT function's — which red two faithful nonlinear cases on the
+    /// eleven-file slice before the enclosing-item scan counted BRACES only.
+    #[test]
+    fn a_one_line_neighbour_does_not_lend_its_hypotheses() {
+        let port = "#[trust_vc::requires(0 <= x)]\n#[trust_vc::requires(0 < d)]\n#[trust_vc::ensures(0 <= x / d)]\nfn test4(x: int, d: int) {}\n\n// a comment between the two items\n#[trust_vc::verifier(nonlinear)]\n#[trust_vc::requires(x <= y)]\n#[trust_vc::requires(0 <= z)]\n#[trust_vc::ensures(x * z < y * z)] // FAILS\nfn test1_fails(x: int, y: int, z: int) {}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_NONLINEAR_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "ensures(x * z"),
+            "ensures",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        // The regression this test exists for is UNCHANGED: reading the
+        // neighbour's `#[requires(0 <= x)]`/`#[requires(0 < d)]` as this
+        // function's would fail the hypothesis channel and say so. The only
+        // failure here is the clause-marked refusal, so the enclosing-item
+        // scan still attributes the attributes correctly.
+        assert_corresponds_with_no_failures(&failures, "one-line neighbour");
+        assert!(
+            claimed.is_some(),
+            "the faithful port must claim upstream's marked line"
+        );
+    }
+
+    /// Merging upstream's two `requires` clauses into one conjunction states
+    /// the SAME hypotheses, and conjunction is associative and commutative, so
+    /// the port still corresponds.
+    #[test]
+    fn merged_conjunction_hypotheses_still_correspond() {
+        let port = "#[trust_vc::verifier(nonlinear)]\n#[trust_vc::requires(x <= y && 0 <= z)]\n#[trust_vc::ensures(x * z < y * z)] // FAILS\nfn test1_fails(x: int, y: int, z: int) {}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_NONLINEAR_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "ensures(x * z"),
+            "ensures",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        // Conjunction associativity/commutativity is still what this test
+        // measures: a reader that did not split the merged conjunction would
+        // report a hypothesis mismatch here, and none is reported.
+        assert_corresponds_with_no_failures(&failures, "merged conjunction");
+        assert!(
+            claimed.is_some(),
+            "the faithful port must claim upstream's marked line"
+        );
+    }
+
+    /// DROPPING a hypothesis is the launder the `let` scan cannot see: the
+    /// marked clause is byte-identical and refuting it no longer needs the
+    /// nonlinear reasoning upstream's case is about.
+    #[test]
+    fn dropping_an_upstream_hypothesis_breaks_correspondence() {
+        let port = "#[trust_vc::verifier(nonlinear)]\n#[trust_vc::requires(x <= y)]\n#[trust_vc::ensures(x * z < y * z)] // FAILS\nfn test1_fails(x: int, y: int, z: int) {}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_NONLINEAR_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "ensures(x * z"),
+            "ensures",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a dropped hypothesis claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("hypotheses") && failure.contains("0<=z")),
+            "expected the dropped hypothesis to be named, got {failures:?}"
+        );
+    }
+
+    /// H2: `unwrap_contract_attribute` erases the clause KIND, so
+    /// `#[requires(P)]` and `#[ensures(P)]` canonicalize alike. The kind is
+    /// therefore compared SEPARATELY, from the engine's own obligation kind
+    /// against upstream's clause list.
+    ///
+    /// DISCLOSURE, measured 2026-09-17 end to end on a two-entry slice: the
+    /// kind string below is a FICTION. Over all 13 refuted obligations in two
+    /// real corpus runs the engine emitted `assert` (`postcondition`,
+    /// `assertion_1`, `assertion_2`), `assert_by`, `verification_step` and
+    /// `assertion` — never one of the eight literal clause spellings
+    /// `obligation_clause_kind` matches. So this guard does not fire on real
+    /// engine output, and this test does not establish that the substitution is
+    /// caught in the gate. The test is kept, not weakened: if the engine ever
+    /// reports clause obligations by clause name, the guard is already here and
+    /// already covered. The class it was written for — an upstream case whose
+    /// mark is a clause line — is refused outright by the second vacuity guard
+    /// at the end of `premise_correspondence`, which is keyed on upstream's
+    /// own mark and depends on no engine spelling.
+    #[test]
+    fn a_requires_obligation_cannot_claim_an_upstream_ensures_clause() {
+        let port = "#[trust_vc::verifier(nonlinear)]\n#[trust_vc::requires(x <= y)]\n#[trust_vc::requires(0 <= z)]\n#[trust_vc::requires(x * z < y * z)] // FAILS\nfn test1_fails(x: int, y: int, z: int) {}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_NONLINEAR_FAILS_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "requires(x * z"),
+            "requires",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a `requires` obligation claimed an `ensures` clause"
+        );
+        assert!(
+            failures.iter().any(|failure| failure
+                .contains("`requires` obligation where upstream marks a `ensures` clause")),
+            "expected the clause-kind mismatch to be named, got {failures:?}"
+        );
+    }
+
+    /// The premise set is CLOSED over the bindings themselves: a claim that
+    /// names only `b` still depends on the `a` that `b` was built from.
+    #[test]
+    fn premise_correspondence_closes_over_chained_bindings() {
+        let region = "    #[test] chained verus_code! {\n        proof fn test_choose() {\n            let a = choose|i: int| f(i);\n            let b = a + 1;\n            assert(5 <= b); // FAILS\n        }\n    } => Err(err) => assert_one_fails(err)\n";
+        let port = "#[trust_vc::proof]\nfn chained() {\n    let a: int = 0;\n    let b: int = a + 1;\n    trust_vc::assert!(5 <= b); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(region);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "5 <= b"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a laundered chained premise claimed an upstream line"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.contains("binds `a`")),
+            "expected the chained binding to be named, got {failures:?}"
+        );
+    }
+
+    const UPSTREAM_SCOPE_TEST4_REGION: &str = r#"    #[test] test4_fails verus_code! {
+        fn test1() {
+            let mut x = 6;
+            x = 60;
+            let x = 7;
+            let y = {
+                let mut x = 5;
+                x = {let x = x + 50; x + 50};
+                x
+            };
+            assert(x == 7);
+            assert(y == 105);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// THE VACUOUS-PREMISE HOLE. `assert(false)` reaches no identifier, so the
+    /// binding, definition and reachability channels compare NOTHING — and
+    /// upstream marks `assert(false); // FAILS` across much of this corpus.
+    /// With the statement channel a mere SUBSET, a port could delete the whole
+    /// body and keep the marked line.
+    #[test]
+    fn an_identifier_free_claim_cannot_be_refuted_on_a_gutted_body() {
+        let port = "#[trust_vc::ensures(true)]\nfn test4_fails() {\n    trust_vc::assert!(false); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_SCOPE_TEST4_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "false"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a gutted body claimed upstream's identifier-free marked line"
+        );
+        assert!(
+            failures.iter().any(|failure| failure
+                .contains("statements the function runs before the refuted one do not correspond")),
+            "expected the deleted statements to be named, got {failures:?}"
+        );
+    }
+
+    /// The other half of the same rule: the FAITHFUL port of that case must
+    /// still be accepted. Statement EQUALITY costs a port that runs upstream's
+    /// program nothing — both surfaces go through one segmenter and one
+    /// canonicalizer.
+    #[test]
+    fn the_faithful_port_of_that_case_still_corresponds() {
+        let port = "#[trust_vc::ensures(true)]\nfn test4_fails() {\n    let mut x = 6;\n    x = 60;\n    let x = 7;\n    let y = {\n        let mut x = 5;\n        x = {\n            let x = x + 50;\n            x + 50\n        };\n        x\n    };\n    trust_vc::assert!(x == 7);\n    trust_vc::assert!(y == 105);\n    trust_vc::assert!(false); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_SCOPE_TEST4_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "assert!(false)"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_some(),
+            "the faithful port must still correspond, got {failures:?}"
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    const UPSTREAM_CHOOSE_ASSERT_FALSE_REGION: &str = r#"    #[test] vacuous verus_code! {
+        spec fn f(i: int) -> bool {
+            5 <= i
+        }
+
+        proof fn test_choose() {
+            let i = choose|i: int| f(i);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// Equal statements are not enough when the claim reaches nothing: the
+    /// premise ENVIRONMENT is then the only thing that distinguishes the two
+    /// programs, so the binding sets must correspond in full rather than by
+    /// reachability from the claim.
+    #[test]
+    fn an_identifier_free_claim_cannot_be_refuted_under_rewritten_bindings() {
+        let port = "#[trust_vc::proof]\nfn test_choose() {\n    let i: int = 0;\n    trust_vc::assert!(false); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_CHOOSE_ASSERT_FALSE_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "assert!(false)"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a rewritten binding under an identifier-free claim claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("reaches no identifier either side binds")),
+            "expected the vacuity guard to be named, got {failures:?}"
+        );
+    }
+
+    /// THE READER HOLE. `canonical_let_bindings` parsed a whole LINE as one
+    /// binding, so the second `let` on it was invisible to the binding channel
+    /// — and `body_statement_cores` skipped any core starting with `let`, so it
+    /// was invisible to the statement channel too.
+    #[test]
+    fn two_bindings_on_one_line_are_both_read() {
+        let lines = vec!["    let _z: int = 0; let i: int = 0;"];
+
+        let bindings = canonical_let_bindings(&lines);
+
+        assert_eq!(bindings.len(), 2, "{bindings:?}");
+        assert!(
+            bindings.iter().any(|binding| binding.name == "_z"),
+            "{bindings:?}"
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding.name == "i" && binding.init_core == "0"),
+            "{bindings:?}"
+        );
+    }
+
+    /// The same hole, hiding a STATEMENT instead of a binding: `assume!` after
+    /// a `let` on one line pins a falsifying model and was seen by neither
+    /// channel.
+    #[test]
+    fn a_statement_after_a_binding_on_one_line_is_read() {
+        let lines = vec!["    let _z: int = 0; trust_vc::assume!(i == 0);"];
+
+        let statements = body_statement_cores(&lines);
+        let bindings = canonical_let_bindings(&lines);
+
+        assert!(statements.contains("assume(i==0)"), "{statements:?}");
+        assert_eq!(bindings.len(), 1, "{bindings:?}");
+    }
+
+    /// The inner `;`s of a block initializer are NOT statement separators of
+    /// the enclosing body, and splitting must not treat them as such.
+    #[test]
+    fn a_block_initializer_stays_one_binding() {
+        let lines = vec![
+            "    let y = {",
+            "        let mut x = 5;",
+            "        x = {let x = x + 50; x + 50};",
+            "        x",
+            "    };",
+        ];
+
+        let bindings = canonical_let_bindings(&lines);
+
+        assert_eq!(bindings.len(), 1, "{bindings:?}");
+        assert_eq!(bindings[0].name, "y");
+        assert_eq!(
+            bindings[0].init_core, "{letmutx=5;x={letx=x+50;x+50};x}",
+            "{bindings:?}"
+        );
+    }
+
+    const UPSTREAM_HIDDEN_ASSUME_REGION: &str = r#"    #[test] hidden verus_code! {
+        proof fn test() {
+            let i: int = 3;
+            assert(i > 5); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// End to end: an `assume!` parked after a binding on one line used to be
+    /// invisible to both premise channels, so a port could pin the model that
+    /// makes upstream's claim mean something else and still correspond.
+    #[test]
+    fn an_assume_hidden_after_a_binding_is_not_a_correspondence() {
+        let port = "#[trust_vc::proof]\nfn test() {\n    let i: int = 3; trust_vc::assume!(i > 5);\n    trust_vc::assert!(i > 5); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_HIDDEN_ASSUME_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "assert!(i > 5)"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a hidden `assume!` claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("assume(i>5)")),
+            "expected the hidden assume to be named, got {failures:?}"
+        );
+    }
+
+    /// THE SPELLING GAP a round-4 report described as the binding channel
+    /// discriminating. It was not discriminating: the two surfaces spell one
+    /// binder two ways and the texts simply differed, which would refuse a
+    /// FAITHFUL port of these `choose.rs` cases.
+    #[test]
+    fn the_choose_macro_and_upstreams_bare_binder_are_one_claim() {
+        assert_eq!(
+            canonical_claim_core("trust_vc::choose!(|i: int| f(i))"),
+            canonical_claim_core("choose|i: int| f(i)")
+        );
+        assert_eq!(
+            canonical_claim_core("trust_vc::forall!(|i: int| f(i))"),
+            canonical_claim_core("forall|i: int| f(i)")
+        );
+    }
+
+    /// And the rewrite must not RE-ASSOCIATE: a binder's body runs to the end
+    /// of the expression, so dropping the macro's parentheses outright would
+    /// pull `>= 0` inside the body and make two different claims equal.
+    #[test]
+    fn the_binder_rewrite_does_not_reassociate_what_follows_it() {
+        let port =
+            canonical_claim_core("trust_vc::assert!(trust_vc::choose!(|n: nat| f(n)) >= 0);");
+
+        assert_eq!(
+            port,
+            canonical_claim_core("assert((choose|n: nat| f(n)) >= 0);")
+        );
+        assert_ne!(
+            port,
+            canonical_claim_core("assert(choose|n: nat| f(n) >= 0);")
+        );
+    }
+
+    /// `choose_tuple` really is a call taking a closure on BOTH surfaces, so
+    /// the binder rewrite must leave it alone.
+    #[test]
+    fn the_binder_rewrite_leaves_a_closure_taking_call_alone() {
+        assert_eq!(
+            canonical_claim_core("choose_tuple(|i: int, j: int| f2(i, j))"),
+            "choose_tuple(|i:int,j:int|f2(i,j))"
+        );
+    }
+
+    /// The native port needs a Rust unused-binding suppressor where upstream
+    /// needs none, and it binds nothing and calls nothing — so it is not a
+    /// statement either surface has to present. Measured: without this,
+    /// `scope.rs::test1_fails` and `::test2_fails` were refused on `let _ = x;`
+    /// alone.
+    #[test]
+    fn a_let_underscore_discard_of_a_path_is_not_a_premise() {
+        let lines = vec!["    let _ = x;"];
+
+        assert!(body_statement_cores(&lines).is_empty());
+        assert!(canonical_let_bindings(&lines).is_empty());
+    }
+
+    /// And the exemption stops at a bare path: a discarded CALL carries the
+    /// callee's `ensures` into scope, so it stays a compared statement.
+    #[test]
+    fn a_let_underscore_discard_of_a_call_is_still_a_premise() {
+        let lines = vec!["    let _ = lemma_positive(x);"];
+
+        assert!(
+            body_statement_cores(&lines).contains("let_=lemma_positive(x)"),
+            "{:?}",
+            body_statement_cores(&lines)
+        );
+    }
+
+    /// Upstream marks the CLAUSE line of a multi-line statement, so the premise
+    /// window must end where that STATEMENT begins — not where the marker sits,
+    /// which left a fragment of the marked statement in upstream's own
+    /// statement set that the port could never present. Measured on
+    /// `nonlinear.rs::test_requires`.
+    #[test]
+    fn the_upstream_premise_window_excludes_the_marked_statement_itself() {
+        let region = "    #[test] test_requires verus_code! {\n        proof fn test(x: nat) {\n            assert(x * x + x == x * (x + 1)) by(nonlinear_arith)\n                requires x < 0xfff // FAILS\n            {\n            }\n            assert(x * x + x == x * (x + 1));\n        }\n    } => Err(e) => assert_one_fails(e)\n";
+        let lines: Vec<&str> = region.lines().collect();
+        let offset = lines
+            .iter()
+            .position(|line| line.contains(UPSTREAM_FAILS_MARKER))
+            .expect("marker present");
+
+        let mark =
+            upstream_mark_from_region(&lines, offset, normalized_marked_source_line(lines[offset]));
+
+        assert!(
+            mark.statements.is_empty(),
+            "the marked statement's own first line must not be a premise: {:?}",
+            mark.statements
+        );
+    }
+
+    /// Schema v2 requires `correspondence_bound` VERBATIM, so every fixture
+    /// manifest gets it stamped in rather than carrying a 1.7 KB copy of the
+    /// text. Re-wording the bound then changes exactly one place.
+    fn stamp_correspondence_bound(manifest_json: &str) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(manifest_json).expect("fixture manifest should parse as JSON");
+        value["correspondence_bound"] =
+            serde_json::Value::String(ACCEPTED_CASE_CORRESPONDENCE_BOUND.to_string());
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("fixture manifest should re-serialize")
+        )
+    }
+
+    fn summary_case(case_id: &str, verdict: VerusExpectedVerdict) -> VerusExpectedCase {
+        test_expected_case(case_id, verdict, 1)
+    }
+
+    fn summary_entry(
+        classification: &str,
+        expected_cases: Vec<VerusExpectedCase>,
+    ) -> VerusManifestEntry {
+        VerusManifestEntry {
+            upstream_path: "source/rust_verify_test/tests/split.rs".to_string(),
+            classification: classification.to_string(),
+            evidence_kind: VerusEvidenceKind::ProofObligation,
+            owner_issue: "#123".to_string(),
+            reason: "accepted-case split fixture".to_string(),
+            trust_vc_paths: vec!["evals/verus/ported/split.rs".to_string()],
+            trust_vc_source_hashes: Vec::new(),
+            trust_vc_check_args: Vec::new(),
+            expected_cases,
+            known_gaps: Vec::new(),
+            notes: String::new(),
+        }
+    }
+
+    /// THE WEAKENED CLAIM, round 5. The accepted-case total is three different
+    /// kinds of evidence added together, and the source-level correspondence
+    /// rule reaches exactly one of them. Printing the total alone reads as the
+    /// strongest bucket applying to all of it — which is how a gutted
+    /// `verified` port was accepted in review round 5 — so the split is
+    /// computed here and rendered under the total everywhere.
+    #[test]
+    fn replacement_summary_splits_accepted_cases_by_what_actually_pins_them() {
+        let entry = summary_entry(
+            "ported",
+            vec![
+                summary_case("a_verified", VerusExpectedVerdict::Verified),
+                summary_case("b_verified", VerusExpectedVerdict::Verified),
+                summary_case("c_counterexample", VerusExpectedVerdict::Counterexample),
+                summary_case("d_error", VerusExpectedVerdict::Error),
+            ],
+        );
+
+        let summary = verus_replacement_summary(std::slice::from_ref(&entry));
+
+        assert_eq!(summary.accepted_expected_case_count, 4);
+        assert_eq!(summary.accepted_expected_cases_counterexample, 1);
+        assert_eq!(summary.accepted_expected_cases_verified, 2);
+        assert_eq!(summary.accepted_expected_cases_error, 1);
+        assert_eq!(
+            summary.accepted_expected_cases_counterexample
+                + summary.accepted_expected_cases_verified
+                + summary.accepted_expected_cases_error,
+            summary.accepted_expected_case_count,
+            "the split must account for every accepted case; a bucket that \
+             vanishes is a case nobody knows the evidence for"
+        );
+    }
+
+    /// A case classified `not-applicable` is not accepted evidence, so it must
+    /// reach neither the total nor the split.
+    #[test]
+    fn replacement_summary_split_counts_only_accepted_entries() {
+        let entry = summary_entry(
+            "not-applicable",
+            vec![summary_case("a_verified", VerusExpectedVerdict::Verified)],
+        );
+
+        let summary = verus_replacement_summary(std::slice::from_ref(&entry));
+
+        assert_eq!(summary.accepted_expected_case_count, 0);
+        assert_eq!(summary.accepted_expected_cases_verified, 0);
+    }
+
+    /// The gate's own one-line detail must never carry the total without the
+    /// split — it is the line a reader quotes.
+    #[test]
+    fn rendered_summary_prints_the_split_under_the_accepted_total() {
+        let mut report = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
+            upstream_path: "source/rust_verify_test/tests/split.rs".to_string(),
+            classification: "ported".to_string(),
+            evidence_kind: VerusEvidenceKind::ProofObligation,
+            trust_vc_paths: vec!["evals/verus/ported/split.rs".to_string()],
+            trust_vc_check_args: Vec::new(),
+            expected_cases: Vec::new(),
+        });
+        report.replacement_summary = VerusReplacementSummary {
+            accepted_expected_case_count: 259,
+            accepted_expected_cases_counterexample: 51,
+            accepted_expected_cases_verified: 183,
+            accepted_expected_cases_verified_schema_fixed: 48,
+            accepted_expected_cases_error: 25,
+            ..VerusReplacementSummary::default()
+        };
+
+        let rendered = verus_corpus_manifest_gate_detail(&report);
+
+        assert!(
+            rendered.contains("259 accepted expected cases"),
+            "total missing: {rendered}"
+        );
+        // BOTH LAYERS, or the line says one layer's scope is the whole. LAYER 1
+        // covers every accepted case; the counterexample fraction is LAYER 2's
+        // scope and must be labelled as the PROGRAM-level one.
+        // This fixture has no measured establishment, i.e. the manifest-only
+        // lane, where NO upstream source was read. LAYER 1 must therefore say
+        // NOT RUN here: "every accepted case is checked against upstream" is
+        // true of the checkout lane only, and printing it here would be the
+        // round-8 overstatement in the opposite direction.
+        assert!(
+            rendered.contains(
+                "259 accepted expected cases, LAYER-1 upstream checks NOT RUN here (no --verus-path, so no upstream source was read at either layer), and 51 of them are PROGRAM-correspondence SCOPED"
+            ),
+            "the gate detail line must state both layers, and must not claim LAYER 1 ran in a lane that read no upstream source: {rendered}"
+        );
+        assert!(
+            rendered.contains("51 counterexample, 19.7% of the total"),
+            "PROGRAM-correspondence SCOPED split and PERCENTAGE missing: {rendered}"
+        );
+        // SCOPE without a measured ESTABLISHED count renders as NOT MEASURED,
+        // never as though the scope were the established number. This is the
+        // manifest-only lane, which reads no upstream source at all.
+        assert!(
+            rendered.contains(
+                "PROGRAM-ESTABLISHED count NOT MEASURED here (no --verus-path, so no upstream source was read at either layer)"
+            ),
+            "an unmeasured established count must say so: {rendered}"
+        );
+        assert!(
+            rendered.contains("establishing NOTHING about the port's PROGRAM"),
+            "the verified bucket must carry what it establishes, at the layer it is silent on: {rendered}"
+        );
+        assert!(
+            !rendered.contains("establishing NOTHING about upstream"),
+            "upstream IS read for every accepted case; only the PROGRAM comparison is missing: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "183 verified = 135 obligation-count-pinned + 48 SCHEMA-FIXED with no pin at all, 70.7%"
+            ),
+            "verified split, and its author-pinned/schema-fixed sub-split, missing: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "25 error = diagnostic-pattern-pinned, 9.7%, plus upstream's asserted message where upstream asserts one"
+            ),
+            "error split missing, or missing the upstream half LAYER 1 supplies: {rendered}"
+        );
+    }
+
+    /// The same line WITH the measurement: scope never travels alone once an
+    /// upstream checkout has been read.
+    ///
+    /// The numbers here are a fixture, not a claim about the corpus — the
+    /// corpus's own are recounted by
+    /// `the_bound_states_scope_and_established_for_every_bucket`. What is pinned
+    /// is the RENDERING: the established count, its percentage, and both
+    /// subtractions appear beside the scope count.
+    #[test]
+    fn a_measured_established_count_travels_beside_the_scope_count() {
+        let summary = VerusReplacementSummary {
+            accepted_expected_case_count: 259,
+            accepted_expected_cases_counterexample: 51,
+            accepted_expected_cases_verified: 183,
+            accepted_expected_cases_verified_schema_fixed: 48,
+            accepted_expected_cases_error: 25,
+            accepted_counterexample_established: Some(47),
+            accepted_counterexample_refused_uncheckable: Some(3),
+            accepted_counterexample_unreadable_upstream_case: Some(1),
+            ..VerusReplacementSummary::default()
+        };
+
+        let phrase = summary.accepted_case_split_phrase();
+
+        assert!(
+            phrase.contains(
+                "259 accepted expected cases, EVERY ONE of them LAYER-1 checked against upstream (upstream case RESOLVED and declared verdict COMPARED on every one; the mapped-case count, upstream-asserted messages, warning and forbidden patterns only on the narrower populations clause (L1) of the bound prints beside each), and 51 of them are PROGRAM-correspondence SCOPED"
+            ),
+            "a measured lane must state LAYER 1's full scope: {phrase}"
+        );
+        assert!(
+            phrase.contains("51 counterexample, 19.7% of the total"),
+            "scope missing: {phrase}"
+        );
+        assert!(
+            phrase.contains(
+                "of which 47 PROGRAM-ESTABLISHED = 18.1% of the total (3 REFUSED as un-checkable, 1 with no readable upstream case)"
+            ),
+            "the established half and both subtractions must travel with the scope: {phrase}"
+        );
+        assert!(
+            !phrase.contains("NOT MEASURED"),
+            "a measured summary must not claim otherwise: {phrase}"
+        );
+    }
+
+    /// The bound is the claim. Pin the two sentences five rounds of review paid
+    /// for, so a later edit that quietly restores the stronger reading fails
+    /// here instead of shipping.
+    #[test]
+    fn the_accepted_case_bound_states_the_verified_hole_and_the_head_relative_ratchet() {
+        let bound = ACCEPTED_CASE_CORRESPONDENCE_BOUND;
+
+        assert!(
+            bound.contains("COUNTEREXAMPLE cases ONLY"),
+            "the bound must state the SCOPE of correspondence first: {bound}"
+        );
+        assert!(
+            bound.contains("obligation COUNT") && bound.contains("VERIFIED"),
+            "the bound must say a verified case is pinned by a count: {bound}"
+        );
+        // ROUND 8 CORRECTION. This assertion used to demand the phrase
+        // "NOTHING THAT READS UPSTREAM'S SOURCE", which was FALSE: the
+        // per-case upstream block reads upstream's source for EVERY accepted
+        // case and compares a verified case's declared verdict against
+        // upstream's own. The true hole is at the PROGRAM level, and the bound
+        // must say BOTH halves or it understates the gate.
+        assert!(
+            bound.contains("NOTHING THAT READS UPSTREAM'S PROGRAM"),
+            "the bound must say what a verified case is NOT tied to: {bound}"
+        );
+        assert!(
+            !bound.contains("NOTHING THAT READS UPSTREAM'S SOURCE"),
+            "upstream's SOURCE is read for every accepted case; only its PROGRAM is unchecked for a verified one: {bound}"
+        );
+        assert!(
+            bound.contains("LAYER 1") && bound.contains("LAYER 2"),
+            "the bound must name both layers, or one layer's scope reads as the whole: {bound}"
+        );
+        assert!(
+            bound.contains("Its DECLARATION is checked all the same"),
+            "the verified bucket's hole must be stated as program-level, not as the absence of any upstream check: {bound}"
+        );
+        // Clause (2) described ALL 183 as pinned by a count. That is false for
+        // the schema-fixed sub-bucket, so the bound must separate the two and
+        // say what each does and does not establish.
+        assert!(
+            bound.contains("(2a) AUTHOR-PINNED") && bound.contains("(2b) SCHEMA-FIXED"),
+            "the bound must split the verified bucket by who wrote the pin: {bound}"
+        );
+        assert!(
+            bound.contains("THE COUNT PINS NOTHING BECAUSE THE SCHEMA WROTE IT"),
+            "the bound must say the schema-fixed count pins nothing: {bound}"
+        );
+        assert!(
+            bound.contains("a schema placeholder, not an engine verdict"),
+            "the bound must say `verified` is not an engine verdict for those cases: {bound}"
+        );
+        assert!(
+            bound.contains("body is deleted")
+                && bound.contains("applies to these with LESS resistance"),
+            "the bound must keep the deleted-body sentence and say it applies with LESS resistance to the schema-fixed cases: {bound}"
+        );
+        assert!(
+            bound.contains("not a refusal by construction")
+                && bound.contains("TRIP-WIRE ON AN UNCOMMITTED DIFF"),
+            "the bound must correct the proof-content ratchet's claim: {bound}"
+        );
+        assert!(
+            bound.contains("ENCODED OBLIGATION") && bound.contains("Verus-to-IR import"),
+            "the bound must name the route that closes it: {bound}"
+        );
+        // The two non-discriminations INSIDE the correspondence-scoped
+        // fifth, each with the witness it was measured on. A bound that names
+        // only the scope still reads as "and within that scope it is tight".
+        assert!(
+            bound.contains("BLOCK STRUCTURE") && bound.contains("scope.rs::test1_fails"),
+            "the bound must name the block-structure hole and its witness: {bound}"
+        );
+        assert!(
+            bound.contains("CLAUSE-MARKED") && bound.contains("z3_restart.rs::test2_fails"),
+            "the bound must name the clause-marked class and its witness: {bound}"
+        );
+        // The route, at the detail that makes it actionable rather than a
+        // gesture: four named parts, not "encode it properly".
+        for part in [
+            "per-CASE entry point",
+            "obligation-SET comparison in the calculus",
+            "pinned Verus build",
+        ] {
+            assert!(
+                bound.contains(part),
+                "the route must name `{part}`: {bound}"
+            );
+        }
+    }
+
+    fn bound_manifest(schema_version: u32, correspondence_bound: &str) -> JsonVerusManifest {
+        JsonVerusManifest {
+            schema_version,
+            manifest_id: "upstream-verus-corpus".to_string(),
+            description: "test".to_string(),
+            correspondence_bound: correspondence_bound.to_string(),
+            upstream: JsonUpstream {
+                repo: VERUS_REPO_URL.to_string(),
+                upstream_ref: "a40d57c73650cd3648b09386bfdb96ab5c270626".to_string(),
+                test_roots: vec![VERUS_TEST_ROOT.to_string()],
+            },
+            gate: JsonGate {
+                missing_entry: "fail".to_string(),
+                failing_classifications: vec!["unsupported-gap".to_string()],
+            },
+            entries: Vec::new(),
+        }
+    }
+
+    /// The number and the statement of what the number does not establish must
+    /// travel in ONE artifact. Deleting the bound from the manifest is the
+    /// cheapest possible launder, so it refuses the whole load.
+    #[test]
+    fn a_manifest_without_the_correspondence_bound_is_refused() {
+        let error = validate_json_manifest_schema(&bound_manifest(2, ""))
+            .expect_err("a schema-v2 manifest with no bound must not load");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("correspondence_bound") && message.contains("absent or empty"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// And softening it is the same launder with more typing.
+    #[test]
+    fn a_manifest_that_softens_the_correspondence_bound_is_refused() {
+        let softened = ACCEPTED_CASE_CORRESPONDENCE_BOUND
+            .replace("THE LARGEST HOLE", "a minor caveat")
+            .replace("not a refusal by construction", "a refusal by construction");
+        let error = validate_json_manifest_schema(&bound_manifest(2, &softened))
+            .expect_err("a reworded bound must not load");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("VERBATIM") && message.contains("a DIFFERENT text"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            validate_json_manifest_schema(&bound_manifest(2, ACCEPTED_CASE_CORRESPONDENCE_BOUND))
+                .is_ok(),
+            "the verbatim bound must load"
+        );
+    }
+
+    /// Schema v1 predates the field; it is the seed/YAML shape and carries no
+    /// accepted-case count to qualify.
+    #[test]
+    fn a_schema_v1_manifest_does_not_require_the_correspondence_bound() {
+        validate_json_manifest_schema(&bound_manifest(1, ""))
+            .expect("a schema-v1 manifest must still load without the bound");
+    }
+
+    fn ratchet_case(min_obligations: usize, fingerprints: &[&str]) -> VerusExpectedCase {
+        VerusExpectedCase {
+            min_obligations,
+            obligation_fingerprints: fingerprints.iter().map(|text| text.to_string()).collect(),
+            ..counterexample_case()
+        }
+    }
+
+    const RATCHET_FINGERPRINT_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const RATCHET_FINGERPRINT_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// THE PROOF-CONTENT RATCHET. Nothing pinned `min_obligations` against
+    /// being rewritten downward, so a port that deleted proof content re-pinned
+    /// itself to the smaller number and stayed accepted.
+    #[test]
+    fn proof_content_may_not_be_repinned_downward() {
+        let reason = obligation_content_decrease_reason(
+            6,
+            &[
+                RATCHET_FINGERPRINT_A.to_string(),
+                RATCHET_FINGERPRINT_B.to_string(),
+            ],
+            &ratchet_case(2, &[RATCHET_FINGERPRINT_A]),
+        )
+        .expect("a downward re-pin must be refused");
+
+        assert!(reason.contains("min_obligations falls 6 -> 2"), "{reason}");
+        assert!(reason.contains("obligation_decrease_waiver"), "{reason}");
+    }
+
+    /// The ratchet measures HOW MUCH is proven, not WHICH hashes: a fingerprint
+    /// is engine-derived, so an encoder change rehashes the same obligations
+    /// and must not need a waiver on every case. This is a named limit of the
+    /// control, pinned here so nobody reads it as identity pinning.
+    #[test]
+    fn a_swapped_pinned_obligation_at_the_same_count_is_not_a_decrease() {
+        assert!(
+            obligation_content_decrease_reason(
+                1,
+                &[RATCHET_FINGERPRINT_A.to_string()],
+                &ratchet_case(1, &[RATCHET_FINGERPRINT_B]),
+            )
+            .is_none(),
+            "fingerprint churn at an unchanged count must not need a waiver"
+        );
+    }
+
+    /// A SHRINKING pinned set is a decrease even when `min_obligations` was
+    /// already wrong, so the two halves of the commitment cannot be played off
+    /// against each other.
+    #[test]
+    fn fewer_pinned_obligations_is_a_decrease() {
+        let reason = obligation_content_decrease_reason(
+            0,
+            &[
+                RATCHET_FINGERPRINT_A.to_string(),
+                RATCHET_FINGERPRINT_B.to_string(),
+            ],
+            &ratchet_case(1, &[RATCHET_FINGERPRINT_A]),
+        )
+        .expect("a shrinking pinned set must be refused");
+
+        assert!(
+            reason.contains("pinned obligations fall 2 -> 1"),
+            "{reason}"
+        );
+    }
+
+    /// An INTENTIONAL decrease is declared on the case, pinned to the count it
+    /// descends from.
+    #[test]
+    fn a_declared_waiver_authorizes_one_decrease() {
+        let mut case = ratchet_case(2, &[RATCHET_FINGERPRINT_A]);
+        case.obligation_decrease_waiver = Some(ObligationDecreaseWaiver {
+            from_min_obligations: 6,
+            reason: "re-keyed to upstream's split case".to_string(),
+        });
+
+        assert!(
+            obligation_content_decrease_reason(
+                6,
+                &[
+                    RATCHET_FINGERPRINT_A.to_string(),
+                    RATCHET_FINGERPRINT_B.to_string()
+                ],
+                &case,
+            )
+            .is_none(),
+            "a matching waiver must authorize the decrease"
+        );
+        // ... and only that one: once the decrease is committed the committed
+        // count is the new number, which the waiver no longer names.
+        let reason = obligation_content_decrease_reason(
+            2,
+            &[RATCHET_FINGERPRINT_A.to_string()],
+            &ratchet_case_with_waiver(1, &[], 6),
+        )
+        .expect("a stale waiver must not authorize a further decrease");
+        assert!(reason.contains("does not authorize it"), "{reason}");
+    }
+
+    fn ratchet_case_with_waiver(
+        min_obligations: usize,
+        fingerprints: &[&str],
+        from_min_obligations: usize,
+    ) -> VerusExpectedCase {
+        let mut case = ratchet_case(min_obligations, fingerprints);
+        case.obligation_decrease_waiver = Some(ObligationDecreaseWaiver {
+            from_min_obligations,
+            reason: "declared".to_string(),
+        });
+        case
+    }
+
+    /// An empty reason is not a declaration.
+    #[test]
+    fn an_empty_waiver_reason_authorizes_nothing() {
+        let mut case = ratchet_case(2, &[RATCHET_FINGERPRINT_A]);
+        case.obligation_decrease_waiver = Some(ObligationDecreaseWaiver {
+            from_min_obligations: 6,
+            reason: "   ".to_string(),
+        });
+
+        assert!(
+            obligation_content_decrease_reason(6, &[RATCHET_FINGERPRINT_A.to_string()], &case)
+                .is_some(),
+            "an empty waiver reason must not authorize a decrease"
+        );
+    }
+
+    /// Growth is never a decrease.
+    #[test]
+    fn adding_proof_content_is_not_a_decrease() {
+        assert!(obligation_content_decrease_reason(
+            1,
+            &[RATCHET_FINGERPRINT_A.to_string()],
+            &ratchet_case(2, &[RATCHET_FINGERPRINT_A, RATCHET_FINGERPRINT_B]),
+        )
+        .is_none());
+    }
+
+    const UPSTREAM_OPAQUE_REGION: &str = r#"    #[test] test1_fails verus_code! {
+        #[verifier(opaque)]
+        spec fn f1(i: int) -> int {
+            i + 1
+        }
+
+        fn assertby_test() {
+            assert(f1(3) > 4); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// The DEFINITION is a premise too, and it lives outside the function
+    /// entirely — where neither the `let` scan nor the clause scan looks.
+    /// Rewriting it turns upstream's unprovable claim into a ground falsehood
+    /// with the marked line untouched.
+    #[test]
+    fn a_rewritten_definition_cannot_reuse_upstreams_marked_claim() {
+        let port = "#[trust_vc::spec]\nfn f1(i: int) -> int {\n    i - 100\n}\n\n#[trust_vc::proof]\nfn assertby_test() {\n    trust_vc::assert!(f1(3) > 4); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_OPAQUE_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "f1(3) > 4"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a rewritten definition claimed an upstream line"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("defines `f1`")),
+            "expected the rewritten definition to be named, got {failures:?}"
+        );
+    }
+
+    /// The same definition across the two surfaces — `spec fn` on one side, a
+    /// `#[trust_vc::spec]` attribute on the other — is ONE definition.
+    #[test]
+    fn a_faithful_definition_corresponds_across_the_two_surfaces() {
+        let port = "#[trust_vc::spec]\nfn f1(i: int) -> int {\n    i + 1\n}\n\n#[trust_vc::proof]\nfn assertby_test() {\n    trust_vc::assert!(f1(3) > 4); // FAILS\n}\n";
+        let candidate = candidate_from_upstream_region(UPSTREAM_OPAQUE_REGION);
+        let observed = counterexample_observed_case(vec![port_obligation(
+            port,
+            line_of(port, "f1(3) > 4"),
+            "assert",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &counterexample_case(),
+            &observed,
+            &mut failures,
+        );
+
+        assert_eq!(failures, Vec::<String>::new());
+        assert!(
+            claimed.is_some(),
+            "a faithful definition failed to correspond"
+        );
+    }
+
+    /// An obligation the engine did NOT decide, spelled the way the engine
+    /// spells it today: a `Counterexample` certificate status carrying the
+    /// incompleteness category that justified it.
+    fn incompleteness_obligation(name: &str, line_text: Option<&str>) -> ObservedFailingObligation {
+        let mut obligation = obligation_with_status(name, line_text, "Counterexample");
+        obligation.unknown_category = Some("incompleteness".to_string());
+        obligation
+    }
+
+    /// Upstream `assert_one_fails` is `assert_eq!(err.errors.len(), 1)` plus a
+    /// span on a `FAILS` line. A port function with three asserts used to count
+    /// as covered no matter which of the three failed.
+    #[test]
+    fn counterexample_case_requires_exactly_one_failing_obligation() {
+        let candidate = counterexample_candidate(&["assert(false); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![
+            failing_obligation("assertion_0", Some("    assert!(false); // FAILS")),
+            failing_obligation("assertion_2", Some("    assert!(other); // FAILS")),
+        ]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("expected exactly 1 refuted obligation")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn counterexample_case_requires_the_failing_line_to_carry_the_upstream_marker() {
+        let candidate = counterexample_candidate(&["assert(f1(3int) == 4int); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(f1(3int) == 4int);"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("does not carry the upstream `FAILS` marker")),
+            "{failures:?}"
+        );
+    }
+
+    /// An unlocated failing obligation cannot be checked against the marker at
+    /// all, so it FAILS — the gate never guesses which line the engine meant.
+    #[test]
+    fn counterexample_case_fails_when_the_failing_obligation_has_no_source_line() {
+        let candidate = counterexample_candidate(&["assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case =
+            counterexample_observed_case(vec![failing_obligation("assertion_1", None)]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("has no readable source line")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn counterexample_case_passes_on_one_marked_failing_obligation() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(5 <= i); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// `obligation_count` alone must not carry a counterexample case: three
+    /// captured obligations and NO identified failure is not evidence.
+    #[test]
+    fn counterexample_case_is_not_carried_by_obligation_count_alone() {
+        let candidate = counterexample_candidate(&["assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(Vec::new());
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("expected exactly 1 refuted obligation")),
+            "{failures:?}"
+        );
+    }
+
+    /// The `FAILS` comment is written by the PORT author. Without an upstream
+    /// line to compare it against, a red case would be one comment away from
+    /// green — so a case whose upstream marked lines could not be read FAILS.
+    #[test]
+    fn counterexample_case_fails_when_upstream_marked_lines_are_unavailable() {
+        let candidate = counterexample_candidate(&[]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(5 <= i); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("cannot cross-check its `FAILS` marker")),
+            "{failures:?}"
+        );
+    }
+
+    /// Moving the marker onto whatever line the engine happens to report is
+    /// exactly the gaming this rule exists to stop: the marked line must be a
+    /// line upstream marks too.
+    #[test]
+    fn counterexample_case_fails_when_the_marked_line_is_not_marked_upstream() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(f(7)); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("corresponds to no `FAILS`-marked line")),
+            "{failures:?}"
+        );
+    }
+
+    /// Upstream searches EVERY text line of the relevant span, so a marker
+    /// trailing a wrapped assertion counts there and must count here — and the
+    /// WRAPPED statement is what corresponds, not the `); // FAILS` line the
+    /// marker happens to sit on.
+    #[test]
+    fn counterexample_case_accepts_a_marker_on_a_later_line_of_the_failing_statement() {
+        let candidate = counterexample_candidate(&["assert(a == b); // FAILS"]);
+        let expected_case = counterexample_case();
+        let span = vec![
+            "    trust_vc::assert!(".to_string(),
+            "        a == b".to_string(),
+            "    ); // FAILS".to_string(),
+        ];
+        let observed_case = counterexample_observed_case(vec![obligation_with_span(
+            "assertion_1",
+            Some(&span),
+            "Counterexample",
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        // The marker on the span's LAST line is found (upstream searches the
+        // whole span, so this gate does too), and the statement the span spells
+        // across three lines canonicalizes to upstream's one-line assertion —
+        // so a wrapped port statement corresponds, where comparing the marked
+        // LINE alone (`); // FAILS`) corresponded to nothing.
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// An UNDECIDED obligation is not an error. Folding it into the failure
+    /// count reported "observed 2" for a case with one genuine counterexample,
+    /// naming the wrong defect; it is counted apart and reported as the hole it
+    /// is.
+    #[test]
+    fn counterexample_case_reports_undecided_obligations_as_their_own_failure() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![
+            failing_obligation(
+                "assertion_1",
+                Some("    trust_vc::assert!(5 <= i); // FAILS"),
+            ),
+            obligation_with_status(
+                "assertion_2",
+                Some("    trust_vc::assert!(g());"),
+                "Unknown",
+            ),
+        ]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("left 1 obligation(s) UNDECIDED")),
+            "{failures:?}"
+        );
+        assert!(
+            !failures
+                .iter()
+                .any(|failure| failure.contains("expected exactly 1 refuted obligation")),
+            "an undecided obligation must not be counted as a second failure: {failures:?}"
+        );
+    }
+
+    /// A NON-DECISION MUST NOT EARN COVERAGE CREDIT.
+    ///
+    /// The engine reports a genuine theory incompleteness as a model-less
+    /// verification FAILURE (`VerifyResult::NotProved`, whose whole point is
+    /// that no counterexample was found and none may be narrated). The
+    /// certificate layer then stamped it `Counterexample`, so
+    /// "exactly 1 refuted obligation, as upstream `assert_one_fails`
+    /// requires" was satisfiable by an obligation the solver NEVER DECIDED —
+    /// measured on `real.rs::real_nonlinear2`, whose detail reads
+    /// "not discharged (solver incompleteness, no model): ... nonlinear real
+    /// arithmetic is outside the default prover profile".
+    ///
+    /// This is fail-closed with respect to `Verified` — an incompleteness can
+    /// never publish a proof — but it is NOT fail-closed with respect to
+    /// COVERAGE: the case counted as a covered upstream counterexample case on
+    /// the strength of a refutation that was never produced.
+    #[test]
+    fn counterexample_case_rejects_an_undecided_incompleteness_as_its_refutation() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![incompleteness_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(5 <= i); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures.iter().any(|failure| failure.contains("UNDECIDED")),
+            "an incompleteness is a NON-DECISION and must be reported as undecided: {failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("expected exactly 1 refuted obligation")),
+            "an incompleteness must not be counted as the case's one refutation: {failures:?}"
+        );
+    }
+
+    /// The same defect, spelled with the honest certificate status: a
+    /// `NotProved` obligation is not a refutation either.
+    #[test]
+    fn counterexample_case_rejects_a_not_proved_obligation_as_its_refutation() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![obligation_with_status(
+            "assertion_1",
+            Some("    trust_vc::assert!(5 <= i); // FAILS"),
+            "NotProved",
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures.iter().any(|failure| failure.contains("UNDECIDED")),
+            "{failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("expected exactly 1 refuted obligation")),
+            "{failures:?}"
+        );
+    }
+
+    /// The guard must not swallow a GENUINE refutation: a model-bearing
+    /// counterexample carries no unknown-category, and still counts.
+    #[test]
+    fn counterexample_case_still_accepts_a_decided_refutation() {
+        let candidate = counterexample_candidate(&["            assert(5 <= i); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_1",
+            Some("    trust_vc::assert!(5 <= i); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// THE NATIVE SURFACE IS DELIBERATELY NOT UPSTREAM'S SPELLING.
+    ///
+    /// R1 retired byte-parity with Verus source. The port spells `P ==> Q` as
+    /// `!(P) || Q`; comparing the two marked lines verbatim rejects a FAITHFUL
+    /// port for being spelled natively. Both sides go through the same
+    /// canonicalization instead, and implication is expanded by its definition.
+    #[test]
+    fn correspondence_accepts_an_implication_spelled_as_a_disjunction() {
+        let candidate =
+            counterexample_candidate(&["            assert(x >= 0.0 ==> x / 3.0 > 0.0); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_0",
+            Some("    trust_vc::assert!(!(x >= 0.0) || x / 3.0 > 0.0); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            claimed,
+            Some(normalized_marked_source_line(
+                "assert(x >= 0.0 ==> x / 3.0 > 0.0); // FAILS"
+            ))
+        );
+    }
+
+    /// THE PIN THE WHOLE RELAXATION RESTS ON.
+    ///
+    /// Widening the correspondence rule is only safe while it stays a RULE. A
+    /// port whose marked statement claims something upstream never claimed must
+    /// still be refused, in every dialect — this is the exact laundering probe
+    /// that defeated the predecessor design, where a case could DECLARE the
+    /// upstream line it "reproduced" and the gate never compared the port's own
+    /// statement to anything.
+    #[test]
+    fn correspondence_refuses_a_port_that_reproduces_nothing_upstream_claims() {
+        let candidate = counterexample_candidate(&[
+            "            assert(x * y == y * z) by(nonlinear_arith); // FAILS",
+        ]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_0",
+            Some("    trust_vc::assert!(false); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            claimed.is_none(),
+            "a trivially false assertion claims nothing"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("corresponds to no `FAILS`-marked line")),
+            "{failures:?}"
+        );
+    }
+
+    /// THE SECOND LAUNDERING PROBE: UPSTREAM'S CLAUSE BURIED IN A TRIVIALLY
+    /// FALSE STATEMENT.
+    ///
+    /// The marker may sit on any line of the refuted statement, so the marked
+    /// line is a FRAGMENT of the refuted claim that the port author picks. When
+    /// that fragment was itself a comparison text, a port could wrap upstream's
+    /// clause in a statement that no solver has to work to refute and spend the
+    /// trivial refutation as upstream's:
+    ///
+    ///     #[trust_vc::ensures(
+    ///         false && (
+    ///         x * z < y * z // FAILS
+    ///     ))]
+    ///
+    /// Upstream's `x * z < y * z` needs a model witnessing that strict
+    /// monotonicity fails; `false && (..)` is refuted by every model. The
+    /// comparison is anchored on the ENGINE'S LOCATED STATEMENT instead, so the
+    /// case fails.
+    #[test]
+    fn correspondence_refuses_upstream_clause_buried_in_a_trivially_false_statement() {
+        let candidate = counterexample_candidate(&["                x * z < y * z, // FAILS"]);
+        let expected_case = counterexample_case();
+        let span = vec![
+            "#[trust_vc::ensures(".to_string(),
+            "    false && (".to_string(),
+            "    x * z < y * z // FAILS".to_string(),
+            "))]".to_string(),
+        ];
+        let observed_case = counterexample_observed_case(vec![obligation_with_span(
+            "ensures_0",
+            Some(&span),
+            "Counterexample",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        // The hole this pins: the MARKED LINE alone does canonicalize to
+        // upstream's clause, so a rule that compared it would accept.
+        assert_eq!(
+            canonical_claim_core("    x * z < y * z // FAILS"),
+            canonical_claim_core("                x * z < y * z, // FAILS"),
+        );
+        assert!(claimed.is_none(), "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("corresponds to no `FAILS`-marked line")),
+            "{failures:?}"
+        );
+    }
+
+    /// The same laundering, with upstream's WHOLE STATEMENT as the buried
+    /// fragment: a faithful port line parked inside the proof block of an outer
+    /// statement whose own obligation is what the engine refutes.
+    ///
+    /// The outer scoped `requires false` is what fails here, which is a
+    /// content-free refutation; the inner line is never the claim the engine
+    /// decided, and must not be the claim the gate compares.
+    #[test]
+    fn correspondence_refuses_a_faithful_port_line_parked_inside_a_refuted_block() {
+        let candidate = counterexample_candidate(&[
+            "            assert(x * y == y * z) by(nonlinear_arith); // FAILS",
+        ]);
+        let expected_case = counterexample_case();
+        let span = vec![
+            "    trust_vc::assert_by_nonlinear!(".to_string(),
+            "        false;".to_string(),
+            "        requires false;".to_string(),
+            "        {".to_string(),
+            "            trust_vc::assert_by_nonlinear!(x * y == y * z); // FAILS".to_string(),
+            "        }".to_string(),
+            "    );".to_string(),
+        ];
+        let observed_case = counterexample_observed_case(vec![obligation_with_span(
+            "assert_by_nonlinear_0_requires_0",
+            Some(&span),
+            "Counterexample",
+        )]);
+        let mut failures = Vec::new();
+
+        let claimed = append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert_eq!(
+            canonical_claim_core(
+                "            trust_vc::assert_by_nonlinear!(x * y == y * z); // FAILS"
+            ),
+            canonical_claim_core(
+                "            assert(x * y == y * z) by(nonlinear_arith); // FAILS"
+            ),
+        );
+        assert!(claimed.is_none(), "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("corresponds to no `FAILS`-marked line")),
+            "{failures:?}"
+        );
+    }
+
+    /// The macro surface maps onto upstream's `assert .. by(..)`, and the
+    /// rewrite PRESERVES the proof mode.
+    #[test]
+    fn correspondence_accepts_a_proof_macro_for_an_upstream_by_clause() {
+        let candidate = counterexample_candidate(&[
+            "            assert(x * y == y * z) by(nonlinear_arith); // FAILS",
+        ]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_0",
+            Some("    trust_vc::assert_by_nonlinear!(x * y == y * z); // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// The proof MODE is part of the claim's identity: a plain assertion does
+    /// not correspond to an upstream assertion discharged by a solver mode, and
+    /// two different modes do not correspond to each other.
+    #[test]
+    fn correspondence_refuses_a_different_proof_mode() {
+        let candidate = counterexample_candidate(&[
+            "            assert(x * y == y * z) by(nonlinear_arith); // FAILS",
+        ]);
+        let expected_case = counterexample_case();
+        for port_line in [
+            "    trust_vc::assert!(x * y == y * z); // FAILS",
+            "    trust_vc::assert_by_bit_vector!(x * y == y * z); // FAILS",
+        ] {
+            let observed_case = counterexample_observed_case(vec![failing_obligation(
+                "assertion_0",
+                Some(port_line),
+            )]);
+            let mut failures = Vec::new();
+
+            append_counterexample_identity_failures(
+                &candidate,
+                &expected_case,
+                &observed_case,
+                &mut failures,
+            );
+
+            assert!(
+                failures
+                    .iter()
+                    .any(|failure| failure.contains("corresponds to no `FAILS`-marked line")),
+                "{port_line}: {failures:?}"
+            );
+        }
+    }
+
+    /// Upstream marks the CLAUSE line of a `requires`/`ensures` block; the port
+    /// spells the same clause as an attribute.
+    #[test]
+    fn correspondence_accepts_a_contract_attribute_for_a_clause_line() {
+        let candidate = counterexample_candidate(&["                x * z < y * z, // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "ensures_0",
+            Some("#[trust_vc::ensures(x * z < y * z)] // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// A comment-only port marker corresponds to no code in any dialect.
+    #[test]
+    fn correspondence_refuses_a_comment_only_port_marker() {
+        let candidate =
+            counterexample_candidate(&["            assert(x >= 0.0 ==> x / 3.0 > 0.0); // FAILS"]);
+        let expected_case = counterexample_case();
+        let observed_case = counterexample_observed_case(vec![failing_obligation(
+            "assertion_0",
+            Some("    // FAILS"),
+        )]);
+        let mut failures = Vec::new();
+
+        append_counterexample_identity_failures(
+            &candidate,
+            &expected_case,
+            &observed_case,
+            &mut failures,
+        );
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("corresponds to no upstream code")),
+            "{failures:?}"
+        );
+    }
+
+    /// A candidate whose cases all map to ONE upstream case.
+    fn claim_candidate(upstream_marked: &[&str], case_ids: &[&str]) -> TrustVcCorpusRunCandidate {
+        let mut candidate = counterexample_candidate(upstream_marked);
+        candidate.expected_cases = case_ids
+            .iter()
+            .map(|case_id| {
+                let mut expected_case = counterexample_case();
+                expected_case.case_id = (*case_id).to_string();
+                expected_case.upstream_case_id = Some("case".to_string());
+                expected_case
+            })
+            .collect();
+        candidate
+    }
+
+    /// ONE REPRODUCED OBLIGATION MAY NOT COVER N UPSTREAM ERRORS.
+    ///
+    /// Upstream `assert_fails(e, N)` spends N errors on N marked lines, and the
+    /// manifest spends those N on N mapped port cases. Without this, every port
+    /// case of one upstream case could declare the SAME upstream line and a
+    /// single reproduced failure would earn N cases' worth of credit.
+    #[test]
+    fn upstream_marked_line_claims_cannot_outnumber_upstream_markers() {
+        let candidate = claim_candidate(&["            assert(false); // FAILS"], &["a", "b"]);
+        let claimed = normalized_marked_source_line("assert(false); // FAILS");
+        let claims = vec![("a", claimed.clone()), ("b", claimed)];
+        let mut failures = Vec::new();
+
+        append_upstream_marked_line_claim_failures(&candidate, &claims, &mut failures);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("2 port case(s) claim it")),
+            "{failures:?}"
+        );
+    }
+
+    /// The control: upstream really does repeat a marked line within one case,
+    /// and two port cases may then legitimately claim it twice.
+    #[test]
+    fn upstream_marked_line_claims_may_match_upstream_multiplicity() {
+        let candidate = claim_candidate(
+            &[
+                "            assert(false); // FAILS",
+                "            assert(false); // FAILS",
+            ],
+            &["a", "b"],
+        );
+        let claimed = normalized_marked_source_line("assert(false); // FAILS");
+        let claims = vec![("a", claimed.clone()), ("b", claimed)];
+        let mut failures = Vec::new();
+
+        append_upstream_marked_line_claim_failures(&candidate, &claims, &mut failures);
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// A NON-DECISION IS STILL A CAPTURED OBLIGATION.
+    ///
+    /// Splitting `NotProved` out of `Counterexample` must not shrink what
+    /// `min_obligations` and the pinned `obligation_fingerprints` commit to:
+    /// the engine built, encoded and ran that obligation, it just did not
+    /// decide it. The first cut of the split dropped it from both capture
+    /// filters, which turned choose.rs's 12 honest "non-decision" failures into
+    /// 30 by adding spurious count and fingerprint-pin failures on top.
+    #[test]
+    fn a_not_proved_obligation_is_still_captured() {
+        assert!(captured_certificate_obligation_status("not_proved"));
+        assert!(captured_certificate_obligation_status("counterexample"));
+        assert!(captured_certificate_obligation_status("unknown"));
+        assert!(!captured_certificate_obligation_status("assumed"));
+        assert!(!captured_certificate_obligation_status("uncaptured"));
+        assert!(!captured_certificate_obligation_status("skipped"));
+    }
+
+    /// The two dialects must normalize alike, or the cross-check would demand a
+    /// byte-identical port; a LOGICAL `!` must survive, or it would equate two
+    /// different assertions.
+    #[test]
+    fn marked_source_line_normalization_spans_the_two_dialects() {
+        assert_eq!(
+            normalized_marked_source_line("    trust_vc::assert!(5 <= i); // FAILS"),
+            normalized_marked_source_line("            assert(5 <= i); // FAILS")
+        );
+        assert_eq!(
+            normalized_marked_source_line("trust_vc::assert!(!(x >= 0.0)); // FAILS"),
+            "assert(!(x>=0.0));"
+        );
+        assert_ne!(
+            normalized_marked_source_line("assert(i == 7); // FAILS"),
+            normalized_marked_source_line("assert(i == 8); // FAILS")
+        );
+        assert_eq!(normalized_marked_source_line("    // FAILS on its own"), "");
+    }
+
+    /// A PATH-QUALIFIED call is NOT the bare call, and the canonicalizer must
+    /// keep it that way.
+    ///
+    /// MEASURED, and it decides how a name collision in a port is repaired.
+    /// Upstream's `test_verify_one_file!` blocks are separate compilation units,
+    /// so one upstream file may declare the same helper name at two arities
+    /// (`choose.rs` declares `f`, `cnatf` and `cintf` 1-ary in one block and
+    /// 2-ary in another). A port that flattens those blocks into one Rust file
+    /// has to do something about the collision, and the two obvious moves are a
+    /// RENAME (`cintf2`) or a MODULE (`tuple::cintf`).
+    ///
+    /// Neither works, and this test pins why: `normalized_marked_source_line`
+    /// drops a literal `trust_vc::` prefix and `strip_turbofish` drops `::<..>`,
+    /// and no pass reduces any other path, so `tuple::cintf(..)` canonicalizes
+    /// to itself and corresponds to no upstream statement — exactly as a rename
+    /// does not.
+    ///
+    /// And the missing rule may NOT be added: a general "drop the path prefix"
+    /// pass would equate `Seq::empty()` with `Set::empty()`, two different
+    /// claims, which is the one thing the canonicalizer's contract forbids. The
+    /// honest repair is to give the port upstream's own compilation-unit
+    /// boundary so each helper keeps upstream's own name (see
+    /// `evals/verus/ported/choose.rs` and `choose_tuple.rs`).
+    #[test]
+    fn path_qualified_call_is_not_the_bare_call() {
+        // The `trust_vc::` dialect prefix IS dropped, and only it.
+        assert_eq!(
+            canonical_claim_core("trust_vc::assert!(cintf(-10, -10));"),
+            canonical_claim_core("assert(cintf(-10, -10));")
+        );
+        // A module path is not reduced, so a module wrapper does not rescue a
+        // colliding helper name.
+        assert_ne!(
+            canonical_claim_core("assert(tuple::cintf(-10, -10));"),
+            canonical_claim_core("assert(cintf(-10, -10));")
+        );
+        // Nor does a rename, which is the same mismatch by another spelling.
+        assert_ne!(
+            canonical_claim_core("assert(cintf2(-10, -10));"),
+            canonical_claim_core("assert(cintf(-10, -10));")
+        );
+        // Why a general path-prefix reduction is refused: it would equate two
+        // different claims.
+        assert_ne!(
+            canonical_claim_core("assert(Seq::empty() =~= s);"),
+            canonical_claim_core("assert(Set::empty() =~= s);")
+        );
+    }
+
+    /// `//` inside a string literal is not a comment opener, so it must not
+    /// truncate the line — two different assertions would otherwise normalize
+    /// to the same prefix.
+    #[test]
+    fn line_comment_stripping_respects_string_literals() {
+        assert_eq!(
+            code_before_line_comment(r#"    assert!(u == "http://a"); // FAILS"#),
+            r#"    assert!(u == "http://a"); "#
+        );
+        assert_ne!(
+            normalized_marked_source_line(r#"assert!(u == "http://a"); // FAILS"#),
+            normalized_marked_source_line(r#"assert!(u == "http://b"); // FAILS"#)
+        );
+    }
+
+    /// The upstream marker is read from the VERUS CHECKOUT and attributed to the
+    /// case whose region it falls in — a marker may never travel to a
+    /// neighbouring case.
+    #[test]
+    fn upstream_marked_lines_are_read_per_case_from_the_verus_checkout() {
+        let temp_dir = unique_temp_dir("upstream-marked-lines");
+        let upstream_path = "source/rust_verify_test/tests/synthetic.rs";
+        let source_path = temp_dir.join(upstream_path);
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("dirs");
+        fs::write(
+            &source_path,
+            r#"test_verify_one_file! {
+    #[test] test1 verus_code! {
+        proof fn a() {
+            assert(5 <= i); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+}
+
+test_verify_one_file! {
+    #[test] #[ignore] test2 verus_code! {
+        // a comment mentioning FAILS carries no code
+        proof fn b() {
+            assert(i == 7); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+}
+"#,
+        )
+        .expect("write upstream source");
+
+        let marked = upstream_fails_marked_lines_by_case(Some(&temp_dir), upstream_path);
+
+        assert_eq!(
+            marked
+                .get("test1")
+                .map(|marks| marks.iter().map(|mark| mark.normalized.clone()).collect()),
+            Some(vec!["assert(5<=i);".to_string()]),
+            "{marked:?}"
+        );
+        assert_eq!(
+            marked
+                .get("test2")
+                .map(|marks| marks.iter().map(|mark| mark.normalized.clone()).collect()),
+            Some(vec!["assert(i==7);".to_string()]),
+            "the comment-only FAILS line carries no code: {marked:?}"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    /// The canonical form is a NORMALIZER, not a waiver: it maps surface
+    /// spellings onto the claim they spell, and nothing else.
+    #[test]
+    fn canonical_claim_core_maps_the_two_surfaces_onto_one_claim() {
+        for (port, upstream) in [
+            // Implication, expanded by its definition.
+            (
+                "trust_vc::assert!(!(x >= 0.0) || x / 3.0 > 0.0); // FAILS",
+                "assert(x >= 0.0 ==> x / 3.0 > 0.0); // FAILS",
+            ),
+            // Proof macro against `assert .. by(..)`, mode preserved.
+            (
+                "trust_vc::assert_by_bit_vector!(b << 2u32 == b * 4);",
+                "assert(b << 2 == b * 4) by(bit_vector);",
+            ),
+            // Contract attribute against a bare clause line.
+            (
+                "#[trust_vc::ensures(x * z < y * z)] // FAILS",
+                "    x * z < y * z, // FAILS",
+            ),
+            // Literal suffix and turbofish drift.
+            (
+                "trust_vc::assert!(Multiset::<V>::singleton(v).len() == 1usize);",
+                "assert(Multiset::singleton(v).len() == 1);",
+            ),
+            // `3int` is the integer 3.
+            (
+                "trust_vc::assert!(s.index(0) == 3int);",
+                "assert(s.index(0) == 3);",
+            ),
+            // The spec-closure CONSTRUCTOR the native `Set::mk_map` signature
+            // demands, against upstream's bare closure.
+            (
+                "let m1 = s1.mk_map(SpecFn::new(|k: int| 10int * k));",
+                "let m1 = s1.mk_map(|k: int| 10 * k);",
+            ),
+            // An EMPTY `by` block with no proof mode introduces nothing, so the
+            // keyword goes with it.
+            (
+                "trust_vc::assert!(trust_vc::equal!(m1, m2)); // FAILS",
+                "assert(equal(m1, m2)) by {} // FAILS",
+            ),
+        ] {
+            assert_eq!(
+                canonical_claim_core(port),
+                canonical_claim_core(upstream),
+                "{port} / {upstream}"
+            );
+        }
+    }
+
+    /// The rewrites cannot manufacture a claim. Each pair below differs in an
+    /// OPERAND, an operator or a proof mode, and must stay apart.
+    #[test]
+    fn canonical_claim_core_keeps_different_claims_apart() {
+        for (left, right) in [
+            ("trust_vc::assert!(false);", "assert(x * y == y * z);"),
+            // A NON-empty `by` block still separates two statements, and a
+            // `by(mode)` keeps its mode: neither may be laundered by the
+            // empty-block rule.
+            ("assert(P) by {}", "assert(P) by { reveal(f); }"),
+            ("assert(P) by {}", "assert(P) by(nonlinear_arith) {}"),
+            // A `SpecFn::new` holding more than one argument is not a
+            // spec-closure spelling and is left alone.
+            ("s.mk_map(SpecFn::new(f, g))", "s.mk_map(f, g)"),
+            // The unwrap may not erase the closure it wraps.
+            (
+                "s.mk_map(SpecFn::new(|k: int| 10 * k))",
+                "s.mk_map(|k: int| 11 * k)",
+            ),
+            (
+                "trust_vc::assert!(x * y == y * z);",
+                "assert(x * y == y * w);",
+            ),
+            (
+                "trust_vc::assert!(x * y == y * z);",
+                "assert(x * y == y * z) by(nonlinear_arith);",
+            ),
+            ("trust_vc::assert!(!(p) || q);", "assert(p ==> !(q));"),
+            (
+                "trust_vc::assert_by_nonlinear!(x == y; requires x < 3);",
+                "assert(x == y) by(nonlinear_arith);",
+            ),
+        ] {
+            assert_ne!(
+                canonical_claim_core(left),
+                canonical_claim_core(right),
+                "{left} / {right}"
+            );
+        }
+    }
+
+    /// A NON-empty proof body is content: only an EMPTY one is dropped.
+    #[test]
+    fn canonical_claim_core_keeps_a_non_empty_proof_body() {
+        assert_eq!(
+            canonical_claim_core("assert(p) by(nonlinear_arith) requires x < 3 { }"),
+            canonical_claim_core("assert(p) by(nonlinear_arith) requires x < 3"),
+        );
+        assert_ne!(
+            canonical_claim_core("assert(p) by(nonlinear_arith) { lemma(x); }"),
+            canonical_claim_core("assert(p) by(nonlinear_arith)"),
+        );
+    }
+
+    /// A numeric literal's TYPE SUFFIX is read off the line that still has its
+    /// whitespace, because compaction destroys the token boundary that makes a
+    /// literal a literal.
+    ///
+    /// Measured need: `assert_forall_by.rs`'s `implies` cases, where the port
+    /// writes `0int <= x implies 1int <= f1(x)` for upstream's
+    /// `0 <= x implies 1 <= f1(x)`. Compacted first, `1int` follows the `s` of
+    /// `implies` and is no longer token-initial, so it kept a suffix upstream's
+    /// literal never had and a FAITHFUL port failed on a type ascription.
+    #[test]
+    fn canonical_claim_core_reads_a_literal_suffix_across_a_keyword_boundary() {
+        assert_eq!(
+            canonical_claim_core("0int <= x implies 1int <= f1(x)"),
+            canonical_claim_core("0 <= x implies 1 <= f1(x)"),
+        );
+        // The rule still names a TYPE and never a VALUE, and an IDENTIFIER that
+        // merely ends in suffix-shaped characters is not a literal.
+        for (left, right) in [
+            ("10int <= x", "1 <= x"),
+            ("f1int(x)", "f1(x)"),
+            ("x implies 1int <= y", "x implies 1int <= z"),
+        ] {
+            assert_ne!(
+                canonical_claim_core(left),
+                canonical_claim_core(right),
+                "{left} / {right}"
+            );
+        }
+    }
+
+    /// THE PLAIN PROOF MACROS, desugared onto upstream's own text.
+    ///
+    /// Every right-hand side here is upstream's `verus!` surface, and the
+    /// rewrite that meets it is the backwards run of upstream's OWN lowering
+    /// (`source/builtin_macros/src/syntax.rs:2894` / `:2952`).
+    #[test]
+    fn canonical_claim_core_desugars_the_plain_proof_macros() {
+        for (port, upstream) in [
+            // `assert_by!(P, { .. })` — upstream's `assert(P) by { .. }`.
+            (
+                "trust_vc::assert_by!(f1(3int) > 4int, { trust_vc::reveal!(f1); });",
+                "assert(f1(3) > 4) by { reveal(f1); }",
+            ),
+            // A BLOCK-bodied proposition survives verbatim.
+            (
+                "trust_vc::assert_by!({ let a = 3int; f1(a) > a }, { trust_vc::reveal!(f1); });",
+                "assert({let a = 3; f1(a) > a}) by { reveal(f1); }",
+            ),
+            // `assert_forall_by!(|x: T| P, { .. })` — upstream's
+            // `assert forall|x: T| P by { .. }`.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) < x, { trust_vc::reveal!(f1); });",
+                "assert forall|x: int| f1(x) < x by { reveal(f1); }",
+            ),
+            // An EMPTY proof block, which the empty-block rule then drops on
+            // BOTH surfaces alike.
+            (
+                "trust_vc::assert_forall_by!(|x: nat| 1int <= f1(x as int), {});",
+                "assert forall|x: nat| 1 <= f1(x as int) by {}",
+            ),
+            // A MULTI-VARIABLE binder keeps its own comma: the split is at the
+            // LAST top-level comma, never the first.
+            (
+                "trust_vc::assert_forall_by!(|i: int, j: int| f2(i, j), {});",
+                "assert forall|i: int, j: int| f2(i, j) by {}",
+            ),
+            // The VERUS-FORM argument is upstream's text already, so it is
+            // unwrapped rather than rebuilt — including the `implies` KEYWORD,
+            // which `expand_implications` must not touch.
+            (
+                "trust_vc::assert_forall_by!(assert forall|x: int| 0int <= x implies 1int <= f1(x) by { trust_vc::reveal!(f1); });",
+                "assert forall|x: int| 0 <= x implies 1 <= f1(x) by { reveal(f1); }",
+            ),
+            // The same argument spelled without the leading `assert` keyword,
+            // which the macro also accepts.
+            (
+                "trust_vc::assert_forall_by!(forall|x: int| 0int <= x implies 1int <= f1(x) by { trust_vc::reveal!(f1); });",
+                "assert forall|x: int| 0 <= x implies 1 <= f1(x) by { reveal(f1); }",
+            ),
+            // A BLOCK/`#[trigger]` body inside the binder survives verbatim,
+            // spelled across lines on the port side.
+            (
+                "trust_vc::assert_forall_by!(\n    |x: nat| {\n        let a: int = 1int;\n        a <= #[trigger] f1(x as int)\n    },\n    {\n        trust_vc::reveal!(f1);\n    }\n);",
+                "assert forall|x: nat| { let a: int = 1; a <= #[trigger] f1(x as int) } by { reveal(f1); }",
+            ),
+            // UPSTREAM'S OWN desugared spelling, which the pinned checkout
+            // writes directly at `expand_errors.rs:207`. The rewrite is applied
+            // to both surfaces, so upstream's two spellings of one statement
+            // meet each other.
+            (
+                "assert_by(true, {reveal(is_good_message_10);});",
+                "assert(true) by { reveal(is_good_message_10); }",
+            ),
+        ] {
+            assert_eq!(
+                canonical_claim_core(port),
+                canonical_claim_core(upstream),
+                "{port} / {upstream}"
+            );
+        }
+    }
+
+    /// WHAT THE DESUGARING MAY NOT EQUATE.
+    ///
+    /// Widening the normalizer is the move most easily mistaken for waiving the
+    /// check, so the negative pins carry the weight: a proof MODE is never
+    /// synthesised, a proof BODY is never dropped, a BINDER is never truncated,
+    /// a quantified ASSERT-FORALL is never confused with an assert OF a
+    /// quantified formula, and a sibling macro that merely shares the prefix is
+    /// never rewritten into a principle it does not spell.
+    #[test]
+    fn canonical_claim_core_keeps_the_plain_proof_macros_apart() {
+        for (left, right) in [
+            // A MODE is never synthesised: the desugaring emits a BARE `by`.
+            (
+                "trust_vc::assert_by!(x * y == y * z, { lemma(x); });",
+                "assert(x * y == y * z) by(nonlinear_arith) { lemma(x); }",
+            ),
+            // A NON-empty proof body is content and is never dropped.
+            (
+                "trust_vc::assert_by!(f1(3int) > 3int, { trust_vc::reveal!(f1); });",
+                "assert(f1(3) > 3) by {}",
+            ),
+            // An operand may not move.
+            (
+                "trust_vc::assert_by!(x * y == y * z, {});",
+                "assert(x * y == y * w) by {}",
+            ),
+            // `assert forall|x| P by {..}` is NOT `assert(forall|x| P) by {..}`:
+            // the by-block of the first introduces the bound variable, the
+            // second proves a closed quantified formula.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, { trust_vc::reveal!(f1); });",
+                "assert(forall|x: int| f1(x) > x) by { reveal(f1); }",
+            ),
+            // ... and it is not the plain `assert_by!` of the same closure.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, {});",
+                "trust_vc::assert_by!(|x: int| f1(x) > x, {});",
+            ),
+            // The binder's TYPE is part of the claim.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, {});",
+                "assert forall|x: nat| f1(x) > x by {}",
+            ),
+            // The binder's NAME is part of the claim.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, {});",
+                "assert forall|y: int| f1(y) > y by {}",
+            ),
+            // The CONDITION is part of the claim.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, {});",
+                "assert forall|x: int| f1(x) >= x by {}",
+            ),
+            // THE LAST-COMMA SPLIT, pinned negatively: a multi-variable binder
+            // may not be truncated to its first variable.
+            (
+                "trust_vc::assert_forall_by!(|i: int, j: int| f2(i, j), {});",
+                "assert forall|i: int| f2(i, j) by {}",
+            ),
+            // A SIBLING MACRO that merely shares the prefix spells a wholly
+            // different proof principle and is left alone.
+            (
+                "trust_vc::assert_by_contradiction!(f1(3int) > 3int, { trust_vc::reveal!(f1); });",
+                "assert(f1(3) > 3) by { reveal(f1); }",
+            ),
+            // The MODE-carrying family keeps its mode, and is not reachable
+            // through the plain rewrite either.
+            (
+                "trust_vc::assert_by_nonlinear!(x * y == y * z);",
+                "assert(x * y == y * z) by {}",
+            ),
+            // NO proof block: not the macro's two-argument surface, so nothing
+            // is rewritten and it corresponds to no upstream statement.
+            (
+                "trust_vc::assert_by!(f1(3int) > 3int);",
+                "assert(f1(3) > 3) by {}",
+            ),
+            // A proof argument that is not a BLOCK is not a proof block.
+            (
+                "trust_vc::assert_forall_by!(|x: int| f1(x) > x, lemma(x));",
+                "assert forall|x: int| f1(x) > x by lemma(x)",
+            ),
+            // A head that is not CLOSURE-shaped is not a binder.
+            (
+                "trust_vc::assert_forall_by!(g(x), {});",
+                "assert forall g(x) by {}",
+            ),
+            // A binder with an EMPTY condition is not the macro's surface.
+            (
+                "trust_vc::assert_forall_by!(|x: int|, {});",
+                "assert forall|x: int| by {}",
+            ),
+            // A verus-form argument that is not `assert forall|..|` is left
+            // alone rather than unwrapped.
+            (
+                "trust_vc::assert_forall_by!(assert_something(x));",
+                "assert_something(x)",
+            ),
+            // The rewrite is WHOLE-TEXT anchored, exactly like
+            // `rewrite_proof_macro_to_upstream_form`: a call buried inside a
+            // larger expression is not a statement and is not rewritten.
+            (
+                "f(assert_by(p, { lemma(x); }))",
+                "f(assert(p) by { lemma(x); })",
+            ),
+        ] {
+            assert_ne!(
+                canonical_claim_core(left),
+                canonical_claim_core(right),
+                "{left} / {right}"
+            );
+        }
+    }
+
+    /// A chain of implications is right-associative, and the canonical form
+    /// must not silently re-associate it.
+    #[test]
+    fn canonical_claim_core_expands_an_implication_chain_right_associatively() {
+        assert_eq!(canonical_claim_core("a ==> b ==> c"), "!(a)||(!(b)||c)");
+        assert_ne!(
+            canonical_claim_core("a ==> b ==> c"),
+            canonical_claim_core("(a ==> b) ==> c"),
+        );
+        // `<==>` is a different connective and is not an implication arrow.
+        assert_eq!(canonical_claim_core("a <==> b"), "a<==>b");
+    }
+
+    /// Upstream marks the CLAUSE line of a statement that wraps across lines;
+    /// the statement it sits in is upstream's own text, and the extractor must
+    /// find it without swallowing the neighbours.
+    #[test]
+    fn upstream_statement_lines_covers_the_whole_wrapped_statement() {
+        let region = [
+            "    #[test] test_requires verus_code! {",
+            "        proof fn test(x: nat) {",
+            "            assert(x * x + x == x * (x + 1)) by(nonlinear_arith)",
+            "                requires x < 0xfff // FAILS",
+            "            {",
+            "            }",
+            "            assert(x * x + x == x * (x + 1));",
+            "        }",
+            "    } => Err(e) => assert_one_fails(e)",
+        ];
+
+        let statement = upstream_statement_lines(&region, 3);
+
+        assert_eq!(
+            statement,
+            [
+                "            assert(x * x + x == x * (x + 1)) by(nonlinear_arith)",
+                "                requires x < 0xfff // FAILS",
+                "            {",
+                "            }",
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            canonical_claim_core(&statement),
+            canonical_claim_core(
+                "trust_vc::assert_by_nonlinear!(x * x + x == x * (x + 1); requires x < 0xfff);"
+            ),
+        );
+        // A single-line statement is still just itself.
+        assert_eq!(
+            upstream_statement_lines(&region, 6),
+            "            assert(x * x + x == x * (x + 1));"
+        );
+    }
+
+    /// With no `--verus-path` there is nothing to cross-check against, and the
+    /// extractor must say so by returning nothing rather than inventing a line.
+    #[test]
+    fn upstream_marked_lines_are_empty_without_a_verus_checkout() {
+        assert!(
+            upstream_fails_marked_lines_by_case(None, "source/rust_verify_test/tests/x.rs")
+                .is_empty()
+        );
+    }
+
+    /// The span proxy must stop at the end of the located statement, or a
+    /// single-line assertion would borrow the NEXT line's marker.
+    #[test]
+    fn statement_span_stops_at_the_end_of_the_located_statement() {
+        let source = "fn f() {\n    assert!(a);\n    assert!(b); // FAILS\n}\n";
+        assert_eq!(statement_span_lines(source, 2), vec!["    assert!(a);"]);
+        let wrapped =
+            "fn f() {\n    assert!(\n        a == b\n    ); // FAILS\n    assert!(c);\n}\n";
+        assert_eq!(
+            statement_span_lines(wrapped, 2),
+            vec!["    assert!(", "        a == b", "    ); // FAILS"]
+        );
+    }
+
+    fn error_pattern_case(patterns: &[&str]) -> VerusExpectedCase {
+        VerusExpectedCase {
+            obligation_decrease_waiver: None,
+            case_id: "case".to_string(),
+            upstream_case_id: None,
+            trust_vc_path: None,
+            expected_verdict: VerusExpectedVerdict::Error,
+            min_obligations: 0,
+            obligation_fingerprints: Vec::new(),
+            expected_error_patterns: patterns.iter().map(|p| (*p).to_string()).collect(),
+            expected_rust_diagnostic_pattern_sets: Vec::new(),
+            forbidden_diagnostic_patterns: Vec::new(),
+            expected_warning_patterns: Vec::new(),
+        }
+    }
+
+    fn error_observed_case(
+        diagnostic_context: &[&str],
+        failure_diagnostics: &[&str],
+    ) -> TrustVcCorpusObservedCase {
+        TrustVcCorpusObservedCase {
+            case_id: "case".to_string(),
+            trust_vc_path: "ported/foo.rs".to_string(),
+            verdict: "error".to_string(),
+            obligation_count: 0,
+            obligation_fingerprints: Vec::new(),
+            diagnostic_context: diagnostic_context
+                .iter()
+                .map(|d| (*d).to_string())
+                .collect(),
+            failure_diagnostics: failure_diagnostics
+                .iter()
+                .map(|d| (*d).to_string())
+                .collect(),
+            failing_obligations: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A declared pattern that appears only in the PORT'S OWN SOURCE LINES is
+    /// not evidence that the verifier said anything. The old check joined
+    /// `diagnostic_context` — which carries those source lines — into one blob,
+    /// so `admit`, `assume` or `nested` matched the port's text.
+    #[test]
+    fn expected_error_pattern_is_not_satisfied_by_the_ports_own_source_line() {
+        let expected_case = error_pattern_case(&["admitted proof"]);
+        let observed_case = error_observed_case(
+            &[
+                "detail: extract body assertions: something else entirely",
+                "ported/foo.rs:12:     trust_vc::admit!(); // admitted proof",
+            ],
+            &["detail: extract body assertions: something else entirely"],
+        );
+        let mut failures = Vec::new();
+
+        append_expected_error_pattern_failures(&expected_case, &observed_case, &mut failures);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("no single failure diagnostic contained all")),
+            "a source-line match must not satisfy a declared error pattern: {failures:?}"
+        );
+    }
+
+    /// Upstream `assert_vir_error_msg` checks ONE error's message, so two
+    /// declared patterns may not be satisfied by two different diagnostics.
+    #[test]
+    fn expected_error_patterns_may_not_straddle_two_failure_diagnostics() {
+        let expected_case = error_pattern_case(&["external_body", "trusted function body"]);
+        let observed_case = error_observed_case(
+            &[],
+            &[
+                "src/a.rs:3: external_body (assumed)",
+                "src/b.rs:9: admit (trusted function body)",
+            ],
+        );
+        let mut failures = Vec::new();
+
+        append_expected_error_pattern_failures(&expected_case, &observed_case, &mut failures);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("no single failure diagnostic contained all")),
+            "patterns split across two diagnostics must not pass: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn expected_error_patterns_pass_when_one_failure_diagnostic_carries_them_all() {
+        let expected_case = error_pattern_case(&["external_body", "trusted function body"]);
+        let observed_case = error_observed_case(
+            &[],
+            &["src/a.rs:3: external_body (trusted function body assumed)"],
+        );
+        let mut failures = Vec::new();
+
+        append_expected_error_pattern_failures(&expected_case, &observed_case, &mut failures);
+
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// An observed case with source-line context but NO failure-attached
+    /// diagnostic has nothing the verifier said; it must fail, not fall back to
+    /// the context blob.
+    #[test]
+    fn expected_error_patterns_fail_without_any_failure_attached_diagnostic() {
+        let expected_case = error_pattern_case(&["assume"]);
+        let observed_case =
+            error_observed_case(&["ported/foo.rs:4:     trust_vc::assume!(true);"], &[]);
+        let mut failures = Vec::new();
+
+        append_expected_error_pattern_failures(&expected_case, &observed_case, &mut failures);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("no failure-attached diagnostic was captured")),
+            "{failures:?}"
+        );
     }
 
     #[test]
@@ -20712,8 +30041,11 @@ fn ui_context_counterexample() {
             .expect("corpus report should load");
         let run_report = run_trust_vc_corpus(&temp_dir, &corpus, None);
 
-        assert_eq!(run_report.passed_paths, 1);
-        assert_eq!(run_report.failed_paths, 0);
+        // The path is RED for the unrelated counterexample-identity reason (the
+        // failing obligation carries no source line), so assert on the
+        // FORBIDDEN-PATTERN behaviour directly rather than on the path verdict:
+        // no forbidden-pattern failure is raised when the marker sits in a dead
+        // branch.
         let observed_case = &run_report.results[0].observed_cases[0];
         assert!(
             observed_case
@@ -20730,6 +30062,13 @@ fn ui_context_counterexample() {
                 .all(|entry| !entry.contains("INCORRECT CONTEXT")),
             "dead branch marker must not appear in diagnostic context: {:?}",
             observed_case.diagnostic_context
+        );
+        assert!(
+            run_report.results[0].failures.iter().all(|failure| {
+                !failure.contains("diagnostic context unexpectedly contained forbidden pattern")
+            }),
+            "a dead-branch marker must not raise a forbidden-pattern failure: {:?}",
+            run_report.results[0].failures
         );
 
         fs::write(
@@ -20858,7 +30197,12 @@ fn target() {}
 
         let mut functions = Vec::new();
         let mut source_errors = Vec::new();
-        scan_trust_vc_corpus_file(&source_path, &mut functions, &mut source_errors);
+        scan_trust_vc_corpus_file(
+            &source_path,
+            &BTreeSet::new(),
+            &mut functions,
+            &mut source_errors,
+        );
 
         assert!(
             source_errors.is_empty(),
@@ -20952,7 +30296,7 @@ fn compiler_error_case(x: i32) -> i32 {
     }
 
     #[test]
-    fn trust_vc_corpus_execution_records_unsafe_proof_mode_errors_as_expected_cases() {
+    fn trust_vc_corpus_execution_takes_unsafe_proof_mode_errors_from_the_engine() {
         let temp_dir = unique_temp_dir("trust-vc-evidence-corpus-unsafe-proof-error");
         let upstream_tests = temp_dir.join(VERUS_TEST_ROOT);
         fs::create_dir_all(&upstream_tests).expect("upstream test dir should be created");
@@ -21008,13 +30352,26 @@ unsafe fn unsafe_proof_fn_fail() {
             .expect("corpus report should load");
         let run_report = run_trust_vc_corpus(&temp_dir, &corpus, None);
 
-        assert_eq!(run_report.passed_paths, 1);
+        assert_eq!(
+            run_report.passed_paths, 1,
+            "{:?}",
+            run_report.results[0].failures
+        );
         assert_eq!(run_report.failed_paths, 0);
         let result = &run_report.results[0];
-        assert_eq!(result.function_count, 0);
+        // The function REACHES the engine: the gate no longer removes it and
+        // then writes its own diagnostic in its place.
+        assert_eq!(result.function_count, 1);
         assert_eq!(result.observed_case_ids, vec!["unsafe_proof_fn_fail"]);
         assert_eq!(result.observed_cases[0].verdict, "error");
-        assert_eq!(result.observed_cases[0].obligation_count, 0);
+        assert!(
+            result.observed_cases[0]
+                .diagnostic_context
+                .iter()
+                .any(|entry| entry.contains("'unsafe' only makes sense on exec-mode functions")),
+            "engine must supply the rejection diagnostic: {:?}",
+            result.observed_cases[0].diagnostic_context
+        );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
@@ -21382,7 +30739,7 @@ pub fn test_regression_70() {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -21505,7 +30862,7 @@ fn fixture_ok(x: i32) -> i32 {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -21810,6 +31167,23 @@ pub fn double(x: u16) -> i128 { x as i128 + x as i128 }
         fixture_root
     }
 
+    /// A fake-cargo log line records `$*`, which since 2026-09-16 carries the
+    /// per-unit Trust verification scope ahead of the subcommand. Assert on the
+    /// working directory, the SCOPE, and the subcommand TAIL rather than on a
+    /// whole-line equality that the scope would break.
+    #[cfg(unix)]
+    fn cargo_log_has_scoped_invocation(log: &str, dir: &str, tail: &str) -> bool {
+        log.lines().any(|line| {
+            let Some(rest) = line.strip_prefix(&format!("{dir}|")) else {
+                return false;
+            };
+            rest.starts_with("-Zprofile-rustflags ")
+                && rest.contains("profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]")
+                && rest.contains("profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]")
+                && rest.ends_with(tail)
+        })
+    }
+
     #[cfg(unix)]
     fn write_spec_use_sidecar_fake_cargo(path: &Path, log_path: &Path, missing_sidecar: bool) {
         let missing_sidecar = if missing_sidecar { "1" } else { "0" };
@@ -21818,13 +31192,13 @@ pub fn double(x: u16) -> i128 { x as i128 + x as i128 }
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s|%s\n' "$(basename "$PWD")" "$*" >> "{}"
-if [ "$1" = "check" ] && [ "$2" = "--message-format=json" ] && [ "$3" = "--all-targets" ] && [ "$4" = "--locked" ] && [ "$5" = "--offline" ]; then
+if [ "${{@: -5:1}}" = "check" ] && [ "${{@: -4:1}}" = "--message-format=json" ] && [ "${{@: -3:1}}" = "--all-targets" ] && [ "${{@: -2:1}}" = "--locked" ] && [ "${{@: -1:1}}" = "--offline" ]; then
   mkdir -p "$CARGO_TARGET_DIR/debug/deps"
   printf '%s: %s\n' "$CARGO_TARGET_DIR/debug/deps/libspec_use.rmeta" "$(pwd)/src/lib.rs" > "$CARGO_TARGET_DIR/debug/deps/spec_use.d"
   echo '{{"reason":"compiler-artifact"}}'
   exit 0
 fi
-if [ "$(basename "$PWD")" = "cargo_spec_use" ] && [ "$1" = "check" ] && [ "$2" = "--lib" ] && [ "$3" = "--locked" ] && [ "$4" = "--offline" ]; then
+if [ "$(basename "$PWD")" = "cargo_spec_use" ] && [ "${{@: -4:1}}" = "check" ] && [ "${{@: -3:1}}" = "--lib" ] && [ "${{@: -2:1}}" = "--locked" ] && [ "${{@: -1:1}}" = "--offline" ]; then
   mkdir -p "$CARGO_TARGET_DIR/debug/deps"
   driver_args="$(env | grep '^ __VERUS_DRIVER_ARGS_FOR_' || true)"
   case "$driver_args" in
@@ -21926,7 +31300,7 @@ JSON
   echo '{{"reason":"compiler-artifact"}}'
   exit 0
 fi
-if [ "$1" = "check" ] && [ "$2" = "--lib" ] && [ "$3" = "--locked" ] && [ "$4" = "--offline" ]; then
+if [ "${{@: -4:1}}" = "check" ] && [ "${{@: -3:1}}" = "--lib" ] && [ "${{@: -2:1}}" = "--locked" ] && [ "${{@: -1:1}}" = "--offline" ]; then
   mkdir -p "$CARGO_TARGET_DIR/debug/deps"
   metadata="$CARGO_TARGET_DIR/debug/deps/libspec_def.rmeta"
   printf 'fake metadata' > "$metadata"
@@ -22030,6 +31404,7 @@ exit 0
     #[cfg(unix)]
     fn spec_use_sidecar_candidate() -> TrustVcCorpusRunCandidate {
         TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/spec_use/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -22039,6 +31414,7 @@ exit 0
             expected_cases: ["concrete_b", "concrete_caller", "test", "lib"]
                 .into_iter()
                 .map(|case_id| VerusExpectedCase {
+                    obligation_decrease_waiver: None,
                     case_id: case_id.to_string(),
                     upstream_case_id: None,
                     trust_vc_path: None,
@@ -22145,6 +31521,7 @@ exit 0
     #[cfg(unix)]
     fn unverified_spec_use_sidecar_candidate() -> TrustVcCorpusRunCandidate {
         TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path:
                 "source/rust_verify_test/tests/cargo-tests/unverified/spec_use/src/lib.rs"
                     .to_string(),
@@ -22153,6 +31530,7 @@ exit 0
             trust_vc_paths: vec!["ported/cargo_unverified_spec_use".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "direct_body_call".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -22219,15 +31597,24 @@ exit 0
         );
         let cargo_log = fs::read_to_string(&cargo_log).expect("cargo log should be readable");
         assert!(
-            cargo_log.contains(
-                "cargo_spec_use|check --message-format=json --all-targets --locked --offline"
+            cargo_log_has_scoped_invocation(
+                &cargo_log,
+                "cargo_spec_use",
+                "check --message-format=json --all-targets --locked --offline"
             ),
-            "consumer typecheck should still run first: {cargo_log}"
+            "consumer typecheck should still run first, and scoped: {cargo_log}"
         );
         assert!(
-            cargo_log.contains("cargo_spec_def|check --lib --locked --offline")
-                && cargo_log.contains("cargo_spec_def2|check --lib --locked --offline"),
-            "producer sidecar builds should be orchestrated: {cargo_log}"
+            cargo_log_has_scoped_invocation(
+                &cargo_log,
+                "cargo_spec_def",
+                "check --lib --locked --offline"
+            ) && cargo_log_has_scoped_invocation(
+                &cargo_log,
+                "cargo_spec_def2",
+                "check --lib --locked --offline"
+            ),
+            "producer sidecar builds should be orchestrated AND carry the per-unit scope: {cargo_log}"
         );
         assert_eq!(
             result
@@ -22239,6 +31626,12 @@ exit 0
                     .canonicalize()
                     .expect("fixture root should canonicalize")
             )
+        );
+
+        assert_eq!(
+            fixture_scratch_residue(&crate_root),
+            Vec::<PathBuf>::new(),
+            "fixture and sidecar builds must leave no scratch behind"
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
@@ -22303,14 +31696,20 @@ exit 0
         );
         let cargo_log = fs::read_to_string(&cargo_log).expect("cargo log should be readable");
         assert!(
-            cargo_log.contains(
-                "cargo_unverified_spec_use|check --message-format=json --all-targets --locked --offline"
+            cargo_log_has_scoped_invocation(
+                &cargo_log,
+                "cargo_unverified_spec_use",
+                "check --message-format=json --all-targets --locked --offline"
             ),
-            "unverified consumer typecheck should still run first: {cargo_log}"
+            "unverified consumer typecheck should still run first, and scoped: {cargo_log}"
         );
         assert!(
-            cargo_log.contains("cargo_spec_use|check --lib --locked --offline"),
-            "spec_use sidecar should be built for the unverified consumer: {cargo_log}"
+            cargo_log_has_scoped_invocation(
+                &cargo_log,
+                "cargo_spec_use",
+                "check --lib --locked --offline"
+            ),
+            "spec_use sidecar should be built for the unverified consumer AND carry the per-unit scope: {cargo_log}"
         );
         assert_eq!(
             result
@@ -22322,6 +31721,12 @@ exit 0
                     .canonicalize()
                     .expect("fixture root should canonicalize")
             )
+        );
+
+        assert_eq!(
+            fixture_scratch_residue(&crate_root),
+            Vec::<PathBuf>::new(),
+            "fixture and transitive sidecar builds must leave no scratch behind"
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
@@ -22383,6 +31788,12 @@ exit 0
             "dependency facts should not be passed when sidecar setup fails"
         );
 
+        assert_eq!(
+            fixture_scratch_residue(&crate_root),
+            Vec::<PathBuf>::new(),
+            "a failed sidecar build must leave no scratch behind either"
+        );
+
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
@@ -22424,7 +31835,7 @@ fn fixture_hidden(x: i32) -> i32 {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -22586,7 +31997,7 @@ edition = "2021"
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -22611,6 +32022,15 @@ exit 0
         assert_eq!(
             output.command.args,
             vec![
+                // Per-unit Trust verification scoping, pinned exactly: the
+                // fixture's own units stay verified (advisory) and only the
+                // packages it links are switched off. A future widening of this
+                // policy has to change this assertion.
+                "-Zprofile-rustflags".to_string(),
+                "--config".to_string(),
+                "profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]".to_string(),
+                "--config".to_string(),
+                "profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]".to_string(),
                 "check".to_string(),
                 "--message-format=json".to_string(),
                 "--all-targets".to_string(),
@@ -22622,6 +32042,108 @@ exit 0
             fs::read_to_string(fixture_root.join("Cargo.lock"))
                 .expect("fixture lockfile should remain readable"),
             "version = 4\n# original\n"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn trust_per_unit_scope_is_pinned_for_every_gate_compile_site() {
+        // The BASE scope every compile site the gate drives shares, pinned
+        // exactly: the units under test stay verified (advisory) and only the
+        // packages they link are switched off. A future widening of this
+        // policy has to change this assertion.
+        assert_eq!(
+            trust_per_unit_scope_args(),
+            vec![
+                "-Zprofile-rustflags".to_string(),
+                "--config".to_string(),
+                "profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]".to_string(),
+                "--config".to_string(),
+                "profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]".to_string(),
+            ]
+        );
+        // cargo only accepts `-Z` and `--config` BEFORE the subcommand, so the
+        // scope is a PREFIX and the subcommand keeps its original order.
+        let args = with_trust_per_unit_scope(
+            trust_per_unit_scope_args(),
+            &["check", "--workspace", "--locked", "--offline"],
+        );
+        assert_eq!(args[0], "-Zprofile-rustflags");
+        assert_eq!(
+            &args[args.len() - 4..],
+            &[
+                "check".to_string(),
+                "--workspace".to_string(),
+                "--locked".to_string(),
+                "--offline".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_fixture_scope_keeps_corpus_siblings_verified_and_repo_crates_off() {
+        // A fixture that depends on another corpus fixture must NOT have that
+        // sibling silently switched off by the `"*"` rule: the sibling is corpus
+        // code under test. A repo tooling crate outside `evals/` must stay off.
+        let temp_dir = unique_temp_dir("trust-vc-evidence-fixture-scope-siblings");
+        let corpus = temp_dir.join("evals/verus/ported");
+        for dir in ["cargo_leaf", "cargo_mid", "cargo_top"] {
+            fs::create_dir_all(corpus.join(dir).join("src")).expect("fixture dir");
+        }
+        fs::create_dir_all(temp_dir.join("crates/tooling/src")).expect("tooling dir");
+        fs::write(
+            corpus.join("cargo_leaf/Cargo.toml"),
+            "[package]\nname = \"leaf_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("leaf manifest");
+        fs::write(
+            corpus.join("cargo_mid/Cargo.toml"),
+            "[package]\nname = \"mid_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nleaf = { path = \"../cargo_leaf\", package = \"leaf_pkg\" }\n",
+        )
+        .expect("mid manifest");
+        fs::write(
+            temp_dir.join("crates/tooling/Cargo.toml"),
+            "[package]\nname = \"tooling_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("tooling manifest");
+        fs::write(
+            corpus.join("cargo_top/Cargo.toml"),
+            "[package]\nname = \"top_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmid = { path = \"../cargo_mid\" }\ntooling = { path = \"../../../../crates/tooling\" }\n",
+        )
+        .expect("top manifest");
+        let crate_root = temp_dir.canonicalize().expect("temp dir canonicalize");
+        let fixture_root = crate_root.join("evals/verus/ported/cargo_top");
+
+        let args = cargo_fixture_verification_scope_args(&crate_root, &fixture_root);
+
+        assert!(
+            args.contains(
+                &"profile.dev.package.\"mid_pkg\".rustflags=[\"-Ztrust-policy=advisory\"]"
+                    .to_string()
+            ),
+            "direct corpus sibling must stay verified: {args:?}"
+        );
+        assert!(
+            args.contains(
+                &"profile.dev.package.\"leaf_pkg\".rustflags=[\"-Ztrust-policy=advisory\"]"
+                    .to_string()
+            ),
+            "transitive corpus sibling must stay verified: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("tooling_pkg")),
+            "a repo tooling crate is not corpus code under test: {args:?}"
+        );
+        assert!(
+            args.contains(
+                &"profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]".to_string()
+            ),
+            "linked packages must be scoped off: {args:?}"
+        );
+        assert!(
+            args.contains(&"profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]".to_string()),
+            "the fixture's own units must stay verified: {args:?}"
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
@@ -22649,6 +32171,7 @@ exit 0
         args.run_trust_vc_corpus = true;
         args.port_manifest_only = true;
         let direct_corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/direct.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::ProofObligation,
@@ -22657,6 +32180,7 @@ exit 0
             expected_cases: Vec::new(),
         });
         let fixture_corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/basic/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -22666,6 +32190,7 @@ exit 0
             expected_cases: Vec::new(),
         });
         let integration_corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/cargo-verus/tests/test_late_args.rs".to_string(),
             classification: "ported".to_string(),
             evidence_kind: VerusEvidenceKind::CargoTrustVcIntegrationTest,
@@ -22751,6 +32276,7 @@ exit 0
             .canonicalize()
             .expect("temp dir should canonicalize");
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/basic/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -22762,6 +32288,7 @@ exit 0
             ],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "fixture_ok".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -22866,6 +32393,206 @@ exit 0
                 .is_some_and(|name| name.starts_with("dependency-sidecars-")),
             "sidecar target dir should keep dependency digest leaf: {}",
             sidecar_target.display()
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    /// Everything below a run directory under the scratch runs root: a target
+    /// directory, build output, dep-info or a sidecar artifact. A bare, empty
+    /// run directory is not residue; anything inside one is.
+    fn fixture_scratch_residue(crate_root: &Path) -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let entries = fs::read_dir(dir).expect("scratch directory should be listable");
+            for entry in entries {
+                let path = entry.expect("scratch entry should be readable").path();
+                out.push(path.clone());
+                if path.is_dir() {
+                    walk(&path, out);
+                }
+            }
+        }
+        let runs_root = crate_root
+            .join("target")
+            .join("trust-vc-corpus-fixtures")
+            .join("runs");
+        let mut residue = Vec::new();
+        let Ok(runs) = fs::read_dir(&runs_root) else {
+            return residue;
+        };
+        for run in runs {
+            let run = run.expect("scratch run entry should be readable").path();
+            if run.is_dir() {
+                walk(&run, &mut residue);
+            } else {
+                residue.push(run);
+            }
+        }
+        residue.sort();
+        residue
+    }
+
+    #[cfg(unix)]
+    fn write_scratch_probe_fixture(crate_root: &Path) -> PathBuf {
+        let fixture_root = crate_root.join("ported/basic_fixture");
+        fs::create_dir_all(fixture_root.join("src")).expect("fixture src dir should be created");
+        fs::write(
+            fixture_root.join("Cargo.toml"),
+            "[package]\nname = \"basic-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("fixture Cargo.toml should be written");
+        fs::write(fixture_root.join("Cargo.lock"), "version = 4\n")
+            .expect("fixture lockfile should be written");
+        fs::write(fixture_root.join("src/lib.rs"), "pub fn ok() {}\n")
+            .expect("fixture source should be written");
+        fs::write(fixture_root.join("src/current"), "lib.rs")
+            .expect("fixture source selector should be written");
+        fixture_root
+    }
+
+    /// A fake build that refuses a target directory already holding anything
+    /// (a reused build answers from whatever an earlier build left there),
+    /// records in its dep-info the one source the fixture currently names, and
+    /// leaves a megabyte of build output behind, as a real build does.
+    #[cfg(unix)]
+    fn write_scratch_probe_fake_cargo(path: &Path) {
+        write_executable(
+            path,
+            r#"#!/usr/bin/env bash
+if [ -n "$(ls -A "$CARGO_TARGET_DIR" 2>/dev/null)" ]; then
+  echo "cargo was handed a non-empty target dir: $CARGO_TARGET_DIR" >&2
+  exit 65
+fi
+source="$(cat src/current)"
+mkdir -p "$CARGO_TARGET_DIR/debug/deps"
+printf '%s: %s\n' "$CARGO_TARGET_DIR/debug/deps/libbasic_fixture.rmeta" "$(pwd)/src/$source" > "$CARGO_TARGET_DIR/debug/deps/basic_fixture-${source%.rs}.d"
+head -c 1048576 /dev/zero > "$CARGO_TARGET_DIR/debug/deps/libbasic_fixture.rmeta"
+echo '{"reason":"compiler-artifact"}'
+exit 0
+"#,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_fixture_scratch_is_fresh_per_build_and_removed_once_its_evidence_is_read() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-fixture-scratch-lifecycle");
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let crate_root = temp_dir
+            .canonicalize()
+            .expect("temp dir should canonicalize");
+        let fixture_root = write_scratch_probe_fixture(&crate_root);
+        let fake_cargo = crate_root.join("fake-cargo");
+        write_scratch_probe_fake_cargo(&fake_cargo);
+        let env = vec![("CARGO".to_string(), fake_cargo.display().to_string())];
+        // A build already sitting at the very path the first round will use,
+        // as a crash between build and cleanup leaves one, naming a source
+        // that still exists.
+        let stale_deps = cargo_fixture_target_dir(&crate_root, &fixture_root).join("debug/deps");
+        fs::create_dir_all(&stale_deps).expect("stale build dir should be created");
+        fs::write(
+            stale_deps.join("stale.d"),
+            format!("stale: {}\n", fixture_root.join("src/lib.rs").display()),
+        )
+        .expect("stale dep-info should be written");
+
+        // Every round changes the fixture and keeps every earlier source on
+        // disk, so an earlier build's dep-info would still resolve if it were
+        // read: the evidence can only stay exact if no earlier build is.
+        for (round, source) in ["first.rs", "second.rs", "third.rs", "fourth.rs"]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(fixture_root.join("src").join(source), "pub fn ok() {}\n")
+                .expect("round source should be written");
+            fs::write(fixture_root.join("src/current"), source)
+                .expect("round source selector should be written");
+
+            let output = run_cargo_check_for_fixture(&crate_root, &fixture_root, &env);
+
+            assert_eq!(
+                output.command.exit_code,
+                Some(0),
+                "round {round}: {:?}",
+                output.command
+            );
+            assert_eq!(output.cargo_dep_info_error, None, "round {round}");
+            assert_eq!(
+                output.cargo_dep_info_sources,
+                BTreeSet::from([fixture_root.join("src").join(source)]),
+                "round {round}: the evidence must name this build's sources and no earlier build's"
+            );
+            assert!(
+                !cargo_fixture_target_dir(&crate_root, &fixture_root).exists(),
+                "round {round}: the target dir must not outlive the evidence read from it"
+            );
+            assert_eq!(
+                fixture_scratch_residue(&crate_root),
+                Vec::<PathBuf>::new(),
+                "round {round}: repeated runs must leave no build output behind"
+            );
+        }
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_fixture_scratch_left_by_exited_runs_is_reaped_and_live_runs_are_spared() {
+        let temp_dir = unique_temp_dir("trust-vc-evidence-fixture-scratch-reap");
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let crate_root = temp_dir
+            .canonicalize()
+            .expect("temp dir should canonicalize");
+        let fixture_root = write_scratch_probe_fixture(&crate_root);
+        let fake_cargo = crate_root.join("fake-cargo");
+        write_scratch_probe_fake_cargo(&fake_cargo);
+        let env = vec![("CARGO".to_string(), fake_cargo.display().to_string())];
+        let runs_root = crate_root
+            .join("target")
+            .join("trust-vc-corpus-fixtures")
+            .join("runs");
+
+        // What a killed run leaves behind: its target dir, build output and a
+        // dep-info file naming a source that still exists.
+        let mut exited = Command::new("true").spawn().expect("`true` should spawn");
+        let exited_pid = exited.id();
+        exited.wait().expect("`true` should exit");
+        let exited_run = runs_root.join(format!("pid-{exited_pid}"));
+        let exited_deps = exited_run.join("fixture-0123456789abcdef/debug/deps");
+        fs::create_dir_all(&exited_deps).expect("exited run scratch should be created");
+        fs::write(exited_deps.join("libstale.rmeta"), vec![0u8; 1 << 20])
+            .expect("exited run build output should be written");
+        fs::write(
+            exited_deps.join("stale.d"),
+            format!("stale: {}\n", fixture_root.join("src/lib.rs").display()),
+        )
+        .expect("exited run dep-info should be written");
+        // pid 1 outlives every test, so this run directory has a live owner.
+        let live_run = runs_root.join("pid-1").join("fixture-live");
+        fs::create_dir_all(&live_run).expect("live run scratch should be created");
+        fs::write(live_run.join("in-flight"), "building")
+            .expect("live run build output should be written");
+        // A name that identifies no owning process is not the reaper's to judge.
+        let unowned = runs_root.join("not-a-run");
+        fs::create_dir_all(&unowned).expect("unowned entry should be created");
+        fs::write(unowned.join("keep"), "").expect("unowned file should be written");
+
+        let output = run_cargo_check_for_fixture(&crate_root, &fixture_root, &env);
+
+        assert_eq!(output.command.exit_code, Some(0), "{:?}", output.command);
+        assert!(
+            !exited_run.exists(),
+            "scratch left by an exited run must be reaped: {}",
+            exited_run.display()
+        );
+        assert!(
+            live_run.join("in-flight").exists(),
+            "a live run's scratch must never be touched"
+        );
+        assert!(
+            unowned.join("keep").exists(),
+            "an entry that names no owning process must be left alone"
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
@@ -23023,6 +32750,7 @@ edition = "2021"
             .canonicalize()
             .expect("fixture root should canonicalize");
         let corpus = corpus_for_typecheck(TrustVcCorpusRunCandidate {
+            upstream_fails_marked_lines: BTreeMap::new(),
             upstream_path: "source/rust_verify_test/tests/cargo-tests/verified/basic/src/lib.rs"
                 .to_string(),
             classification: "ported".to_string(),
@@ -23030,6 +32758,7 @@ edition = "2021"
             trust_vc_paths: vec!["ported/basic_fixture".to_string()],
             trust_vc_check_args: Vec::new(),
             expected_cases: vec![VerusExpectedCase {
+                obligation_decrease_waiver: None,
                 case_id: "fixture_ok".to_string(),
                 upstream_case_id: None,
                 trust_vc_path: None,
@@ -23169,7 +32898,7 @@ fn fixture_ok() {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23513,7 +33242,7 @@ edition = "2021"
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23663,7 +33392,7 @@ JSON
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23703,6 +33432,9 @@ exit 101
             result.observed_cases[0].trust_vc_path,
             "ported/borrow_error/src/lib.rs"
         );
+        // The recorded argv carries the per-unit Trust verification scope ahead
+        // of the subcommand (cargo only accepts `-Z`/`--config` there), so pin
+        // the whole list including the scope rather than the bare subcommand.
         assert_eq!(
             result
                 .command
@@ -23710,6 +33442,11 @@ exit 101
                 .map(|command| command.args.as_slice()),
             Some(
                 &[
+                    "-Zprofile-rustflags".to_string(),
+                    "--config".to_string(),
+                    "profile.dev.rustflags=[\"-Ztrust-policy=advisory\"]".to_string(),
+                    "--config".to_string(),
+                    "profile.dev.package.\"*\".rustflags=[\"-Ztrust-verify=off\"]".to_string(),
                     "check".to_string(),
                     "--message-format=json".to_string(),
                     "--all-targets".to_string(),
@@ -23737,7 +33474,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23792,7 +33529,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23842,7 +33579,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -23895,7 +33632,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24007,7 +33744,7 @@ pub fn harness_invalid_rust() {
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24055,7 +33792,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24102,7 +33839,7 @@ exit 0
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24149,7 +33886,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24206,7 +33943,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24255,7 +33992,7 @@ exit 101
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24303,7 +34040,7 @@ exit 64
         write_executable(
             &fake_cargo,
             r#"#!/usr/bin/env bash
-if [ "$1" != "check" ] || [ "$2" != "--message-format=json" ] || [ "$3" != "--all-targets" ] || [ "$4" != "--locked" ] || [ "$5" != "--offline" ]; then
+if [ "$1" != "-Zprofile-rustflags" ] || [ "${@: -5:1}" != "check" ] || [ "${@: -4:1}" != "--message-format=json" ] || [ "${@: -3:1}" != "--all-targets" ] || [ "${@: -2:1}" != "--locked" ] || [ "${@: -1:1}" != "--offline" ]; then
   echo "unexpected cargo args: $*" >&2
   exit 64
 fi
@@ -24879,6 +34616,52 @@ rustflags = ["--cfg", "evidence_side_effect"]
         assert!(active_cargo_config_override_detected(&temp_dir, None));
 
         fs::write(temp_dir.join(".cargo/config.toml"), "").expect("cargo config should be cleared");
+
+        // A rustflags override hidden in a CORPUS FIXTURE manifest, through
+        // cargo's `profile-rustflags` feature, is the same override as the
+        // `[target.…] rustflags` case above and was invisible to this control
+        // until 2026-09-16 (only the ROOT manifest was scanned).
+        let fixture_dir = temp_dir.join("evals/verus/ported/cargo_probe");
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+        fs::write(
+            fixture_dir.join("Cargo.toml"),
+            r#"
+cargo-features = ["profile-rustflags"]
+
+[package]
+name = "probe"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("fixture manifest should be written");
+        assert!(active_cargo_config_override_detected(&temp_dir, None));
+        fs::write(
+            fixture_dir.join("Cargo.toml"),
+            r#"
+[package]
+name = "probe"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev.package."*"]
+rustflags = ["-Ztrust-verify=off"]
+"#,
+        )
+        .expect("fixture manifest should be written");
+        assert!(active_cargo_config_override_detected(&temp_dir, None));
+        fs::write(
+            fixture_dir.join("Cargo.toml"),
+            r#"
+[package]
+name = "probe"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("clean fixture manifest should be written");
+        assert!(!active_cargo_config_override_detected(&temp_dir, None));
+
         let isolated_cargo_home = temp_dir.join("evidence-cargo-home");
         fs::create_dir_all(&isolated_cargo_home).expect("isolated cargo home should be created");
         fs::write(
@@ -24991,6 +34774,107 @@ paths = ["../../../../fake-ay"]
             DEFAULT_VERUS_TEST_COMMAND
                 .contains("cargo test -p cargo-verus --features integration-tests"),
             "default Verus command must include cargo-verus integration tests"
+        );
+        assert!(
+            DEFAULT_VERUS_TEST_COMMAND.contains("unset RUSTUP_TOOLCHAIN;"),
+            "default Verus command must build Verus with the toolchain Verus pins, not the Trust channel"
+        );
+        assert!(
+            DEFAULT_VERUS_TEST_COMMAND.contains("RUSTUP_AUTO_INSTALL=0;"),
+            "default Verus command must never let rustup install the oracle"
+        );
+    }
+
+    /// A `rustup` that logs its arguments and `RUSTUP_AUTO_INSTALL`, then exits
+    /// with `exit_code`.
+    #[cfg(unix)]
+    fn write_fake_rustup(path: &Path, log: &Path, exit_code: i32) {
+        write_executable(
+            path,
+            &format!(
+                "#!/bin/sh\nprintf '%s|RUSTUP_AUTO_INSTALL=%s\\n' \"$*\" \"${{RUSTUP_AUTO_INSTALL-unset}}\" >> '{}'\nexit {exit_code}\n",
+                log.display()
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upstream_verus_gate_is_not_run_without_the_pinned_oracle() {
+        let temp_dir = unique_temp_dir("trust-vc-verus-oracle");
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let rustup = temp_dir.join("rustup");
+        let log = temp_dir.join("rustup.log");
+        let toolchain = temp_dir.join("rust-toolchain.toml");
+        let rustup_arg = rustup.to_string_lossy().into_owned();
+
+        // Verus pins the oracle, rustup lacks it: a required skipped gate.
+        fs::write(
+            &toolchain,
+            format!("[toolchain]\nchannel = \"{VERUS_ORACLE_TOOLCHAIN}\"\n"),
+        )
+        .expect("toolchain file should be written");
+        write_fake_rustup(&rustup, &log, 1);
+        let gate = upstream_verus_gate(&temp_dir, None, &[], &rustup_arg);
+        assert!(gate.required);
+        assert_eq!(gate.status, GateStatus::Skipped);
+        assert_eq!(
+            gate.detail.as_deref(),
+            Some(format!("NOT RUN: oracle rustc {VERUS_ORACLE_TOOLCHAIN} not installed").as_str())
+        );
+        assert!(gate.command.is_none(), "an absent oracle runs nothing");
+        assert_eq!(
+            fs::read_to_string(&log).expect("rustup should have been asked"),
+            format!("which --toolchain {VERUS_ORACLE_TOOLCHAIN} rustc|RUSTUP_AUTO_INSTALL=0\n")
+        );
+
+        // rustup holds it: the probe clears the default command to run.
+        write_fake_rustup(&rustup, &log, 0);
+        assert_eq!(verus_oracle_not_run(&temp_dir, &rustup_arg), None);
+
+        // Verus moved to another toolchain: NOT RUN before rustup is asked.
+        fs::remove_file(&log).expect("log should be removable");
+        fs::write(&toolchain, "[toolchain]\nchannel = \"1.99.0\"\n")
+            .expect("toolchain file should be written");
+        let gate = upstream_verus_gate(&temp_dir, None, &[], &rustup_arg);
+        assert_eq!(gate.status, GateStatus::Skipped);
+        assert_eq!(
+            gate.detail.as_deref(),
+            Some(
+                format!(
+                    "NOT RUN: oracle rustc {VERUS_ORACLE_TOOLCHAIN}: the Verus checkout's rust-toolchain.toml names `1.99.0`"
+                )
+                .as_str()
+            )
+        );
+        fs::remove_file(&toolchain).expect("toolchain file should be removable");
+        assert!(verus_oracle_not_run(&temp_dir, &rustup_arg)
+            .is_some_and(|detail| detail.ends_with("names no channel")));
+        assert!(!log.exists(), "a mismatched checkout never asks rustup");
+
+        // A sparse checkout without the file: the committed pin still counts.
+        fs::write(
+            &toolchain,
+            format!("[toolchain]\nchannel = \"{VERUS_ORACLE_TOOLCHAIN}\"\n"),
+        )
+        .expect("toolchain file should be written");
+        init_git_repo(&temp_dir);
+        git_commit_all(&temp_dir, "pin the oracle");
+        fs::remove_file(&toolchain).expect("toolchain file should be removable");
+        assert_eq!(verus_oracle_not_run(&temp_dir, &rustup_arg), None);
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn verus_suite_scripts_name_the_same_oracle() {
+        let suite_common =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/verus_suite/suite_common.py");
+        let text = fs::read_to_string(&suite_common).expect("suite_common.py should be readable");
+        assert!(
+            text.lines()
+                .any(|line| line == format!("RUST_TOOLCHAIN = \"{VERUS_ORACLE_TOOLCHAIN}\"")),
+            "{} must pin the same Verus oracle as VERUS_ORACLE_TOOLCHAIN",
+            suite_common.display()
         );
     }
 
@@ -25192,6 +35076,29 @@ paths = ["../../../../fake-ay"]
     }
 
     #[test]
+    fn only_the_pinned_trust_channel_passes_the_active_toolchain_check() {
+        assert_eq!(non_trust_active_toolchain_failure("trust"), None);
+        for stock in [
+            "stable-aarch64-apple-darwin",
+            "1.97.1",
+            "1.97.1-aarch64-apple-darwin",
+            "nightly-2026-04-20",
+            "nightly-2026-04-20-aarch64-apple-darwin",
+            // Neither a prefix nor a suffix of the channel name is the channel.
+            "trust-old",
+            "Trust",
+            "",
+        ] {
+            let failure = non_trust_active_toolchain_failure(stock)
+                .unwrap_or_else(|| panic!("`{stock}` must not pass as the Trust channel"));
+            assert!(
+                failure.contains(&format!("`{stock}`")) && failure.contains("`trust`"),
+                "the failure must name both toolchains: {failure}"
+            );
+        }
+    }
+
+    #[test]
     fn sanitized_command_env_injects_detected_active_toolchain() {
         // With a detected toolchain, the shim dir leads PATH and RUSTUP_TOOLCHAIN
         // is exported so the shims resolve to that toolchain in cwds without a
@@ -25365,6 +35272,8 @@ entries:
         let temp_dir = unique_temp_dir("trust-vc-evidence-verus-rev");
         let args = test_evidence_args(&temp_dir, &temp_dir, Some("cli123"));
         let corpus = VerusCorpusReport {
+            accepted_case_correspondence_bound: String::new(),
+            proof_content_decrease_waivers: Vec::new(),
             manifest_path: temp_dir.join("verus-tests.json"),
             manifest_schema_version: 1,
             upstream_repo: Some(VERUS_REPO_URL.to_string()),
@@ -25388,6 +35297,7 @@ entries:
             accepted_executable_ports: Vec::new(),
             unsupported_gap_evidence: Vec::new(),
             accepted_trust_vc_source_hashes: Vec::new(),
+            unscheduled_ported_paths: Vec::new(),
             run_candidates: Vec::new(),
         };
 
@@ -25724,6 +35634,7 @@ entries:
             port_manifest_only: true,
             update_verus_tests_manifest: true,
             refresh_trust_vc_corpus_evidence: false,
+            repin_obligation_rendering_drift: Vec::new(),
             corpus_triage_report: false,
             scaffold_verus_port_stubs: false,
             verus_command: None,
@@ -25903,5 +35814,1141 @@ ay-sys = {{ path = "{ay_relative_root}/crates/ay-sys" }}
                 source: Some(format!("git+{AY_REPO_URL}?rev={rev}#{rev}")),
             })
             .collect()
+    }
+
+    const UPSTREAM_SCOPE_TEST1_FAILS_REGION: &str = r#"    #[test] test1_fails verus_code! {
+        fn test1() {
+            {
+                let mut x = 5;
+                x = 50;
+            }
+            let mut x = 6;
+            x = 60;
+            let x = 7;
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    const PORT_SCOPE_TEST1_FAILS: &str = r#"#[trust_vc::ensures(true)]
+fn test1_fails() {
+    {
+        let mut x = 5;
+        x = 50;
+        let _ = x;
+    }
+    let mut x = 6;
+    x = 60;
+    let x = 7;
+    let _ = x;
+    trust_vc::assert!(false); // FAILS
+}
+"#;
+
+    const PORT_SCOPE_TEST1_FAILS_FLATTENED: &str = r#"#[trust_vc::ensures(true)]
+fn test1_fails() {
+    let x = 7;
+    let _ = x;
+    let mut x = 6;
+    x = 60;
+    let mut x = 5;
+    x = 50;
+    trust_vc::assert!(false); // FAILS
+}
+"#;
+
+    /// DISCLOSURE, not approval: this pins the block-structure sentence of
+    /// `ACCEPTED_CASE_CORRESPONDENCE_BOUND` as TRUE.
+    ///
+    /// `scope.rs::test1_fails` is upstream's BLOCK-SCOPE case — the one file
+    /// whose entire subject is scope. Delete the inner block, flatten every
+    /// binding into one sequence and reverse their order, and the premise
+    /// channels do not move: the binding channel compares name/initializer
+    /// PAIRS as a SET and the statement channel is a SET, so neither sees
+    /// structure or order. Both the faithful port and the rewrite correspond.
+    ///
+    /// If a later change CLOSES this hole, this test fails — and the fix is to
+    /// delete the block-structure sentence from the bound in the same commit,
+    /// never to relax the test. The claim and its witness travel together.
+    #[test]
+    fn block_structure_and_statement_order_reach_no_premise_channel() {
+        let lines: Vec<&str> = UPSTREAM_SCOPE_TEST1_FAILS_REGION.lines().collect();
+        let offset = lines
+            .iter()
+            .position(|line| line.contains(UPSTREAM_FAILS_MARKER))
+            .expect("upstream case marks a line");
+        let mark =
+            upstream_mark_from_region(&lines, offset, normalized_marked_source_line(lines[offset]));
+
+        let faithful = port_obligation(
+            PORT_SCOPE_TEST1_FAILS,
+            line_of(PORT_SCOPE_TEST1_FAILS, "assert!(false)"),
+            "assert",
+        );
+        let flattened = port_obligation(
+            PORT_SCOPE_TEST1_FAILS_FLATTENED,
+            line_of(PORT_SCOPE_TEST1_FAILS_FLATTENED, "assert!(false)"),
+            "assert",
+        );
+
+        assert!(
+            premise_correspondence(&faithful, &mark).is_ok(),
+            "the committed port must correspond: {:?}",
+            premise_correspondence(&faithful, &mark)
+        );
+        assert!(
+            premise_correspondence(&flattened, &mark).is_ok(),
+            "MEASURED HOLE: the block-deleted, reordered rewrite corresponds too. If this \
+             now fails, the hole is closed — delete the block-structure sentence from \
+             ACCEPTED_CASE_CORRESPONDENCE_BOUND in the same commit: {:?}",
+            premise_correspondence(&flattened, &mark)
+        );
+        assert_eq!(
+            faithful.context_statements, flattened.context_statements,
+            "the statement channel is a SET, so the rewrite presents the same one"
+        );
+        assert!(
+            ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains("BLOCK STRUCTURE")
+                && ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains("scope.rs::test1_fails"),
+            "the bound must name this hole and its witness"
+        );
+    }
+
+    const UPSTREAM_Z3_RESTART_TEST2_FAILS_REGION: &str = r#"    #[test] test2_fails verus_code! {
+        #[verifier(nonlinear)] /* vattr */
+        // #[verifier(spinoff_prover)] /* vattr */ is implied for nonlinear queries
+        proof fn wrong_lemma_2(x: int, y: int, z: int)
+            requires
+                x > y,
+                3 <= z,
+            ensures
+                y * z > x // FAILS
+        {
+        }
+    } => Err(e) => assert_one_fails(e)
+"#;
+
+    const PORT_Z3_RESTART_TEST2_FAILS: &str = r#"#[trust_vc::verifier(nonlinear)]
+#[trust_vc::requires(x > y)]
+#[trust_vc::requires(3 <= z)]
+#[trust_vc::ensures(y * z > x)] // FAILS
+fn test2_fails(x: int, y: int, z: int) {}
+"#;
+
+    const PORT_Z3_RESTART_TEST2_FAILS_GROUNDED: &str = r#"#[trust_vc::verifier(nonlinear)]
+#[trust_vc::requires(x > y)]
+#[trust_vc::requires(3 <= z)]
+#[trust_vc::ensures(y * z > x)] // FAILS
+fn test2_fails(x: int, y: int, z: int) {
+    trust_vc::assume!(x == 10);
+    trust_vc::assume!(y == 1);
+    trust_vc::assume!(z == 3);
+}
+"#;
+
+    /// Upstream's own `assert_bitvector_by.rs::test3_fails`, verbatim from the
+    /// pinned checkout. It states its hypothesis as a `requires` clause list on
+    /// a SIGNATURE LINE OF ITS OWN, which is the shape this test is about.
+    const UPSTREAM_ASSERT_BITVECTOR_BY_TEST3_FAILS_REGION: &str = r#"    #[test] test3_fails verus_code! {
+        proof fn test3_fails(b1: u32, b2: u32)
+            requires b1 != b2
+        {
+            assert((b1 << 10) == (b2 << 10)) by(bit_vector) requires b1 == b2;  // FAILS
+        }
+    } => Err(err) => assert_one_fails(err)
+"#;
+
+    /// The faithful port of it: the same hypothesis as an ATTRIBUTE.
+    const PORT_ASSERT_BITVECTOR_BY_TEST3_FAILS: &str = r#"#[trust_vc::requires(b1 != b2)]
+#[trust_vc::ensures(true)]
+fn test3_fails(b1: u32, b2: u32) {
+    trust_vc::assert_by_bit_vector!((b1 << 10u32) == (b2 << 10u32); requires b1 == b2); // FAILS
+}
+"#;
+
+    /// A SIGNATURE CLAUSE IS A HYPOTHESIS, NOT A STATEMENT THE FUNCTION RUNS.
+    ///
+    /// `enclosing_function_header_lines` reads the item opener through the line
+    /// that opens the body as the HEADER, and that is where upstream writes its
+    /// `requires` clause list. While `enclosing_function_prefix_lines` ALSO
+    /// started at the item opener the two windows OVERLAPPED, so the same
+    /// clause reached the hypothesis channel (correctly) and the STATEMENT
+    /// channel (as though the function had run it). No port spelling could
+    /// answer the second: the port states the hypothesis as an attribute, and
+    /// `source_statement_segments` skips an attribute line by construction. The
+    /// measured failure was
+    ///
+    ///     upstream's case also runs ["requiresb1!=b2"], and the port
+    ///     additionally runs []
+    ///
+    /// so `assert_bitvector_by.rs` could not go green from the port side at all.
+    #[test]
+    fn a_signature_clause_is_a_hypothesis_and_not_a_body_statement() {
+        let lines: Vec<&str> = UPSTREAM_ASSERT_BITVECTOR_BY_TEST3_FAILS_REGION
+            .lines()
+            .collect();
+        let offset = lines
+            .iter()
+            .position(|line| line.contains(UPSTREAM_FAILS_MARKER))
+            .expect("upstream case marks a line");
+        let mark =
+            upstream_mark_from_region(&lines, offset, normalized_marked_source_line(lines[offset]));
+
+        // The clause reaches the HYPOTHESIS channel, which is where it belongs.
+        assert!(
+            mark.hypotheses.iter().any(|atom| atom == "requires:b1!=b2"),
+            "upstream's signature clause must be read as a hypothesis: {:?}",
+            mark.hypotheses
+        );
+        // And it reaches the STATEMENT channel nowhere. Upstream's body runs
+        // nothing before the marked line, so the window is empty.
+        assert!(
+            mark.statements.is_empty(),
+            "a signature clause is not a statement the function runs: {:?}",
+            mark.statements
+        );
+
+        let port = port_obligation(
+            PORT_ASSERT_BITVECTOR_BY_TEST3_FAILS,
+            line_of(PORT_ASSERT_BITVECTOR_BY_TEST3_FAILS, "assert_by_bit_vector"),
+            "verification_step",
+        );
+        assert_eq!(
+            port.context_hypotheses, mark.hypotheses,
+            "the port states the same hypothesis as an attribute"
+        );
+        assert_eq!(
+            port.context_statements, mark.statements,
+            "both bodies run nothing before the marked line"
+        );
+        premise_correspondence(&port, &mark)
+            .expect("the faithful port must correspond under upstream's premises");
+    }
+
+    /// The change above LOSES NO STATEMENT, and this is the case that could
+    /// have been lost: a statement written on the line that OPENS the body.
+    ///
+    /// The old window handed that whole line to `source_statement_segments`,
+    /// which drops it via `opens_function_item` — so `fn f() { assume!(..);`
+    /// reached NEITHER premise channel. The new window keeps whatever follows
+    /// the brace, so the statement is now visible where it never was.
+    #[test]
+    fn a_statement_on_the_body_opening_line_reaches_the_statement_channel() {
+        const SOURCE: &str = r#"#[trust_vc::ensures(true)]
+fn f(x: int) { trust_vc::assume!(x == 0);
+    trust_vc::assert!(x > 0); // FAILS
+}
+"#;
+        let prefix = enclosing_function_prefix_lines(SOURCE, line_of(SOURCE, "assert!(x > 0)"));
+        let prefix_refs: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        let statements = body_statement_cores(&prefix_refs);
+        assert!(
+            statements.iter().any(|core| core.contains("assume")),
+            "a statement on the body-opening line must reach the statement channel: {statements:?}"
+        );
+    }
+
+    /// The clause-marked class, MEASURED and then CHECKED — the window is the
+    /// function BODY.
+    ///
+    /// `z3_restart.rs::test2_fails` marks an `ensures` clause over an EMPTY
+    /// body. The marked line is a function HEADER line on both surfaces.
+    /// `enclosing_function_prefix_lines` used to return an empty window for a
+    /// header line, so the binding and statement channels compared nothing at
+    /// all and the port's whole BODY was invisible — a body stuffed with ground
+    /// `assume!`s, which collapses upstream's nonlinear postcondition to
+    /// `3 > 10`, presented the SAME premise channels as the faithful empty
+    /// body, and the class had to be REFUSED as un-checkable.
+    ///
+    /// A contract obligation is discharged against everything the body runs, so
+    /// the window for a header mark is that body. This test pins both halves of
+    /// the fix: the FAITHFUL port (empty body, like upstream's) corresponds, and
+    /// the GROUNDED port is caught — by the statement channel, on the three
+    /// `assume!`s upstream does not run, and NOT by a refusal.
+    #[test]
+    fn a_clause_marked_obligation_is_checked_against_the_function_body() {
+        let lines: Vec<&str> = UPSTREAM_Z3_RESTART_TEST2_FAILS_REGION.lines().collect();
+        let offset = lines
+            .iter()
+            .position(|line| line.contains(UPSTREAM_FAILS_MARKER))
+            .expect("upstream case marks a line");
+        let mark =
+            upstream_mark_from_region(&lines, offset, normalized_marked_source_line(lines[offset]));
+        assert_eq!(mark.clause_kind.as_deref(), Some("ensures"));
+        assert!(
+            mark.marked_on_function_header,
+            "upstream marks the signature clause list, which is a header line"
+        );
+        assert!(
+            !mark.window_undrawable,
+            "upstream's function HAS a body, so a window can be drawn — it is that body"
+        );
+        assert!(
+            mark.bindings.is_empty() && mark.statements.is_empty(),
+            "and upstream's body is empty, so the window it draws is empty"
+        );
+
+        // THE ENGINE'S OWN KIND STRING, measured end to end on the two-entry
+        // slice and not guessed: a refuted postcondition comes back as
+        // `kind: "assert", name: "postcondition"`. It is NOT `"ensures"`, which
+        // is why `obligation_clause_kind` — and the first spelling of the guard
+        // this test covers — never matched real engine output.
+        let faithful = port_obligation(
+            PORT_Z3_RESTART_TEST2_FAILS,
+            line_of(PORT_Z3_RESTART_TEST2_FAILS, "ensures(y * z > x)"),
+            "assert",
+        );
+        let grounded = port_obligation(
+            PORT_Z3_RESTART_TEST2_FAILS_GROUNDED,
+            line_of(PORT_Z3_RESTART_TEST2_FAILS_GROUNDED, "ensures(y * z > x)"),
+            "assert",
+        );
+        assert!(
+            obligation_clause_kind(&faithful.kind).is_none(),
+            "the engine's kind for a postcondition is not a clause spelling, so a \
+             port-side clause-kind test cannot see this case"
+        );
+
+        // THE MEASUREMENT, the other way round from the one this test used to
+        // record: the launder is now VISIBLE, and it is visible on the channel
+        // that compares as equality.
+        assert!(
+            faithful.context_statements.is_empty(),
+            "the faithful port runs nothing, exactly as upstream's body does"
+        );
+        assert!(
+            grounded
+                .context_statements
+                .iter()
+                .any(|core| core.contains("assume")),
+            "the grounded port's three `assume!` statements must reach the statement channel: {:?}",
+            grounded.context_statements
+        );
+        assert_eq!(
+            faithful.context_hypotheses, grounded.context_hypotheses,
+            "the launder is in the body, not the clause list, so the hypothesis channel cannot be what catches it"
+        );
+
+        premise_correspondence(&faithful, &mark)
+            .expect("the faithful port reproduces upstream's clause over upstream's body");
+        let error = premise_correspondence(&grounded, &mark)
+            .expect_err("a port that runs statements upstream does not run must not correspond");
+        assert!(
+            error.contains("statements the function runs before the refuted one"),
+            "the grounded port must be caught by the STATEMENT channel, not by a refusal: {error}"
+        );
+        assert!(
+            ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains("CLAUSE-MARKED")
+                && ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains("z3_restart.rs::test2_fails"),
+            "the bound must name this class and its witness"
+        );
+    }
+
+    /// Upstream's own `assert(..) by(nonlinear_arith) requires .. // FAILS`,
+    /// verbatim from the pinned checkout.
+    const UPSTREAM_NONLINEAR_TEST_REQUIRES_REGION: &str = r#"    #[test] test_requires verus_code! {
+        proof fn test(x: nat, y: nat, z: nat) {
+            assert(x * x + x == x * (x + 1)) by(nonlinear_arith)
+                requires x < 0xfff // FAILS
+            {
+            }
+            assert(x * x + x == x * (x + 1));
+        }
+    } => Err(e) => assert_one_fails(e)
+"#;
+
+    /// NEGATIVE CONTROL for the un-checkable refusal, and the second correction
+    /// it took.
+    ///
+    /// A CLAUSE line is not always a HEADER line. `nonlinear.rs::test_requires`
+    /// marks the `requires` clause of a BODY-level `assert(..)
+    /// by(nonlinear_arith)`, so `clause_kind` is `Some("requires")` and the
+    /// premise window is still empty — but empty because that assert is the
+    /// function's FIRST statement, which is a fact about upstream's program
+    /// that the port must reproduce, since the statement channel compares as
+    /// equality. Keying the refusal on `clause_kind` refused it wrongly;
+    /// keying it on `marked_on_function_header` does not.
+    ///
+    /// Measured over the pinned manifest: the refusal costs 3 of the 51
+    /// counterexample cases with this key, and would have cost 4 with the
+    /// wrong one.
+    #[test]
+    fn a_body_level_clause_mark_is_not_refused_as_uncheckable() {
+        let lines: Vec<&str> = UPSTREAM_NONLINEAR_TEST_REQUIRES_REGION.lines().collect();
+        let offset = lines
+            .iter()
+            .position(|line| line.contains(UPSTREAM_FAILS_MARKER))
+            .expect("upstream case marks a line");
+        let mark =
+            upstream_mark_from_region(&lines, offset, normalized_marked_source_line(lines[offset]));
+
+        assert_eq!(
+            mark.clause_kind.as_deref(),
+            Some("requires"),
+            "upstream marks a clause here"
+        );
+        assert!(
+            !mark.marked_on_function_header,
+            "but the clause belongs to a BODY statement, not to the function's signature"
+        );
+        assert!(
+            mark.bindings.is_empty() && mark.statements.is_empty(),
+            "its window is empty because the by-assert is the first statement"
+        );
+
+        let port = "#[trust_vc::proof]\nfn test_requires(x: nat, y: nat, z: nat) {\n    trust_vc::assert_by_nonlinear!(x * x + x == x * (x + 1); requires x < 0xfff); // FAILS\n    trust_vc::assert!(x * x + x == x * (x + 1));\n}\n";
+        let faithful = port_obligation(
+            port,
+            line_of(port, "requires x < 0xfff"),
+            "verification_step",
+        );
+
+        assert!(
+            premise_correspondence(&faithful, &mark).is_ok(),
+            "a body-level clause mark must still be checked, not refused: {:?}",
+            premise_correspondence(&faithful, &mark)
+        );
+    }
+
+    /// The numbers IN the bound are the corpus's own, recomputed here.
+    ///
+    /// The bound states a split (259 = 51 + 183 + 25), three percentages, and
+    /// the sub-split of the verified bucket (183 = 135 author-pinned + 48
+    /// schema-fixed). If the manifest moves and the text does not, the bound is
+    /// a stale claim about a corpus that no longer exists — so recount from the
+    /// pinned manifest and require the text to carry exactly what was counted.
+    ///
+    /// The sub-split is recounted the same way, and so is the SCHEMA FACT it
+    /// rests on: every case of a `cargo_trust_vc_integration_test` entry must
+    /// really be `verified` with `min_obligations: 0` and no fingerprints. If
+    /// one ever carries a real pin, "the schema wrote it" stops being true of
+    /// all 48 and this fails rather than letting the bound overstate the hole.
+    #[test]
+    fn the_bound_carries_the_measured_accepted_case_split() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("cargo-trust-vc should live under crates/")
+            .join("evals/verus/verus-tests.json");
+        let raw = fs::read_to_string(&manifest_path).expect("pinned manifest should be readable");
+        let manifest: JsonVerusManifest =
+            serde_json::from_str(&raw).expect("pinned manifest should parse");
+
+        let mut total = 0usize;
+        let mut counterexample = 0usize;
+        let mut verified = 0usize;
+        let mut error = 0usize;
+        let mut verified_schema_fixed = 0usize;
+        let mut schema_fixed_entries = 0usize;
+        for entry in &manifest.entries {
+            if !matches!(entry.classification.as_str(), "ported" | "unchanged") {
+                continue;
+            }
+            let schema_fixed =
+                entry.evidence_kind == VerusEvidenceKind::CargoTrustVcIntegrationTest;
+            if schema_fixed {
+                schema_fixed_entries += 1;
+            }
+            for case in &entry.expected_cases {
+                total += 1;
+                match case.expected_verdict {
+                    VerusExpectedVerdict::Counterexample => counterexample += 1,
+                    VerusExpectedVerdict::Verified => verified += 1,
+                    VerusExpectedVerdict::Error => error += 1,
+                    // Scout-only, and never valid as accepted evidence, so an
+                    // accepted entry carrying one is itself the finding.
+                    VerusExpectedVerdict::VerifiedBlocker => {
+                        panic!("accepted entry carries a scout-only verified-blocker case")
+                    }
+                }
+                if schema_fixed {
+                    verified_schema_fixed += 1;
+                    // The bound says the SCHEMA wrote this row's verdict and
+                    // count. Measure that, do not assert it.
+                    assert_eq!(
+                        case.expected_verdict,
+                        VerusExpectedVerdict::Verified,
+                        "{}::{} is in a cargo_trust_vc_integration_test entry but is not `verified`",
+                        entry.upstream_path,
+                        case.case_id
+                    );
+                    assert_eq!(
+                        case.min_obligations, 0,
+                        "{}::{} carries a non-zero min_obligations, so the schema did not write its count",
+                        entry.upstream_path, case.case_id
+                    );
+                    assert!(
+                        case.obligation_fingerprints.is_empty(),
+                        "{}::{} carries obligation_fingerprints, so it is not pin-free",
+                        entry.upstream_path,
+                        case.case_id
+                    );
+                }
+            }
+        }
+        assert_eq!(counterexample + verified + error, total);
+        let verified_author_pinned = verified - verified_schema_fixed;
+
+        let percent = |part: usize| 100.0 * part as f64 / total as f64;
+        let expected = format!(
+            "{total} accepted expected cases = {counterexample} counterexample ({:.1}%) + {verified} verified ({:.1}%) + {error} error ({:.1}%)",
+            percent(counterexample),
+            percent(verified),
+            percent(error)
+        );
+        assert!(
+            ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains(&expected),
+            "the bound must carry the measured split verbatim; recounted `{expected}`"
+        );
+        assert!(
+            ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains(&format!(
+                "{counterexample} of {total} = {:.1}%",
+                percent(counterexample)
+            )) && ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains(&format!(
+                "{verified} of {total} = {:.1}%",
+                percent(verified)
+            )),
+            "the bound must restate the measured split on the counterexample and verified clauses"
+        );
+
+        // The sub-split, recounted the same way. Clause (2) described all
+        // `verified` cases as pinned by an obligation count; that is false for
+        // the schema-fixed sub-bucket, so both sub-counts and the number of
+        // entries they come from are recomputed here rather than written down.
+        for required in [
+            format!("Of those {verified} verified, {verified_schema_fixed} are SCHEMA-FIXED"),
+            format!("(2a) AUTHOR-PINNED, {verified_author_pinned} of {verified}"),
+            format!(
+                "(2b) SCHEMA-FIXED, {verified_schema_fixed} of {verified} — all {verified_schema_fixed} cases of the {schema_fixed_entries} `cargo_trust_vc_integration_test` entries"
+            ),
+            format!("greater than 0 on every one of the {verified_author_pinned}"),
+            format!("present on every one of the {verified_author_pinned}"),
+            // SCOPE and ESTABLISHED for the two buckets whose established count
+            // needs no upstream read: the verified bucket establishes nothing
+            // about upstream by construction, and the error bucket's scope is a
+            // manifest fact. The checkout-measured halves are recounted by
+            // `the_bound_states_scope_and_established_for_every_bucket`.
+            format!(
+                "(2) VERIFIED — LAYER 1 COVERS {verified} of {total} = {:.1}%, LAYER 2 COVERS 0 of {verified}",
+                percent(verified)
+            ),
+            format!(
+                "COVERS {verified_author_pinned}, ESTABLISHES {verified_author_pinned} PORT-SIDE obligation pins and zero PROGRAM-level correspondence"
+            ),
+            format!(
+                "COVERS {verified_schema_fixed}, ESTABLISHES ZERO PROOF CONTENT BY CONSTRUCTION"
+            ),
+            format!(
+                "it is {verified_schema_fixed} CLI-BEHAVIOUR WITNESSES, not {verified_schema_fixed} proofs"
+            ),
+            format!("LAYER 1 still applies to all {verified_schema_fixed}"),
+            format!(
+                "(3) ERROR — LAYER 1 COVERS {error} of {total} = {:.1}%",
+                percent(error)
+            ),
+        ] {
+            assert!(
+                ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains(&required),
+                "the bound must carry the measured verified sub-split verbatim; recounted `{required}`"
+            );
+        }
+    }
+
+    /// The repository root of this worktree.
+    fn repo_root_for_bound_measurements() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("cargo-trust-vc should live under crates/")
+            .to_path_buf()
+    }
+
+    fn pinned_manifest_for_bound_measurements() -> JsonVerusManifest {
+        let manifest_path = repo_root_for_bound_measurements().join("evals/verus/verus-tests.json");
+        let raw = fs::read_to_string(&manifest_path).expect("pinned manifest should be readable");
+        serde_json::from_str(&raw).expect("pinned manifest should parse")
+    }
+
+    /// Grammar for a recounted number, so a measured count can be printed in
+    /// a sentence without the sentence going stale when the count moves off 1.
+    fn pluralize(count: usize, one: &'static str, many: &'static str) -> &'static str {
+        if count == 1 {
+            one
+        } else {
+            many
+        }
+    }
+
+    /// The pinned Verus checkout the strict evidence gate is run against
+    /// (`--verus-path ../verus`), overridable with `TRUST_VC_VERUS_PATH`.
+    fn pinned_verus_checkout() -> PathBuf {
+        match std::env::var("TRUST_VC_VERUS_PATH") {
+            Ok(path) => PathBuf::from(path),
+            Err(_) => repo_root_for_bound_measurements()
+                .parent()
+                .expect("the repo root should have a parent")
+                .join("verus"),
+        }
+    }
+
+    /// THE READER FIX THAT RECOVERS `harness.rs`'s FOUR HAND-WRITTEN CASES,
+    /// pinned so that a regression back to the one-form reader fails here and
+    /// not three layers downstream in an unexplained `no upstream marked line
+    /// was read`.
+    ///
+    /// `upstream_case_regions` reads a case name off the `#[test]` LINE, which
+    /// is what `test_verify_one_file!` expands to, AND off a bare `#[test]`
+    /// line whose `fn name()` sits below it, which upstream's hand-written
+    /// `harness.rs` uses for 4 of its 6 cases. Until round 11 it read only the
+    /// first, so no upstream text was readable for those four at all and their
+    /// cross-check could only FAIL — the difference between "the port does not
+    /// correspond" and "nothing was read to compare it with". Clause (1) of the
+    /// bound counted that cost; it no longer has one to count, and this test
+    /// pins both the reader and the sentence.
+    ///
+    /// The plain branch is CONSERVATIVE on purpose, and the third and fourth
+    /// blocks below are what keep it so: a `#[test]` line that carries anything
+    /// other than further attributes is the same-line form and is read as such,
+    /// and a `#[test]` with no `fn` under it mints no region at all. A reader
+    /// that guessed here would cut unrelated files into cases and compare ports
+    /// against text upstream never wrote.
+    ///
+    /// LAYER 1's reader is a different one — `upstream_verus_harness_cases`,
+    /// which parses the file with `syn` — and it enumerated all six throughout.
+    /// The last block pins that the two readers now AGREE on this file, which
+    /// is the property the bound's `NOT invisible to LAYER 1` sentence used to
+    /// carry as a caveat.
+    #[test]
+    fn the_region_reader_sees_both_upstream_test_declaration_forms() {
+        let same_line = [
+            "    #[test] harness_macro_false verus_code! {",
+            "        fn f() { assert(false); // FAILS",
+            "        }",
+            "    } => Err(e) => assert_one_fails(e)",
+        ];
+        let plain = [
+            "#[test]",
+            "fn harness_false() {",
+            "    let err = verify_one_file(\"harness_false\", verus_code! {",
+            "        fn harness2() { assert(false); // FAILS",
+            "    }}, &[]).unwrap_err();",
+            "}",
+        ];
+
+        let seen: Vec<String> = upstream_case_regions(&same_line)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            seen,
+            vec!["harness_macro_false".to_string()],
+            "the macro form must still be read exactly as before"
+        );
+
+        let seen_plain: Vec<String> = upstream_case_regions(&plain)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            seen_plain,
+            vec!["harness_false".to_string()],
+            "a plain `#[test]` above `fn name()` declares a case this reader must now see; if that stopped, clause (1) of the bound must count `harness.rs::harness_false` as unreadable again"
+        );
+        let plain_region = upstream_case_regions(&plain)
+            .into_iter()
+            .next()
+            .expect("the plain form declares a region")
+            .1;
+        assert!(
+            plain_region
+                .iter()
+                .any(|line| line.contains("assert(false); // FAILS")),
+            "the region must START at the `#[test]` line and so contain the marked line: {plain_region:?}"
+        );
+
+        // CONSERVATISM, half one: a `#[test]` line that carries anything else
+        // is the same-line form, and the plain branch must not also fire on it
+        // and steal the name off the item below.
+        let decorated = [
+            "#[test] #[ignore] named_by_the_macro verus_code! {",
+            "fn not_the_case_name() { }",
+        ];
+        assert_eq!(
+            upstream_case_regions(&decorated)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            vec!["named_by_the_macro".to_string()],
+            "the same-line name wins; the `fn` below it is body, not a declaration"
+        );
+
+        // CONSERVATISM, half two: no `fn` under the attribute, no region. A
+        // reader that walked on until it found one would cut a file at a
+        // `#[test]` and attribute unrelated code to a case.
+        let orphan = [
+            "#[test]",
+            "struct NotAFunction;",
+            "",
+            "fn much_later_and_unattached() { }",
+        ];
+        assert!(
+            upstream_case_regions(&orphan).is_empty(),
+            "a `#[test]` whose next item is not an `fn` declares no case"
+        );
+        assert!(
+            upstream_case_regions(&["#[test]"]).is_empty(),
+            "a `#[test]` at end of file declares no case"
+        );
+
+        // AND THE TWO READERS NOW AGREE on the file this cost. Measured against
+        // the pinned checkout where it exists; skipped rather than faked when it
+        // does not, because the reader itself is pinned by the blocks above
+        // without any checkout at all.
+        let verus = pinned_verus_checkout();
+        if verus
+            .join("source/rust_verify_test/tests/harness.rs")
+            .is_file()
+        {
+            let cases = upstream_verus_harness_cases(
+                Some(&verus),
+                "source/rust_verify_test/tests/harness.rs",
+            )
+            .expect("upstream harness.rs should enumerate")
+            .expect("a checkout was supplied");
+            let names: Vec<&str> = cases.iter().map(|case| case.case_id.as_str()).collect();
+            assert_eq!(
+                names.len(),
+                6,
+                "upstream harness.rs has six cases: {names:?}"
+            );
+
+            let source = fs::read_to_string(verus.join("source/rust_verify_test/tests/harness.rs"))
+                .expect("upstream harness.rs should read");
+            let lines: Vec<&str> = source.lines().collect();
+            let mut regions: Vec<String> = upstream_case_regions(&lines)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            regions.sort();
+            let mut ast: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+            ast.sort();
+            assert_eq!(
+                regions, ast,
+                "the LINE-BASED region reader and LAYER 1's AST reader must enumerate the same six cases for upstream's hand-written harness.rs"
+            );
+        }
+    }
+
+    /// EVERY BUCKET'S TWO NUMBERS, RECOUNTED — scope from the manifest,
+    /// established from the pinned Verus checkout.
+    ///
+    /// The recurring defect this pins is a SCOPE count read as an ESTABLISHED
+    /// count. The bound now states both for every bucket, so both are
+    /// recomputed here with the gate's OWN readers and required in the text
+    /// verbatim; a corpus move, a reader fix or a refusal that starts or stops
+    /// firing fails this test instead of quietly restating an old number.
+    ///
+    /// It needs the pinned checkout and does NOT pass without it: an
+    /// established count that nothing re-derives is the vacuous check this
+    /// branch exists to remove.
+    #[test]
+    fn the_bound_states_scope_and_established_for_every_bucket() {
+        let manifest = pinned_manifest_for_bound_measurements();
+        let verus = pinned_verus_checkout();
+        assert!(
+            verus.join("source/rust_verify_test/tests").is_dir(),
+            "the bound's ESTABLISHED counts are measured against the pinned Verus checkout, expected at `{}` and not found. Clone upstream at the manifest's `upstream.ref` beside this repo, or point TRUST_VC_VERUS_PATH at it. This test deliberately fails rather than passing on numbers nothing re-derived.",
+            verus.display()
+        );
+
+        let summary = verus_replacement_summary(&manifest.entries);
+        let measured = measure_upstream_read_establishment(&manifest.entries, &verus);
+        let total = summary.accepted_expected_case_count;
+        assert_eq!(
+            measured.counterexample_scope, summary.accepted_expected_cases_counterexample,
+            "the two counters must be counting the same bucket"
+        );
+        assert_eq!(measured.error_scope, summary.accepted_expected_cases_error);
+
+        let percent = |part: usize| 100.0 * part as f64 / total as f64;
+        let scope = measured.counterexample_scope;
+        let established = measured.counterexample_established();
+        let outside = total - scope;
+        let error_scope = measured.error_scope;
+        let layer1_scope = measured.layer1_scope;
+        assert_eq!(
+            layer1_scope + measured.layer1_unresolved_upstream_case,
+            total,
+            "every accepted expected case is either inside LAYER 1 or is itself a gate failure"
+        );
+
+        // THE LIVE HALF. The bound claims LAYER 1 is running and currently RED;
+        // that claim is taken from the gate's OWN report here, not replicated,
+        // so a manifest fix (or a regression) changes the sentence rather than
+        // leaving a stale boast behind. `load_corpus_report` is the same entry
+        // point `cargo trust-vc evidence --verus-path ../verus` uses.
+        let report = load_corpus_report(
+            &repo_root_for_bound_measurements().join("evals/verus/verus-tests.json"),
+            &repo_root_for_bound_measurements(),
+            Some(&verus),
+        )
+        .expect("the pinned manifest should load against the pinned checkout");
+        let live_failures = report.upstream_case_failures.len();
+        let live_verdict = report
+            .upstream_case_failures
+            .iter()
+            .filter(|failure| failure.contains(", but upstream Verus harness case `"))
+            .count();
+        let live_count = report
+            .upstream_case_failures
+            .iter()
+            .filter(|failure| failure.contains("mapped TrustVc expected case(s)"))
+            .count();
+        let live_pattern = report
+            .upstream_case_failures
+            .iter()
+            .filter(|failure| failure.contains("is missing upstream error diagnostic pattern"))
+            .count();
+        assert_eq!(
+            live_verdict + live_count + live_pattern,
+            live_failures,
+            "the bound splits the live LAYER 1 findings into exactly these three classes; a new class must be added to the sentence: {:?}",
+            report.upstream_case_failures
+        );
+
+        let mut missing_phrases: Vec<String> = Vec::new();
+        for required in [
+            // LAYER 1 and LAYER 2 in one sentence, both scopes recounted. The
+            // headline that stood here named only Layer 2's scope and called
+            // the other 208 cases untied to upstream, which was FALSE.
+            format!(
+                "HEADLINE: LAYER 1 checks a case's DECLARATION against upstream's source and COVERS {layer1_scope} of {total} accepted expected cases ({:.1}%)",
+                percent(layer1_scope)
+            ),
+            format!(
+                "LAYER 2 checks the port's PROGRAM against upstream's program and COVERS {scope} of {total} ({:.1}%), of which {established} ({:.1}%) survive to establish anything",
+                percent(scope),
+                percent(established)
+            ),
+            format!(
+                "every accepted case, {total} of {total}, has its upstream case RESOLVED and its declared VERDICT compared, with the five narrower LAYER-1 checks applying only to the populations just named; {scope} additionally have their PROGRAM checked, of which {established} survive"
+            ),
+            // THE HEADLINE'S THREE DENOMINATORS, round 9's finding. Each
+            // sub-check is required to print the population it runs on, so a
+            // check can never again be credited to the layer's 259.
+            format!(
+                "Corpus-wide, on all {layer1_scope} of {total}: the declared upstream case RESOLVES to a real, non-`#[ignore]`d upstream case, and the DECLARED VERDICT IS ADMISSIBLE FOR upstream's"
+            ),
+            format!(
+                "the mapped-case COUNT is compared per UPSTREAM case over the {} the corpus maps \u{2014} EXACTLY on the {} that state a failure count, counting the mapped cases that DECLARE a failure, `>=` on the other {}",
+                measured.layer1_mapped_upstream_cases,
+                measured.layer1_exact_occurrence_cases,
+                measured.layer1_at_least_occurrence_cases
+            ),
+            format!(
+                "upstream's ASSERTED DIAGNOSTIC MESSAGES are required on {} of the {error_scope} error cases, {} strings in all, and on nothing else",
+                measured.error_cases_with_upstream_asserted_message,
+                measured.upstream_asserted_error_patterns_required
+            ),
+            format!(
+                "an upstream VERIFIER WARNING on the {} upstream case that asserts one",
+                measured.layer1_warning_asserting_cases
+            ),
+            format!(
+                "an upstream FORBIDDEN diagnostic-context pattern on the {} upstream case that states one, {} {} in all",
+                measured.layer1_forbidden_pattern_asserting_cases,
+                measured.layer1_forbidden_patterns_required,
+                pluralize(measured.layer1_forbidden_patterns_required, "pattern", "patterns")
+            ),
+            format!(
+                "the cargo-fixture requirement on the {} of the {total} whose upstream case is a RUST-error case",
+                measured.layer1_rust_error_cases
+            ),
+            // The same five, restated as (c) through (g) with their own
+            // denominators inline, plus the check that was missing from the
+            // list entirely until round 9.
+            format!(
+                "counted per UPSTREAM case, over the {}, and not per port case: EXACTLY on the {} upstream cases where upstream states a failure count, `>=` on the other {} where it states none",
+                measured.layer1_mapped_upstream_cases,
+                measured.layer1_exact_occurrence_cases,
+                measured.layer1_at_least_occurrence_cases
+            ),
+            format!(
+                "and nothing required of the other {} or of any case outside that bucket",
+                error_scope - measured.error_cases_with_upstream_asserted_message
+            ),
+            format!(
+                "on the {} of the {total} whose upstream case is a Rust-error one",
+                measured.layer1_rust_error_cases
+            ),
+            format!(
+                "(g) every FORBIDDEN diagnostic-context pattern upstream states to be declared, on the {} upstream case that states one, {} {} in all",
+                measured.layer1_forbidden_pattern_asserting_cases,
+                measured.layer1_forbidden_patterns_required,
+                pluralize(measured.layer1_forbidden_patterns_required, "pattern", "patterns")
+            ),
+            // The verified bucket's own two populations, and the error
+            // bucket's non-vacuity: a SCOPE of 25 pins presented as 25 real
+            // pins is the same error one level down.
+            format!(
+                "the declared `verified` must equal upstream's own verdict on all {}",
+                summary.accepted_expected_cases_verified
+            ),
+            format!(
+                "the rule that reaches the {} of the {} verified cases whose upstream case is a counterexample one",
+                measured.layer1_verified_cases_on_exact_count_upstream,
+                summary.accepted_expected_cases_verified
+            ),
+            format!(
+                "{} of the {error_scope} declare at least one `expected_error_patterns` entry",
+                measured.error_cases_with_declared_patterns
+            ),
+            format!(
+                "(e) applies to the {} of the {} whose upstream case asserts a verifier warning",
+                measured.layer1_verified_cases_with_upstream_warning,
+                summary.accepted_expected_cases_verified
+            ),
+            format!(
+                "(L1) LAYER 1 \u{2014} PER-CASE UPSTREAM CHECKS \u{2014} COVERS {layer1_scope} of {total} = {:.1}%",
+                percent(layer1_scope)
+            ),
+            format!(
+                "{} of the {total} fail to resolve",
+                measured.layer1_unresolved_upstream_case
+            ),
+            format!(
+                "each of the {} non-ignored upstream cases in the {} accepted files",
+                measured.layer1_mapped_upstream_cases, summary.accepted_executable_entries
+            ),
+            format!("upstream's extracted verdict, on all {total}"),
+            format!(
+                "EXACTLY on the {} upstream cases where upstream states a failure count",
+                measured.layer1_exact_occurrence_cases
+            ),
+            format!(
+                "{} upstream-asserted strings across {} of the {error_scope} error cases",
+                measured.upstream_asserted_error_patterns_required,
+                measured.error_cases_with_upstream_asserted_message
+            ),
+            format!(
+                "on the {} upstream case that asserts one",
+                measured.layer1_warning_asserting_cases
+            ),
+            format!(
+                "On the {} cases of (d) this composes into a real port-to-upstream tie in the RUN lane",
+                measured.error_cases_with_upstream_asserted_message
+            ),
+            // The LIVE Layer-1 findings, taken from the gate's own report, not
+            // replicated here: a layer described as live must be shown running.
+            // Phrased so the sentence stays GRAMMATICAL at any count — the
+            // spelling it replaces read "5 verdict mismatches ... so all 7
+            // BLOCK", which goes to "0 verdict mismatches ... so all 1 BLOCK"
+            // the moment a finding is fixed, and a text that cannot survive its
+            // own numbers moving is a text nobody will update.
+            format!(
+                "returns {live_failures} `upstream_case_failures`, split {live_verdict} verdict, {live_count} occurrence-count, {live_pattern} missing-diagnostic-pattern"
+            ),
+            format!("every one of the {live_failures} remaining BLOCKS"),
+            format!(
+                "{} are REFUSED as un-checkable",
+                measured.counterexample_refused_uncheckable
+            ),
+            // The class `harness.rs::harness_false` was alone in until round
+            // 11: a counterexample case for which the LINE-BASED region reader
+            // could read no upstream text at all. It is EMPTY now, and the
+            // count is still recomputed so that a regression in the reader
+            // refills it here rather than silently downstream.
+            format!(
+                "And {} more can only FAIL the cross-check, never pass it",
+                measured.counterexample_unreadable_upstream_case
+            ),
+            format!(
+                "the other {outside} ({:.1}%) have their DECLARATION checked and their PROGRAM not",
+                percent(outside)
+            ),
+            format!(
+                "(1) COUNTEREXAMPLE / LAYER 2 \u{2014} COVERS {scope} of {total} = {:.1}%, ESTABLISHES {established} of {total} = {:.1}%",
+                percent(scope),
+                percent(established)
+            ),
+            // The region reader's blindness, stated for THAT reader only. The
+            // sentence it replaces said every upstream reader in this gate.
+            format!(
+                "{} of that file's 6 upstream cases are now invisible to it, and none anywhere in the accepted macro corpus: {} of {}",
+                measured.region_reader_invisible_upstream_cases,
+                measured.region_reader_invisible_upstream_cases,
+                measured.ast_reader_upstream_cases
+            ),
+            format!(
+                "Weaker still on {} of the {established}",
+                measured.counterexample_empty_upstream_window
+            ),
+            format!(
+                "{} of those {}",
+                measured.counterexample_empty_window_and_no_definitions,
+                measured.counterexample_empty_upstream_window
+            ),
+            format!(
+                "(3) ERROR \u{2014} LAYER 1 COVERS {error_scope} of {total} = {:.1}%, LAYER 2 COVERS 0, and the bucket ESTABLISHES {error_scope} PORT-SIDE diagnostic pins plus, on {} of the {error_scope}, an upstream-asserted message",
+                percent(error_scope),
+                measured.error_cases_with_upstream_asserted_message
+            ),
+            format!(
+                "{} of the {error_scope} error cases have an upstream case that ASSERTS a diagnostic message, and for those LAYER 1 already requires upstream's exact string \u{2014} {} strings in all",
+                measured.error_cases_with_upstream_asserted_message,
+                measured.upstream_asserted_error_patterns_required
+            ),
+            format!(
+                "the other {} have no upstream-asserted message whatever",
+                error_scope - measured.error_cases_with_upstream_asserted_message
+            ),
+            format!(
+                "The {} declared patterns that are NOT upstream text",
+                measured.error_patterns - measured.error_patterns_upstream_asserted
+            ),
+            format!(
+                "the {} declared error patterns that are the port's own wording have no upstream channel, because Layer 1 checks upstream's {} asserted strings in the upstream-to-port direction only",
+                measured.error_patterns - measured.error_patterns_upstream_asserted,
+                measured.upstream_asserted_error_patterns_required
+            ),
+            format!(
+                "of the {} declared `expected_error_patterns` only {} appear inside a string literal",
+                measured.error_patterns, measured.error_patterns_upstream_asserted
+            ),
+            format!(
+                "{} of the {error_scope} have every declared pattern so sourced",
+                measured.error_cases_upstream_asserted_patterns
+            ),
+            format!(
+                "{} of the {error_scope} \u{2014} every `no_cheating.rs` case",
+                measured.error_cases_port_authored_patterns
+            ),
+            format!(
+                "for {} of those {} upstream asserts no message whatever",
+                measured.error_cases_with_no_upstream_asserted_pattern,
+                measured.error_cases_port_authored_patterns
+            ),
+            format!(
+                "{} of the {error_scope} (`harness.rs::harness_invalid_rust`)",
+                measured.error_cases_unreadable_upstream_case
+            ),
+        ] {
+            if !ACCEPTED_CASE_CORRESPONDENCE_BOUND.contains(&required) {
+                missing_phrases.push(required);
+            }
+        }
+        assert!(
+            missing_phrases.is_empty(),
+            "the bound must carry every measured scope/established phrase verbatim; recounted and not found: {missing_phrases:#?}"
+        );
+
+        // Clause (3) says LAYER 1 checks the verdict and the count and NOTHING
+        // ELSE for the error cases with no upstream-asserted message. That is a
+        // claim about the OTHER narrow checks having no population there, so it
+        // is measured rather than read off the code: an error case that gained
+        // an upstream warning, a forbidden diagnostic-context pattern or a
+        // Rust-error mapping would make the sentence false.
+        assert_eq!(
+            measured.error_cases_without_message_in_other_narrow_check, 0,
+            "the bound says LAYER 1 checks only the verdict and the count for an error case with no upstream-asserted message; {} such case(s) now fall inside another narrow check, so that sentence must change",
+            measured.error_cases_without_message_in_other_narrow_check
+        );
+    }
+    /// THE APPEND MECHANISM for a review finding this prose has not yet
+    /// absorbed, pinned so that it is ready BEFORE it is needed.
+    ///
+    /// The standing instruction it implements: a bound that carries its own
+    /// outstanding review comment is more honest than one that hides it, and a
+    /// reader is better served by an imperfect description that ships than by a
+    /// perfect one that does not. So a finding that arrives after the prose is
+    /// settled is APPENDED VERBATIM under a heading that says it was found by
+    /// review and is not folded in, and the branch lands.
+    ///
+    /// What is pinned here, and why each part:
+    ///   * the section EXISTS and is the LAST thing in the bound — a
+    ///     disclosure buried mid-text is not a disclosure;
+    ///   * its heading says, in the bound itself, that these were found by
+    ///     review and are NOT folded into the prose;
+    ///   * the findings list is either the explicit `NONE OUTSTANDING.`
+    ///     sentinel or one-or-more `[R<round>] ` entries, so an empty section
+    ///     can never be mistaken for a missing one, and a finding can never be
+    ///     dropped in without a round to attribute it to;
+    ///   * the section travels into the pinned manifest BYTE-IDENTICALLY, by
+    ///     the same check that carries the rest — measured against the real
+    ///     `evals/verus/verus-tests.json`, not asserted.
+    #[test]
+    fn the_bound_carries_its_outstanding_review_findings_section() {
+        let bound = ACCEPTED_CASE_CORRESPONDENCE_BOUND;
+        assert_eq!(
+            bound.matches(OUTSTANDING_REVIEW_FINDINGS_HEADING).count(),
+            1,
+            "the outstanding-findings section must appear exactly once"
+        );
+        let heading = bound
+            .find(OUTSTANDING_REVIEW_FINDINGS_HEADING)
+            .expect("the bound must carry the outstanding-findings section");
+        let section = &bound[heading..];
+        assert!(
+            section.contains("FOUND BY REVIEW, NOT YET FOLDED INTO THE PROSE ABOVE"),
+            "the heading must say what the section is, in the bound itself: {section}"
+        );
+        assert!(
+            section.contains(
+                "a finding leaves this list only by being FIXED above, in the commit that removes it"
+            ),
+            "disclosure is not a substitute for the fix, and the bound must say so: {section}"
+        );
+        assert!(
+            section.contains("`--refresh-trust-vc-corpus-evidence`")
+                && section.contains("the_bound_carries_its_outstanding_review_findings_section"),
+            "the section must carry its own append procedure and name the test that pins it: {section}"
+        );
+
+        let findings =
+            outstanding_review_findings(bound).expect("the findings list must be reachable");
+        assert!(
+            !findings.is_empty(),
+            "an EMPTY findings list is indistinguishable from a lost section; write the `{NO_OUTSTANDING_REVIEW_FINDINGS}` sentinel instead"
+        );
+        if findings != NO_OUTSTANDING_REVIEW_FINDINGS {
+            assert!(
+                findings.starts_with("[R"),
+                "each appended finding must open with its review round, `[R<round>] `: {findings:?}"
+            );
+            assert!(
+                findings.ends_with('.'),
+                "an appended finding is prose and ends in a full stop: {findings:?}"
+            );
+            assert!(
+                !findings.contains(NO_OUTSTANDING_REVIEW_FINDINGS),
+                "the sentinel must be DELETED when a finding is appended: {findings:?}"
+            );
+        }
+
+        // LAST, not merely present. `rfind` on the heading plus this length
+        // check is what refuses a later clause being added underneath it.
+        assert_eq!(
+            bound.rfind(OUTSTANDING_REVIEW_FINDINGS_HEADING),
+            Some(heading),
+            "the section must be the bound's last"
+        );
+        assert!(
+            bound.trim_end().ends_with(findings),
+            "nothing may follow the findings list: {:?}",
+            &bound[bound.len().saturating_sub(120)..]
+        );
+
+        // AND IT TRAVELS. Not a claim about the schema check — the pinned
+        // manifest is read and its own copy of the section compared.
+        let manifest = pinned_manifest_for_bound_measurements();
+        assert_eq!(
+            manifest.correspondence_bound, bound,
+            "the manifest's `correspondence_bound` must carry the bound, section included, byte for byte"
+        );
+        assert_eq!(
+            outstanding_review_findings(&manifest.correspondence_bound),
+            Some(findings),
+            "the findings list must reach the manifest copy unchanged"
+        );
     }
 }

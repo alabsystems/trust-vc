@@ -22,15 +22,23 @@ impl TrustVcExprFolder for FnCallReturnTypeRepair<'_> {
                 return_ty,
             } => {
                 let mut fixed_args = fold_expr_vec(self, args);
-                // Coerce IntLit arguments whose type is the default Int{32} to
-                // match the function's declared parameter types. The codegen path
-                // assigns Int{32} to unsuffixed literals at compile time without
-                // access to the TypeEnv. Part of #2658 Category F.
+                // Type an unsuffixed (default `Int{32}`) literal argument by the
+                // function's declared parameter type. The codegen path assigns
+                // Int{32} to unsuffixed literals at compile time without access
+                // to the TypeEnv. Part of #2658 Category F. Only where that
+                // never changes the literal's value
+                // (`ir_lowering::untyped_literal_at_peer`): this used to retype
+                // any `Int{32}` literal by shape, so `f(300)` with `f(a: u8)`
+                // passed a `u8` literal of 300.
                 if let Some(param_types) = self.env.lookup_fn_params(&name) {
                     for (arg, param_ty) in fixed_args.iter_mut().zip(param_types.iter()) {
-                        if let TrustVcExpr::IntLit { ty, .. } = arg {
-                            if *ty != *param_ty && is_default_int_type(ty) {
-                                *ty = param_ty.clone();
+                        if !is_default_int_type(param_ty)
+                            && crate::ir_lowering::is_untyped_literal(arg)
+                        {
+                            if let Some(typed) =
+                                crate::ir_lowering::untyped_literal_at_peer(arg, param_ty)
+                            {
+                                *arg = typed;
                             }
                         }
                     }
