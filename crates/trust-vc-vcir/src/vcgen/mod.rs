@@ -48,6 +48,7 @@ mod aux_work;
 mod bitvector;
 mod bitwise;
 mod body;
+mod call_identity;
 mod closed_templates;
 mod expr;
 mod inline_body;
@@ -56,6 +57,7 @@ mod loops;
 mod quant;
 mod query;
 mod relevance;
+mod resolution;
 mod spec;
 pub mod term;
 mod trigger_pattern;
@@ -75,6 +77,7 @@ use crate::ids::FnId;
 use crate::item::{Body, FnDecl, FnRole, Mode, VcCrate};
 use crate::stmt::{Block, Stmt, StmtKind};
 use crate::ty::IntRange;
+use crate::CheckedSpecDefinitions;
 
 /// Generate the checks of every function of `krate`.
 ///
@@ -83,6 +86,75 @@ use crate::ty::IntRange;
 /// refused with the tag `vcgen-internal`.
 #[must_use]
 pub fn generate(krate: &VcCrate) -> CrateVcs {
+    generate_with_spec_definitions(krate, &CheckedSpecDefinitions::default())
+}
+
+/// Generate checks using separately checked, client-matched Spec definitions.
+///
+/// The collection supplies no native provenance and does not change imported
+/// declarations or count them as verified. Its complete signature join is
+/// rechecked at every consumption before any defining equation is translated.
+#[must_use]
+pub fn generate_with_spec_definitions(
+    krate: &VcCrate,
+    definitions: &CheckedSpecDefinitions,
+) -> CrateVcs {
+    generate_with_spec_definitions_and_bv_policy(krate, definitions, BitvectorPolicy::default())
+}
+
+/// The preprocessing phase selected by a source invocation. Rich typed IR
+/// keeps independent undefined-operation occurrences unless explicitly opted in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BitvectorPolicy {
+    #[default]
+    PreserveOperations,
+    /// Verus's typed syntactic preprocessing before finite BV conversion.
+    VerusSyntactic,
+}
+
+/// Generate checks under an explicit BV preprocessing policy. This changes
+/// neither source/WF admission nor the supplied checked definition collection.
+#[must_use]
+pub fn generate_with_spec_definitions_and_bv_policy(
+    krate: &VcCrate,
+    definitions: &CheckedSpecDefinitions,
+    bitvector_policy: BitvectorPolicy,
+) -> CrateVcs {
+    // Effect-invalid bodies cannot enter the shared logical tables, even for
+    // direct callers that omitted the ordinary WF precondition.
+    if let Some(problem) = crate::prophecy::check_crate(krate).first() {
+        return CrateVcs {
+            fns: krate
+                .fns
+                .iter()
+                .map(|decl| {
+                    (
+                        decl.id,
+                        FnVcs::Refused(val::refusal("prophecy", &problem.message, problem.span)),
+                    )
+                })
+                .collect(),
+        };
+    }
+    if let Err(errors) = definitions.validate_for_crate(krate) {
+        let problem = &errors[0];
+        return CrateVcs {
+            fns: krate
+                .fns
+                .iter()
+                .map(|declaration| {
+                    (
+                        declaration.id,
+                        FnVcs::Refused(val::refusal(
+                            "imported-definition",
+                            &problem.message,
+                            problem.span,
+                        )),
+                    )
+                })
+                .collect(),
+        };
+    }
     let widths = match krate.architecture.cases() {
         Ok(widths) => widths,
         Err(detail) => {
@@ -122,11 +194,11 @@ pub fn generate(krate: &VcCrate) -> CrateVcs {
                 .collect(),
         };
     }
-    let first = generate_width(krate, widths[0]);
+    let first = generate_width(krate, widths[0], definitions, bitvector_policy);
     if widths.len() == 1 {
         return first;
     }
-    let second = generate_width(krate, widths[1]);
+    let second = generate_width(krate, widths[1], definitions, bitvector_policy);
     let fns = first
         .fns
         .into_iter()
@@ -172,6 +244,40 @@ impl<'a> Recommendations<'a> {
     /// Same complete/WF source preconditions as generate. No normal proof
     /// equation, obligation, verdict or assumed fact is changed.
     pub fn new(krate: &'a VcCrate) -> Result<Self, VcRefusal> {
+        Self::new_with_spec_definitions(krate, &CheckedSpecDefinitions::default())
+    }
+
+    /// Use the same separate definition collection and exact client join as
+    /// normal generation. Recommendations remain diagnostics, never authority.
+    pub fn new_with_spec_definitions(
+        krate: &'a VcCrate,
+        definitions: &CheckedSpecDefinitions,
+    ) -> Result<Self, VcRefusal> {
+        Self::new_with_spec_definitions_and_bv_policy(
+            krate,
+            definitions,
+            BitvectorPolicy::default(),
+        )
+    }
+
+    /// Retain the same source preprocessing policy for optional diagnostics.
+    /// This never changes the already established main proof result.
+    pub fn new_with_spec_definitions_and_bv_policy(
+        krate: &'a VcCrate,
+        definitions: &CheckedSpecDefinitions,
+        bitvector_policy: BitvectorPolicy,
+    ) -> Result<Self, VcRefusal> {
+        if let Some(problem) = crate::prophecy::check_crate(krate).first() {
+            return Err(val::refusal("prophecy", &problem.message, problem.span));
+        }
+        if let Err(errors) = definitions.validate_for_crate(krate) {
+            let problem = &errors[0];
+            return Err(val::refusal(
+                "imported-definition",
+                &problem.message,
+                problem.span,
+            ));
+        }
         if let Some(span) = krate.fns.iter().find_map(incomplete_source_binder) {
             return Err(val::refusal(
                 "source-construction",
@@ -187,8 +293,9 @@ impl<'a> Recommendations<'a> {
             .iter()
             .copied()
             .map(|width| {
-                let ctx = val::Ctx::for_width(krate, width);
-                let tables = spec::Tables::build(&ctx, krate);
+                let mut ctx = val::Ctx::for_width_with_checked_spec(krate, width, definitions);
+                ctx.bitvector_policy = bitvector_policy;
+                let tables = spec::Tables::build_with_spec_definitions(&ctx, krate, definitions);
                 (ctx, tables)
             })
             .collect();
@@ -250,6 +357,9 @@ fn incomplete_source_binder(decl: &FnDecl) -> Option<crate::SpanId> {
                 return Some(expr.span)
             }
             ExprKind::ProofInSpec(block) => return in_block(block),
+            ExprKind::ProofInSpecTail { block, tail } => {
+                return in_block(block).or_else(|| in_expr(tail))
+            }
             _ => {}
         }
         let mut found = None;
@@ -276,6 +386,7 @@ fn incomplete_source_binder(decl: &FnDecl) -> Option<crate::SpanId> {
         .map(|clause| &clause.expr)
         .chain(&decl.decreases)
         .chain(&decl.decreases_when)
+        .chain(decl.unwind_spec().condition())
         .find_map(in_expr)
         .or_else(|| match &decl.body {
             Body::None => None,
@@ -286,9 +397,15 @@ fn incomplete_source_binder(decl: &FnDecl) -> Option<crate::SpanId> {
 
 /// Two complete contexts keep source nominal/type-argument identity unchanged;
 /// only their mathematical bounds, clips and native BV widths differ.
-fn generate_width(krate: &VcCrate, width: u32) -> CrateVcs {
-    let ctx = val::Ctx::for_width(krate, width);
-    let tables = spec::Tables::build(&ctx, krate);
+fn generate_width(
+    krate: &VcCrate,
+    width: u32,
+    definitions: &CheckedSpecDefinitions,
+    bitvector_policy: BitvectorPolicy,
+) -> CrateVcs {
+    let mut ctx = val::Ctx::for_width_with_checked_spec(krate, width, definitions);
+    ctx.bitvector_policy = bitvector_policy;
+    let tables = spec::Tables::build_with_spec_definitions(&ctx, krate, definitions);
     let uncovered = uncovered_cycles(&ctx, krate);
     let mut fns = Vec::new();
     for decl in &krate.fns {
@@ -373,6 +490,7 @@ fn architecture_event(check: &Check) -> (crate::SiteId, u8, usize) {
         CheckKind::BitvectorAssert { .. } => (9, 0),
         CheckKind::Recommendation { clause, .. } => (10, *clause),
         CheckKind::ChoiceRecommendation { .. } => (11, 0),
+        CheckKind::Unwind { .. } => (12, 0),
     };
     (check.site, kind, clause)
 }
@@ -519,6 +637,27 @@ fn uncovered_cycles(ctx: &val::Ctx<'_>, krate: &VcCrate) -> HashMap<FnId, VcRefu
         if !cyclic {
             continue;
         }
+        if component.iter().any(|id| {
+            ctx.fns
+                .get(id)
+                .is_some_and(|decl| decl.attrs.broadcast_triggers.is_some())
+        }) {
+            for id in &component {
+                let span = ctx
+                    .fns
+                    .get(id)
+                    .map_or(crate::ids::SpanId(0), |decl| decl.span);
+                out.insert(
+                    *id,
+                    val::refusal(
+                        "broadcast-recursion",
+                        "a cycle through a broadcast proof contract",
+                        span,
+                    ),
+                );
+            }
+            continue;
+        }
         let first = component[0];
         let covered = ctx
             .group(first)
@@ -553,6 +692,9 @@ fn uncovered_cycles(ctx: &val::Ctx<'_>, krate: &VcCrate) -> HashMap<FnId, VcRefu
 fn all_callees(decl: &FnDecl) -> BTreeSet<FnId> {
     let mut out = BTreeSet::new();
     let mut add = |e: &Expr| collect_calls(e, &mut out);
+    for hint in decl.broadcast_hints() {
+        add(hint);
+    }
     for clause in decl
         .requires
         .iter()
@@ -567,11 +709,14 @@ fn all_callees(decl: &FnDecl) -> BTreeSet<FnId> {
     if let Some(when) = &decl.decreases_when {
         add(when);
     }
+    if let Some(condition) = decl.unwind_spec().condition() {
+        add(condition);
+    }
     match &decl.body {
         Body::None => {}
         Body::Spec(expr) | Body::Constant(expr) => add(expr),
         Body::Stmts(block) => visit_stmts(block, &mut |stmt| {
-            if let StmtKind::Call { callee, .. } = &stmt.kind {
+            if let StmtKind::Call { callee, .. } | StmtKind::BroadcastUse { callee } = &stmt.kind {
                 out.insert(*callee);
             }
             for e in stmt_exprs(stmt) {
@@ -589,14 +734,18 @@ fn collect_calls(e: &Expr, out: &mut BTreeSet<FnId>) {
         ExprKind::Call { callee, .. } => {
             out.insert(*callee);
         }
-        ExprKind::ProofInSpec(block) => visit_stmts(block, &mut |stmt| {
-            if let StmtKind::Call { callee, .. } = &stmt.kind {
-                out.insert(*callee);
-            }
-            for e in stmt_exprs(stmt) {
-                collect_calls(e, out);
-            }
-        }),
+        ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
+            visit_stmts(block, &mut |stmt| {
+                if let StmtKind::Call { callee, .. } | StmtKind::BroadcastUse { callee } =
+                    &stmt.kind
+                {
+                    out.insert(*callee);
+                }
+                for e in stmt_exprs(stmt) {
+                    collect_calls(e, out);
+                }
+            })
+        }
         _ => {}
     }
     e.for_each_child(&mut |child| collect_calls(child, out));
@@ -688,6 +837,11 @@ pub fn calls_anything(block: &Block) -> bool {
     let mut found = false;
     visit_stmts(block, &mut |stmt| {
         found |= matches!(stmt.kind, StmtKind::Call { .. });
+        if let StmtKind::GhostTail { tail, .. } = &stmt.kind {
+            let mut callees = BTreeSet::new();
+            collect_calls(tail, &mut callees);
+            found |= !callees.is_empty();
+        }
     });
     found
 }
@@ -696,6 +850,13 @@ pub fn calls_anything(block: &Block) -> bool {
 /// ones included, in program order.
 fn visit_stmts<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
     for stmt in &block.stmts {
+        if let StmtKind::GhostTail { block, .. } = &stmt.kind {
+            // This statement's own expression is its final value, so its
+            // prefix precedes the callback in actual evaluation order.
+            visit_stmts(block, f);
+            f(stmt);
+            continue;
+        }
         f(stmt);
         match &stmt.kind {
             StmtKind::If {
@@ -733,6 +894,7 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .map(|clause| &clause.expr)
             .collect(),
         StmtKind::If { cond, .. } => vec![cond],
+        StmtKind::GhostTail { tail, .. } => vec![tail],
         StmtKind::Return { value, .. } => value.iter().collect(),
         StmtKind::Loop(lp) => lp
             .cond
@@ -741,7 +903,9 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .chain(lp.invariants.iter().map(|inv| &inv.expr))
             .chain(&lp.decreases)
             .collect(),
-        StmtKind::Reveal { .. }
+        StmtKind::BorrowMut { .. }
+        | StmtKind::BroadcastUse { .. }
+        | StmtKind::Reveal { .. }
         | StmtKind::Hide { .. }
         | StmtKind::Ghost(_)
         | StmtKind::Block(_)
@@ -772,18 +936,6 @@ fn refused_anywhere(ctx: &val::Ctx<'_>, block: &Block) -> Result<(), VcRefusal> 
                     stmt.span,
                 ));
                 return;
-            }
-        }
-        if let StmtKind::AssertBitVector {
-            requires, ensures, ..
-        } = &stmt.kind
-        {
-            let mut work = 200_000usize;
-            for clause in requires.iter().chain(ensures) {
-                if let Err(error) = bitvector::admit_syntax(ctx, &clause.expr, &mut work) {
-                    problem = Some(error);
-                    return;
-                }
             }
         }
         let signed_div = |e: &Expr| {

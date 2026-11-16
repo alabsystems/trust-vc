@@ -56,9 +56,10 @@ use trust_vc_vcir::{check_crate_for_diagnostics, Block, Body, FnDecl, FnId, Stmt
 
 use crate::args::{self, SplitArgs};
 use crate::cargo::{self, Inputs as CargoInputs, Invocation as CargoInvocation};
+use crate::compiler_environment::CompilerEnvironment;
 use crate::messages::{self, Phase};
 use crate::reader::{self, CrateRead, FnStatus, ReadOptions, Refusal, UserError};
-use crate::verdict::{self, FnVerdict, Outcome, Record, SiteCounts, Verdict};
+use crate::verdict::{self, FnVerdict, Outcome, OutputSinks, Record, SiteCounts, Verdict};
 use crate::verify::{self, Report, VerifyOptions};
 
 /// Environment variable naming a file that receives a debug dump of the VcIR
@@ -113,6 +114,8 @@ const ERASE_IMPLS_MESSAGE: &str = "trust-vc-erase-impls";
 /// First argument of the child process that performs the erase run.
 pub const ERASE_RUN_FLAG: &str = "--trust-vc-erase-run";
 const ERASE_INPUTS_PREFIX: &str = "--trust-vc-erase-cargo-state=";
+const ERASE_COMPILER_ENVIRONMENT_FLAG: &str = "--trust-vc-erase-compiler-environment";
+const ERASE_ENVIRONMENT_REFUSAL_MESSAGE: &str = "trust-vc-erase-environment-refusal";
 
 /// The rustc flags `rust_verify` adds to every run in which `verus!` has been
 /// expanded (`enable_default_features_and_verus_attr` with `syntax_macro`
@@ -201,6 +204,7 @@ struct RunOptions {
     cargo: bool,
     cargo_inputs: CargoInputs,
     private_output: Option<PathBuf>,
+    compiler_environment: Option<CompilerEnvironment>,
 }
 
 impl RunOptions {
@@ -213,6 +217,7 @@ impl RunOptions {
             read: ReadOptions {
                 new_mut_ref: split.extended().contains(&"new-mut-ref"),
                 no_external_by_default: split.has("no-external-by-default"),
+                no_bv_simplify: split.extended().contains(&"no-bv-simplify"),
             },
             no_cheating: split.has("no-cheating"),
             no_verify: split.has("no-verify"),
@@ -226,6 +231,7 @@ impl RunOptions {
             cargo: false,
             cargo_inputs: CargoInputs::default(),
             private_output: None,
+            compiler_environment: None,
         })
     }
 }
@@ -337,10 +343,10 @@ fn unsupported_request(split: &SplitArgs, via_cargo: bool) -> Option<(&'static s
     for extended in split.extended() {
         match extended {
             // Handled.
-            "new-mut-ref" => {}
+            "new-mut-ref" | "no-bv-simplify" => {}
             // Only change what the reader refuses anyway (`inline_air_stmt`)
             // or how the solver is driven, not which programs verify.
-            "allow-inline-air" | "no-bv-simplify" | "no-solver-version-check" => {}
+            "allow-inline-air" | "no-solver-version-check" => {}
             "check-api-safety" => {
                 return Some((
                     "check-api-safety",
@@ -371,6 +377,7 @@ fn unsupported_request(split: &SplitArgs, via_cargo: bool) -> Option<(&'static s
 /// The verify run's callbacks: read after type checking, report, stop.
 struct VerifyRun {
     opts: RunOptions,
+    outputs: OutputSinks,
     /// Set once the callback ran; if it never ran the compiler stopped early.
     reached: bool,
     /// Set while trust-vc reads, checks and reports the crate (after rustc's
@@ -390,6 +397,12 @@ impl Callbacks for VerifyRun {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         crate::diagnostic_compat::configure(config);
         self.opts.cargo_inputs.install(config);
+        if let Some(environment) = &self.opts.compiler_environment {
+            if let Err(error) = environment.apply_to_options(&mut config.opts) {
+                rustc_session::EarlyDiagCtxt::new(config.opts.error_format)
+                    .early_fatal(error.to_string());
+            }
+        }
         if let Some(directory) = &self.opts.private_output {
             crate::cargo_native::configure(config, directory);
         }
@@ -400,20 +413,6 @@ impl Callbacks for VerifyRun {
             return Compilation::Stop;
         }
         let read = reader::read_crate(tcx, self.opts.read);
-        if let Some(path) = std::env::var_os(DUMP_VCIR_ENV) {
-            // A dump that cannot be written only loses the dump.
-            let statuses: Vec<String> = read
-                .fns
-                .iter()
-                .map(|f| format!("{}: {:?}", f.def_path, f.status))
-                .collect();
-            let text = format!(
-                "{}-- statuses --\n{}\n",
-                trust_vc_vcir::pretty::crate_to_string(&read.krate),
-                statuses.join("\n")
-            );
-            let _ = std::fs::write(path, text);
-        }
         self.decide(tcx, &read);
         self.reading = false;
         Compilation::Stop
@@ -423,6 +422,43 @@ impl Callbacks for VerifyRun {
 impl VerifyRun {
     fn prepare_read(&mut self, tcx: TyCtxt<'_>) -> bool {
         self.reached = true;
+        if let Some(environment) = &self.opts.compiler_environment {
+            let checked = environment
+                .check_options(&tcx.sess.opts)
+                .and_then(|()| check_environment_dependencies(environment, tcx.sess));
+            if let Err(error) = checked {
+                self.refuse(
+                    tcx,
+                    rustc_span::DUMMY_SP,
+                    "request-environment",
+                    &error.to_string(),
+                );
+                self.outcome = Some(Outcome::Refused);
+                return false;
+            }
+        }
+        // Use the actual tracked macro read, including ordinary CLI requests
+        // whose logical environment need not be virtualized. Checking only a
+        // process snapshot would miss an injected compiler value.
+        let documentation_expansion = tcx.sess.env_depinfo.lock().iter().any(|(key, value)| {
+            key.as_str() == "VERUSDOC" && value.is_some_and(|value| value.as_str() == "1")
+        });
+        if documentation_expansion {
+            let constant = tcx.hir_body_owners().find(|owner| {
+                let definition = owner.to_def_id();
+                matches!(tcx.def_kind(definition), DefKind::Fn | DefKind::AssocFn)
+                    && matches!(
+                        tcx.constness(definition),
+                        rustc_hir::Constness::Const { .. }
+                    )
+            });
+            if let Some(owner) = constant {
+                self.refuse(tcx, tcx.def_span(owner), "documentation-const",
+                    "VERUSDOC=1 omits const-function contracts in this macro cohort; verification of that expansion is not represented");
+                self.outcome = Some(Outcome::Refused);
+                return false;
+            }
+        }
         if tcx.dcx().has_errors().is_some() {
             self.outcome = Some(Outcome::FrontEndRejected);
             return false;
@@ -459,9 +495,10 @@ impl VerifyRun {
         true
     }
 
-    fn new(opts: RunOptions) -> Self {
+    fn new(opts: RunOptions, outputs: OutputSinks) -> Self {
         Self {
             opts,
+            outputs,
             reached: false,
             reading: false,
             functions: Vec::new(),
@@ -470,6 +507,24 @@ impl VerifyRun {
             erase_exit: None,
             failed_elsewhere: false,
         }
+    }
+
+    fn dump_vcir(&self, read: &CrateRead) {
+        if !self.outputs.wants_vcir_dump() {
+            return;
+        }
+        let statuses: Vec<String> = read
+            .fns
+            .iter()
+            .map(|f| format!("{}: {:?}", f.def_path, f.status))
+            .collect();
+        let text = format!(
+            "{}-- statuses --\n{}\n",
+            trust_vc_vcir::pretty::crate_to_string(&read.krate),
+            statuses.join("\n")
+        );
+        // A dump that cannot be written only loses the dump.
+        let _ = self.outputs.write_vcir(&text);
     }
 
     /// Record every function; `read_verdict` (with `read_tag`) is the
@@ -524,6 +579,7 @@ impl VerifyRun {
         read: &CrateRead,
         owner: Option<&reader::declaration_staging::LiveNormalClientRead<'_, '_, '_, 'tcx>>,
     ) {
+        self.dump_vcir(read);
         let refusals: Vec<&Refusal> = read.refusals().collect();
         let first_phase: Vec<&UserError> = read
             .errors
@@ -871,6 +927,22 @@ impl VerifyRun {
         if !self.owned_boundary(tcx, read, owner, OwnedBoundary::PositiveVerification) {
             return;
         }
+        if let Some(environment) = &self.opts.compiler_environment {
+            let checked = environment
+                .check_options(&tcx.sess.opts)
+                .and_then(|()| check_environment_dependencies(environment, tcx.sess));
+            if let Err(error) = checked {
+                self.refuse(
+                    tcx,
+                    rustc_span::DUMMY_SP,
+                    "request-environment",
+                    &error.to_string(),
+                );
+                self.outcome = Some(Outcome::Refused);
+                self.record_functions(tcx, read, Verdict::Skipped, Some(TAG_CRATE_REFUSED));
+                return;
+            }
+        }
         let verification = verify::verify(read, self.opts.verify);
         if !self.owned_boundary(tcx, read, owner, OwnedBoundary::PositiveVerification) {
             return;
@@ -1037,8 +1109,12 @@ impl VerifyRun {
             .private_output
             .as_ref()
             .map(|directory| directory.with_file_name("erase"));
-        let child = match run_erase_child(&args, &self.opts.cargo_inputs, private_output.as_deref())
-        {
+        let child = match run_erase_child(
+            &args,
+            &self.opts.cargo_inputs,
+            private_output.as_deref(),
+            self.opts.compiler_environment.as_ref(),
+        ) {
             Ok(child) => child,
             Err(problem) => {
                 // Without the erase run nothing may be called checked.
@@ -1050,6 +1126,11 @@ impl VerifyRun {
             return EraseResult::Failed;
         }
         self.erase_exit = Some(child.code);
+        if let Some(problem) = &child.environment_refusal {
+            print_lines(&child.lines);
+            self.refuse(tcx, rustc_span::DUMMY_SP, "request-environment", problem);
+            return EraseResult::Failed;
+        }
         if self.opts.lifetime_check {
             let problem = match &child.impls {
                 Some(erased) => impl_difference(&impls(tcx), erased),
@@ -1376,6 +1457,10 @@ fn for_each_assume(
                     walk(else_block, f);
                 }
                 StmtKind::Ghost(inner) | StmtKind::Block(inner) => walk(inner, f),
+                StmtKind::GhostTail { block, tail } => {
+                    walk(block, f);
+                    walk_expression(tail, f);
+                }
                 StmtKind::Loop(lp) => {
                     if let Some(cond) = &lp.cond {
                         walk(&cond.block, f);
@@ -1385,6 +1470,17 @@ fn for_each_assume(
                 _ => {}
             }
         }
+    }
+    fn walk_expression(
+        expr: &trust_vc_vcir::Expr,
+        f: &mut dyn FnMut(trust_vc_vcir::SpanId, &trust_vc_vcir::ClauseAttrs),
+    ) {
+        match &expr.kind {
+            trust_vc_vcir::ExprKind::ProofInSpec(block)
+            | trust_vc_vcir::ExprKind::ProofInSpecTail { block, .. } => walk(block, f),
+            _ => {}
+        }
+        expr.for_each_child(&mut |child| walk_expression(child, f));
     }
     if let Body::Stmts(block) = &decl.body {
         walk(block, f);
@@ -1436,6 +1532,7 @@ struct EraseChild {
     lines: Vec<String>,
     /// The impls of its crate ([`impl_keys`]), if it got that far.
     impls: Option<Vec<String>>,
+    environment_refusal: Option<String>,
 }
 
 /// Start the erase run as a child process of this binary and wait for it.
@@ -1443,10 +1540,17 @@ fn run_erase_child(
     args: &[String],
     inputs: &CargoInputs,
     private_output: Option<&std::path::Path>,
+    compiler_environment: Option<&CompilerEnvironment>,
 ) -> Result<EraseChild, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this binary: {e}"))?;
     let mut command = Command::new(exe);
     command.arg(ERASE_RUN_FLAG);
+    if let Some(environment) = compiler_environment {
+        // This selects only the child's restricted dependency checks. It is
+        // plain launch data and constructs no import or compiler ownership.
+        command.arg(ERASE_COMPILER_ENVIRONMENT_FLAG);
+        environment.configure_child(&mut command);
+    }
     if !inputs.0.is_empty() || private_output.is_some() {
         let values = serde_json::to_string(&(&inputs.0, private_output))
             .map_err(|error| format!("cannot encode Cargo environment dependencies: {error}"))?;
@@ -1464,8 +1568,13 @@ fn run_erase_child(
         .map_err(|e| format!("cannot read the erase run's output: {e}"))?;
     let mut lines = Vec::new();
     let mut impls = None;
+    let mut environment_refusal = None;
     for line in String::from_utf8_lossy(&output.stderr).lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if value["$message_type"] == ERASE_ENVIRONMENT_REFUSAL_MESSAGE {
+                environment_refusal = Some("the erase compiler read an unrepresented or mismatched request environment dependency".to_owned());
+                continue;
+            }
             if value["$message_type"] == ERASE_IMPLS_MESSAGE {
                 impls = serde_json::from_value(value["impls"].clone()).ok();
                 continue;
@@ -1477,7 +1586,21 @@ fn run_erase_child(
         code: output.status.code().unwrap_or(101),
         lines,
         impls,
+        environment_refusal,
     })
+}
+
+fn check_environment_dependencies(
+    environment: &CompilerEnvironment,
+    session: &rustc_session::Session,
+) -> std::io::Result<()> {
+    session
+        .env_depinfo
+        .lock()
+        .iter()
+        .try_for_each(|(key, value)| {
+            environment.check_dependency(key.as_str(), value.as_ref().map(|value| value.as_str()))
+        })
 }
 
 /// Callbacks of the erase run: a plain compile that lists its crate's
@@ -1485,6 +1608,7 @@ fn run_erase_child(
 struct EraseRun {
     cargo_inputs: CargoInputs,
     private_output: Option<PathBuf>,
+    compiler_environment: Option<CompilerEnvironment>,
 }
 
 impl Callbacks for EraseRun {
@@ -1497,11 +1621,45 @@ impl Callbacks for EraseRun {
     }
 
     fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if let Some(environment) = &self.compiler_environment {
+            if let Err(error) = check_environment_dependencies(environment, tcx.sess) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "$message_type": ERASE_ENVIRONMENT_REFUSAL_MESSAGE,
+                        "permission_from_report": false,
+                    })
+                );
+                tcx.dcx()
+                    .struct_err(format!("request environment refused: {error}"))
+                    .emit();
+                return Compilation::Stop;
+            }
+        }
         let line = serde_json::json!({
             "$message_type": ERASE_IMPLS_MESSAGE,
             "impls": impl_keys(tcx),
         });
         eprintln!("{line}");
+        Compilation::Continue
+    }
+
+    fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if let Some(environment) = &self.compiler_environment {
+            if let Err(error) = check_environment_dependencies(environment, tcx.sess) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "$message_type": ERASE_ENVIRONMENT_REFUSAL_MESSAGE,
+                        "permission_from_report": false,
+                    })
+                );
+                tcx.dcx()
+                    .struct_err(format!("request environment refused: {error}"))
+                    .emit();
+                return Compilation::Stop;
+            }
+        }
         Compilation::Continue
     }
 }
@@ -1631,6 +1789,38 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
         .cloned()
         .unwrap_or_else(|| "rust_verify".to_string())];
     let mut remaining = argv.get(2..).unwrap_or(&[]);
+    let compiler_environment =
+        if remaining.first().map(String::as_str) == Some(ERASE_COMPILER_ENVIRONMENT_FLAG) {
+            remaining = &remaining[1..];
+            // The real child has the original three values/removals installed by
+            // Command. Do not apply the coordinator's absent-process guard here.
+            let verdict = std::env::var_os(verdict::VERDICT_DIR_ENV);
+            let dump = std::env::var_os(DUMP_VCIR_ENV);
+            let verusdoc = std::env::var_os("VERUSDOC");
+            match CompilerEnvironment::from_raw(
+                verdict.as_deref(),
+                dump.as_deref(),
+                verusdoc.as_deref(),
+            ) {
+                Ok(environment) => Some(environment),
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "$message_type": ERASE_ENVIRONMENT_REFUSAL_MESSAGE,
+                            "permission_from_report": false,
+                        })
+                    );
+                    eprintln!(
+                        "{}",
+                        verdict::crate_refusal_json("request-environment", &error.to_string())
+                    );
+                    return ExitCode::from(1);
+                }
+            }
+        } else {
+            None
+        };
     let mut cargo_inputs = CargoInputs::default();
     let mut private_output = None;
     if let Some(values) = remaining
@@ -1663,6 +1853,7 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
                 &mut EraseRun {
                     cargo_inputs,
                     private_output,
+                    compiler_environment,
                 },
             )
         })
@@ -1704,17 +1895,34 @@ pub fn main() -> ExitCode {
     if argv.get(1).map(String::as_str) == Some(ERASE_RUN_FLAG) {
         return erase_child_main(&argv);
     }
+    // Capture ordinary CLI output data once, before compiler callbacks. Live
+    // coordinator requests pass their own OutputSinks instead of reading or
+    // changing this process's environment.
+    let outputs = OutputSinks::new(
+        std::env::var_os(verdict::VERDICT_DIR_ENV).map(PathBuf::from),
+        std::env::var_os(DUMP_VCIR_ENV).map(PathBuf::from),
+    );
+    ExitCode::from(run_with_context(argv, outputs, |key| {
+        match std::env::var(key) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+                "Cargo environment variable {key} is not valid Unicode"
+            )),
+        }
+    }))
+}
+
+fn run_with_context(
+    argv: Vec<String>,
+    outputs: OutputSinks,
+    environment: impl FnMut(&str) -> Result<Option<String>, String>,
+) -> u8 {
     let mut record = Record {
         argv: argv.clone(),
         ..Record::default()
     };
-    let invocation = cargo::prepare(&argv, |key| match std::env::var(key) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "Cargo environment variable {key} is not valid Unicode"
-        )),
-    });
+    let invocation = cargo::prepare(&argv, environment);
     let (arguments, cargo_options, cargo_inputs) = match invocation {
         Ok(CargoInvocation::Standalone) => (
             argv.get(1..).unwrap_or(&[]).to_vec(),
@@ -1734,14 +1942,14 @@ pub fn main() -> ExitCode {
         Err(problem) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &problem);
             record.outcome = Some(Outcome::Refused);
-            return finish(record, 1);
+            return finish(record, 1, &outputs);
         }
     };
     let mut split = match args::split(&arguments) {
         Ok(s) => s,
         Err(e) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &e.to_string());
-            return finish(record, 1);
+            return finish(record, 1, &outputs);
         }
     };
     record.entry_file = split.entry_file().map(PathBuf::from);
@@ -1752,7 +1960,7 @@ pub fn main() -> ExitCode {
             Err(problem) => {
                 refuse_crate(&mut record, "cargo-import", &problem);
                 record.outcome = Some(Outcome::Refused);
-                return finish(record, 1);
+                return finish(record, 1, &outputs);
             }
         };
         for (name, path) in imports {
@@ -1774,7 +1982,7 @@ pub fn main() -> ExitCode {
     if let Some((tag, detail)) = unsupported_request(&split, cargo_options.is_some()) {
         refuse_crate(&mut record, tag, &detail);
         record.outcome = Some(Outcome::Refused);
-        return finish(record, 1);
+        return finish(record, 1, &outputs);
     }
 
     let program = argv
@@ -1789,7 +1997,7 @@ pub fn main() -> ExitCode {
         Err(reason) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &reason);
             record.outcome = Some(Outcome::Refused);
-            return finish(record, 1);
+            return finish(record, 1, &outputs);
         }
     };
     let mut opts = invocation.options();
@@ -1808,14 +2016,14 @@ pub fn main() -> ExitCode {
                         &format!("cannot create private Cargo outputs: {error}"),
                     );
                     record.outcome = Some(Outcome::Refused);
-                    return finish(record, 1);
+                    return finish(record, 1, &outputs);
                 }
             };
             opts.private_output = Some(private.path().join("verify"));
             scratch = Some(private);
         }
     }
-    let mut callbacks = VerifyRun::new(opts);
+    let mut callbacks = VerifyRun::new(opts, outputs.clone());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rustc_driver::catch_fatal_errors(|| {
             rustc_driver::run_compiler(invocation.verify(), &mut callbacks)
@@ -1888,7 +2096,7 @@ pub fn main() -> ExitCode {
         // The earlier erase compile was speculative and private. Only a
         // completed verification (or explicit recorded --no-verify skip)
         // can now emit Cargo's requested public artifacts.
-        match run_erase_child(invocation.erase(), &cargo_inputs, None) {
+        match run_erase_child(invocation.erase(), &cargo_inputs, None, None) {
             Ok(child) => {
                 print_lines(&child.lines);
                 if child.code != 0 {
@@ -1911,7 +2119,7 @@ pub fn main() -> ExitCode {
         }
     }
     drop(scratch);
-    finish(record, code)
+    finish(record, code, &outputs)
 }
 
 /// Called at the single-threaded binary entry, before starting rustc's worker
@@ -1926,7 +2134,7 @@ fn direct_cargo_compile(
     args: Vec<String>,
     inputs: CargoInputs,
     bootstrap: bool,
-) -> ExitCode {
+) -> u8 {
     struct DirectRun(CargoInputs);
     impl Callbacks for DirectRun {
         fn config(&mut self, config: &mut rustc_interface::interface::Config) {
@@ -1949,21 +2157,21 @@ fn direct_cargo_compile(
     // This is ordinary compiler work, not a verification. Do not write a
     // proof-success record for a probe, build script or unselected dependency.
     match outcome {
-        Ok(Ok(())) => ExitCode::SUCCESS,
-        Ok(Err(_)) => ExitCode::from(1),
-        Err(_) => ExitCode::from(101),
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => 1,
+        Err(_) => 101,
     }
 }
 
-/// Write the verdict record and turn `code` into the process exit code.
-fn finish(mut record: Record, code: u8) -> ExitCode {
+/// Write the verdict record and retain the actual numeric exit status.
+fn finish(mut record: Record, code: u8, outputs: &OutputSinks) -> u8 {
     record.exit_code = Some(i32::from(code));
-    for problem in record.write() {
+    for problem in record.write_to(outputs) {
         note_json(&format!(
             "trust-vc: could not write verdict record: {problem}"
         ));
     }
-    ExitCode::from(code)
+    code
 }
 
 #[cfg(test)]

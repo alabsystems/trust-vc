@@ -72,6 +72,9 @@ pub(super) fn check(expected: &Options, actual: &Options) -> Result<(), String> 
         color: _,
         verbose: _,
         jobs: _,
+        resource_worker_v2: _,
+        resource_worker_v3: _,
+        resource_subgroups_v3: _,
         recommended_stack_size: _,
         target_modifiers: _,
         mitigation_coverage_map: _,
@@ -137,6 +140,9 @@ pub(super) fn check(expected: &Options, actual: &Options) -> Result<(), String> 
         trust_verify_explicit_off,
         json_timings,
         color,
+        resource_worker_v2,
+        resource_worker_v3,
+        resource_subgroups_v3,
         recommended_stack_size,
     );
     check_codegenoptions(&expected.cg, &actual.cg)?;
@@ -459,7 +465,7 @@ fn check_unstableoptions(
         trust_bundle_foreign_crate: _,
         trust_cg_frontend: _,
         trust_cg_f1_backend: _,
-        trust_ir_upstream_mir: _,
+        trust_drop_rlib_objects: _,
         trust_ir_crate_module: _,
         trust_cg_output_gate: _,
         trust_ir_cg_args: _,
@@ -483,6 +489,7 @@ fn check_unstableoptions(
         trust_no_str_byte_position: _,
         trust_tinv: _,
         trust_no_r1: _,
+        trust_option_flag_lanes: _,
         trust_platform_properties: _,
         trust_platform_unanalysed: _,
         trust_platform_budget: _,
@@ -510,6 +517,11 @@ fn check_unstableoptions(
         trust_verify_package_name: _,
         trust_verify_profile: _,
         trust_verify_session: _,
+        trust_admission_run_digest: _,
+        trust_admission_unit_digest: _,
+        trust_admission_semantics_digest: _,
+        trust_admission_unit_role: _,
+        trust_admission_compile_target: _,
         trust_verify_target_spec_sha256: _,
         trust_verify_timeout_ms: _,
         trust_verify_worker_threads: _,
@@ -609,6 +621,13 @@ fn check_unstableoptions(
         track_diagnostics,
         trim_diagnostic_paths,
         trust_instance_flip_probe,
+        trust_drop_rlib_objects,
+        trust_option_flag_lanes,
+        trust_admission_run_digest,
+        trust_admission_unit_digest,
+        trust_admission_semantics_digest,
+        trust_admission_unit_role,
+        trust_admission_compile_target,
         trust_proof_artifact_root,
         trust_verify_target_spec_sha256,
         trust_witness,
@@ -619,3 +638,6 @@ fn check_unstableoptions(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

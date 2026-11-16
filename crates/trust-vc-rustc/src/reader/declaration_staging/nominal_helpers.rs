@@ -27,7 +27,7 @@ mod types;
 
 #[cfg(test)]
 pub(super) use cohort::transaction::Probe as TransactionProbe;
-pub(super) use cohort::Cohort;
+pub(super) use cohort::{ClosedScope, Cohort};
 
 /// The same counter pays for cohort, owner, expansion, type and body inventory.
 pub(super) struct Work {

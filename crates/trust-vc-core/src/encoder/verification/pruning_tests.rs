@@ -156,6 +156,7 @@ fn make_ctx() -> PreparedVerificationContext {
         overflow_behavior: crate::vc::OverflowBehavior::default(),
         div0_behavior: crate::vc::Div0Behavior::default(),
         bitshift_behavior: crate::vc::BitshiftBehavior::default(),
+        scalar_cast_capture: None,
         broadcast_use_groups: HashSet::new(),
         assert_by_scopes: HashMap::new(),
         forall_bound_vars: HashMap::new(),

@@ -18,6 +18,10 @@ thing a run chooses:
                               records and a Verus+z3 reference run (--reference),
                               see trust_vc_score.py.
 
+--prepared-sdk-request consumes an existing complete SDK layout prepared by a
+still-live native coordinator. It requires that coordinator's actual data socket
+and --owned-stdin lifecycle. This runner never constructs a native SDK owner.
+
 --capture-diagnostics puts a wrapper in rust_verify's place that copies each run's
 stderr (the JSON diagnostics) to runs/<label>/diags/<test dir>/; a Verus+z3 run
 captured this way is the reference for trust-vc runs.
@@ -60,24 +64,32 @@ Every run that runs anything appends one line to --ledger (default
 <out-root>/runs.csv): what ran and its totals, and for trust-vc the score.
 """
 
+# Capture the actual inherited socket before imports/staging can allocate a
+# descriptor at an invalid numeric locator. It carries requests, never an SDK.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import native_request_channel
+_NATIVE_CHANNEL = native_request_channel.capture() if __name__ == "__main__" else None
+
 import argparse
 import csv
 import datetime as dt
 import hashlib
 import json
-import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
 
 import suite_common
 import native_runtime
+import prepared_sdk
 import owned_processes as owned
 import trust_vc_score
 
@@ -92,8 +104,9 @@ DEFAULT_EXCLUDE = {"cargo": "invokes `cargo`/`cargo verus` builds (PATH cargo is
 OUTCOMES = ["ok", "FAILED", "ignored", "timeout", "crashed", "not-run"]
 
 # The files upstream's harness takes from target-verus/<profile>/ for a test that
-# does not import vstd (common/mod.rs run_verus). A trust-vc stage holds these and
-# rust_verify, nothing else, so a test that imports vstd finds no vstd.
+# does not import vstd (common/mod.rs run_verus). Ordinary unprepared trust-vc
+# staging holds these and rust_verify. Prepared mode consumes its owner's entire
+# already-sealed SDK inventory instead.
 BUILTIN_ARTIFACTS = [
     "libverus_builtin.rlib",
     "libverus_builtin_macros.dylib",
@@ -107,6 +120,94 @@ TRUST_VC_VERDICT_ENV = "TRUST_VC_VERDICT_DIR"
 # Inert locator only. Nested Targo authenticates its actual live ancestor.
 TARGO_NESTED_ENDPOINT = "TRUST_TARGO_NESTED_UNVERIFIED_ENDPOINT"
 TARGO_LEGACY_ENDPOINT = "TRUST_TARGO_NESTED_UNVERIFIED_BROKER"
+
+# The maintained zero-token lender accepts only a bare fixed execution. These
+# advertisements must be refused before child_env's allowlist can discard them.
+LENDER_ADVERTISEMENTS = (
+    "CARGO_JOBSERVER_HANDOFF", "TRUST_CPU_HANDOFF", "TRUST_FIXED_CLAIM_HANDOFF_V1",
+    "CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS", "TRUST_CPU_IMPLICIT_FD",
+    "BUILD_SLOT_FENCE_FDS", "ATERM_SDK_LEASE_V3", "ATERM_WORKLOAD_CPU_FDS_V1",
+    "ATERM_WORKLOAD_HOST_STORE_FD_V1", "ATERM_WORKLOAD_HOST_CONTROL_FDS_V1",
+)
+
+
+def execution_lender_context(env):
+    if env.get("BUILD_SLOT_HELD") != "1" or env.get("BUILD_SLOT_CPU_PROTOCOL") != "1":
+        raise SystemExit("execution lending needs an existing fixed build-slot protocol 1 reservation")
+    advertised = [key for key in LENDER_ADVERTISEMENTS if key in env]
+    if advertised:
+        raise SystemExit("execution lending cannot replace advertised custody: " + ", ".join(advertised))
+
+
+def execution_lender_inputs(args):
+    path = getattr(args, "execution_lender", None)
+    if path is None:
+        return {}
+    if args.frontend != "trust-vc":
+        raise SystemExit("--execution-lender applies to --frontend trust-vc only")
+    if args.threads != 1 or args.parallel_bins != 1:
+        raise SystemExit("execution lending requires --threads 1 --parallel-bins 1")
+    execution_lender_context(os.environ)
+    for entry in args.env:
+        key = entry.partition("=")[0]
+        if (key in LENDER_ADVERTISEMENTS or key == "CARGO_BUILD_JOBS"
+                or key.startswith(("BUILD_SLOT_", "TARGO_", "TRUST_CPU_", "ATERM_WORKLOAD_", "ATERM_SDK_"))):
+            raise SystemExit("--env cannot change execution-lender admission context: " + key)
+    path = Path(os.path.abspath(path.expanduser()))
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise SystemExit(f"execution lender is not an executable file: {path}")
+    # These are executable input identities, never admission or proof authority.
+    return native_runtime.snapshot_files([path, Path(sys.executable).absolute()])
+
+
+def stage_execution_wrapper(wrapper, real, lender, dyld, diags=None):
+    """Exec the selected lender; capture mode retains actual wait status too."""
+    adapter = wrapper.with_name(wrapper.name + ".execution.py")
+    source = '''import os, signal, subprocess, sys, tempfile, time
+from pathlib import Path
+REAL = %r
+LENDER = %r
+DYLD = %r
+DIAGS = %r
+FORBIDDEN = %r
+if os.environ.get("BUILD_SLOT_HELD") != "1" or os.environ.get("BUILD_SLOT_CPU_PROTOCOL") != "1" or any(key in os.environ for key in FORBIDDEN):
+    sys.stderr.write("execution lending requires bare fixed protocol 1 custody\\n")
+    sys.exit(75)
+env = dict(os.environ, DYLD_LIBRARY_PATH=DYLD)
+argv = [LENDER, REAL, *sys.argv[1:]]
+if DIAGS is None:
+    os.execve(LENDER, argv, env)
+out, entry = "", ""
+for index, argument in enumerate(sys.argv[1:], 1):
+    if index > 1 and sys.argv[index - 1] == "-o":
+        out = argument
+    if not argument.startswith("-") and argument.endswith(".rs"):
+        entry = argument
+with tempfile.TemporaryFile() as stderr:
+    status = subprocess.run(argv, env=env, stderr=stderr).returncode
+    stderr.seek(0)
+    body = stderr.read()
+sys.stderr.buffer.write(body)
+sys.stderr.buffer.flush()
+if out:
+    directory = Path(DIAGS) / Path(out).parent.name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / (str(time.time_ns()) + "-" + str(os.getpid()) + ".stderr")).write_bytes(
+        ("entry=" + entry + "\\n").encode() + body + ("exit=" + str(status) + "\\n").encode())
+if status < 0:
+    if -status not in (signal.SIGKILL, signal.SIGSTOP):
+        signal.signal(-status, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, [-status])
+    os.kill(os.getpid(), -status)
+os._exit(status)
+''' % (str(real), str(lender), str(dyld), str(diags) if diags is not None else None,
+       LENDER_ADVERTISEMENTS)
+    write_if_changed(adapter, source, 0o644)
+    # A shell exec handles interpreter paths containing spaces. The adapter sets
+    # DYLD after this protected binary, and exec preserves ordinary signal status.
+    write_if_changed(wrapper, "#!/bin/bash\nexec " + shlex.quote(sys.executable)
+                     + " -I -S " + shlex.quote(str(adapter)) + ' "$@"\n', 0o755)
+    return {path.name: sha256(path, {}) for path in (wrapper, adapter)}
 
 # Stands in for rust_verify under --capture-diagnostics. It runs the real binary,
 # passes its stdout, stderr and exit status through, and copies its stderr to
@@ -351,13 +452,56 @@ def check_native_cli_inputs(tools):
                 raise RuntimeError(f"native CLI build output changed: {name}: {path}")
 
 
+def prepared_sdk_inventory(args, target):
+    request = getattr(args, "prepared_sdk_request", None)
+    if request is None:
+        return None
+    if (args.frontend != "trust-vc" or args.capture_diagnostics
+            or getattr(args, "execution_lender", None)):
+        raise RuntimeError("prepared SDK mode needs its private data forwarder without staging adapters")
+    if args.threads != 1 or args.parallel_bins != 1:
+        raise RuntimeError("prepared SDK mode requires --threads 1 --parallel-bins 1 for its serial coordinator")
+    channel = owned.CURRENT.native_channel
+    if channel is None:
+        raise RuntimeError("prepared SDK mode needs its actual captured native request channel")
+    channel.check()
+    inventory = getattr(args, "prepared_sdk_inventory", None)
+    if inventory is None:
+        runtime = args.dyld or os.environ.get(suite_common.DYLD_ENV)
+        if runtime is None:
+            raise RuntimeError("prepared SDK mode needs its explicit selected native runtime")
+        runtime = Path(runtime).expanduser().resolve(strict=True)
+        inventory = prepared_sdk.PreparedSdk(request, target, runtime)
+        args.prepared_sdk_inventory = inventory
+    if inventory.root != target:
+        raise RuntimeError("prepared SDK inventory belongs to a different stage")
+    inventory.check()
+    return inventory
+
+
+def check_prepared_sdk(args):
+    inventory = getattr(args, "prepared_sdk_inventory", None)
+    if inventory is not None:
+        inventory.check()
+
+
 def stage_target_verus(tv, verus_src, args, label_dir):
     """<stage>/source/target-verus/debug, where run_verus finds rust_verify and the
     builtin crates. Verus's own, with nothing captured: a symlink to it. Otherwise a
     directory of this run's own: symlinks to Verus's files, or trust-vc's clones, and
     under --capture-diagnostics the tee wrapper as rust_verify. Returns the sha256 of
     every file the run puts there itself."""
+    # The native owner has already populated and sealed this entire directory.
+    # Consume its COMPLETE inventory before warmups/snapshots and return before
+    # any unlink/clone/mkdir or stale-entry cleanup can touch the owned layout.
     check_resource_handoff(os.environ)
+    inventory = prepared_sdk_inventory(args, tv)
+    if inventory is not None:
+        return dict(inventory.staged)
+    lender_inputs = getattr(args, "execution_lender_inputs", {})
+    if lender_inputs:
+        execution_lender_context(os.environ)
+        native_runtime.check_files(lender_inputs)
     real_tv = verus_src / "target-verus/debug"
     if args.frontend == "verus" and not args.capture_diagnostics:
         link_to(tv, real_tv)  # never rmtree through the link: it points into <verus>
@@ -382,24 +526,38 @@ def stage_target_verus(tv, verus_src, args, label_dir):
             if staged[name] != source_inputs[str((args.builtins / name).absolute())]["sha256"]:
                 raise RuntimeError(f"staged builtin differs from its selected input: {name}")
             wanted.add(name)
-        real = tv / ("rust_verify.real" if args.capture_diagnostics else "rust_verify")
+        real = tv / ("rust_verify.real" if args.capture_diagnostics or lender_inputs else "rust_verify")
         clone_file(args.rust_verify, real)
         staged[real.name] = sha256(real, {})
         if staged[real.name] != source_inputs[str(args.rust_verify.absolute())]["sha256"]:
             raise RuntimeError("staged frontend differs from its selected input")
         native_runtime.check_files(source_inputs)
         wanted.add(real.name)
+        if lender_inputs:
+            lender = tv / "execution-lender"
+            clone_file(args.execution_lender, lender)
+            staged[lender.name] = sha256(lender, {})
+            if staged[lender.name] != lender_inputs[str(args.execution_lender.absolute())]["sha256"]:
+                raise RuntimeError("staged execution lender differs from its selected input")
+            wanted.add(lender.name)
+            staged.update(stage_execution_wrapper(tv / "rust_verify", real, lender, args.dyld,
+                          label_dir / "diags" if args.capture_diagnostics else None))
+            wanted.update(("rust_verify", "rust_verify.execution.py"))
         for name, item in args.native_cli_inputs.items():
             original = Path(item["path"])
             if sha256(original, {}) != item["sha256"]:
                 raise RuntimeError(f"native CLI build output changed before staging: {original}")
-            clone_file(original, tv / name)
-            staged[name] = sha256(tv / name, {})
-            if staged[name] != item["sha256"]:
+            actual_name = name + ".real" if lender_inputs and name == "verus" else name
+            clone_file(original, tv / actual_name)
+            staged[actual_name] = sha256(tv / actual_name, {})
+            if staged[actual_name] != item["sha256"]:
                 raise RuntimeError(f"native CLI stage differs from selected output: {name}")
-            item["staged_path"] = str(tv / name)
-            wanted.add(name)
-    if args.capture_diagnostics:
+            item["staged_path"] = str(tv / actual_name)
+            wanted.add(actual_name)
+            if lender_inputs and name == "verus":
+                staged.update(stage_execution_wrapper(tv / name, tv / actual_name, lender, args.dyld))
+                wanted.update((name, name + ".execution.py"))
+    if args.capture_diagnostics and not lender_inputs:
         wrapper = tv / "rust_verify"
         write_if_changed(wrapper, TEE_WRAPPER.replace("@DYLD@", str(args.dyld)).replace("@REAL@", str(real))
                          .replace("@DIAGS@", str(label_dir / "diags")), 0o755)
@@ -413,7 +571,10 @@ def stage_target_verus(tv, verus_src, args, label_dir):
         if name in wanted:
             native_runtime.check_files(warm_inputs)
             try:
-                owned.run([str(tv / name), "--version"], env={"PATH": os.environ.get("PATH", "")},
+                warm_env = ({key: os.environ[key] for key in
+                             ("PATH", "BUILD_SLOT_HELD", "BUILD_SLOT_CPU_PROTOCOL") if key in os.environ}
+                            if lender_inputs else {"PATH": os.environ.get("PATH", "")})
+                owned.run([str(tv / name), "--version"], env=warm_env,
                                capture_output=True, timeout=1800)
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -517,6 +678,8 @@ def stage(label_dir, verus_src, bins, args):
 
 def child_env(args, src):
     check_resource_handoff(os.environ)
+    if getattr(args, "execution_lender_inputs", {}):
+        execution_lender_context(os.environ)
     # Carry the actual Cargo inputs and the broker's reservation through every
     # native child. Keep unrelated environment values out of run.json.
     inherited = (
@@ -551,6 +714,8 @@ def child_env(args, src):
         k, _, v = kv.partition("=")
         if k in (TARGO_NESTED_ENDPOINT, TARGO_LEGACY_ENDPOINT):
             raise SystemExit("a nested Targo locator must be inherited unchanged from its live host")
+        if k.upper() == native_request_channel.ENV:
+            raise SystemExit("a native request channel must be captured from its actual inherited socket")
         if args.frontend == "trust-vc" and k.upper() in (
             "RUSTC_BOOTSTRAP", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
             "CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER",
@@ -1116,6 +1281,10 @@ def clear_test_outputs(label_dir, name, discovery):
 def argument_parser(*, frontend_action="store"):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--owned-stdin", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--prepared-sdk-request", type=Path, default=None,
+                    help="consume this live coordinator request's complete pre-staged SDK inventory; "
+                         "requires its inherited native request channel, --owned-stdin, "
+                         "--threads 1 and --parallel-bins 1")
     ap.add_argument("--solver", help="path used as VERUS_Z3_PATH (kept as given, symlinks are not resolved)")
     ap.add_argument("--label", required=True)
     ap.add_argument("--verus", "--verus-path", dest="verus", default=None,
@@ -1149,6 +1318,9 @@ def argument_parser(*, frontend_action="store"):
                     help="trust-vc: genuine native verus build output, staged beside cargo-verus")
     ap.add_argument("--cargo-verus", type=Path, default=None, action=frontend_action,
                     help="trust-vc: genuine upstream cargo-verus build output (required with --verus-driver)")
+    ap.add_argument("--execution-lender", type=Path, default=None, action=frontend_action,
+                    help="trust-vc: actual source-built zero-token execution lender under fixed admission; "
+                         "requires --threads 1 --parallel-bins 1")
     ap.add_argument("--builtins", type=Path, default=None,
                     help="trust-vc: directory holding the trustc-built " + ", ".join(BUILTIN_ARTIFACTS)
                          + " (build_verus_builtins.sh)")
@@ -1174,6 +1346,8 @@ def main():
                 else suite_common.default_out_root())
     label_dir = out_root / "runs" / args.label
     args.label_dir = label_dir
+    if args.prepared_sdk_request is not None and (not args.owned_stdin or args.summarize_only):
+        ap.error("--prepared-sdk-request needs --owned-stdin and an actual run")
     meta_path = label_dir / "run.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {"invocations": []}
     if args.frontend is None:
@@ -1182,6 +1356,9 @@ def main():
         raise SystemExit(f"label {args.label} holds a {meta.get('frontend', 'verus')} run; use another label")
     if args.reference is None and meta.get("reference") and args.frontend == "trust-vc":
         args.reference = Path(meta["reference"])
+    args.execution_lender_inputs = execution_lender_inputs(args)
+    if args.execution_lender:
+        args.execution_lender = Path(os.path.abspath(args.execution_lender.expanduser()))
     if args.reference is not None:
         args.reference = Path(os.path.abspath(args.reference.expanduser()))
         if not (args.reference / "diags").is_dir():
@@ -1233,10 +1410,15 @@ def main():
     args.native_cli_inputs = (native_cli_inputs(args, selected_bins)
                               if not args.summarize_only else {})
     check_native_cli_inputs(args.native_cli_inputs)
+    prepared = prepared_sdk_inventory(args, label_dir / "stage/source/target-verus/debug")
     args.native_runtime_inventory = None
     if not args.summarize_only and args.frontend == "trust-vc":
         native_paths = [args.rust_verify, *selected_bins.values(),
                         *(Path(item["path"]) for item in args.native_cli_inputs.values())]
+        if args.execution_lender_inputs:
+            native_paths.append(args.execution_lender)
+        if prepared is not None:
+            native_paths.append(Path(prepared.links["vstd_sdk_client"][0]))
         args.native_runtime_inventory = native_runtime.resolve(
             args.dyld or os.environ.get(suite_common.DYLD_ENV), native_paths)
         args.dyld = Path(args.native_runtime_inventory["directory"])
@@ -1277,6 +1459,7 @@ def main():
         time.sleep(1.1)  # find -newer has 1 s granularity on some filesystems
         root, src, staged, staged_tv = stage(label_dir, verus_src,
                                              {n: p for n, p in bins.items() if n not in excluded}, args)
+        check_prepared_sdk(args)
         env = child_env(args, src)
         staged_inputs = {}
         stage_frontends = []
@@ -1319,6 +1502,8 @@ def main():
                         and cached_data.get("binary_sha256") == sha256(bins[name], {})
                         and cached_data.get("compiled_helpers") == helpers.get(name)
                         and cached_data.get("native_cli_inputs", {}) == args.native_cli_inputs
+                        and cached_data.get("execution_lender_inputs", {}) == args.execution_lender_inputs
+                        and cached_data.get("staged_target_verus_sha256") == staged_tv
                         and cached_data.get("native_driver") == (
                             args.native_runtime_inventory["driver"] if args.native_runtime_inventory else None)
                         and cached_data.get("internal_skips", {}) == (internal_skips if name == "cargo" else {})):
@@ -1342,16 +1527,20 @@ def main():
         t0 = time.monotonic()
 
         def work(name):
+            check_prepared_sdk(args)
             native_runtime.check_files(staged_inputs, [staged[name], *stage_frontends]
                                        if staged_inputs else None)
             check_native_cli_inputs(args.native_cli_inputs)
+            native_runtime.check_files(args.execution_lender_inputs)
             native_runtime.check(args.native_runtime_inventory,
                                  [bins[name], args.rust_verify] if args.native_runtime_inventory else None)
             clear_test_outputs(label_dir, name, discoveries[name])
             check_cargo_helpers(helpers.get(name))
             res = run_binary(name, staged[name], env, binary_cwd(name, src), args, label_dir / "logs", discoveries[name])
+            check_prepared_sdk(args)
             check_cargo_helpers(helpers.get(name))
             check_native_cli_inputs(args.native_cli_inputs)
+            native_runtime.check_files(args.execution_lender_inputs)
             native_runtime.check(args.native_runtime_inventory,
                                  [bins[name], args.rust_verify] if args.native_runtime_inventory else None)
             native_runtime.check_files(staged_inputs, [staged[name], *stage_frontends]
@@ -1362,6 +1551,8 @@ def main():
             res["coverage_policy"] = policy
             res["compiled_helpers"] = helpers.get(name)
             res["native_cli_inputs"] = args.native_cli_inputs
+            res["execution_lender_inputs"] = args.execution_lender_inputs
+            res["staged_target_verus_sha256"] = staged_tv
             res["native_driver"] = (args.native_runtime_inventory["driver"]
                                     if args.native_runtime_inventory else None)
             res["internal_skips"] = internal_skips if name == "cargo" else {}
@@ -1376,6 +1567,7 @@ def main():
         owned.parallel_map(work, todo, args.parallel_bins)
 
         check_native_cli_inputs(args.native_cli_inputs)
+        native_runtime.check_files(args.execution_lender_inputs)
         native_runtime.check(args.native_runtime_inventory)
         native_runtime.check_files(staged_inputs)
         inv["wall_s"] = round(time.monotonic() - t0, 1)
@@ -1386,8 +1578,13 @@ def main():
                      "excluded": excluded, "extras": extras, "coverage_policy": policy,
                      "compiled_helpers": helpers, "internal_skips": {"cargo": internal_skips},
                      "native_cli_inputs": args.native_cli_inputs,
+                     "execution_lender_inputs": args.execution_lender_inputs,
                      "native_runtime_inventory": args.native_runtime_inventory,
                       "staged_consumed_inputs": staged_inputs})
+        if prepared is not None:
+            meta["prepared_sdk_inventory"] = {
+                "request": str(prepared.request), "sdk": str(prepared.root),
+                "entries": prepared.staged, "permission_from_inventory": False}
         if args.frontend != "verus" or args.capture_diagnostics:
             meta.update({"frontend": args.frontend, "capture_diagnostics": args.capture_diagnostics,
                          "staged_target_verus_sha256": staged_tv})
@@ -1423,11 +1620,19 @@ def main():
             raise SystemExit(1)
     finally:
         try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+            check_prepared_sdk(args)
+        finally:
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":
-    with owned.scope(owned_stdin="--owned-stdin" in sys.argv[1:]):
-        main()
+    try:
+        with owned.scope(owned_stdin="--owned-stdin" in sys.argv[1:],
+                         native_channel=_NATIVE_CHANNEL):
+            main()
+    finally:
+        if _NATIVE_CHANNEL is not None:
+            _NATIVE_CHANNEL.close()

@@ -25,7 +25,9 @@ What is pinned here, and why:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
+import io
 import json
 import signal
 import subprocess
@@ -144,6 +146,389 @@ class ReferenceTest(unittest.TestCase):
         self.assertEqual(tvs.norm_file("/a/test_inputs/x-y/sub/m.rs"), "sub/m.rs")
         self.assertEqual(tvs.norm_file("../../examples/guide/a.rs"), "examples/guide/a.rs")
         self.assertEqual(tvs.norm_file("/v/examples/guide/a.rs"), "examples/guide/a.rs")
+
+
+class RejectionParityScoreRunTest(unittest.TestCase):
+    """Exercise the real file-based scorer with measured rejection shapes.
+
+    These are ordinary temporary JSON fixtures, not compiler/SDK receipts. The
+    native compiler rejected the whole crate before proof; the reference also
+    emitted a placed source error, although its diagnostic assertion failed.
+    """
+
+    def rejection(self, *functions):
+        value = record(*functions)
+        value.update(compiler_commit="82bb867eddb94599f68194f701c766f2b6f5a02f",
+                     outcome="verus-rejected", exit_code=1, erase_exit=None)
+        for function in value["functions"]:
+            function["kind"] = "AssocFn"
+        return value
+
+    def trait_record(self):
+        return self.rejection(fn("external", (24, 24), name="Tr::foo"),
+                              fn("external", (24, 24), name="Tr::VERUS_SPEC__foo"))
+
+    def impl_record(self):
+        return self.rejection(fn("rejected", (23, 23), name="Tr::foo"),
+                              fn("external", (30, 30), name="<X as Tr>::foo"))
+
+    def score_cases(self, cases):
+        with tempfile.TemporaryDirectory(prefix="tvs-rejection-parity-") as tmp:
+            root = Path(tmp)
+            verdicts, logs, reference = root / "verdicts", root / "logs", root / "reference"
+            verdicts.mkdir()
+            logs.mkdir()
+            verus_src = fake_verus(root / "verus") if any(
+                case.get("binary") == "examples" for case in cases) else root / "source"
+            examples = tvs.example_tests(verus_src)
+            rows, outcomes = [], {}
+            for index, case in enumerate(cases):
+                binary, test = case.get("binary", "diagnostics"), case.get("test_name", f"case_{index}")
+                test_dir, _ = tvs.test_dir_of(binary, test, examples)
+                native_path = str(root / "stage/source/target.noindex/debug/test_inputs" / test_dir / "test.rs")
+                reference_path = REF_RS.replace("basic-t", test_dir)
+                rows.append({"binary": binary, "test_name": test,
+                             "outcome": case.get("harness", "ok")})
+                if "raw_verdict" in case:
+                    (verdicts / f"{test_dir}.jsonl").write_text(case["raw_verdict"])
+                elif "records" in case:
+                    values = copy.deepcopy(case["records"])
+                    for value in values:
+                        if value.get("entry_file") == TEST_RS:
+                            value["entry_file"] = native_path
+                        for function in value.get("functions", []):
+                            if function.get("file") == TEST_RS:
+                                function["file"] = native_path
+                    if "modify_records" in case:
+                        case["modify_records"](values)
+                    (verdicts / f"{test_dir}.jsonl").write_text(
+                        "".join(json.dumps(value) + "\n" for value in values))
+                captures = case.get("captures", [{"text": case.get("capture", error(24)),
+                    "entry": case.get("reference_entry", REF_RS),
+                    "exit": case.get("reference_exit", "1")}])
+                for capture_index, capture in enumerate(captures):
+                    if capture["text"] is None:
+                        continue
+                    directory = reference / "diags" / test_dir
+                    directory.mkdir(parents=True, exist_ok=True)
+                    lines = []
+                    for line in capture["text"].splitlines():
+                        try:
+                            diagnostic = json.loads(line)
+                        except json.JSONDecodeError:
+                            lines.append(line)
+                            continue
+                        if isinstance(diagnostic, dict):
+                            for span in diagnostic.get("spans", []):
+                                if span.get("file_name") == REF_RS:
+                                    span["file_name"] = reference_path
+                                    if "reference_path_alias" in case:
+                                        span["file_name"] = case["reference_path_alias"](reference_path)
+                        lines.append(json.dumps(diagnostic))
+                    header = capture.get("entry", REF_RS)
+                    if header == REF_RS:
+                        header = reference_path
+                        if "reference_path_alias" in case:
+                            header = case["reference_path_alias"](reference_path)
+                    text = "" if header is None else f"entry={header}\n"
+                    text += "\n".join(lines) + "\n"
+                    footer = capture.get("exit", "1")
+                    if footer is not None:
+                        text += f"exit={footer}\n"
+                    (directory / f"1-{capture_index}.stderr").write_text(text)
+                outcome = case.get("reference_outcome", "FAILED")
+                if outcome is not None:
+                    outcomes[(binary, test)] = outcome
+                if "failed_output" in case:
+                    with (logs / f"{binary}.a1.jsonl").open("a") as stream:
+                        stream.write(json.dumps({"type": "test", "event": "failed", "name": test,
+                                                 "stdout": case["failed_output"]}) + "\n")
+            reference_dir = None if all(case.get("no_reference") for case in cases) else reference
+            return tvs.score_run(rows, verdicts, logs, verus_src, reference_dir, outcomes)
+
+    def assert_no_match(self, case, score="pass", unchecked=1):
+        scored, totals = self.score_cases([case])
+        row = scored[0]
+        self.assertEqual(row["score"], score)
+        self.assertEqual(row["reference_rejection_match"], 0)
+        self.assertIs(type(row["reference_rejection_match"]), int)
+        self.assertEqual(row["unchecked_verified_fns"], unchecked)
+        self.assertEqual(totals["reference_rejection_matches"], 0)
+        return row, totals
+
+    def test_actual_trait_and_impl_shapes_do_not_invent_unchecked_functions(self):
+        scored, totals = self.score_cases([
+            {"records": [self.trait_record()], "capture": error(
+                24, message="An individual item of a trait cannot be marked external.")},
+            {"records": [self.impl_record()], "capture": error(
+                30, message="An individual item of a trait impl cannot be marked external.")},
+        ])
+        self.assertEqual([row["score"] for row in scored], ["pass", "pass"])
+        self.assertEqual([row["reference"] for row in scored], ["FAILED", "FAILED"])
+        self.assertEqual([row["verified_fns"] for row in scored], [0, 0])
+        self.assertEqual([row["unchecked_verified_fns"] for row in scored], [0, 0])
+        self.assertEqual([row["reference_rejection_match"] for row in scored], [1, 1])
+        self.assertTrue(all(type(row["reference_rejection_match"]) is int for row in scored))
+        self.assertEqual(totals["reference_rejection_matches"], 2)
+        self.assertEqual(totals["verified_fns"], 0)
+        self.assertEqual(totals["unchecked_verified_fns"], 0)
+        self.assertTrue(totals["ok"])
+
+    def test_every_native_record_needs_its_own_placed_error_match(self):
+        records = [self.trait_record(), self.impl_record()]
+        self.assert_no_match({"records": records, "capture": error(24)})
+        scored, totals = self.score_cases([
+            {"records": records, "capture": error(24) + "\n" + error(30)}])
+        self.assertEqual(scored[0]["records"], 2)
+        self.assertEqual(scored[0]["reference_rejection_match"], 1)
+        self.assertEqual(scored[0]["unchecked_verified_fns"], 0)
+        self.assertEqual(totals["reference_rejection_matches"], 1)  # cases, not records
+
+    def test_acceptance_and_mixed_runs_keep_the_unexpected_pass_guard(self):
+        for outcome, exit_code in [("checked", 0), ("verification-failed", 1), ("unknown", 1)]:
+            with self.subTest(outcome=outcome):
+                accepted = self.trait_record()
+                accepted.update(outcome=outcome, exit_code=exit_code)
+                self.assert_no_match({"records": [accepted]})
+                self.assert_no_match({"records": [self.trait_record(), accepted]})
+
+    def test_normal_exit_and_complete_record_shape_are_required(self):
+        mutations = [("exit_code", value) for value in (0, 101, -9, None, True, "1", 1.0)]
+        mutations += [("schema", "unknown"), ("outcome", None), ("erase_exit", 0),
+                      ("refused", None), ("functions", [])]
+        for key, value in mutations:
+            with self.subTest(field=key, value=value):
+                changed = self.trait_record()
+                changed[key] = value
+                self.assert_no_match({"records": [changed]})
+        for key in ("schema", "outcome", "exit_code", "erase_exit", "refused", "crate_refusals", "functions"):
+            with self.subTest(missing=key):
+                changed = self.trait_record()
+                del changed[key]
+                self.assert_no_match({"records": [changed]})
+
+    def test_missing_empty_and_corrupt_verdicts_preserve_existing_scores(self):
+        self.assert_no_match({}, score="false-pass", unchecked=0)
+        self.assert_no_match({"records": []}, score="false-pass", unchecked=0)
+        self.assert_no_match({"raw_verdict": "\n"}, score="false-pass", unchecked=0)
+        self.assert_no_match({"raw_verdict": "{not JSON}\n"}, score="bad-record", unchecked=0)
+
+    def test_native_identity_metadata_cannot_be_missing_or_malformed(self):
+        for field in ("entry_file", "compiler_commit"):
+            for value in (None, "", True, False):
+                with self.subTest(field=field, value=value):
+                    changed = self.trait_record()
+                    changed[field] = value
+                    self.assert_no_match({"records": [changed]})
+            with self.subTest(missing=field):
+                changed = self.trait_record()
+                del changed[field]
+                self.assert_no_match({"records": [changed]})
+        for field, values in [("kind", (None, "", True, "Struct", "unknown")),
+                              ("def_path", (None, "", " ", "\t", True, False)),
+                              ("tag", ("", True, False, "unsupported"))]:
+            for value in values:
+                with self.subTest(function_field=field, value=value):
+                    changed = self.trait_record()
+                    changed["functions"][0][field] = value
+                    self.assert_no_match({"records": [changed]})
+            with self.subTest(missing_function_field=field):
+                changed = self.trait_record()
+                del changed["functions"][0][field]
+                self.assert_no_match({"records": [changed]})
+
+    def test_function_states_and_site_claims_cannot_be_waived(self):
+        for verdict in ("trusted", "failed", "spec", "declared", "unknown", None):
+            with self.subTest(verdict=verdict):
+                changed = self.trait_record()
+                changed["functions"][0]["verdict"] = verdict
+                self.assert_no_match({"records": [changed]})
+        for field in ("sites_proved", "sites_failed"):
+            for value in (1, False, True):
+                with self.subTest(field=field, value=value):
+                    changed = self.trait_record()
+                    changed["functions"][0][field] = value
+                    self.assert_no_match({"records": [changed]})
+            with self.subTest(missing=field):
+                changed = self.trait_record()
+                del changed["functions"][0][field]
+                self.assert_no_match({"records": [changed]})
+        changed = self.trait_record()
+        for function in changed["functions"]:
+            function.update(sites_proved=0, sites_failed=0)
+        scored, _ = self.score_cases([{"records": [changed]}])
+        self.assertEqual(scored[0]["reference_rejection_match"], 1)
+
+    def test_reference_conflict_unchecked_and_refusal_precedence_are_unchanged(self):
+        verified = self.rejection(fn("verified", (24, 24)))
+        row, totals = self.assert_no_match({"records": [verified]}, score="false-pass-ref", unchecked=0)
+        self.assertEqual(row["false_pass_ref_fns"], "f")
+        self.assertEqual(totals["false_pass_ref"], 1)
+        verified = self.rejection(fn("verified", (1, 5)))
+        self.assert_no_match({"records": [verified]})
+        self.assert_no_match({"records": [verified], "capture": None})
+        for verdict in ("refused", "skipped"):
+            with self.subTest(verdict=verdict):
+                refused = self.rejection(fn(verdict, (24, 24), tag="no-verify"))
+                self.assert_no_match({"records": [refused]}, score="bad-record", unchecked=0)
+                refused["crate_refusals"] = ["trust-vc refused: no-verify: no proof claim"]
+                row, _ = self.assert_no_match({"records": [refused]}, score="refused", unchecked=0)
+                self.assertIn("no-verify", row["tags"])
+        refusal = self.trait_record()
+        refusal.update(refused=True, crate_refusals=["trust-vc refused: trait: unsupported"])
+        self.assert_no_match({"records": [refusal]}, score="refused", unchecked=0)
+        self.assert_no_match({"records": [verified], "harness": "FAILED",
+                              "failed_output": "trust-vc refused: trait: unsupported"},
+                             score="refused", unchecked=0)
+
+    def test_native_ranges_and_source_files_are_validated(self):
+        for bounds in (None, [], [25, 24], [0, 24], [-1, 24], [True, 24], [24, 24.5]):
+            with self.subTest(bounds=bounds):
+                changed = self.trait_record()
+                changed["functions"][0]["lines"] = bounds
+                self.assert_no_match({"records": [changed]})
+        for field in ("lines", "file"):
+            with self.subTest(missing=field):
+                changed = self.trait_record()
+                del changed["functions"][0][field]
+                self.assert_no_match({"records": [changed]})
+        changed = self.trait_record()
+        changed["functions"][0]["file"] = ""
+        self.assert_no_match({"records": [changed]})
+
+    def test_native_files_cannot_borrow_another_case_or_stage_anchor(self):
+        other_case = TEST_RS.replace("basic-t", "diagnostics-other_case")
+        same_case_other_stage = "/other/stage/source/target.noindex/debug/test_inputs/diagnostics-case_0/test.rs"
+        for path in (other_case, same_case_other_stage):
+            with self.subTest(path=path):
+                moved = self.trait_record()
+                moved["entry_file"] = path
+                for function in moved["functions"]:
+                    function["file"] = path
+                self.assert_no_match({"records": [moved]})
+                moved = self.trait_record()
+                moved["functions"][0]["file"] = path
+                self.assert_no_match({"records": [moved]})
+
+    def test_native_anchor_is_lexical_and_fixture_binding_does_not_repair_aliases(self):
+        aliases = {
+            "leading whitespace": lambda path: " " + path,
+            "trailing whitespace": lambda path: path + " ",
+            "relative": lambda path: path.lstrip("/"),
+            "parent segment": lambda path: path.replace("/stage/", "/stage/../stage/", 1),
+            "dot segment": lambda path: path.replace("/stage/", "/stage/./", 1),
+            "repeated slash": lambda path: path.replace("/stage/", "/stage//", 1),
+        }
+        for name, alias in aliases.items():
+            with self.subTest(alias=name):
+                def move(values):
+                    for value in values:
+                        value["entry_file"] = alias(value["entry_file"])
+                        for function in value["functions"]:
+                            function["file"] = value["entry_file"]
+                self.assert_no_match({"records": [self.trait_record()], "modify_records": move})
+        for value in (" " + TEST_RS, TEST_RS + " ", TEST_RS.replace("basic-t", "other-case")):
+            with self.subTest(unbound_malformed_entry=value):
+                changed = self.trait_record()
+                changed["entry_file"] = value
+                self.assert_no_match({"records": [changed]})
+
+    def test_compiler_commit_requires_the_normal_full_lowercase_identity(self):
+        valid = self.trait_record()["compiler_commit"]
+        for compiler in ("unknown", "abc", valid[:-1], valid + "0", valid.upper(), "g" * 40,
+                         " " + valid, valid + " "):
+            with self.subTest(compiler_commit=compiler):
+                changed = self.trait_record()
+                changed["compiler_commit"] = compiler
+                self.assert_no_match({"records": [changed]})
+
+    def test_reference_capture_headers_primary_files_and_exits_must_agree(self):
+        wrong_case = REF_RS.replace("basic-t", "diagnostics-other_case")
+        same_case_other_stage = "/other/stage/source/target.noindex/debug/test_inputs/diagnostics-case_0/test.rs"
+        for header in (None, "", wrong_case, " " + REF_RS, REF_RS + " ",
+                       REF_RS.lstrip("/"), REF_RS.replace("/stage/", "/stage/../stage/", 1)):
+            with self.subTest(header=header):
+                self.assert_no_match({"records": [self.trait_record()], "reference_entry": header})
+        for filename in (wrong_case, same_case_other_stage, " " + REF_RS, REF_RS + " "):
+            with self.subTest(primary_file=filename):
+                self.assert_no_match({"records": [self.trait_record()],
+                                      "capture": error(24, file=filename)})
+        for exit_code in (None, 0, 101, -9, True, "01", " 1", "1 "):
+            with self.subTest(reference_exit=exit_code):
+                self.assert_no_match({"records": [self.trait_record()], "reference_exit": exit_code})
+        both_files = json.loads(error(24))
+        both_files["spans"].append({"file_name": wrong_case, "line_start": 24, "is_primary": True})
+        self.assert_no_match({"records": [self.trait_record()], "capture": json.dumps(both_files)})
+        for bad_capture in ({"text": error(24), "entry": wrong_case},
+                            {"text": error(24), "entry": None},
+                            {"text": error(24), "exit": 0}):
+            with self.subTest(extra_capture=bad_capture):
+                self.assert_no_match({"records": [self.trait_record()],
+                                      "captures": [{"text": error(24)}, bad_capture]})
+
+    def test_example_entries_do_not_gain_the_normal_test_rejection_exception(self):
+        entry = "../../examples/same.rs"
+        changed = self.trait_record()
+        changed["entry_file"] = entry
+        for function in changed["functions"]:
+            function["file"] = entry
+        row, _ = self.assert_no_match({"binary": "examples", "test_name": "examples_same",
+                                      "records": [changed], "reference_entry": entry,
+                                      "capture": error(24, file=entry)})
+        self.assertEqual(row["records"], 1)
+        self.assertEqual(row["test_dir"], "example-same")
+
+    def test_reference_entry_aliases_remain_invalid_even_when_primary_files_agree(self):
+        aliases = {
+            "leading whitespace": lambda path: " " + path,
+            "trailing whitespace": lambda path: path + " ",
+            "relative": lambda path: path.lstrip("/"),
+            "parent segment": lambda path: path.replace("/stage/", "/stage/../stage/", 1),
+            "dot segment": lambda path: path.replace("/stage/", "/stage/./", 1),
+            "repeated slash": lambda path: path.replace("/stage/", "/stage//", 1),
+        }
+        for name, alias in aliases.items():
+            with self.subTest(alias=name):
+                self.assert_no_match({"records": [self.trait_record()], "reference_path_alias": alias})
+
+    def test_reference_errors_must_be_captured_placed_and_correlated(self):
+        for capture in (None, "", "not JSON", error(24, primary=False),
+                        error(24, primary=1), error(24, primary="true"),
+                        error(24, file="/reference/unrelated.rs"), error(99),
+                        error(24) + "\n" + error(30, primary=False),
+                        json.dumps({"level": "error", "message": "no primary span", "spans": []}),
+                        json.dumps({"level": "warning", "message": "only warning", "spans": []}),
+                        json.dumps({"level": "error", "message": "aborting due to 1 previous error",
+                                    "spans": []})):
+            with self.subTest(capture=capture):
+                self.assert_no_match({"records": [self.trait_record()], "capture": capture})
+        self.assert_no_match({"records": [self.trait_record()], "no_reference": True})
+        for outcome in ("ignored", "not-run", "crashed", "", None):
+            with self.subTest(reference_outcome=outcome):
+                self.assert_no_match({"records": [self.trait_record()], "reference_outcome": outcome})
+        self.assert_no_match({"records": [self.trait_record()], "reference_outcome": "ok"}, unchecked=0)
+
+    def test_csv_and_summary_expose_the_match_without_changing_reference_outcome(self):
+        accepted = self.trait_record()
+        accepted.update(outcome="checked", exit_code=0)
+        scored, totals = self.score_cases([
+            {"records": [self.trait_record()]},
+            {"records": [self.impl_record()], "capture": error(30)},
+            {"records": [accepted]},
+        ])
+        self.assertIn("reference_rejection_match", tvs.SCORE_FIELDS)
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=tvs.SCORE_FIELDS)
+        writer.writeheader()
+        writer.writerows(scored)
+        rendered = list(csv.DictReader(io.StringIO(output.getvalue())))
+        self.assertEqual([row["reference"] for row in rendered], ["FAILED"] * 3)
+        self.assertEqual([row["reference_rejection_match"] for row in rendered], ["1", "1", "0"])
+        self.assertEqual([row["unchecked_verified_fns"] for row in rendered], ["0", "0", "1"])
+        self.assertEqual(totals["reference_rejection_matches"], 2)
+        summary = "\n".join(tvs.summary_lines(scored, totals))
+        self.assertIn("| reference_rejection_matches | 2 |", summary)
+        self.assertIn("Tests that break the run (1)", summary)
 
 
 def fake_verus(root: Path) -> Path:

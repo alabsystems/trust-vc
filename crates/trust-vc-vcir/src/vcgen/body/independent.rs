@@ -52,6 +52,9 @@ impl<'a> Queries<'a> {
     pub(super) fn emitted(&mut self, stmt: &'a Stmt) {
         self.seen.insert(stmt as *const Stmt);
     }
+    pub(super) fn was_emitted(&self, stmt: &Stmt) -> bool {
+        self.seen.contains(&(stmt as *const Stmt))
+    }
     pub(super) fn finish(&self) -> R<()> {
         if let Some(stmt) = self
             .expected
@@ -79,6 +82,9 @@ impl<'a> Queries<'a> {
         if let ExprKind::ProofInSpec(block) = &expr.kind {
             return self.block(block, later);
         }
+        if let ExprKind::ProofInSpecTail { block, tail } = &expr.kind {
+            return self.block_tail(block, tail, later);
+        }
         let mut out = Found::default();
         expr.for_each_child(&mut |child| {
             let found = self.expr(child, later);
@@ -86,6 +92,18 @@ impl<'a> Queries<'a> {
             out.needed |= found.needed;
         });
         out
+    }
+    fn block_tail(&mut self, block: &'a Block, tail: &'a Expr, later: bool) -> Found {
+        let tail = if block.stmts.iter().any(diverges) {
+            Found::default()
+        } else {
+            self.expr(tail, later)
+        };
+        let prefix = self.block(block, later || tail.query);
+        Found {
+            query: prefix.query || tail.query,
+            needed: prefix.needed || tail.needed,
+        }
     }
     fn stmt(&mut self, stmt: &'a Stmt, later: bool) -> Found {
         let mut out = Found::default();
@@ -110,6 +128,9 @@ impl<'a> Queries<'a> {
             StmtKind::Ghost(block) | StmtKind::Block(block) => {
                 out = self.block(block, later);
             }
+            StmtKind::GhostTail { block, tail } => {
+                out = self.block_tail(block, tail, later);
+            }
             StmtKind::Loop(lp) => {
                 if let Some(cond) = &lp.cond {
                     let found = self.block(&cond.block, later);
@@ -130,10 +151,12 @@ impl<'a> Queries<'a> {
                 &stmt.kind,
                 StmtKind::Let { .. } | StmtKind::Assign { .. } | StmtKind::Call { .. }
             );
-        for expr in super::super::stmt_exprs(stmt) {
-            let found = self.expr(expr, later);
-            out.query |= found.query;
-            out.needed |= found.needed;
+        if !matches!(stmt.kind, StmtKind::GhostTail { .. }) {
+            for expr in super::super::stmt_exprs(stmt) {
+                let found = self.expr(expr, later);
+                out.query |= found.query;
+                out.needed |= found.needed;
+            }
         }
         if out.needed {
             self.needed.insert(stmt as *const Stmt);

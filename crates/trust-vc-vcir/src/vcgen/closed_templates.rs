@@ -289,7 +289,7 @@ impl Vocabulary {
             let Some(prefix) = arity.checked_mul(2).and_then(|n| args.get(..n)) else {
                 return false;
             };
-            for pair in prefix.chunks_exact(2) {
+            for pair in prefix.as_chunks::<2>().0 {
                 if !self.closed_pair(&pair[0], &pair[1], pay) {
                     return false;
                 }

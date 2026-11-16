@@ -61,6 +61,8 @@ pub(crate) struct ProducedProof {
     pub(crate) alethe: String,
     pub(crate) kernel_verified: bool,
     pub(crate) strict_verified: bool,
+    pub(crate) cast_observation:
+        Option<Result<crate::native_scalar_cast::UnitCastObservation, String>>,
 }
 
 /// The unit id (and its single assertion's id) for one obligation.
@@ -74,6 +76,7 @@ pub(crate) fn decide(
     relation: &BodyRelation,
     assumptions: &[(String, TrustExpr)],
     assertion: TrustExpr,
+    observe_casts: bool,
 ) -> Result<UnitOutcome, Decline> {
     let mut unit = TrustVerificationUnit::new(unit_id).with_exec_arithmetic();
     for (name, sort) in &relation.variables {
@@ -100,7 +103,30 @@ pub(crate) fn decide(
         .with_proof_policy(proof_policy());
 
     let engine = TrustVcTrustEngine::new();
-    let report = match TrustVerifier::verify(&engine, &request) {
+    let mut cast_observation = None;
+    let verification = if observe_casts {
+        engine
+            .verify_with_scalar_cast_capture(&request)
+            .map(|observed| {
+                let (report, mut captures) = observed.into_parts();
+                cast_observation = Some(match captures.pop() {
+                    Some(Ok(encoding)) if captures.is_empty() => {
+                        crate::native_scalar_cast::bounded_json(&request).map(|_| {
+                            crate::native_scalar_cast::UnitCastObservation {
+                                request: request.clone(),
+                                encoding,
+                            }
+                        })
+                    }
+                    Some(Err(reason)) => Err(reason),
+                    _ => Err("cast capture did not match the one native unit".into()),
+                });
+                report
+            })
+    } else {
+        TrustVerifier::verify(&engine, &request)
+    };
+    let report = match verification {
         Ok(report) => report,
         // The engine refuses rather than answers: a unit it cannot lower, or a
         // proof policy it cannot satisfy. Either way nothing was proved, and
@@ -140,6 +166,7 @@ pub(crate) fn decide(
             alethe: artifact.payload().to_string(),
             kernel_verified: artifact.kernel_verified(),
             strict_verified: artifact.strict_verified(),
+            cast_observation: cast_observation.take(),
         });
 
     Ok(match unit_report.outcome() {

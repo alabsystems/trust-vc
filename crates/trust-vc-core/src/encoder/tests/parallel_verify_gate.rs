@@ -6,6 +6,8 @@
 //!
 //! Default mode: parallel (no serialization).
 //! `TRUST_VC_SEQUENTIAL_TESTS=1`: serialized (mutex-gated).
+//! Each configuration control runs in a fresh exact-test child, so it does not
+//! change the parent suite's process environment or observation counters.
 
 use super::*;
 use std::sync::atomic::Ordering;
@@ -16,14 +18,63 @@ use crate::encoder::verification::test_gate::{
     MAX_ACTIVE_VERIFY_CALLS_SEEN,
 };
 
-/// Serializes the two gate tests against each other.
-///
-/// Both tests mutate `TRUST_VC_SEQUENTIAL_TESTS` (process-global env var)
-/// and share static observation counters. Running them concurrently causes
-/// `test_default_mode_allows_parallel_verification` to remove the env var
-/// while `test_verify_gate_serializes_when_sequential_mode`'s threads are
-/// executing, making the gate skip observation. Fixes race found by P1-865.
-static GATE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const GATE_CHILD_TEST: &str = "TVC_VERIFY_GATE_CHILD_TEST";
+
+/// Exercise the real environment-selected gate in an isolated process.
+/// `Command::env` configures only the child; ordinary concurrent parent tests
+/// retain their original gate mode. The original body runs exactly once in
+/// the child selected by the same libtest image and exact test name.
+fn run_gate_control_in_child(test_name: &str, sequential: bool, body: fn()) {
+    if std::env::var_os(GATE_CHILD_TEST).is_some_and(|name| name == test_name) {
+        if sequential {
+            assert_eq!(
+                std::env::var_os("TRUST_VC_SEQUENTIAL_TESTS"),
+                Some("1".into())
+            );
+        } else {
+            assert!(std::env::var_os("TRUST_VC_SEQUENTIAL_TESTS").is_none());
+        }
+        body();
+        return;
+    }
+    assert!(
+        std::env::var_os(GATE_CHILD_TEST).is_none(),
+        "a gate-control child must select its exact original test"
+    );
+    let original_mode = std::env::var_os("TRUST_VC_SEQUENTIAL_TESTS");
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let exact = format!("{module}::{test_name}");
+    let mut command = std::process::Command::new(
+        std::env::current_exe().expect("current gate-control libtest image"),
+    );
+    command
+        .args(["--exact", &exact, "--nocapture"])
+        .env(GATE_CHILD_TEST, test_name);
+    if sequential {
+        command.env("TRUST_VC_SEQUENTIAL_TESTS", "1");
+    } else {
+        command.env_remove("TRUST_VC_SEQUENTIAL_TESTS");
+    }
+    let output = command.output().expect("run the exact gate-control child");
+    assert_eq!(
+        std::env::var_os("TRUST_VC_SEQUENTIAL_TESTS"),
+        original_mode,
+        "a child gate control must not alter the parent process mode"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_row = format!("test {exact} ... ok");
+    assert!(
+        output.status.success()
+            && stdout.lines().any(|line| line == expected_row)
+            && stdout.lines().any(|line| line
+                .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+        "gate-control child {exact} failed ({status}):\n{stdout}\n{stderr}",
+        status = output.status
+    );
+}
 
 /// Proves the test gate serializes when `TRUST_VC_SEQUENTIAL_TESTS=1` is set.
 ///
@@ -31,13 +82,14 @@ static GATE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// then asserts that at most 1 is active inside the gate at any time.
 #[test]
 fn test_verify_gate_serializes_when_sequential_mode() {
-    let _lock = GATE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    run_gate_control_in_child(
+        "test_verify_gate_serializes_when_sequential_mode",
+        true,
+        verify_gate_serializes_when_sequential_mode_body,
+    );
+}
 
-    // Enable sequential mode for this test. GATE_TEST_MUTEX (held above)
-    // serializes the two gate tests, so the guard's restore-on-drop is
-    // race-free; the workspace env choke point performs the raw write.
-    let _sequential_mode = crate::env::ScopedEnvVar::set("TRUST_VC_SEQUENTIAL_TESTS", "1");
-
+fn verify_gate_serializes_when_sequential_mode_body() {
     reset_gate_observation();
 
     let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -79,9 +131,14 @@ fn test_verify_gate_serializes_when_sequential_mode() {
 /// reentrant and skip observation entirely.
 #[test]
 fn test_verify_gate_recovers_after_panic_unwind() {
-    let _lock = GATE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _sequential_mode = crate::env::ScopedEnvVar::set("TRUST_VC_SEQUENTIAL_TESTS", "1");
+    run_gate_control_in_child(
+        "test_verify_gate_recovers_after_panic_unwind",
+        true,
+        verify_gate_recovers_after_panic_unwind_body,
+    );
+}
 
+fn verify_gate_recovers_after_panic_unwind_body() {
     reset_gate_observation();
     register_current_thread_for_gate_observation();
 
@@ -126,11 +183,14 @@ fn test_verify_gate_recovers_after_panic_unwind() {
 /// active in sequential mode, so we verify thread completion instead.
 #[test]
 fn test_default_mode_allows_parallel_verification() {
-    let _lock = GATE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    run_gate_control_in_child(
+        "test_default_mode_allows_parallel_verification",
+        false,
+        default_mode_allows_parallel_verification_body,
+    );
+}
 
-    // Ensure sequential mode is NOT set (unset for the test, restored on exit).
-    let _sequential_mode = crate::env::ScopedEnvVar::unset("TRUST_VC_SEQUENTIAL_TESTS");
-
+fn default_mode_allows_parallel_verification_body() {
     let barrier = Arc::new(std::sync::Barrier::new(4));
     let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 

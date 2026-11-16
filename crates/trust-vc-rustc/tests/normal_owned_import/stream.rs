@@ -7,10 +7,9 @@
 
 use serde_json::Value;
 
-pub fn split<'a>(
-    raw: &'a [u8],
-    expected: &Value,
-) -> Result<(&'a [u8], &'a [u8], &'a [u8]), String> {
+type StreamSections<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
+pub fn split<'a>(raw: &'a [u8], expected: &Value) -> Result<StreamSections<'a>, String> {
     let mut boundary = None;
     let mut offset = 0usize;
     for line in raw.split_inclusive(|byte| *byte == b'\n') {

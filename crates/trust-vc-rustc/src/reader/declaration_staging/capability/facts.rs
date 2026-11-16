@@ -59,51 +59,100 @@ fn declaration(view: &View, key: NativeKey) -> Result<&alignment::Declaration, S
         .ok_or_else(|| "the native declaration is absent".into())
 }
 
-pub(super) fn correspondence(
+pub(in crate::reader::declaration_staging) fn correspondence(
     library: &StagedLibrary,
     keep: NativeKey,
 ) -> Result<(&alignment::Declaration, &alignment::Declaration), String> {
-    let candidate = library
-        .prepared
-        .candidates
-        .matches
-        .iter()
-        .find(|candidate| candidate.keep == keep)
-        .ok_or("the declaration has no unique checked Keep/Erase correspondence")?;
-    if library
-        .prepared
-        .erase
-        .roundtrip_unknown
-        .contains_key(&candidate.erase)
-    {
-        return Err(
-            "the emitted declaration did not survive the actual metadata round trip".into(),
-        );
+    nominal_inputs(library).correspondence(keep)
+}
+
+/// Borrow the actual completed Keep facts before their maps are moved into
+/// the owned handoff. This view creates no admission or compiler context.
+#[derive(Clone, Copy)]
+pub(in crate::reader::declaration_staging) struct NominalInputs<'facts> {
+    pub(in crate::reader::declaration_staging) inputs: &'facts Inputs,
+    pub(in crate::reader::declaration_staging) common: &'facts Metadata,
+    pub(in crate::reader::declaration_staging) keep: &'facts View,
+    pub(in crate::reader::declaration_staging) erase: &'facts OwnedErase,
+    pub(in crate::reader::declaration_staging) candidates: &'facts alignment::Candidates,
+    pub(in crate::reader::declaration_staging) policies:
+        &'facts BTreeMap<NativeKey, declaration_policy::OwnedPolicy>,
+    pub(in crate::reader::declaration_staging) wf:
+        &'facts BTreeMap<NativeKey, declaration_wf::OwnedWf>,
+    pub(in crate::reader::declaration_staging) fields:
+        &'facts BTreeMap<NativeKey, declaration_fields::OwnedFields>,
+    pub(in crate::reader::declaration_staging) helpers:
+        &'facts BTreeMap<NativeKey, nominal_helpers::OwnedHelpers>,
+}
+
+fn nominal_inputs(library: &StagedLibrary) -> NominalInputs<'_> {
+    NominalInputs {
+        inputs: &library.inputs,
+        common: &library.prepared.common,
+        keep: &library.prepared.keep_view,
+        erase: &library.prepared.erase,
+        candidates: &library.prepared.candidates,
+        policies: &library.prepared.nominal_policies,
+        wf: &library.prepared.nominal_wf,
+        fields: &library.prepared.nominal_fields,
+        helpers: &library.prepared.nominal_helpers,
     }
-    let keep = declaration(&library.prepared.keep_view, candidate.keep)?;
-    let erase = declaration(&library.prepared.erase.view, candidate.erase)?;
-    for declaration in [keep, erase] {
-        let Observation::Observed(anchor) = &declaration.source else {
-            return Err("the declaration's original source identity is Unknown".into());
-        };
-        library.inputs.sources.validate_anchor(&anchor.identifier)?;
-        for enclosing in &anchor.enclosing_declarations {
-            library.inputs.sources.validate_anchor(enclosing)?;
+}
+
+impl<'facts> NominalInputs<'facts> {
+    pub(in crate::reader::declaration_staging) fn correspondence(
+        self,
+        keep: NativeKey,
+    ) -> Result<
+        (
+            &'facts alignment::Declaration,
+            &'facts alignment::Declaration,
+        ),
+        String,
+    > {
+        let candidate = self
+            .candidates
+            .matches
+            .iter()
+            .find(|candidate| candidate.keep == keep)
+            .ok_or("the declaration has no unique checked Keep/Erase correspondence")?;
+        if self.erase.roundtrip_unknown.contains_key(&candidate.erase) {
+            return Err(
+                "the emitted declaration did not survive the actual metadata round trip".into(),
+            );
         }
+        let keep = declaration(self.keep, candidate.keep)?;
+        let erase = declaration(&self.erase.view, candidate.erase)?;
+        for declaration in [keep, erase] {
+            let Observation::Observed(anchor) = &declaration.source else {
+                return Err("the declaration's original source identity is Unknown".into());
+            };
+            self.inputs.sources.validate_anchor(&anchor.identifier)?;
+            for enclosing in &anchor.enclosing_declarations {
+                self.inputs.sources.validate_anchor(enclosing)?;
+            }
+        }
+        Ok((keep, erase))
     }
-    Ok((keep, erase))
 }
 
 /// Retain the original per-parameter recursion rule beside the abstract
 /// carrier. Empty exported variants never stand in for representation WF.
-pub(super) struct NominalFacts<'library> {
-    pub(super) erase: &'library alignment::Declaration,
-    pub(super) policy: &'library declaration_policy::OwnedPolicy,
-    pub(super) parameters: Vec<u32>,
+pub(in crate::reader::declaration_staging) struct NominalFacts<'library> {
+    pub(in crate::reader::declaration_staging) erase: &'library alignment::Declaration,
+    pub(in crate::reader::declaration_staging) policy: &'library declaration_policy::OwnedPolicy,
+    pub(in crate::reader::declaration_staging) parameters: Vec<u32>,
 }
 
 pub(super) fn nominal(library: &StagedLibrary, key: NativeKey) -> Result<NominalFacts<'_>, String> {
-    let (keep, erase) = correspondence(library, key)?;
+    nominal_from(nominal_inputs(library), key)
+}
+
+pub(in crate::reader::declaration_staging) fn nominal_from(
+    inputs: NominalInputs<'_>,
+    key: NativeKey,
+) -> Result<NominalFacts<'_>, String> {
+    let (keep, erase) = inputs.correspondence(key)?;
     if !matches!(
         keep.shape,
         Observation::Observed(alignment::DeclarationShape::Nominal {
@@ -112,9 +161,8 @@ pub(super) fn nominal(library: &StagedLibrary, key: NativeKey) -> Result<Nominal
     ) {
         return Err("the declaration is not a supported native nominal kind".into());
     }
-    let policy = library
-        .prepared
-        .nominal_policies
+    let policy = inputs
+        .policies
         .get(&key)
         .ok_or("the native nominal policy is Unknown")?;
     let nominal = policy
@@ -136,22 +184,19 @@ pub(super) fn nominal(library: &StagedLibrary, key: NativeKey) -> Result<Nominal
     {
         return Err("the nominal recursion policy does not cover the complete binder".into());
     }
-    let wf = library
-        .prepared
-        .nominal_wf
+    let wf = inputs
+        .wf
         .get(&key)
         .ok_or("the original nominal positivity/base-case facts are Unknown")?;
-    let fields = library
-        .prepared
-        .nominal_fields
+    let fields = inputs
+        .fields
         .get(&key)
         .ok_or("the original field-language facts are Unknown")?;
-    let helpers = library
-        .prepared
-        .nominal_helpers
+    let helpers = inputs
+        .helpers
         .get(&key)
         .ok_or("the original nominal helper-language closure is Unknown")?;
-    helpers.revalidate(&library.inputs, &library.prepared.common)?;
+    helpers.revalidate(inputs.inputs, inputs.common)?;
     let expected = wf
         .local_declarations()
         .iter()

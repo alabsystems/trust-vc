@@ -42,6 +42,10 @@ impl Callbacks for Capture {
             .expect("actual native Target declaration");
         let checked = check(tcx, owner);
         let mut result = checked.observation();
+        if matches!(tcx.def_kind(owner), DefKind::Fn | DefKind::AssocFn) {
+            result["headers"] =
+                super::super::declaration_headers::check(tcx, owner.expect_local()).observation();
+        }
         let wrong = tcx
             .hir_crate_items(())
             .owners()
@@ -119,10 +123,10 @@ fn native(source: &str) -> Value {
     std::fs::write(
         &path,
         format!(
-            r#"#![feature(register_tool, sized_hierarchy)]
+            r#"#![feature(register_tool, sized_hierarchy, rustc_attrs)]
 #![register_tool(verus)]
 #![register_tool(verifier)]
-#![allow(dead_code, non_snake_case)]
+#![allow(dead_code, non_snake_case, internal_features)]
 fn Other() {{}}
 {source}
 "#
@@ -153,6 +157,46 @@ fn Other() {{}}
         assert_eq!(result["import_authorized"], false);
     }
     result
+}
+
+#[test]
+fn uninterpreted_policy_requires_the_complete_spec_declaration() {
+    let marker = "#[verus::internal(verus_macro)]";
+    for (directives, accepted) in [
+        ("#[verus::internal(spec)] #[verus::internal(uninterp)] #[verus::internal(external_body)]", true),
+        ("#[verus::internal(exec)] #[verus::internal(uninterp)] #[verus::internal(external_body)]", false),
+        ("#[verus::internal(proof)] #[verus::internal(uninterp)] #[verus::internal(external_body)]", false),
+        ("#[verus::internal(spec)] #[verus::internal(uninterp)]", false),
+        ("#[verus::internal(spec)] #[verus::internal(external_body)]", false),
+        ("#[verus::internal(spec)] #[verus::internal(uninterp)] #[verus::internal(external_body)] #[verus::internal(open)]", false),
+        ("#[verus::internal(spec)] #[verus::internal(uninterp(argument))] #[verus::internal(external_body)]", false),
+    ] {
+        let result = native(&format!(
+            "{marker} {directives} pub fn Target<A>(value: A) -> u64 {{ unimplemented!() }}"
+        ));
+        assert_eq!(result["state"] == "CheckedNativeGenericPolicy", accepted, "{result}");
+        if accepted {
+            assert_eq!(result["parameters"][0]["native_index"], 0);
+            assert_eq!(result["headers"]["state"], "ObservedNoHeaderReference");
+            assert_eq!(result["headers"]["bodies_visited"], 1);
+        }
+    }
+}
+
+#[test]
+fn an_uninterpreted_signature_does_not_hide_original_header_calls() {
+    let result = native(
+        r#"
+#[rustc_diagnostic_item = "verus::verus_builtin::requires"]
+fn Header<T>(value: T) {}
+#[verus::internal(verus_macro)] #[verus::internal(spec)]
+#[verus::internal(uninterp)] #[verus::internal(external_body)]
+pub fn Target<A>(value: A) -> u64 { Header((true,)); unimplemented!() }
+"#,
+    );
+    assert_eq!(result["state"], "CheckedNativeGenericPolicy");
+    assert_eq!(result["headers"]["state"], "ObservedHeaderReferences");
+    assert_eq!(result["headers"]["references"][0]["kind"], "Requires");
 }
 
 #[test]

@@ -43,6 +43,70 @@ pub const REFUSAL_PREFIX: &str = "trust-vc refused: ";
 /// Environment variable naming the directory that collects records.
 pub const VERDICT_DIR_ENV: &str = "TRUST_VC_VERDICT_DIR";
 
+/// Output destinations for one invocation. These paths carry no verification,
+/// import, compiler or resource permission.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutputSinks {
+    verdict_dir: Option<PathBuf>,
+    dump_vcir: Option<PathBuf>,
+    request_cwd: Option<PathBuf>,
+}
+
+impl OutputSinks {
+    /// Output paths for an ordinary invocation in the current directory.
+    /// The caller captures its environment; this constructor never reads it.
+    pub fn new(verdict_dir: Option<PathBuf>, dump_vcir: Option<PathBuf>) -> Self {
+        Self {
+            verdict_dir,
+            dump_vcir,
+            request_cwd: None,
+        }
+    }
+
+    /// Interpret a request's output paths in its original working directory,
+    /// without changing the coordinator's working directory or environment.
+    /// Absolute paths remain absolute; relative paths retain their lexical
+    /// components beneath `cwd`. No filesystem or source permission is granted.
+    pub fn for_request(
+        cwd: &Path,
+        verdict_dir: Option<PathBuf>,
+        dump_vcir: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
+        if !cwd.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the request output directory must be absolute",
+            ));
+        }
+        Ok(Self {
+            verdict_dir: verdict_dir.map(|path| cwd.join(path)),
+            dump_vcir: dump_vcir.map(|path| cwd.join(path)),
+            request_cwd: Some(cwd.to_path_buf()),
+        })
+    }
+
+    pub(crate) fn wants_vcir_dump(&self) -> bool {
+        self.dump_vcir.is_some()
+    }
+
+    fn local_verdict_path(&self, directory: &Path) -> PathBuf {
+        let directory = match &self.request_cwd {
+            Some(cwd) => cwd.join(directory),
+            None => directory.to_path_buf(),
+        };
+        directory.join("trust-vc-verdict.jsonl")
+    }
+
+    /// Write only the requested debug output. Failure loses the dump and does
+    /// not change a verification result.
+    pub(crate) fn write_vcir(&self, text: &str) -> std::io::Result<()> {
+        match &self.dump_vcir {
+            Some(path) => std::fs::write(path, text),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Build the message of a refusal diagnostic.
 pub fn refusal_message(tag: &str, detail: &str) -> String {
     if detail.is_empty() {
@@ -276,7 +340,7 @@ impl Record {
     /// could not be written. A write failure does not change the exit code:
     /// the runner treats a harness pass without a record as a false pass, so a
     /// lost record can only lower the score.
-    pub fn write(&self) -> Vec<String> {
+    pub fn write_to(&self, outputs: &OutputSinks) -> Vec<String> {
         // One write call per record: tests run concurrently and two of them
         // can share a file (examples with the same file stem), and an
         // O_APPEND write of the whole line keeps lines from interleaving.
@@ -284,11 +348,10 @@ impl Record {
         let mut problems = Vec::new();
         let mut targets = Vec::new();
         if let Some(dir) = self.output_file.as_ref().and_then(|p| p.parent()) {
-            targets.push(dir.join("trust-vc-verdict.jsonl"));
+            targets.push(outputs.local_verdict_path(dir));
         }
-        if let (Some(dir), Some(name)) = (std::env::var_os(VERDICT_DIR_ENV), self.test_dir_name()) {
-            let dir = PathBuf::from(dir);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let (Some(dir), Some(name)) = (&outputs.verdict_dir, self.test_dir_name()) {
+            if let Err(e) = std::fs::create_dir_all(dir) {
                 problems.push(format!("{}: {e}", dir.display()));
             }
             targets.push(dir.join(format!("{name}.jsonl")));
@@ -409,8 +472,8 @@ mod tests {
             output_file: Some(test_dir.join("libtest_crate.rmeta")),
             ..Record::default()
         };
-        assert!(r.write().is_empty());
-        assert!(r.write().is_empty());
+        assert!(r.write_to(&OutputSinks::default()).is_empty());
+        assert!(r.write_to(&OutputSinks::default()).is_empty());
         assert!(!entry_dir.join("trust-vc-verdict.jsonl").exists());
         let text = std::fs::read_to_string(test_dir.join("trust-vc-verdict.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 2);
@@ -483,3 +546,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod output_tests;

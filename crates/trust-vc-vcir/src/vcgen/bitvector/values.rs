@@ -67,6 +67,14 @@ pub(super) fn substitute(
                 }
                 Ty::Adt(*id, result)
             }
+            Ty::MutRef(inner) => Ty::MutRef(Box::new(copy(
+                ctx,
+                inner,
+                arguments,
+                work,
+                span,
+                depth + 1,
+            )?)),
             Ty::Ref { mutable, inner } => Ty::Ref {
                 mutable: *mutable,
                 inner: Box::new(copy(ctx, inner, arguments, work, span, depth + 1)?),

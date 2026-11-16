@@ -226,7 +226,7 @@ fn compiler_provenance_distinguishes_public_and_helper_typing() {
     };
 
     // The schema records the newly required compiler provenance fact.
-    assert_eq!(crate::SCHEMA, "trust-vc.vcir@9");
+    assert_eq!(crate::SCHEMA, "trust-vc.vcir@11");
     let id = FnId(DefHash::new(0, 1));
     let span = SpanId(0);
     let n = Expr::read(Place::local(LocalId(1)), Ty::nat(), span);
@@ -255,6 +255,7 @@ fn compiler_provenance_distinguishes_public_and_helper_typing() {
             name: name.to_string(),
             ty: Ty::nat(),
             mode: Mode::Spec,
+            prophecy: crate::DeclProphecy::Default,
             mutable: false,
             kind,
             span,
@@ -280,6 +281,7 @@ fn compiler_provenance_distinguishes_public_and_helper_typing() {
             decreases: vec![n.clone()],
             decreases_when: None,
             decreases_by: None,
+            unwind: None,
             attrs: FnAttrs {
                 is_trait_method_impl,
                 ..FnAttrs::default()

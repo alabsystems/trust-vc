@@ -98,6 +98,12 @@ pub enum BuiltinArith {
 /// A Verus item, identified by its diagnostic-item name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerusItem {
+    /// `Seq::len` is an ordinary pure call only after a live owned import
+    /// authenticates its actual definition and typed signature.
+    SeqLen,
+    /// Candidate for an ordinary bodyless call only after the current owned
+    /// source family supplies its complete checked recommendation semantics.
+    SeqIndex,
     /// Native architecture-width builtin; no host width is substituted.
     ArchWordBits,
     /// Only the checked local global-size directive may consume this item.
@@ -108,14 +114,18 @@ pub enum VerusItem {
     Ensures,
     /// `recommends`: a header call holding the recommendations.
     Recommends,
+    /// `returns`: one pure entry-state value constrained by the result.
+    Returns,
     /// A header marker the reader does not handle yet (`decreases`,
-    /// `returns`, `opens_invariants`, `no_unwind_when`, loop invariants,
+    /// `opens_invariants`, loop invariants,
     /// ...).
     OtherHeader,
     /// `opens_invariants_none`: the function opens no invariant.
     OpensInvariantsNone,
     /// `no_unwind`: the function does not unwind.
     NoUnwind,
+    /// `no_unwind_when`: a pure Boolean condition in the caller's entry state.
+    NoUnwindWhen,
     /// `assert_`.
     Assert,
     /// `assume_`.
@@ -153,6 +163,18 @@ pub enum VerusItem {
     SpecCastInteger,
     /// `old`: the entry value behind a `&mut` parameter.
     Old,
+    /// The current contents of an opaque reference under `-V new-mut-ref`.
+    MutRefCurrent,
+    /// The prophetic future contents of an opaque mutable reference.
+    MutRefFuture,
+    /// `final_`: only a directly enclosing dereference may consume it.
+    Final,
+    /// Resolution of the owned value, independent of its referent's lifetime.
+    HasResolved,
+    /// Resolution of the value behind a shared reference, including unsized T.
+    HasResolvedUnsized,
+    /// An explicitly prophetic spec read of a native place after its borrow.
+    AfterBorrow,
     /// `get_variant_field`: a checked, spec-only native field read.
     GetVariantField,
     /// `is_variant`: a checked, spec-only native enum test.
@@ -214,6 +236,12 @@ impl VerusItem {
         if !name.starts_with(VERUS_PREFIX) {
             return None;
         }
+        if name == "verus::vstd::seq::Seq::len" {
+            return Some(Self::SeqLen);
+        }
+        if name == "verus::vstd::seq::Seq::index" {
+            return Some(Self::SeqIndex);
+        }
         let Some(short) = name.strip_prefix(BUILTIN_PREFIX) else {
             return Some(Self::Other);
         };
@@ -229,9 +257,11 @@ impl VerusItem {
             Self::Requires
                 | Self::Ensures
                 | Self::Recommends
+                | Self::Returns
                 | Self::OtherHeader
                 | Self::OpensInvariantsNone
                 | Self::NoUnwind
+                | Self::NoUnwindWhen
         )
     }
 }
@@ -245,8 +275,8 @@ fn builtin_item(short: &str) -> VerusItem {
         "requires" => V::Requires,
         "ensures" => V::Ensures,
         "recommends" => V::Recommends,
-        "returns"
-        | "invariant"
+        "returns" => V::Returns,
+        "invariant"
         | "invariant_except_break"
         | "decreases"
         | "decreases_when"
@@ -256,11 +286,11 @@ fn builtin_item(short: &str) -> VerusItem {
         | "opens_invariants_any"
         | "opens_invariants_except"
         | "opens_invariants_set"
-        | "no_unwind_when"
         | "extra_dependency"
         | "default_ensures" => V::OtherHeader,
         "opens_invariants_none" => V::OpensInvariantsNone,
         "no_unwind" => V::NoUnwind,
+        "no_unwind_when" => V::NoUnwindWhen,
         "assert_" => V::Assert,
         "assume_" => V::Assume,
         "admit" => V::Admit,
@@ -292,6 +322,12 @@ fn builtin_item(short: &str) -> VerusItem {
         "spec_literal_nat" => V::SpecLiteralNat,
         "spec_cast_integer" => V::SpecCastInteger,
         "old" => V::Old,
+        "after_borrow" => V::AfterBorrow,
+        "mut_ref_current" => V::MutRefCurrent,
+        "mut_ref_future" => V::MutRefFuture,
+        "final_" => V::Final,
+        "has_resolved" => V::HasResolved,
+        "has_resolved_unsized" => V::HasResolvedUnsized,
         "get_variant_field" => V::GetVariantField,
         "is_variant" => V::IsVariant,
         "constrain_type" => V::ConstrainType,
@@ -357,6 +393,14 @@ mod tests {
         );
         assert_eq!(
             VerusItem::from_name("verus::vstd::seq::Seq::len"),
+            Some(VerusItem::SeqLen)
+        );
+        assert_eq!(
+            VerusItem::from_name("verus::vstd::seq::Seq::index"),
+            Some(VerusItem::SeqIndex)
+        );
+        assert_eq!(
+            VerusItem::from_name("verus::vstd::seq::Seq::unknown"),
             Some(VerusItem::Other)
         );
         assert_eq!(VerusItem::from_name("Option"), None);

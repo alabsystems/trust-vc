@@ -6,8 +6,8 @@
 
 use super::*;
 use trust_vc_vcir::{
-    Block, Body, DefHash, Expr, ExprKind, FnAttrs, FnKind, LocalDecl, LocalId, LocalKind, Mode,
-    Place, SiteId, SpanId, Stmt, StmtKind, Ty,
+    Block, Body, DeclProphecy, DefHash, Expr, ExprKind, FnAttrs, FnKind, Lit, LocalDecl, LocalId,
+    LocalKind, Mode, Place, SiteId, SpanId, Stmt, StmtKind, Ty,
 };
 
 fn id(value: u64) -> FnId {
@@ -20,6 +20,7 @@ fn function(id: FnId, role: FnRole, params: usize, output: Ty) -> FnDecl {
             name: format!("v{index}"),
             ty: Ty::Param(0),
             mode: Mode::Spec,
+            prophecy: DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Param,
             span: SpanId(0),
@@ -29,6 +30,7 @@ fn function(id: FnId, role: FnRole, params: usize, output: Ty) -> FnDecl {
         name: "ret".into(),
         ty: output,
         mode: Mode::Spec,
+        prophecy: DeclProphecy::Default,
         mutable: false,
         kind: LocalKind::Return,
         span: SpanId(0),
@@ -51,6 +53,7 @@ fn function(id: FnId, role: FnRole, params: usize, output: Ty) -> FnDecl {
         requires: vec![],
         ensures: vec![],
         recommends: vec![],
+        unwind: None,
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
@@ -73,6 +76,37 @@ fn call(callee: FnId, local: u32, span: u32) -> Expr {
             )],
         },
     )
+}
+
+#[test]
+fn unwind_observations_preserve_kinds_and_refuse_conditional_scopes() {
+    let mut declaration = function(FnId(DefHash::new(7, 9)), FnRole::Item, 0, Ty::Unit);
+    declaration.mode = Mode::Exec;
+    let value = vcir::signature(&declaration, &mut vcir::Budget::new()).unwrap();
+    assert_eq!(
+        value["unwind"],
+        json!({"declared": false, "kind": "MayUnwind"})
+    );
+    declaration.unwind = Some(trust_vc_vcir::UnwindSpec::NoUnwind);
+    let value = vcir::signature(&declaration, &mut vcir::Budget::new()).unwrap();
+    assert_eq!(
+        value["unwind"],
+        json!({"declared": true, "kind": "NoUnwind"})
+    );
+    declaration.unwind = Some(trust_vc_vcir::UnwindSpec::NoUnwindWhen(Expr::new(
+        Ty::Bool,
+        SpanId(0),
+        ExprKind::Lit(Lit::Bool(true)),
+    )));
+    assert!(vcir::signature(&declaration, &mut vcir::Budget::new())
+        .unwrap_err()
+        .contains("conditional unwind header scopes"));
+    let declarations = BTreeMap::from([(declaration.id, &declaration)]);
+    let mut walk = vcir::Walk::new(&declaration, &declarations);
+    assert!(walk
+        .body(&mut vcir::Budget::new())
+        .unwrap_err()
+        .contains("header scopes"));
 }
 
 #[test]

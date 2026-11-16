@@ -29,6 +29,7 @@ use crate::declaration_alignment::{
 
 use super::declaration_headers::{CheckedHeaders, EmptyHeader};
 use super::declaration_modes::{original_body_available, DeclarationModes};
+use super::declaration_staging::{CheckedSourceFunction, OwnedSourceHeader};
 use super::modes::{CheckedModes, ModeCheck};
 
 mod types;
@@ -197,10 +198,57 @@ pub(super) fn prepare_correspondence<'a>(
 pub(super) struct PreparedFunction<'facts, 'tcx> {
     owner: LocalDefId,
     body: &'tcx hir::Body<'tcx>,
-    modes: CheckedModes,
-    empty_header: &'facts EmptyHeader<'tcx>,
-    headers: &'facts CheckedHeaders<'tcx>,
+    modes: CheckedModes<'tcx>,
+    header: FunctionHeader<'facts, 'tcx>,
     correspondence: PreparedCorrespondence<'facts>,
+}
+
+enum FunctionHeader<'facts, 'tcx> {
+    Empty {
+        fact: &'facts EmptyHeader<'tcx>,
+        checked: &'facts CheckedHeaders<'tcx>,
+    },
+    Source(CheckedSourceFunction<'facts, 'tcx>),
+}
+
+enum HeaderRequest<'facts, 'tcx> {
+    Empty(&'facts CheckedHeaders<'tcx>),
+    Source(CheckedSourceFunction<'facts, 'tcx>),
+}
+
+impl<'tcx> FunctionHeader<'_, 'tcx> {
+    fn current(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        owner: LocalDefId,
+        correspondence: &PreparedCorrespondence<'_>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Empty { fact, checked } => {
+                let current = checked
+                    .empty_for(tcx, owner)
+                    .ok_or("the native empty-header fact changed before staging consumption")?;
+                if !std::ptr::eq(current, *fact) {
+                    return Err("the native empty-header identity changed".into());
+                }
+                Ok(())
+            }
+            Self::Source(function) => function.for_factory(
+                tcx,
+                owner,
+                correspondence.sources,
+                correspondence.keep.key,
+                correspondence.erase.key,
+            ),
+        }
+    }
+
+    fn owned_requirement(&self) -> Option<OwnedSourceHeader> {
+        match self {
+            Self::Empty { .. } => None,
+            Self::Source(function) => Some(function.owned_requirement()),
+        }
+    }
 }
 
 /// Owned diagnostic facts, created only from a live checked native packet.
@@ -210,22 +258,20 @@ pub(super) struct OwnedFunction {
     erase: NativeKey,
     parameter_modes: Vec<Mode>,
     return_mode: Mode,
+    prophetic: bool,
     source: SourceIdentity,
     keep_cfg: Digest,
     erase_cfg: Digest,
     erase_rmeta: Digest,
+    source_header: Option<OwnedSourceHeader>,
 }
 
 impl<'tcx> PreparedFunction<'_, 'tcx> {
     pub(super) fn into_owned(self, tcx: TyCtxt<'tcx>) -> Result<OwnedFunction, String> {
-        let current = self
-            .headers
-            .empty_for(tcx, self.owner)
-            .ok_or("the native empty-header fact changed before staging consumption")?;
-        if !std::ptr::eq(current, self.empty_header)
-            || tcx
-                .hir_maybe_body_owned_by(self.owner)
-                .is_none_or(|body| !std::ptr::eq(body, self.body))
+        self.header.current(tcx, self.owner, &self.correspondence)?;
+        if tcx
+            .hir_maybe_body_owned_by(self.owner)
+            .is_none_or(|body| !std::ptr::eq(body, self.body))
             || !original_body_available(tcx, self.owner)
             || tcx.dcx().has_errors().is_some()
         {
@@ -244,15 +290,20 @@ impl<'tcx> PreparedFunction<'_, 'tcx> {
                 .map(|p| p.declared.mode)
                 .collect(),
             return_mode: self.modes.signature.ret.mode,
+            prophetic: self.modes.signature.prophetic,
             source: self.correspondence.source_identity,
             keep_cfg: self.correspondence.keep_cfg,
             erase_cfg: self.correspondence.erase_cfg,
             erase_rmeta: self.correspondence.erase_rmeta,
+            source_header: self.header.owned_requirement(),
         })
     }
 }
 
 impl OwnedFunction {
+    pub(super) fn source_header(&self) -> Option<&OwnedSourceHeader> {
+        self.source_header.as_ref()
+    }
     pub(super) fn keep_key(&self) -> NativeKey {
         self.keep
     }
@@ -265,6 +316,9 @@ impl OwnedFunction {
     }
     pub(super) fn return_mode(&self) -> Mode {
         self.return_mode
+    }
+    pub(super) fn prophetic(&self) -> bool {
+        self.prophetic
     }
     pub(super) fn source_identity(&self) -> SourceIdentity {
         self.source
@@ -285,6 +339,7 @@ impl OwnedFunction {
             "erase_key": {"crate": self.erase.stable_crate_id, "hash": self.erase.def_path_hash.to_string()},
             "parameter_modes": self.parameter_modes.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(),
             "return_mode": format!("{:?}", self.return_mode),
+            "prophetic": self.prophetic,
             "native_empty_header_checked": true,
             "source_manifest_sha256": self.source.manifest_sha256,
             "compatibility_recipe_sha256": self.source.compatibility.recipe_sha256(),
@@ -362,6 +417,38 @@ pub(super) fn prepare_function<'facts, 'tcx>(
     headers: &'facts CheckedHeaders<'tcx>,
     correspondence: PreparedCorrespondence<'facts>,
 ) -> Result<PreparedFunction<'facts, 'tcx>, PreparationError> {
+    prepare_with_header(
+        tcx,
+        owner,
+        index,
+        HeaderRequest::Empty(headers),
+        correspondence,
+    )
+}
+
+pub(super) fn prepare_source_function<'facts, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: LocalDefId,
+    index: &DeclarationModes<'tcx>,
+    source: CheckedSourceFunction<'facts, 'tcx>,
+    correspondence: PreparedCorrespondence<'facts>,
+) -> Result<PreparedFunction<'facts, 'tcx>, PreparationError> {
+    prepare_with_header(
+        tcx,
+        owner,
+        index,
+        HeaderRequest::Source(source),
+        correspondence,
+    )
+}
+
+fn prepare_with_header<'facts, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: LocalDefId,
+    index: &DeclarationModes<'tcx>,
+    header: HeaderRequest<'facts, 'tcx>,
+    correspondence: PreparedCorrespondence<'facts>,
+) -> Result<PreparedFunction<'facts, 'tcx>, PreparationError> {
     let refuse = |reason: &str| PreparationError::Refused(reason.into());
     if !index.belongs_to(tcx)
         || tcx.dcx().has_errors().is_some()
@@ -430,9 +517,18 @@ pub(super) fn prepare_function<'facts, 'tcx>(
             "the checked native signature is not the corresponding all-Spec declaration",
         ));
     }
-    let empty_header = headers
-        .empty_for(tcx, owner)
-        .ok_or_else(|| refuse("no sealed empty-header fact for this original native owner"))?;
+    let header = match header {
+        HeaderRequest::Empty(checked) => FunctionHeader::Empty {
+            fact: checked.empty_for(tcx, owner).ok_or_else(|| {
+                refuse("no sealed empty-header fact for this original native owner")
+            })?,
+            checked,
+        },
+        HeaderRequest::Source(source) => FunctionHeader::Source(source),
+    };
+    header
+        .current(tcx, owner, &correspondence)
+        .map_err(PreparationError::Refused)?;
     let body = tcx
         .hir_maybe_body_owned_by(owner)
         .ok_or_else(|| refuse("the native original body is unavailable"))?;
@@ -445,8 +541,7 @@ pub(super) fn prepare_function<'facts, 'tcx>(
         owner,
         body,
         modes,
-        empty_header,
-        headers,
+        header,
         correspondence,
     })
 }

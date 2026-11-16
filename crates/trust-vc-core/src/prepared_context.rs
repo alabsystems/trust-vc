@@ -35,6 +35,7 @@ pub(crate) mod validation;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PreparedVerificationContext {
+    pub scalar_cast_capture: Option<crate::scalar_cast_capture::ScalarCastCapture>,
     pub obligations: Vec<PreparedObligation>,
     pub variables: Vec<VariableDecl>,
     pub function_context: Option<FunctionContext>,
@@ -764,6 +765,7 @@ pub(crate) fn prepare_context(
     reject_unsound_hide_reveal_interleave(&obligations)?;
 
     Ok(PreparedVerificationContext {
+        scalar_cast_capture: ctx.scalar_cast_capture.clone(),
         has_collection_context: has_collection_context(
             &ctx.variables,
             &obligations,

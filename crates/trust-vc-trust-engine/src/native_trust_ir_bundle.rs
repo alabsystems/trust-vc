@@ -233,6 +233,8 @@ impl TrustVcNativeTrustIrBundleReport {
 #[non_exhaustive]
 pub enum TrustVcNativeTrustIrInputKind {
     RustMir,
+    /// THIR source identity, distinct from a MIR body digest.
+    RustThir,
     TrustIrModule,
 }
 
@@ -3285,6 +3287,14 @@ impl TrustVcTrustEngine {
         &self,
         bundle: &NativeVerificationBundle,
     ) -> Result<TrustVcNativeTrustIrBundleReport, TrustEngineError> {
+        self.consume_native_trust_ir_bundle_observing(bundle, None)
+    }
+
+    pub(crate) fn consume_native_trust_ir_bundle_observing(
+        &self,
+        bundle: &NativeVerificationBundle,
+        cast_observations: Option<&crate::native_scalar_cast::ObservationSink>,
+    ) -> Result<TrustVcNativeTrustIrBundleReport, TrustEngineError> {
         refuse_module_without_wire_identity(&bundle.module)?;
         validate_producer_module(&bundle.module)?;
         validate_upstream_bundle(bundle)?;
@@ -3357,6 +3367,7 @@ impl TrustVcTrustEngine {
             let request_digest = request_digest_raw.to_string();
             if let NativeVerificationRequest::TrustVc(trust_vc_request) = request {
                 let outcome = build_request_report(RequestReportInputs {
+                    cast_observations,
                     request: trust_vc_request,
                     request_digest: &request_digest,
                     module: &bundle.module,
@@ -3858,6 +3869,10 @@ fn native_input_parts(
             TrustVcNativeTrustIrInputKind::RustMir,
             Some(body_digest.to_string()),
         ),
+        NativeAdapterInput::RustThir { source_digest } => (
+            TrustVcNativeTrustIrInputKind::RustThir,
+            Some(source_digest.to_string()),
+        ),
         NativeAdapterInput::TrustIrModule => (TrustVcNativeTrustIrInputKind::TrustIrModule, None),
     }
 }
@@ -3880,6 +3895,7 @@ fn producer_label(producer: NativeBundleProducer) -> &'static str {
 /// them mean.
 #[derive(Clone, Copy)]
 pub(crate) struct RequestReportInputs<'a> {
+    pub(crate) cast_observations: Option<&'a crate::native_scalar_cast::ObservationSink>,
     pub(crate) request: &'a TrustVcNativeRequest,
     pub(crate) request_digest: &'a str,
     /// The whole trust-ir module. The discharge lane reads `functions`,
@@ -3921,6 +3937,7 @@ fn build_request_report(
     inputs: RequestReportInputs<'_>,
 ) -> Result<RequestReportOutcome, TrustEngineError> {
     let RequestReportInputs {
+        cast_observations: _,
         request,
         request_digest,
         module: _,
@@ -5105,6 +5122,40 @@ mod wire_shape_tests {
     /// discharge-mode report with its advisory answer intact could carry that
     /// pass. `authority` was required and defaultless, but `authority` gates
     /// nothing; `is_ok()` and `exit_class()` read `verdict`.
+    #[test]
+    fn thir_source_identity_stays_distinct_from_mir_and_bare_ir() {
+        let source = trust_ir::ProofDigest::sha256([0x31; 32]);
+        let changed = trust_ir::ProofDigest::sha256([0x32; 32]);
+        let thir = native_input_parts(NativeAdapterInput::RustThir {
+            source_digest: source,
+        });
+        assert_eq!(
+            thir,
+            (
+                TrustVcNativeTrustIrInputKind::RustThir,
+                Some(source.to_string())
+            )
+        );
+        assert_ne!(
+            thir,
+            native_input_parts(NativeAdapterInput::RustMir {
+                body_digest: source
+            })
+        );
+        assert_ne!(
+            thir,
+            native_input_parts(NativeAdapterInput::RustThir {
+                source_digest: changed
+            })
+        );
+        assert_ne!(thir, native_input_parts(NativeAdapterInput::TrustIrModule));
+        assert_eq!(serde_json::to_string(&thir.0).unwrap(), "\"rust_thir\"");
+        assert_eq!(
+            serde_json::from_str::<TrustVcNativeTrustIrInputKind>("\"rust_thir\"").unwrap(),
+            thir.0
+        );
+    }
+
     #[test]
     fn a_discharge_report_cannot_wear_a_certificate_mode_verdict() {
         use TrustVcNativeTrustIrRequestMode as Mode;

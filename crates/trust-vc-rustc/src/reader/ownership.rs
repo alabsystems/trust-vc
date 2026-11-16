@@ -23,6 +23,10 @@ use super::Cx;
 
 pub(crate) mod ghost_only;
 
+#[cfg(test)]
+#[path = "ownership/tests/local_allocation.rs"]
+mod local_allocation;
+
 /// Checked declarations whose ownership is retained in the original MIR.
 #[derive(Debug)]
 pub(super) struct NativeOwnership {
@@ -46,10 +50,10 @@ impl NativeOwnership {
 /// Every evaluated value use is a Proof move in both languages. This
 /// classifies syntax and checked modes, never whether a value was moved:
 /// canonical compiler borrow checking must still check the original root.
-pub(super) fn classify(
-    cx: &Cx<'_>,
+pub(super) fn classify<'tcx>(
+    cx: &Cx<'tcx>,
     def: LocalDefId,
-    checked: &CheckedModes,
+    checked: &CheckedModes<'tcx>,
 ) -> Option<NativeOwnership> {
     let signature = proof_signature(cx, def.to_def_id())?;
     if checked.signature.def_id != def.to_def_id()
@@ -59,6 +63,10 @@ pub(super) fn classify(
     {
         return None;
     }
+    checked
+        .availability
+        .checked(cx.tcx, def, checked.signature.body_owner)
+        .ok()?;
     let tcx = cx.tcx;
     let typeck = tcx.typeck(def);
     let body = tcx.hir_body_owned_by(def);

@@ -6,11 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ay_dpll::api::Term;
+use ay_dpll::api::{Solver, Term};
 
-use super::AYEncoder;
+use super::{AYEncoder, AstExpressionParser};
+
+#[path = "ground_scope.rs"]
+mod scope;
 use crate::error::{TrustVcError, TrustVcResult};
 use crate::ir::TrustVcExpr;
+use scope::{TemplateScope, TemplateScopes};
 
 const GROUND_FIXPOINT_ROUNDS: usize = 1;
 
@@ -62,6 +66,8 @@ pub(crate) struct GroundTermPool {
     instantiated_pairs: HashSet<AxiomInstanceKey>,
     revision: u64,
     last_flushed_revision: u64,
+    /// Live encode-then-close binders, never query evidence or persisted ground seeds.
+    template_scopes: TemplateScopes,
 }
 
 impl Default for GroundTermPool {
@@ -79,6 +85,7 @@ impl GroundTermPool {
             instantiated_pairs: HashSet::new(),
             revision: 0,
             last_flushed_revision: 0,
+            template_scopes: TemplateScopes::default(),
         }
     }
 
@@ -94,6 +101,41 @@ impl GroundTermPool {
         arg_exprs: Vec<TrustVcExpr>,
     ) -> bool {
         self.register_with_exprs(symbol, arg_terms, Some(arg_exprs))
+    }
+
+    /// Register only actual caller demand. A template's binder placeholders
+    /// must not become free ground roots, while closed subcalls remain seeds.
+    pub(crate) fn register_expr_scoped(
+        &mut self,
+        solver: &Solver,
+        symbol: &str,
+        arg_terms: Vec<Term>,
+        arg_exprs: Vec<TrustVcExpr>,
+        result: Term,
+    ) -> bool {
+        let bound = self.template_scopes.bound_terms();
+        if !bound.is_empty() {
+            let mut seen = HashSet::new();
+            let mut pending: Vec<Term> = arg_terms.to_vec();
+            pending.push(result); // The zero-arity variable-compatibility arm can be a binder.
+            while let Some(term) = pending.pop() {
+                if !seen.insert(term) {
+                    continue;
+                }
+                // This API requires a current same-solver Term. A stale/foreign
+                // handle refuses by panic; it is never interpreted as a clean leaf.
+                let children = solver.term_children(term);
+                if bound.contains(&term) {
+                    return false;
+                }
+                pending.extend(children);
+            }
+        }
+        self.register_expr(symbol, arg_terms, arg_exprs)
+    }
+
+    fn enter_template_scope(&mut self, solver: &Solver, bound: &[Term]) -> TemplateScope {
+        self.template_scopes.enter(solver, bound)
     }
 
     fn register_with_exprs(
@@ -395,6 +437,20 @@ fn match_trigger_expr<'a>(
 }
 
 impl AYEncoder {
+    /// Only template construction is scoped. Actual ground replay/callers run
+    /// after restoration, even when they use the same native variable Term.
+    pub(in crate::encoder) fn with_ground_template_scope<T>(
+        &mut self,
+        bound: &[Term],
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let _scope = self
+            .state
+            .ground_pool
+            .enter_template_scope(&self.solver, bound);
+        body(self)
+    }
+
     pub(crate) fn flush_ground_axioms_to_fixpoint(&mut self) -> TrustVcResult<usize> {
         if !self.state.ground_pool.needs_flush() {
             return Ok(0);
@@ -548,3 +604,23 @@ impl AYEncoder {
 #[cfg(test)]
 #[path = "ground_pool_tests.rs"]
 mod tests;
+
+impl AstExpressionParser<'_> {
+    pub(in crate::encoder) fn with_ground_template_scope<T>(
+        &mut self,
+        bound: &[Term],
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        // The guard owns its scope identity; restoration does not need to
+        // recover the optional parser attachment after the callback returns.
+        let _scope = self
+            .ground_pool
+            .as_deref_mut()
+            .map(|pool| pool.enter_template_scope(self.solver, bound));
+        body(self)
+    }
+}
+
+#[cfg(test)]
+#[path = "ground_pool_template_tests.rs"]
+mod template_tests;

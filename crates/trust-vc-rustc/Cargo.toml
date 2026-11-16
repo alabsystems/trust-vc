@@ -49,6 +49,11 @@ name = "rust_verify"
 path = "src/bin/rust_verify.rs"
 required-features = ["rustc"]
 
+[[example]]
+name = "output_environment"
+path = "examples/output_environment.rs"
+required-features = ["rustc"]
+
 # cargo-verus resolves a sibling executable named verus for RUSTC_WRAPPER.
 [[bin]]
 name = "verus"
@@ -88,6 +93,16 @@ required-features = ["rustc"]
 [[bin]]
 name = "vstd_normal_client_verify"
 path = "src/bin/vstd_normal_client_verify.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_sdk_client"
+path = "src/bin/vstd_sdk_client.rs"
+required-features = ["rustc"]
+
+[[bin]]
+name = "vstd_sdk_coordinator"
+path = "src/bin/vstd_sdk_coordinator.rs"
 required-features = ["rustc"]
 
 # Runs the binary on tests/golden/*.rs; needs TRUST_VC_VERUS_BUILTINS (see the
@@ -237,8 +252,53 @@ name = "enum_values"
 path = "tests/enum_values.rs"
 required-features = ["rustc"]
 
+[[test]]
+name = "enum_casts"
+path = "tests/enum_casts.rs"
+required-features = ["rustc"]
+
 # Actual optional recommends diagnostics after a genuine proof failure.
 [[test]]
 name = "recommends"
 path = "tests/recommends.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "broadcast_contracts"
+path = "tests/broadcast_contracts.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "external_trait_diagnostics"
+path = "tests/external_trait_diagnostics.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "e18_spec_completion"
+path = "tests/e18_spec_completion.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "bitvector_simplification"
+path = "tests/bitvector_simplification.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "scalar_casts"
+path = "tests/scalar_casts.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "returns_contracts"
+path = "tests/returns_contracts.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "documentation_contracts"
+path = "tests/documentation_contracts.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "primitive_spec_equality"
+path = "tests/primitive_spec_equality.rs"
 required-features = ["rustc"]

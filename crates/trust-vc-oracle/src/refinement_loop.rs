@@ -380,10 +380,7 @@ impl ConvergenceDetector {
             }
         }
         // Divergence: strong negative trend.
-        if self.scores.len() >= 3 && self.trend() < -0.1 {
-            return true;
-        }
-        false
+        self.scores.len() >= 3 && self.trend() < -0.1
     }
 
     /// Number of observations.

@@ -8,6 +8,11 @@
 extern crate rustc_driver;
 
 fn main() -> std::process::ExitCode {
+    // SAFETY: first native-entry operation, before argument handling, file opens,
+    // compiler callbacks, or host worker threads can reuse inherited descriptors.
+    if let Err(exit) = unsafe { trust_vc_rustc::native_entry::capture_inherited_resources() } {
+        return exit;
+    }
     // This standalone process starts no background host work. Each compiler
     // call joins its scoped workers before the observation changes VSTD_KIND.
     unsafe { trust_vc_rustc::reader::declaration_staging::macro_context_main() }

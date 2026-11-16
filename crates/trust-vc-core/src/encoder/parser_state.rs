@@ -185,6 +185,8 @@ pub(super) struct SeqContainsQuantifiedMemo {
 /// Parses `syn::Expr` AST nodes into ay SMT terms.
 #[doc(hidden)]
 pub struct AstExpressionParser<'a> {
+    pub(super) scalar_casts: Option<Vec<crate::scalar_cast_capture::ScalarCastEmission>>,
+    pub(super) scalar_cast_refusal: Option<String>,
     pub(super) solver: &'a mut Solver,
     pub(super) variables: &'a std::collections::HashMap<String, Term>,
     pub(super) collection_lengths: &'a mut std::collections::HashMap<String, Term>,
@@ -773,6 +775,8 @@ impl<'a> AstExpressionParser<'a> {
             var_types,
             functions,
             function_return_types: None,
+            scalar_casts: None,
+            scalar_cast_refusal: None,
             term_widths,
             local_vars: std::collections::HashMap::new(),
             local_var_types: std::collections::HashMap::new(),

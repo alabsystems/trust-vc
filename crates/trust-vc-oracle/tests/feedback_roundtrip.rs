@@ -433,12 +433,12 @@ fn test_multi_iteration_convergence_three_attempts() {
     assert_eq!(result.history.len(), 3);
 
     // First two attempts should have failed
-    for i in 0..2 {
+    for (i, (_, feedback)) in result.history[..2].iter().enumerate() {
         assert!(
-            result.history[i].1.is_failed() || result.history[i].1.is_unknown(),
+            feedback.is_failed() || feedback.is_unknown(),
             "attempt {} should have failed: {:?}",
             i + 1,
-            result.history[i].1
+            feedback
         );
     }
 

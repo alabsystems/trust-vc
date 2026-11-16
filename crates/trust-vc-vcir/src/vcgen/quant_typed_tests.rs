@@ -237,13 +237,19 @@ fn substitution_census_stops_at_unpaid_replacement_names_without_a_size_walk() {
     assert!(!charge_substitution(
         &template,
         &[],
-        &[replacement.clone()],
+        std::slice::from_ref(&replacement),
         &mut pay
     ));
     assert_eq!(denied.len(), 1);
     assert!(denied[0] > 256);
     assert_eq!(
-        at(&template, &[], &[replacement.clone()], &[], &[Sort::Int]),
+        at(
+            &template,
+            &[],
+            std::slice::from_ref(&replacement),
+            &[],
+            &[Sort::Int]
+        ),
         Some(replacement)
     );
 }

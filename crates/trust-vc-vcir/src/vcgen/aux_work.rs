@@ -12,6 +12,10 @@ pub(super) fn expression(work: &Cell<usize>, source: &Expr, span: SpanId) -> R<(
     expression_at(work, source, span, 0)
 }
 
+pub(super) fn type_recipe(work: &Cell<usize>, source: &Ty, span: SpanId) -> R<()> {
+    ty(work, source, span, 0)
+}
+
 fn node(work: &Cell<usize>, span: SpanId, depth: usize) -> R<()> {
     items(work, 1, span)?;
     if depth >= 256 {
@@ -39,7 +43,7 @@ fn ty(work: &Cell<usize>, source: &Ty, span: SpanId, depth: usize) -> R<()> {
                 ty(work, child, span, depth + 1)?;
             }
         }
-        Ty::Ref { inner, .. } => ty(work, inner, span, depth + 1)?,
+        Ty::Ref { inner, .. } | Ty::MutRef(inner) => ty(work, inner, span, depth + 1)?,
         Ty::Bool | Ty::Int(_) | Ty::Unit | Ty::Param(_) => {}
     }
     Ok(())
@@ -64,9 +68,12 @@ fn expression_at(work: &Cell<usize>, source: &Expr, span: SpanId, depth: usize) 
     match &source.kind {
         ExprKind::Lit(_) | ExprKind::IntegerConstant(_) => {}
         ExprKind::Read(value) | ExprKind::Old(value) => place(work, value, span)?,
-        ExprKind::Unary { arg, .. } | ExprKind::Cast { arg, .. } | ExprKind::Borrow(arg) => {
-            expression_at(work, arg, span, depth + 1)?
-        }
+        ExprKind::Unary { arg, .. }
+        | ExprKind::Cast { arg, .. }
+        | ExprKind::Borrow(arg)
+        | ExprKind::MutRefCurrent(arg)
+        | ExprKind::MutRefFuture(arg)
+        | ExprKind::HasResolved(arg) => expression_at(work, arg, span, depth + 1)?,
         ExprKind::Binary { lhs, rhs, .. } => {
             expression_at(work, lhs, span, depth + 1)?;
             expression_at(work, rhs, span, depth + 1)?;
@@ -102,7 +109,15 @@ fn expression_at(work: &Cell<usize>, source: &Expr, span: SpanId, depth: usize) 
         ExprKind::IsVariant { base, .. }
         | ExprKind::Field { base, .. }
         | ExprKind::TupleField { base, .. } => expression_at(work, base, span, depth + 1)?,
+        ExprKind::MutRefUpdate { reference, value } => {
+            expression_at(work, reference, span, depth + 1)?;
+            expression_at(work, value, span, depth + 1)?;
+        }
         ExprKind::ProofInSpec(value) => block(work, value, span, depth + 1)?,
+        ExprKind::ProofInSpecTail { block: value, tail } => {
+            block(work, value, span, depth + 1)?;
+            expression_at(work, tail, span, depth + 1)?;
+        }
         ExprKind::Quant {
             vars,
             triggers,
@@ -187,6 +202,14 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
                 expression_at(work, value, span, depth + 1)?;
             }
         }
+        StmtKind::BorrowMut {
+            dest,
+            place: target,
+        } => {
+            items(work, 1, span)?;
+            let _ = dest;
+            place(work, target, span)?;
+        }
         StmtKind::Assign {
             place: target,
             value,
@@ -233,6 +256,10 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
             block(work, else_block, span, depth + 1)?;
         }
         StmtKind::Ghost(value) | StmtKind::Block(value) => block(work, value, span, depth + 1)?,
+        StmtKind::GhostTail { block: value, tail } => {
+            block(work, value, span, depth + 1)?;
+            expression_at(work, tail, span, depth + 1)?;
+        }
         StmtKind::Loop(value) => {
             node(work, span, depth + 1)?;
             if let Some(condition) = &value.cond {
@@ -248,7 +275,8 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
             }
             block(work, &value.body, span, depth + 2)?;
         }
-        StmtKind::Reveal { .. }
+        StmtKind::BroadcastUse { .. }
+        | StmtKind::Reveal { .. }
         | StmtKind::Hide { .. }
         | StmtKind::Break { .. }
         | StmtKind::Continue { .. }
@@ -290,5 +318,34 @@ mod tests {
             super::super::inline_work::expression(&Cell::new(200_000), &source, SpanId(0)).is_err(),
             "resource admission does not change checked-inline eligibility"
         );
+    }
+
+    #[test]
+    fn ghost_tail_prices_its_raw_unit_value_before_traversal() {
+        let prefix = Block::new(vec![]);
+        let payload = |kind| {
+            Expr::new(
+                Ty::Unit,
+                SpanId(0),
+                ExprKind::ProofInSpec(Block::new(vec![Stmt::new(SpanId(0), kind)])),
+            )
+        };
+        let plain = payload(StmtKind::Ghost(prefix.clone()));
+        let source = payload(StmtKind::GhostTail {
+            block: prefix,
+            tail: Expr::new(Ty::Unit, SpanId(0), ExprKind::Lit(crate::Lit::Unit)),
+        });
+        let before = Cell::new(100);
+        expression(&before, &plain, SpanId(0)).unwrap();
+        let measured = Cell::new(100);
+        expression(&measured, &source, SpanId(0)).unwrap();
+        let used = 100 - measured.get();
+        assert_eq!(before.get() - measured.get(), 2);
+        let exact = Cell::new(used);
+        expression(&exact, &source, SpanId(0)).unwrap();
+        assert_eq!(exact.get(), 0);
+        let short = Cell::new(used - 1);
+        assert!(expression(&short, &source, SpanId(0)).is_err());
+        assert_eq!(short.get(), 0);
     }
 }

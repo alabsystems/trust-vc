@@ -65,12 +65,16 @@ impl<'tcx> Cx<'tcx> {
                     match arg.kind() {
                         GenericArgKind::Lifetime(_) => {}
                         GenericArgKind::Type(t) => {
-                            // A `&mut` inside a data type is not modelled.
-                            if t.walk().any(|a| {
-                                a.as_type().is_some_and(
-                                    |t| matches!(t.kind(), ty::Ref(_, _, m) if m.is_mut()),
-                                )
-                            }) {
+                            // Legacy mutable parameters are transparent and
+                            // cannot be stored in a datatype. The new mode
+                            // retains an opaque carrier at every nesting level.
+                            if !self.opts.new_mut_ref
+                                && t.walk().any(|a| {
+                                    a.as_type().is_some_and(
+                                        |t| matches!(t.kind(), ty::Ref(_, _, m) if m.is_mut()),
+                                    )
+                                })
+                            {
                                 return None;
                             }
                             type_args.push(self.vc_ty_with(t, param)?);
@@ -79,6 +83,9 @@ impl<'tcx> Cx<'tcx> {
                     }
                 }
                 Some(VcTy::Adt(id, type_args))
+            }
+            ty::Ref(_, inner, mutability) if self.opts.new_mut_ref && mutability.is_mut() => {
+                Some(VcTy::MutRef(Box::new(self.vc_ty_with(*inner, param)?)))
             }
             ty::Ref(_, inner, mutability) => Some(VcTy::Ref {
                 mutable: mutability.is_mut(),

@@ -280,6 +280,7 @@ pub(crate) struct VerificationState {
     /// Used when constructing `AstExpressionParser` for overflow predicate
     /// collection. Part of #2516.
     pub(crate) div0_behavior: crate::vc::Div0Behavior,
+    pub(crate) scalar_cast_capture: Option<crate::scalar_cast_capture::ScalarCastCapture>,
     /// Shift bounds checking policy propagated from `VerificationContext`.
     /// Used when constructing `AstExpressionParser` for overflow predicate
     /// collection. Part of #2516.
@@ -434,6 +435,7 @@ impl VerificationState {
             demand_inlined_bodies: false,
             overflow_behavior: crate::vc::OverflowBehavior::default(),
             div0_behavior: crate::vc::Div0Behavior::default(),
+            scalar_cast_capture: None,
             bitshift_behavior: crate::vc::BitshiftBehavior::default(),
             reusable_after_scope: true,
             solver_panic: None,

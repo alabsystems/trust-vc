@@ -33,8 +33,8 @@ replayed on it. `tests/trust_ir_body_discharge.rs::the_real_checked_op_pack_is_u
 pins the measurement; see the `trust_ir_body` module doc for the full
 argument.
 
-**Pin.** trust-ir `0.14.0@bd313b4fbfae2c2826bade463e23224f1df9a61a`
-(binary format v70, bundle schema v8); the builder reproduces this file byte
+**Pin.** trust-ir `0.14.0@ba039cfea77ae44eeaba0dc8e2946c27d5d97ddd`
+(binary format v74, bundle schema v9); the builder reproduces this file byte
 for byte there. No completeness or bound-certificate claim is added. The
 lane refuses a `Drop` and an `ArraySplat` by name, any `Uninit` or
 `Splat` constant, a sited `Assert` or one whose kind carries operands, and

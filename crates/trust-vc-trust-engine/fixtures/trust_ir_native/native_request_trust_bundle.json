@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "producer": "Trust",
   "input": {
     "RustMir": {
@@ -100,7 +100,7 @@
     ]
   },
   "serialization": {
-    "schema_version": 8,
+    "schema_version": 9,
     "canonical_order": true,
     "sort_unordered_sets": true,
     "messagepack_named_fields": true,

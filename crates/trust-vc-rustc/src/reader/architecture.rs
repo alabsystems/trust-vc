@@ -134,7 +134,7 @@ fn candidate(attributes: &[Attribute], work: &mut usize) -> Result<bool, ()> {
     let mut found = false;
     for attribute in attributes {
         *work = work.checked_sub(1).ok_or(())?;
-        let Attribute::Unparsed(item) = attribute else {
+        let Attribute::Tool(item) = attribute else {
             continue;
         };
         if let AttrArgs::Delimited(delimited) = &item.args {
@@ -150,7 +150,7 @@ fn candidate(attributes: &[Attribute], work: &mut usize) -> Result<bool, ()> {
     // token/string constructors see any of this owner's Verus attributes.
     if found {
         for attribute in attributes {
-            let Attribute::Unparsed(item) = attribute else {
+            let Attribute::Tool(item) = attribute else {
                 continue;
             };
             if item.path.segments.len() > 16 {

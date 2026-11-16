@@ -52,6 +52,42 @@ const fn rejected(
 }
 
 const CASES: &[Case] = &[
+    Case {
+        name: "old_in_spec_signature",
+        program: "verus! {\nspec fn foo(x: &mut u64) -> u64\n    recommends *old(x) == 0,\n{ 0 }\n}\n",
+        args: &["-V", "new-mut-ref"],
+        expect: Expect {
+            outcome: "verus-rejected",
+            errors: &[("`old` is meaningless in spec functions", 3)],
+        },
+        twin: "verus! {\nspec fn foo(x: &mut u64) -> u64\n    recommends *x == 0,\n{ 0 }\n}\n",
+        twin_args: &["-V", "new-mut-ref"],
+        twin_expect: CHECKED,
+    },
+    Case {
+        name: "old_in_spec_body",
+        program: "verus! {\nspec fn foo(x: &mut u64) -> u64 {\n    *old(x)\n}\n}\n",
+        args: &["-V", "new-mut-ref"],
+        expect: Expect {
+            outcome: "verus-rejected",
+            errors: &[("`old` is meaningless in spec functions", 3)],
+        },
+        twin: "verus! {\nspec fn foo(x: &mut u64) -> u64 {\n    *x\n}\n}\n",
+        twin_args: &["-V", "new-mut-ref"],
+        twin_expect: CHECKED,
+    },
+    Case {
+        name: "old_uses_resolved_builtin_identity",
+        program: "verus! {\nspec fn old(n: u64) -> u64 { n }\nspec fn foo(x: &mut u64) -> u64 {\n    *verus_builtin::old(x)\n}\n}\n",
+        args: &["-V", "new-mut-ref"],
+        expect: Expect {
+            outcome: "verus-rejected",
+            errors: &[("`old` is meaningless in spec functions", 4)],
+        },
+        twin: "verus! {\nspec fn old(n: u64) -> u64 { n }\nspec fn foo(x: &mut u64) -> u64 {\n    self::old(*x)\n}\n}\n",
+        twin_args: &["-V", "new-mut-ref"],
+        twin_expect: CHECKED,
+    },
     // Header rules (rust_to_vir_func.rs), at the signature.
     rejected(
         "spec_requires",
@@ -345,4 +381,26 @@ fn verus_rules_and_their_twins() {
         problems.extend(check(&twin, case.twin, case.twin_args, &case.twin_expect));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn proof_and_exec_old_keep_their_original_values() {
+    for (label, mode) in [("proof", "proof fn"), ("exec", "fn")] {
+        let source = format!(
+            "verus! {{ {mode} preserve_old(x: &mut u64) {{ assert(*old(x) == *old(x)); }} }}"
+        );
+        let positive = common::run(&format!("old_preserved_{label}"), &source, &[]);
+        assert_eq!(positive.outcome(), "checked", "{positive:?}");
+        assert_eq!(positive.exit, 0, "{positive:?}");
+        assert!(positive.errors().is_empty(), "{positive:?}");
+        let negative = source.replace("==", "!=");
+        let negative = common::run(&format!("old_preserved_{label}_false"), &negative, &[]);
+        assert_eq!(negative.outcome(), "verification-failed", "{negative:?}");
+        assert_eq!(negative.errors().len(), 1, "{negative:?}");
+        assert_eq!(
+            negative.errors()[0].message,
+            "assertion failed",
+            "{negative:?}"
+        );
+    }
 }

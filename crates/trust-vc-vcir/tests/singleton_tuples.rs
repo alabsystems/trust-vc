@@ -24,6 +24,7 @@ fn specification(body: Expr) -> VcCrate {
             name: "result".into(),
             ty: body.ty.clone(),
             mode: Mode::Spec,
+            prophecy: trust_vc_vcir::DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Return,
             span: SpanId(0),
@@ -36,6 +37,7 @@ fn specification(body: Expr) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Spec(body),
     });

@@ -183,7 +183,13 @@ pub(crate) fn discharge_request(inputs: RequestReportInputs<'_>) -> DischargeRep
     };
 
     let types = TypeDecoder::from_module(inputs.module);
-    let mut relation = match body::lower_body(inputs.module, function, function_id, types) {
+    let mut relation = match body::lower_body(
+        inputs.module,
+        function,
+        function_id,
+        types,
+        inputs.cast_observations.is_some(),
+    ) {
         Ok(relation) => relation,
         // A body this lane cannot model is a REQUEST-level refusal: it is not
         // about any one obligation, and every obligation of the function is
@@ -371,7 +377,13 @@ fn discharge_obligation(
     };
 
     let unit_id = unit_id_for(inputs, obligation_id, unit.function_name);
-    let decided = match unit::decide(&unit_id, unit.relation, unit.assumptions, assertion) {
+    let decided = match unit::decide(
+        &unit_id,
+        unit.relation,
+        unit.assumptions,
+        assertion,
+        inputs.cast_observations.is_some(),
+    ) {
         Ok(decided) => decided,
         Err(decline) => {
             return (
@@ -399,14 +411,25 @@ fn discharge_obligation(
     // A certificate is minted ONLY for a verified obligation, and only from an
     // artifact the engine bound to this unit's own assertion.
     let certificate = decided.proof.filter(|_| verified).map(|proof| {
-        TrustVcNativeTrustIrProducedCertificate::new(
+        let certificate = TrustVcNativeTrustIrProducedCertificate::new(
             inputs,
             obligation_id,
             &unit_id,
             proof.alethe,
             proof.kernel_verified,
             proof.strict_verified,
-        )
+        );
+        if let Some(sink) = inputs.cast_observations {
+            sink.record(
+                inputs.request.id.index(),
+                function_id.index(),
+                obligation_id.index(),
+                unit.relation.cast_sites.clone(),
+                &certificate,
+                proof.cast_observation,
+            );
+        }
+        certificate
     });
     (outcome, certificate)
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, GenericArgs, Ty, TyCtxt};
 use rustc_span::Symbol;
 
 use super::super::declaration_policy;
@@ -61,7 +61,7 @@ impl<'tcx> Check<'_, 'tcx> {
         Ok(())
     }
 
-    fn arguments(&self, owner: DefId, args: GenericArgsRef<'tcx>) -> Result<Vec<Ty<'tcx>>, String> {
+    fn arguments(&self, owner: DefId, args: GenericArgs<'tcx>) -> Result<Vec<Ty<'tcx>>, String> {
         let generics = self.tcx.generics_of(owner);
         if args.len() > self.type_work
             || generics.parent.is_some()
@@ -129,7 +129,7 @@ impl<'tcx> Check<'_, 'tcx> {
             }
             ty::Adt(adt, args) => {
                 let definition = adt.did();
-                let arguments = self.arguments(definition, args)?;
+                let arguments = self.arguments(definition, *args)?;
                 match self.builtin(definition) {
                     Some(
                         role @ (BuiltinRole::MathematicalInteger | BuiltinRole::NaturalNumber),
@@ -164,7 +164,7 @@ impl<'tcx> Check<'_, 'tcx> {
                         ) || self
                             .tcx
                             .type_of(parameter.def_id)
-                            .instantiate(self.tcx, args)
+                            .instantiate(self.tcx, *args)
                             .skip_normalization()
                             != *allocator
                         {

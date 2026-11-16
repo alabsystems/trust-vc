@@ -50,6 +50,13 @@ impl<'tcx> FnReader<'_, 'tcx> {
         let ty::Adt(adt_def, args) = rustc_ty.kind() else {
             return refuse("expr", "a struct expression of a non-ADT type", span);
         };
+        if self.cx.source_opaque_nominal(adt_def.did()) {
+            return refuse(
+                "source-opaque-representation",
+                "an opaque source carrier has no constructor or update authority",
+                span,
+            );
+        }
         if self.cx.imported_nominal(adt_def.did()).is_some() {
             return refuse(
                 "opaque-import",
@@ -62,14 +69,39 @@ impl<'tcx> FnReader<'_, 'tcx> {
         }
         self.check_datatype_access(*adt_def, span, "constructor");
         let count = adt_def.non_enum_variant().fields.len();
+        let declared = &adt_def.non_enum_variant().fields;
+        let mut modes = Vec::new();
+        for field in fields {
+            let Some(index) = self.typeck.opt_field_index(field.hir_id) else {
+                return refuse(
+                    "field-mode",
+                    "a constructor field without its native index",
+                    field.span,
+                );
+            };
+            let Some(formal) = declared.get(index) else {
+                return refuse(
+                    "field-mode",
+                    "a constructor field outside its native declaration",
+                    field.span,
+                );
+            };
+            modes.push(
+                super::super::datatypes::field_mode(self.tcx, formal, field.span)
+                    .map_err(super::FnProblem::Refused)?,
+            );
+        }
         let mut operands: Vec<_> = fields.iter().map(|field| field.expr).collect();
         operands.extend(base);
+        if base.is_some() {
+            modes.push(Mode::Exec);
+        }
         // The existing operand lowering freezes values before later effects.
         // Include the base in that same source-order sequence.
-        let mut values = self.operands(&operands, ctx, out)?;
+        let mut values = self.constructor_operands(&operands, &modes, ctx, out)?;
         let mut bindings = Vec::new();
         if base.is_some() {
-            (values, bindings) = self.save_update_values(values, &operands, ctx, out);
+            (values, bindings) = self.save_update_values(values, &operands, &modes, ctx, out);
         }
         let base_value = if base.is_some() {
             let Some(value) = values.pop() else {
@@ -97,7 +129,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
             *slot = Some(value);
         }
         if let (Some(base), Some(value)) = (base, base_value) {
-            self.fill_update_fields(e, base, value, *adt_def, args, &mut slots)?;
+            self.fill_update_fields(e, base, value, *adt_def, *args, &mut slots)?;
         }
         let Some(fields) = slots.into_iter().collect::<Option<Vec<_>>>() else {
             return refuse("expr", "a struct expression that misses a field", span);
@@ -132,12 +164,13 @@ impl<'tcx> FnReader<'_, 'tcx> {
         &mut self,
         values: Vec<Expr>,
         sources: &[&hir::Expr<'_>],
+        modes: &[Mode],
         ctx: Ctx,
         out: &mut Vec<Stmt>,
     ) -> (Vec<Expr>, Vec<Binding>) {
         let mut saved = Vec::new();
         let mut bindings = Vec::new();
-        for (value, source) in values.into_iter().zip(sources) {
+        for ((value, source), formal) in values.into_iter().zip(sources).zip(modes) {
             let id = if ctx == Ctx::Spec {
                 let id = self.add_local(
                     self.local_decl(
@@ -153,7 +186,11 @@ impl<'tcx> FnReader<'_, 'tcx> {
                 bindings.push((id, value, source.span));
                 id
             } else {
-                let id = self.temp(value.ty.clone(), ctx, source.span);
+                let id = self.temp_with_mode(
+                    value.ty.clone(),
+                    super::constructors::transport_mode(ctx, *formal),
+                    source.span,
+                );
                 out.push(Stmt::new(
                     self.sp(source.span),
                     StmtKind::Let {
@@ -173,7 +210,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
     pub(super) fn instantiated_field_rty(
         &self,
         field: &ty::FieldDef,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         span: Span,
     ) -> R<ty::Ty<'tcx>> {
         let env = ty::TypingEnv::post_analysis(self.tcx, self.body_def);
@@ -196,7 +233,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
         base: &hir::Expr<'_>,
         value: Expr,
         adt: ty::AdtDef<'tcx>,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         slots: &mut [Option<Expr>],
     ) -> R<()> {
         let base_ty = self.expr_rty(base);
@@ -250,7 +287,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
                 }
                 continue;
             }
-            let source = self.instantiated_field_rty(field, base_args, base.span)?;
+            let source = self.instantiated_field_rty(field, *base_args, base.span)?;
             if source != target || self.at(source_types[index]) != source {
                 return refuse(
                     "type",

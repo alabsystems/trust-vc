@@ -240,7 +240,9 @@ impl Observe<'_, '_, '_> {
                     self.precharge_type_copy(e, child, depth + 1)?;
                 }
             }
-            Ty::Ref { inner, .. } => self.precharge_type_copy(e, inner, depth + 1)?,
+            Ty::Ref { inner, .. } | Ty::MutRef(inner) => {
+                self.precharge_type_copy(e, inner, depth + 1)?
+            }
             _ => {}
         }
         Ok(())
@@ -639,6 +641,13 @@ impl Observe<'_, '_, '_> {
                 self.copy(e, field)
             }
             ExprKind::Borrow(inner) => self.go(inner, d),
+            ExprKind::MutRefCurrent(_)
+            | ExprKind::MutRefFuture(_)
+            | ExprKind::MutRefUpdate { .. }
+            | ExprKind::HasResolved(_)
+            | ExprKind::ProofInSpecTail { .. } => {
+                self.error(e, "opaque reference operation or embedded proof")
+            }
             ExprKind::Quant {
                 kind, vars, body, ..
             } => {

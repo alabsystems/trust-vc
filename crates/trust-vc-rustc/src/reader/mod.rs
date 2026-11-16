@@ -50,11 +50,13 @@ mod declaration_policy;
 pub mod declaration_staging;
 mod declaration_types;
 mod declaration_wf;
+mod derived_clones;
 mod enum_diagnostics;
 mod function_identity;
 pub(crate) mod function_identity_observer;
 mod function_identity_projection;
 mod function_identity_resolution;
+mod ghost_tail_agreement;
 mod imports;
 mod local_variant_fields;
 mod modes;
@@ -70,7 +72,7 @@ use std::collections::{HashMap, HashSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::ty::{self as mty, TyCtxt};
-use rustc_span::Span;
+use rustc_span::{FileName, Span};
 
 use trust_vc_vcir::{
     AdtDecl, AdtId, AdtKind, DefHash, FieldDecl, FnId, Mode, SpanId, VariantDecl, VcCrate,
@@ -172,17 +174,24 @@ pub struct FnRecord {
 /// Options from the command line that change what the reader reports.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReadOptions {
-    /// `-V new-mut-ref`: `&mut` operands of spec `==` are allowed.
+    /// `-V new-mut-ref`: mutable references have opaque logical identity.
+    /// Executable storage additionally requires native availability/resolution.
     pub new_mut_ref: bool,
     /// `--no-external-by-default`: items outside `verus!` are verified too.
     pub no_external_by_default: bool,
+    /// `-V no-bv-simplify`: retain original BV expression occurrences.
+    pub no_bv_simplify: bool,
 }
 
 /// Everything the reader produced for one crate.
 #[derive(Debug)]
 pub struct CrateRead {
+    /// The actual reader invocation policy, retained with this immutable read.
+    pub(crate) read_options: ReadOptions,
     /// The functions and data types read completely.
     pub krate: VcCrate,
+    /// Separate equations admitted only by the live native library join.
+    pub(crate) spec_definitions: trust_vc_vcir::CheckedSpecDefinitions,
     /// `SpanId(i)` is `spans[i]`.
     pub spans: Vec<Span>,
     /// Spans of `Return` statements that come from a `return` expression.
@@ -274,6 +283,72 @@ pub(crate) const TAG_VERUS_WF: &str = "verus-wf";
 /// `fn f(..);` (`builtin_macros/src/syntax_trait.rs`).
 pub(crate) const VERUS_SPEC: &str = "VERUS_SPEC__";
 
+/// The native declaration specified by a trait's generated companion.
+/// This locates a pair only; callers separately decide its permitted use.
+fn trait_spec_declaration(tcx: TyCtxt<'_>, spec: LocalDefId) -> Option<LocalDefId> {
+    if tcx.def_kind(spec) != DefKind::AssocFn {
+        return None;
+    }
+    let trait_id = tcx.local_parent(spec);
+    if tcx.def_kind(trait_id) != DefKind::Trait {
+        return None;
+    }
+    let name = tcx.item_name(spec.to_def_id());
+    let target = name.as_str().strip_prefix(VERUS_SPEC)?;
+    tcx.associated_items(trait_id)
+        .in_definition_order()
+        .find(|item| {
+            matches!(item.kind, mty::AssocKind::Fn { .. })
+                && item.name().as_str() == target
+                && item.def_id != spec.to_def_id()
+        })
+        .and_then(|item| item.def_id.as_local())
+        .filter(|decl| tcx.local_parent(*decl) == trait_id)
+}
+
+/// Diagnostic identity for an original item and its macro-cloned companion.
+/// Equal names or a shared whole-macro callsite do not identify a source item.
+/// This does not register a body, change classification, or grant visibility.
+fn external_trait_source(tcx: TyCtxt<'_>, item: LocalDefId) -> LocalDefId {
+    let Some(decl) = trait_spec_declaration(tcx, item) else {
+        return item;
+    };
+    let (Some(spec_span), Some(decl_span)) = (
+        tcx.def_ident_span(item.to_def_id()),
+        tcx.def_ident_span(decl.to_def_id()),
+    ) else {
+        return item;
+    };
+    if spec_span.is_dummy()
+        || decl_span.is_dummy()
+        || spec_span.lo() >= spec_span.hi()
+        || decl_span.lo() >= decl_span.hi()
+    {
+        return item;
+    }
+    let source_map = tcx.sess.source_map();
+    let spec_file = source_map.lookup_source_file(spec_span.lo());
+    let decl_file = source_map.lookup_source_file(decl_span.lo());
+    if !matches!(spec_file.name, FileName::Real(_))
+        || spec_file.stable_id != decl_file.stable_id
+        || !spec_file.contains(spec_span.hi())
+        || !decl_file.contains(decl_span.hi())
+        || spec_file.original_relative_byte_pos(spec_span.lo())
+            != decl_file.original_relative_byte_pos(decl_span.lo())
+        || spec_file.original_relative_byte_pos(spec_span.hi())
+            != decl_file.original_relative_byte_pos(decl_span.hi())
+    {
+        return item;
+    }
+    decl
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ExternalItemDiagnostic {
+    Trait,
+    TraitImpl,
+}
+
 /// Upper bound on the instances ([`Cx::instance`]) of one crate.
 const MAX_INSTANCES: usize = 512;
 
@@ -281,8 +356,8 @@ const MAX_INSTANCES: usize = 512;
 /// the ones still to be read.
 #[derive(Default)]
 pub(crate) struct Instances<'tcx> {
-    ids: HashMap<(DefId, mty::GenericArgsRef<'tcx>), FnId>,
-    queue: Vec<(LocalDefId, mty::GenericArgsRef<'tcx>, FnId)>,
+    ids: HashMap<(DefId, mty::GenericArgs<'tcx>), FnId>,
+    queue: Vec<(LocalDefId, mty::GenericArgs<'tcx>, FnId)>,
 }
 
 /// State shared by every function's lowering.
@@ -298,11 +373,16 @@ pub(crate) struct Cx<'tcx> {
     pub fns: HashMap<DefId, FnInfo>,
     /// Structs of this crate that VcIR represents.
     adts: HashMap<DefId, AdtId>,
+    /// Original opaque source identities installed by a borrowed, current
+    /// Keep capability. Membership only denies representation operations.
+    source_opaque_nominals: HashSet<DefId>,
     /// Only a sealed current-client declaration packet populates this index.
     /// The ordinary product entry point has no implicit library authority.
     imports: Option<imports::Registry<'tcx>>,
+    spec_definitions: trust_vc_vcir::CheckedSpecDefinitions,
     local_variant_fields: Option<local_variant_fields::Local<'tcx>>,
     enum_diagnostics: HashSet<DefId>,
+    derived_clones: derived_clones::Registry,
     /// The span table.
     spans: RefCell<Vec<Span>>,
     /// See [`CrateRead::explicit_returns`].
@@ -310,6 +390,10 @@ pub(crate) struct Cx<'tcx> {
     /// See [`CrateRead::native_ownership`]. Eligibility is established from
     /// clean modes and a body that needs no ownership erasure.
     native_ownership: RefCell<HashMap<LocalDefId, ownership::NativeOwnership>>,
+    /// Completed mode facts stay in this exact compiler context, including
+    /// their original generic body when instances are lowered later.
+    checked_modes: RefCell<HashMap<LocalDefId, std::rc::Rc<modes::CheckedModes<'tcx>>>>,
+    ghost_tail_occurrences: RefCell<Vec<modes::ExpectedGhostTail>>,
     pub opts: ReadOptions,
     /// The specification method (`VERUS_SPEC__f`) of each trait method
     /// declaration `f` that has one.
@@ -333,7 +417,7 @@ pub(crate) struct Cx<'tcx> {
     /// For each method implementing a trait method, how many of its
     /// `requires`, `ensures` and `recommends` clauses (the leading ones) it
     /// inherits from the declaration.
-    pub inherited_counts: RefCell<HashMap<FnId, (usize, usize, usize)>>,
+    pub inherited_counts: RefCell<HashMap<FnId, (usize, usize, usize, bool)>>,
 }
 
 impl<'tcx> Cx<'tcx> {
@@ -355,8 +439,35 @@ impl<'tcx> Cx<'tcx> {
         self.imports.as_ref()?.nominal(self.tcx, def_id)
     }
 
+    fn source_opaque_nominal(&self, def_id: DefId) -> bool {
+        self.source_opaque_nominals.contains(&def_id)
+    }
+
+    /// Only type-argument occurrences are inspected. A source capability
+    /// excludes every other datatype declaration from this reader; this
+    /// query never inspects a nongeneric wrapper's private field language.
+    fn mentions_source_opaque(&self, ty: mty::Ty<'tcx>) -> bool {
+        ty.walk().any(|argument| {
+            argument.as_type().is_some_and(
+                |ty| matches!(ty.kind(), mty::Adt(adt, _) if self.source_opaque_nominal(adt.did())),
+            )
+        })
+    }
+
     fn imported_function(&self, def_id: DefId) -> Option<(FnId, usize)> {
         self.imports.as_ref()?.function(self.tcx, def_id)
+    }
+
+    fn imported_seq_len(&self, def_id: DefId) -> bool {
+        self.imports
+            .as_ref()
+            .is_some_and(|imports| imports.seq_len(self.tcx, def_id))
+    }
+
+    fn imported_seq_index(&self, def_id: DefId) -> bool {
+        self.imports
+            .as_ref()
+            .is_some_and(|imports| imports.seq_index(self.tcx, def_id))
     }
 
     fn imported_nominal_policy(&self, def_id: DefId) -> Option<imports::NominalPolicy<'_>> {
@@ -397,7 +508,7 @@ impl<'tcx> Cx<'tcx> {
     /// type arguments `args` ([`trust_vc_vcir::FnRole::Instance`]); it is
     /// read after every function of the crate. `None` for a function that
     /// is not a Verus function of this crate.
-    pub(crate) fn instance(&self, def_id: DefId, args: mty::GenericArgsRef<'tcx>) -> Option<FnId> {
+    pub(crate) fn instance(&self, def_id: DefId, args: mty::GenericArgs<'tcx>) -> Option<FnId> {
         use std::hash::{Hash, Hasher};
         let local = def_id.as_local()?;
         self.fns.get(&def_id)?;
@@ -421,12 +532,12 @@ impl<'tcx> Cx<'tcx> {
     }
 
     /// The next instance to read.
-    fn next_instance(&self) -> Option<(LocalDefId, mty::GenericArgsRef<'tcx>, FnId)> {
+    fn next_instance(&self) -> Option<(LocalDefId, mty::GenericArgs<'tcx>, FnId)> {
         self.instances.borrow_mut().queue.pop()
     }
 
     /// Every instance, with its generic function and type arguments.
-    fn instance_sources(&self) -> HashMap<FnId, (LocalDefId, mty::GenericArgsRef<'tcx>)> {
+    fn instance_sources(&self) -> HashMap<FnId, (LocalDefId, mty::GenericArgs<'tcx>)> {
         self.instances
             .borrow()
             .ids
@@ -555,7 +666,25 @@ fn read_with_imports<'tcx>(
     opts: ReadOptions,
     imports: Option<imports::Registry<'tcx>>,
 ) -> CrateRead {
-    let items = verus_item_table(tcx);
+    read_with_context(tcx, opts, imports, None)
+}
+
+/// A selection made from an original, live native dependency graph. The
+/// staging finalizer authenticates every language item before supplying this
+/// context; ordinary reads continue to use their complete native crate.
+struct SpecReadContext<'facts, 'tcx> {
+    owners: HashSet<LocalDefId>,
+    items: HashMap<DefId, VerusItem>,
+    source_nominals: Option<&'facts declaration_staging::SourceNominals<'facts, 'tcx>>,
+}
+
+fn read_with_context<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    opts: ReadOptions,
+    imports: Option<imports::Registry<'tcx>>,
+    spec: Option<&SpecReadContext<'_, 'tcx>>,
+) -> CrateRead {
+    let items = spec.map_or_else(|| verus_item_table(tcx), |scope| scope.items.clone());
     let (global_sizes, global_errors, global_refusals) = architecture::collect(tcx, &items);
     let mut cx = Cx {
         tcx,
@@ -564,12 +693,21 @@ fn read_with_imports<'tcx>(
         items,
         fns: HashMap::new(),
         adts: HashMap::new(),
+        source_opaque_nominals: HashSet::new(),
         imports,
+        spec_definitions: trust_vc_vcir::CheckedSpecDefinitions::default(),
         local_variant_fields: None,
         enum_diagnostics: HashSet::new(),
+        derived_clones: if spec.is_none() {
+            derived_clones::Registry::collect(tcx, opts.no_external_by_default)
+        } else {
+            derived_clones::Registry::default()
+        },
         spans: RefCell::new(Vec::new()),
         explicit_returns: RefCell::new(HashSet::new()),
         native_ownership: RefCell::new(HashMap::new()),
+        checked_modes: RefCell::new(HashMap::new()),
+        ghost_tail_occurrences: RefCell::new(Vec::new()),
         opts,
         spec_methods: HashMap::new(),
         instances: RefCell::new(Instances::default()),
@@ -590,6 +728,7 @@ fn read_with_imports<'tcx>(
     let mut pending_item_refusals = Vec::new();
     let mut structs = Vec::new();
     let mut errors = global_errors;
+    let mut external_item_diagnostics = HashSet::new();
     // Verus's well-formedness warnings about function bodies.
     let mut fn_warnings: Vec<UserError> = Vec::new();
     // The `VERUS_SPEC__f` methods of traits, matched to their declarations
@@ -604,10 +743,36 @@ fn read_with_imports<'tcx>(
     let mut read_items = Vec::new();
     let mut pending_enum_diagnostics = Vec::new();
 
+    if let Some(nominals) = spec.and_then(|scope| scope.source_nominals) {
+        if let Err(reason) = nominals.install(&mut cx, &mut krate) {
+            item_refusals.push(Refusal::new(
+                "source-opaque-context",
+                reason,
+                tcx.def_span(rustc_hir::def_id::CRATE_DEF_ID),
+            ));
+        }
+    }
+
     // First pass: classify every item and register the functions and datatypes
     // that other items may refer to.
     for owner in tcx.hir_crate_items(()).owners() {
         let def_id = owner.def_id;
+        if cx.source_opaque_nominal(def_id.to_def_id()) {
+            continue;
+        }
+        if spec.is_some_and(|scope| !scope.owners.contains(&def_id)) {
+            continue;
+        }
+        if spec.is_some_and(|scope| scope.source_nominals.is_some())
+            && !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn)
+        {
+            item_refusals.push(Refusal::new(
+                "source-opaque-context",
+                "an opaque source read permits only functions and its one checked carrier",
+                tcx.def_span(def_id),
+            ));
+            continue;
+        }
         if global_sizes.consumes(tcx, def_id) {
             continue;
         }
@@ -657,8 +822,19 @@ fn read_with_imports<'tcx>(
         // Verus reports while building VIR; they are refused otherwise.
         let loose = opts.no_external_by_default;
         let native_constant = kind == DefKind::AssocConst && cx.constants.mode(def_id).is_some();
-        let outside = !item_attrs.verus_macro && !native_constant;
-        let verus = (item_attrs.verus_macro || native_constant || loose) && !external;
+        let derived_source = cx.derived_clones.source(def_id);
+        let outside = !item_attrs.verus_macro && !native_constant && derived_source.is_none();
+        let verus =
+            (item_attrs.verus_macro || native_constant || derived_source.is_some() || loose)
+                && !external;
+        if verus && item_attrs.broadcast_forall && !matches!(kind, DefKind::Fn | DefKind::AssocFn) {
+            item_refusals.push(Refusal::new(
+                "broadcast-contract",
+                "a broadcast marker on an item other than a function",
+                span,
+            ));
+            continue;
+        }
         // An impl nested in a body of Verus code, whatever the body's mode
         // and whether or not it is external: the erase run may not have it
         // where Verus's lifetime check does ([`nested_in_verus_body`]).
@@ -738,11 +914,14 @@ fn read_with_imports<'tcx>(
                 )
                 .verus_macro)
         {
-            errors.push(UserError::new(
-                Phase::RustToVir,
-                item_span,
-                messages::traits::EXTERNAL_TRAIT_ITEM,
-            ));
+            let source = external_trait_source(tcx, def_id);
+            if external_item_diagnostics.insert((source, ExternalItemDiagnostic::Trait)) {
+                errors.push(UserError::new(
+                    Phase::RustToVir,
+                    tcx.hir_span_with_body(tcx.local_def_id_to_hir_id(source)),
+                    messages::traits::EXTERNAL_TRAIT_ITEM,
+                ));
+            }
         }
         // `external.rs`: one item of a trait implementation Verus reads
         // cannot be external.
@@ -758,11 +937,13 @@ fn read_with_imports<'tcx>(
             )
             .verus_macro
         {
-            errors.push(UserError::new(
-                Phase::RustToVir,
-                item_span,
-                messages::traits::EXTERNAL_IMPL_ITEM,
-            ));
+            if external_item_diagnostics.insert((def_id, ExternalItemDiagnostic::TraitImpl)) {
+                errors.push(UserError::new(
+                    Phase::RustToVir,
+                    item_span,
+                    messages::traits::EXTERNAL_IMPL_ITEM,
+                ));
+            }
         }
         let enum_diagnostic = if own_attrs
             .iter()
@@ -805,6 +986,7 @@ fn read_with_imports<'tcx>(
         // Verus reads it with the attributes of its type.
         if matches!(kind, DefKind::Impl { of_trait: true })
             && tcx.is_automatically_derived(def_id.to_def_id())
+            && !cx.derived_clones.implementation(def_id)
         {
             if let Some(refusal) = derived_impl_problem(tcx, def_id, loose) {
                 item_refusals.push(refusal);
@@ -902,7 +1084,9 @@ fn read_with_imports<'tcx>(
                 span,
             )),
             DefKind::Impl { of_trait: true } if verus => {
-                match trait_impl_problem(tcx, def_id, loose)
+                match (!cx.derived_clones.implementation(def_id))
+                    .then(|| trait_impl_problem(tcx, def_id, loose))
+                    .flatten()
                     .or_else(|| impl_header_problem(&cx, def_id))
                 {
                     Some(refusal) => item_refusals.push(refusal),
@@ -1087,19 +1271,7 @@ fn read_with_imports<'tcx>(
     // Specification methods and the declarations they specify
     // (`vir/src/headers.rs`, `make_trait_decls`).
     for spec in spec_candidates {
-        let trait_id = tcx.local_parent(spec);
-        let name = tcx.item_name(spec.to_def_id());
-        let target = &name.as_str()[VERUS_SPEC.len()..];
-        let decl = tcx
-            .associated_items(trait_id)
-            .in_definition_order()
-            .find(|item| {
-                matches!(item.kind, mty::AssocKind::Fn { .. })
-                    && item.name().as_str() == target
-                    && item.def_id != spec.to_def_id()
-            })
-            .and_then(|item| item.def_id.as_local());
-        match decl {
+        match trait_spec_declaration(tcx, spec) {
             Some(decl) => {
                 cx.spec_methods.insert(decl, spec);
             }
@@ -1150,6 +1322,11 @@ fn read_with_imports<'tcx>(
             modes::ModeCheck::Error(error) => Some(error.clone()),
             _ => None,
         };
+        if let modes::ModeCheck::Clean(checked) = &mode_check {
+            cx.checked_modes
+                .borrow_mut()
+                .insert(record.def_id, std::rc::Rc::new(checked.clone()));
+        }
         // Constant initialization has no function-shaped ownership body or
         // signature. Its immutable value is checked through Body::Constant;
         // it cannot mint tracked function ownership from a proxy signature.
@@ -1376,11 +1553,25 @@ fn read_with_imports<'tcx>(
             ));
         }
     }
+    if let Err(refusal) = ghost_tail_agreement::check(&cx, &krate) {
+        verify_refusals.push(refusal);
+    }
+    if let Some(nominals) = spec.and_then(|scope| scope.source_nominals) {
+        if let Err(reason) = nominals.revalidate(tcx) {
+            item_refusals.push(Refusal::new(
+                "source-opaque-context",
+                reason,
+                tcx.def_span(rustc_hir::def_id::CRATE_DEF_ID),
+            ));
+        }
+    }
     let spans = cx.spans.into_inner();
     let explicit_returns = cx.explicit_returns.into_inner();
     let native_ownership = cx.native_ownership.into_inner().into_keys().collect();
     CrateRead {
+        read_options: opts,
         krate,
+        spec_definitions: cx.spec_definitions,
         spans,
         explicit_returns,
         fns,

@@ -415,6 +415,8 @@ pub(crate) struct Analysis<'a> {
     /// The other formulas that bear on a subformula of a formula, among
     /// the inlined facts or not.
     relevant: HashMap<(usize, bool, Term), Vec<usize>>,
+    /// Exact connectivity of the immutable original/inlined fact banks.
+    fact_indices: [Option<fact_closure::Prepared>; 2],
     /// Evaluation steps left for the witness searches.
     witness_budget: usize,
     /// The collisions of each definition's body ([`collisions`]).
@@ -452,6 +454,8 @@ pub(crate) struct Analysis<'a> {
     fact_closure_passes: usize,
     #[cfg(test)]
     fact_closure_scanned_rows: usize,
+    #[cfg(test)]
+    fact_closure_work: usize,
 }
 
 /// The smallest and largest value of each bounded function, by name.
@@ -491,6 +495,7 @@ impl<'a> Analysis<'a> {
             graphs: HashMap::new(),
             depends: HashMap::new(),
             relevant: HashMap::new(),
+            fact_indices: [None, None],
             witness_budget: WITNESS_BUDGET,
             collisions: HashMap::new(),
             early: HashSet::new(),
@@ -516,6 +521,8 @@ impl<'a> Analysis<'a> {
             fact_closure_passes: 0,
             #[cfg(test)]
             fact_closure_scanned_rows: 0,
+            #[cfg(test)]
+            fact_closure_work: 0,
         }
     }
 
@@ -642,6 +649,7 @@ impl<'a> Analysis<'a> {
         hypotheses: &[(Term, Position)],
         goal: &(Term, Position),
     ) -> R<Conds> {
+        self.fact_indices = [None, None];
         let negated = goal.0.clone().not();
         let all = hypotheses
             .iter()
@@ -1176,27 +1184,56 @@ impl<'a> Analysis<'a> {
             {
                 self.fact_closure_calls += 1;
             }
-            #[cfg(not(test))]
-            let closed = fact_closure::close(self.fact_list(), current, node, &mut pay);
-            #[cfg(test)]
             let closed = {
+                #[cfg(test)]
                 let mut input_rows = 0usize;
+                #[cfg(test)]
                 let mut passes = 0usize;
+                #[cfg(test)]
                 let mut scanned_rows = 0usize;
-                let closed = fact_closure::close_observed(
-                    self.fact_list(),
-                    current,
-                    node,
-                    &mut pay,
-                    &mut |event| match event {
-                        fact_closure::Event::InputFact => input_rows += 1,
-                        fact_closure::Event::Pass => passes += 1,
-                        fact_closure::Event::FactRow => scanned_rows += 1,
-                    },
+                #[cfg(test)]
+                let mut work = 0usize;
+                let mut closure_pay = |cost| {
+                    let admitted = pay(cost);
+                    #[cfg(test)]
+                    if admitted {
+                        work += cost;
+                    }
+                    admitted
+                };
+                #[cfg(not(test))]
+                let mut observer = |_| {};
+                #[cfg(test)]
+                let mut observer = |event| match event {
+                    fact_closure::Event::InputFact => input_rows += 1,
+                    fact_closure::Event::Pass => passes += 1,
+                    fact_closure::Event::FactRow => scanned_rows += 1,
+                };
+                let cohort = usize::from(
+                    self.every.is_some() && (self.inlined || self.current == Some(EVERY)),
                 );
-                self.fact_closure_input_rows += input_rows;
-                self.fact_closure_passes += passes;
-                self.fact_closure_scanned_rows += scanned_rows;
+                let closed = (|| {
+                    if self.fact_indices[cohort].is_none() {
+                        self.fact_indices[cohort] = Some(fact_closure::Prepared::new(
+                            self.fact_list(),
+                            &mut closure_pay,
+                            &mut observer,
+                        )?);
+                    }
+                    self.fact_indices[cohort].as_ref().ok_or(TooBig)?.close(
+                        current,
+                        node,
+                        &mut closure_pay,
+                        &mut observer,
+                    )
+                })();
+                #[cfg(test)]
+                {
+                    self.fact_closure_input_rows += input_rows;
+                    self.fact_closure_passes += passes;
+                    self.fact_closure_scanned_rows += scanned_rows;
+                    self.fact_closure_work += work;
+                }
                 closed
             };
             let found = match closed {
@@ -1442,35 +1479,56 @@ impl<'a> Analysis<'a> {
                         }) else {
                             continue;
                         };
-                        // This is an actual subterm of this exact still-present
-                        // ITE, already scaled by its branch and filtered by a
-                        // witness for the WHOLE ITE. A bare oob call cannot
-                        // mint a whole-clip candidate or relevance condition.
-                        let Some(item) = out.get(fallback) else {
-                            continue;
-                        };
-                        let mut left = self.budget;
-                        let mut pay = |cost| match left.checked_sub(cost) {
-                            Some(next) => {
-                                left = next;
-                                true
+                        // Both branches are actual children of this exact
+                        // canonical ITE and were filtered against the WHOLE
+                        // ITE above. A surviving UF value branch can witness
+                        // its in-range case too. Bare calls and collapsed Var
+                        // images still cannot mint any clip metadata.
+                        for (branch, in_range) in [(fallback, false), (a.as_ref(), true)] {
+                            if in_range && !matches!(branch, Term::Call { .. }) {
+                                continue;
                             }
-                            None => false,
-                        };
-                        if !super::closed_templates::charge_term(e, &mut pay)
-                            || !super::closed_templates::charge_term(&item.cond, &mut pay)
-                            || !item
-                                .carriers
-                                .iter()
-                                .all(|value| super::closed_templates::charge_term(value, &mut pay))
-                        {
-                            self.budget = 0;
-                            return Err(TooBig);
+                            // HashMap lookup reads the whole branch even on
+                            // a miss. Charge that walk before borrowing an
+                            // item; the clone/add reservation below is separate.
+                            if !super::closed_templates::charge_term(branch, &mut |cost| {
+                                self.charge(cost).is_ok()
+                            }) {
+                                self.budget = 0;
+                                return Err(TooBig);
+                            }
+                            let Some(item) = out.get(branch) else {
+                                continue;
+                            };
+                            let mut left = self.budget;
+                            let mut pay = |cost| match left.checked_sub(cost) {
+                                Some(next) => {
+                                    left = next;
+                                    true
+                                }
+                                None => false,
+                            };
+                            if !super::closed_templates::charge_term(e, &mut pay)
+                                || !super::closed_templates::charge_term(&item.cond, &mut pay)
+                                || !super::closed_templates::charge_term(c, &mut pay)
+                                || !item.carriers.iter().all(|value| {
+                                    super::closed_templates::charge_term(value, &mut pay)
+                                })
+                                || !pay(3)
+                            {
+                                self.budget = 0;
+                                return Err(TooBig);
+                            }
+                            let selected = if in_range {
+                                (**c).clone()
+                            } else {
+                                (**c).clone().not()
+                            };
+                            let condition = Term::And(vec![item.cond.clone(), selected]);
+                            let carriers = item.carriers.clone();
+                            self.budget = left;
+                            out.add(e.clone(), &carriers, condition);
                         }
-                        let condition = item.cond.clone();
-                        let carriers = item.carriers.clone();
-                        self.budget = left;
-                        out.add(e.clone(), &carriers, condition);
                     }
                 }
                 Ok(out)
@@ -2901,3 +2959,6 @@ mod fact_closure_tests;
 #[cfg(test)]
 #[path = "clip_origin_tests.rs"]
 mod clip_origin_tests;
+
+#[cfg(test)]
+pub(super) mod e18_completion_tests;

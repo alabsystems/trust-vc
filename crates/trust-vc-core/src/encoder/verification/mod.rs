@@ -45,6 +45,8 @@ pub(crate) mod outcome;
 pub(super) mod overflow;
 pub(super) mod overflow_logic;
 pub(super) mod panic;
+#[cfg(test)]
+pub(in crate::encoder) mod phase_observer;
 pub(in crate::encoder) mod pruning;
 pub(super) mod query;
 pub(super) mod rewrite;

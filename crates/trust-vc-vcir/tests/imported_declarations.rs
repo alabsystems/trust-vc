@@ -22,6 +22,7 @@ fn local(ty: Ty, kind: LocalKind) -> LocalDecl {
         name: "value".into(),
         ty,
         mode: Mode::Spec,
+        prophecy: trust_vc_vcir::DeclProphecy::Default,
         mutable: false,
         kind,
         span: SpanId(0),
@@ -48,6 +49,7 @@ fn imported(number: u64, result: Ty) -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::None,
     }

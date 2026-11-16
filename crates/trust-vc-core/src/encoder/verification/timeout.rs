@@ -358,7 +358,10 @@ pub(in crate::encoder) fn reserve_solver_thread_slot() -> SolverThreadGuard {
                 .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return SolverThreadGuard;
+                return SolverThreadGuard {
+                    #[cfg(test)]
+                    capacity_admitted: true,
+                };
             }
             continue;
         }
@@ -376,7 +379,10 @@ pub(in crate::encoder) fn reserve_solver_thread_slot() -> SolverThreadGuard {
         max = max_solver_threads(),
         "Solver thread limiter bypassed — memory pressure risk"
     );
-    SolverThreadGuard
+    SolverThreadGuard {
+        #[cfg(test)]
+        capacity_admitted: false,
+    }
 }
 
 /// RAII guard that decrements `LIVE_SOLVER_THREADS` on drop, even if the
@@ -387,12 +393,80 @@ pub(in crate::encoder) fn reserve_solver_thread_slot() -> SolverThreadGuard {
 /// on the calling thread before returning this guard. The guard is then
 /// moved into the spawned thread so the decrement happens when the thread
 /// exits (or panics). Fixes #1710.
-pub(in crate::encoder) struct SolverThreadGuard;
+pub(in crate::encoder) struct SolverThreadGuard {
+    #[cfg(test)]
+    capacity_admitted: bool,
+}
 
 impl Drop for SolverThreadGuard {
     fn drop(&mut self) {
         LIVE_SOLVER_THREADS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TIMING_HAS_ADMITTED_SLOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reserve normal work unless this same thread already holds the timing
+/// scope's genuinely capacity-admitted reservation. No permit is exported.
+#[cfg(test)]
+pub(in crate::encoder) fn reserve_solver_thread_slot_for_current_work() -> Option<SolverThreadGuard>
+{
+    if TIMING_HAS_ADMITTED_SLOT.with(std::cell::Cell::get) {
+        None
+    } else {
+        Some(reserve_solver_thread_slot())
+    }
+}
+
+/// Own one existing reservation outside the corpus's measurement window.
+/// Only a successful capacity CAS can establish same-thread borrowing.
+#[cfg(test)]
+pub(in crate::encoder) fn with_timing_solver_admission<T>(
+    f: impl FnOnce(Duration, bool) -> T,
+) -> T {
+    // Keep the existing optional gate outside capacity acquisition. The
+    // default remains parallel; sequential mode keeps its original reentry.
+    super::test_gate::with_verify_test_gate(|| timing_solver_admission_inner(f))
+}
+
+#[cfg(test)]
+fn timing_solver_admission_inner<T>(f: impl FnOnce(Duration, bool) -> T) -> T {
+    if TIMING_HAS_ADMITTED_SLOT.with(std::cell::Cell::get) {
+        return f(Duration::ZERO, true);
+    }
+    let started = std::time::Instant::now();
+    let owner = reserve_solver_thread_slot();
+    let waited = started.elapsed();
+    if !owner.capacity_admitted {
+        // The original overload fallback is counted, but did not acquire
+        // capacity. It cannot authorize borrowing. Release this outer probe;
+        // ordinary verification keeps its existing reservation/fallback path.
+        drop(owner);
+        return f(waited, false);
+    }
+    struct BorrowScope<'a> {
+        _owner: &'a SolverThreadGuard,
+        _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for BorrowScope<'_> {
+        fn drop(&mut self) {
+            TIMING_HAS_ADMITTED_SLOT.with(|held| held.set(false));
+        }
+    }
+    TIMING_HAS_ADMITTED_SLOT.with(|held| {
+        assert!(
+            !held.replace(true),
+            "timing admission cannot replace a live owner"
+        );
+    });
+    let _borrow = BorrowScope {
+        _owner: &owner,
+        _same_thread: std::marker::PhantomData,
+    };
+    f(waited, true)
 }
 
 // Thread-local flag: current thread is running within a timeout-protected
@@ -727,5 +801,73 @@ mod tests {
             expected,
             "default should be num_cores/2 (min 2): cores={cores}"
         );
+    }
+
+    /// Borrow the same real owner through the ordinary native verification path,
+    /// including nested timing scopes; no second reservation is returned.
+    #[test]
+    fn timing_admission_reuses_owner_for_nested_native_verification() {
+        with_serialized_guard_test(|| {
+            with_timing_solver_admission(|_, admitted| {
+                assert!(admitted, "test needs an actual capacity-admitted owner");
+                assert!(reserve_solver_thread_slot_for_current_work().is_none());
+                with_timing_solver_admission(|waited, nested_admitted| {
+                    assert!(nested_admitted);
+                    assert_eq!(waited, Duration::ZERO);
+                    assert!(reserve_solver_thread_slot_for_current_work().is_none());
+                    let mut ctx = crate::vc::VerificationContext::new();
+                    ctx.declare_var_typed("flag", crate::ir::TrustVcType::Bool);
+                    ctx.push_obligation(crate::vc::ProofObligation::assume("yes", "flag"));
+                    ctx.push_obligation(crate::vc::ProofObligation::assert("same", "flag"));
+                    assert!(crate::encoder::AYEncoder::verify(&ctx).is_verified());
+                });
+                assert!(reserve_solver_thread_slot_for_current_work().is_none());
+            });
+            let outside = reserve_solver_thread_slot_for_current_work();
+            assert!(
+                outside.is_some(),
+                "scope exit must restore ordinary reservation"
+            );
+            drop(outside);
+        });
+    }
+
+    /// An unwind revokes same-thread borrowing before the existing owner drops.
+    #[test]
+    fn timing_admission_restores_ordinary_reservation_after_unwind() {
+        with_serialized_guard_test(|| {
+            let failed = std::panic::catch_unwind(|| {
+                with_timing_solver_admission(|_, admitted| {
+                    assert!(admitted, "test needs an actual capacity-admitted owner");
+                    assert!(reserve_solver_thread_slot_for_current_work().is_none());
+                    panic!("unwind inside a timing admission");
+                });
+            });
+            assert!(failed.is_err());
+            let outside = reserve_solver_thread_slot_for_current_work();
+            assert!(outside.is_some(), "panic must not leave borrowing enabled");
+            drop(outside);
+        });
+    }
+
+    /// A different worker never inherits the parent's borrowing marker. Its
+    /// ordinary guard remains Send and owns a distinct counted reservation.
+    #[test]
+    fn timing_admission_does_not_lend_ownership_to_unrelated_worker() {
+        with_serialized_guard_test(|| {
+            with_timing_solver_admission(|_, admitted| {
+                assert!(admitted, "test needs an actual capacity-admitted owner");
+                let worker = std::thread::spawn(|| {
+                    let own = reserve_solver_thread_slot_for_current_work()
+                        .expect("another thread must reserve its own capacity");
+                    let owner_drop = std::thread::spawn(move || drop(own));
+                    owner_drop
+                        .join()
+                        .expect("the existing owned guard remains Send");
+                });
+                worker.join().expect("unrelated worker should complete");
+                assert!(reserve_solver_thread_slot_for_current_work().is_none());
+            });
+        });
     }
 }

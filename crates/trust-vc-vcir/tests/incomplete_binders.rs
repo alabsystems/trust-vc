@@ -63,6 +63,7 @@ fn function(number: u64, body: Expr) -> FnDecl {
                 name: "result".into(),
                 ty: body.ty.clone(),
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Return,
                 span: SpanId(2),
@@ -71,6 +72,7 @@ fn function(number: u64, body: Expr) -> FnDecl {
                 name: "bound".into(),
                 ty: Ty::int(),
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Bound,
                 span: SpanId(3),
@@ -84,6 +86,7 @@ fn function(number: u64, body: Expr) -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Spec(body),
     }
@@ -166,8 +169,8 @@ fn diagnostic_binders_still_check_every_child_and_bound_local_type() {
         match component {
             0 => vars[0].1 = Ty::Bool,
             1 => trigger_candidates[0] = read(1, Ty::Bool, 11),
-            2 => *cond = Box::new(Expr::int_lit(1, Ty::int(), SpanId(14))),
-            3 => *result = Box::new(Expr::bool_lit(true, SpanId(15))),
+            2 => **cond = Expr::int_lit(1, Ty::int(), SpanId(14)),
+            3 => **result = Expr::bool_lit(true, SpanId(15)),
             _ => unreachable!(),
         }
         let found = check_crate_for_diagnostics(&source(body));
@@ -184,7 +187,7 @@ fn diagnostic_binders_still_check_every_child_and_bound_local_type() {
     let ExprKind::UntriggeredQuant { body: inner, .. } = &mut body.kind else {
         unreachable!()
     };
-    *inner = Box::new(Expr::int_lit(0, Ty::int(), SpanId(14)));
+    **inner = Expr::int_lit(0, Ty::int(), SpanId(14));
     assert!(check_crate_for_diagnostics(&source(body))
         .errors
         .iter()

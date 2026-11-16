@@ -10,9 +10,9 @@ use std::time::Duration;
 use super::outcome::{AssertionOutcome, SolverUnknownDetail};
 use super::panic::catch_ay_panic_to_unknown;
 use super::test_hooks::{bump_shared_bv_reuse_attempt_count, force_bv_timeout_enabled};
-use super::timeout::{
-    effective_bv_timeout, far_out_watchdog_timeout, reserve_solver_thread_slot, BV_HARD_TIMEOUT,
-};
+#[cfg(not(test))]
+use super::timeout::reserve_solver_thread_slot;
+use super::timeout::{effective_bv_timeout, far_out_watchdog_timeout, BV_HARD_TIMEOUT};
 use super::unknown_category::UnknownCategory;
 use crate::encoder::AYEncoder;
 use crate::error::TrustVcResult;
@@ -255,7 +255,10 @@ fn verify_with_timeout_inner(
 ) -> TrustVcResult<AssertionOutcome> {
     let budget = watchdog_budget(&encoder, assertion, rlimit_ms, base_timeout, base_label);
     let (timeout, timeout_label) = (budget.timeout, budget.label);
+    #[cfg(not(test))]
     let _guard = reserve_solver_thread_slot();
+    #[cfg(test)]
+    let _guard = super::timeout::reserve_solver_thread_slot_for_current_work();
     let interrupt = encoder.interrupt_handle();
     #[cfg_attr(not(test), allow(unused_variables))]
     let force_scope_pop_failure = super::test_hooks::take_forced_scope_pop_failure();
@@ -377,7 +380,10 @@ pub(in crate::encoder) fn verify_assertion_with_timeout_reuse(
         return Ok(ReuseAttempt::TimedOut);
     }
 
+    #[cfg(not(test))]
     let _guard = reserve_solver_thread_slot();
+    #[cfg(test)]
+    let _guard = super::timeout::reserve_solver_thread_slot_for_current_work();
     let interrupt = encoder.interrupt_handle();
     #[cfg_attr(not(test), allow(unused_variables))]
     let force_scope_pop_failure = super::test_hooks::take_forced_scope_pop_failure();

@@ -26,6 +26,7 @@ pub(in crate::vcgen) fn source() -> VcCrate {
                 name: "result".into(),
                 ty: Ty::Bool,
                 mode: Mode::Spec,
+                prophecy: crate::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Return,
                 span: SpanId(0),
@@ -34,6 +35,7 @@ pub(in crate::vcgen) fn source() -> VcCrate {
                 name: "value".into(),
                 ty: parameter,
                 mode: Mode::Spec,
+                prophecy: crate::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Param,
                 span: SpanId(0),
@@ -47,6 +49,7 @@ pub(in crate::vcgen) fn source() -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::None,
     };
@@ -61,6 +64,7 @@ pub(in crate::vcgen) fn application(ctx: &Ctx<'_>, tables: &Tables, ty: Ty, valu
         read: [(LocalId(1), Val::Leaf(value))].into_iter().collect(),
         old: HashMap::new(),
         types: TypeEnv::default(),
+        ..Reads::default()
     };
     let expr = Expr::new(
         Ty::Bool,

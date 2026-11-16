@@ -165,7 +165,9 @@ fn capture_sources<'sources, 'tcx>(
             ));
         }
         let (style, span, kind) = match attribute {
-            Attribute::Unparsed(item) => (item.style, item.span, lexical::Kind::Attribute),
+            Attribute::Tool(item) | Attribute::DeriveHelper(item) => {
+                (item.style, item.span, lexical::Kind::Attribute)
+            }
             Attribute::Parsed(AttributeKind::DocComment { style, span, .. }) => {
                 (*style, *span, lexical::Kind::Document)
             }

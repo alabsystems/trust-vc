@@ -68,6 +68,7 @@ fn source(goal: Expr, left: Ty, right: Ty) -> VcCrate {
                 name: "return".into(),
                 ty: Ty::Unit,
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Return,
                 span: SpanId(0),
@@ -76,6 +77,7 @@ fn source(goal: Expr, left: Ty, right: Ty) -> VcCrate {
                 name: "x".into(),
                 ty: left,
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Param,
                 span: SpanId(0),
@@ -84,6 +86,7 @@ fn source(goal: Expr, left: Ty, right: Ty) -> VcCrate {
                 name: "y".into(),
                 ty: right,
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Param,
                 span: SpanId(0),
@@ -97,6 +100,7 @@ fn source(goal: Expr, left: Ty, right: Ty) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Stmts(Block {
             stmts: vec![
@@ -225,6 +229,7 @@ fn opaque_private_fields_cannot_be_smuggled_through_a_variant() {
         fields: vec![FieldDecl {
             name: "private".into(),
             ty: Ty::Bool,
+            mode: Mode::Exec,
         }],
     });
     assert!(check_crate(&krate)

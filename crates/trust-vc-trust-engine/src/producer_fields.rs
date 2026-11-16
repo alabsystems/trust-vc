@@ -180,6 +180,23 @@ pub struct ProducerTypeBraceSite {
 
 /// Brace sites for every tabled producer STRUCT.
 pub const PRODUCER_TYPE_BRACE_SITES: &[ProducerTypeBraceSites] = &[
+    // The Box types are only constructed by the named-refusal control; no
+    // production path destructures their evidence. These are measured braces.
+    ProducerTypeBraceSites {
+        ty: "BoxValidityFact",
+        sites: &[],
+    },
+    ProducerTypeBraceSites {
+        ty: "BoxFactSession",
+        sites: &[],
+    },
+    ProducerTypeBraceSites {
+        ty: "BoxDerefSite",
+        sites: &[ProducerTypeBraceSite {
+            file: "trust_ir_body/check.rs",
+            braces: 1,
+        }],
+    },
     ProducerTypeBraceSites {
         ty: "Module",
         sites: &[
@@ -809,6 +826,11 @@ pub const LOCAL_PATH_ROOTS: &[&str] = &["self", "crate", "super"];
 
 /// Every producer type either ratchet pins, tabled or excluded.
 pub const PINNED_PRODUCER_TYPES: &[&str] = &[
+    "BoxPointee",
+    "BoxValidityFact",
+    "BoxDerefSite",
+    "BoxFactSession",
+    "PremiseRoot",
     "Module",
     "Function",
     "Block",
@@ -908,6 +930,111 @@ pub const PINNED_PRODUCER_TYPES: &[&str] = &[
 
 /// THE TABLE. Derived, not written: see the module docs.
 pub const PRODUCER_FIELDS: &[ProducerField] = &[
+    ProducerField {
+        ty: "BoxPointee",
+        field: "Sized",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["trust_ir_body/check.rs"],
+        note: "CONSTRUCTED only for the BoxDeref negative fixture, with U8. The production checker refuses the entire instruction and never derives an access or a validity fact from this payload.",
+    },
+    ProducerField {
+        ty: "PremiseRoot",
+        field: "ParamByValue",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["trust_ir_body/check.rs"],
+        note: "CONSTRUCTED only by the named-premise negative fixture; no premise is promoted to established validity.",
+    },
+    ProducerField {
+        ty: "PremiseRoot",
+        field: "AllocPostcondition",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &[],
+        note: "NOT READ. BoxDeref is refused without inspecting any premise root or strengthening its authority.",
+    },
+    ProducerField {
+        ty: "PremiseRoot",
+        field: "ReturnedBoxDischarged",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &[],
+        note: "NOT READ. BoxDeref is refused without inspecting any premise root or strengthening its authority.",
+    },
+    ProducerField {
+        ty: "PremiseRoot",
+        field: "ReturnedBoxAssumed",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &[],
+        note: "NOT READ. BoxDeref is refused without inspecting any premise root or strengthening its authority.",
+    },
+    ProducerField {
+        ty: "PremiseRoot",
+        field: "ReferenceArgBoxValid",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &[],
+        note: "NOT READ. BoxDeref is refused without inspecting any premise root or strengthening its authority.",
+    },
+    ProducerField {
+        ty: "BoxFactSession",
+        field: "PROOF_SNAPSHOT",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["trust_ir_body/check.rs"],
+        note: "Associated constant, recorded by the same uppercase-path scan as enum variants. It is only a constructor input in the negative fixture, never a licence to lower BoxDeref or claim a verified allocation.",
+    },
+    ProducerField {
+        ty: "BoxValidityFact",
+        field: "site",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &["native_discharge/body.rs", "native_discharge/mod.rs", "native_trust_ir_bundle.rs", "trust_ir_body/binding.rs", "trust_ir_body/mod.rs"],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier. Listed files are the existing field-name union for other producer data: obligation/callee source sites, not Box cast sites.",
+    },
+    ProducerField {
+        ty: "BoxValidityFact",
+        field: "session",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
+    ProducerField {
+        ty: "BoxValidityFact",
+        field: "evidence",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &["native_discharge/body.rs", "native_trust_ir_bundle.rs"],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier. Listed files are the existing field-name union for other producer data: proof-certificate evidence whose existing kernel replay is unchanged, not Box validity evidence.",
+    },
+    ProducerField {
+        ty: "BoxValidityFact",
+        field: "not_claimed",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
+    ProducerField {
+        ty: "BoxDerefSite",
+        field: "item",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
+    ProducerField {
+        ty: "BoxDerefSite",
+        field: "ordinal",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
+    ProducerField {
+        ty: "BoxFactSession",
+        field: "judged",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
+    ProducerField {
+        ty: "BoxFactSession",
+        field: "producing",
+        kind: ProducerFieldKind::StructField,
+        read_sites: &[],
+        note: "NOT READ from this Box carrier. The checker refuses BoxDeref before inspecting its validity payload; only the negative fixture constructs the canonical carrier.",
+    },
     ProducerField {
         ty: "Module",
         field: "name",
@@ -1346,8 +1473,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "ObligationSite",
         field: "block",
         kind: ProducerFieldKind::StructField,
-        read_sites: &["native_discharge/body.rs", "native_discharge/mod.rs", "native_trust_ir_bundle.rs", "trust_ir_body/binding.rs", "trust_ir_body/check.rs", "trust_ir_body/lower.rs", "trust_ir_body/mod.rs"],
-        note: "Round 8: resolves the site to an instruction. MERGED 2026-09-23, upstream's ADVISORY body lane: `native_trust_ir_bundle.rs` gains it from the advisory entry `discharge_native_trust_ir_request` (the scope gate that REFUSES an obligation not sited in the named function) and from wire rendering of the lane's own `AssertPosition`; `trust_ir_body/binding.rs` computes the advisory lane's provisional semantic digest, which CLEARS every proof-status, certificate, diagnostic and debug field before hashing the rest, so the digest cannot move with a producer label; `trust_ir_body/check.rs` is the advisory lane's structural check, which admits or REFUSES by variant (a refusal is `NotAnswerable` naming the instruction); `trust_ir_body/lower.rs` lowers the admitted body into the advisory lane's typed query (plus a `#[cfg(test)]` fixture builder); `trust_ir_body/mod.rs` drives the advisory lane: it locates the cited `Assert` site, scopes the obligation kinds it answers, and reads statuses, certificates, formulas, annotations and `requires` ONLY to set `ignored_inputs` (seen and deliberately not used). The invariant holds there by construction: that lane's answer writes back no `ProofStatus`, mints no `trust_ir::ProofCertificate`, never enters `proof_evidence`, and its verdicts never satisfy `is_ok` (see `TrustVcNativeTrustIrDischargeAnswer`). `native_discharge/mod.rs` (`site_is_the_only_return`) resolves a REQUESTED postcondition's site and decides the row only when the site is the function's one `Return` terminator; any other site declines.",
+        read_sites: &["native_discharge/body.rs", "native_discharge/mod.rs", "native_scalar_cast.rs", "native_trust_ir_bundle.rs", "trust_ir_body/binding.rs", "trust_ir_body/check.rs", "trust_ir_body/lower.rs", "trust_ir_body/mod.rs"],
+        note: "Round 8: resolves the site to an instruction. MERGED 2026-09-23, upstream's ADVISORY body lane: `native_trust_ir_bundle.rs` gains it from the advisory entry `discharge_native_trust_ir_request` (the scope gate that REFUSES an obligation not sited in the named function) and from wire rendering of the lane's own `AssertPosition`; `trust_ir_body/binding.rs` computes the advisory lane's provisional semantic digest, which CLEARS every proof-status, certificate, diagnostic and debug field before hashing the rest, so the digest cannot move with a producer label; `trust_ir_body/check.rs` is the advisory lane's structural check, which admits or REFUSES by variant (a refusal is `NotAnswerable` naming the instruction); `trust_ir_body/lower.rs` lowers the admitted body into the advisory lane's typed query (plus a `#[cfg(test)]` fixture builder); `trust_ir_body/mod.rs` drives the advisory lane: it locates the cited `Assert` site, scopes the obligation kinds it answers, and reads statuses, certificates, formulas, annotations and `requires` ONLY to set `ignored_inputs` (seen and deliberately not used). The invariant holds there by construction: that lane's answer writes back no `ProofStatus`, mints no `trust_ir::ProofCertificate`, never enters `proof_evidence`, and its verdicts never satisfy `is_ok` (see `TrustVcNativeTrustIrDischargeAnswer`). `native_discharge/mod.rs` (`site_is_the_only_return`) resolves a REQUESTED postcondition's site and decides the row only when the site is the function's one `Return` terminator; any other site declines. native_scalar_cast.rs retains the original lowering site for exact data matching only; changing it cannot alter the native verdict or issue a translation/source grade.",
     },
     ProducerField {
         ty: "ObligationSite",
@@ -1388,8 +1515,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "ProofFormula",
         field: "bindings",
         kind: ProducerFieldKind::StructField,
-        read_sites: &["native_coverage.rs"],
-        note: "trust-ir's typed meaning of a clause's free names (sort and IR place). `native_coverage.rs` (coverage rule 5) reads each binding's NAME and SORT to build the environment trust-ir's reader reads the payload over (`linked_var_env`); the PLACE is not read there — basis K's kernel replay, via trust-ir's grounder, binds it. Rule 5 only refuses. Neither discharge lane reads it: `native_discharge` binds a payload's names by its own convention and `trust_ir_body` never reads a formula, so a clause whose producer bindings disagree with that convention is not detected by those lanes; that remains an open gap, not a checked property.",
+        read_sites: &["native_coverage.rs", "native_scalar_cast.rs"],
+        note: "trust-ir's typed meaning of a clause's free names (sort and IR place). `native_coverage.rs` (coverage rule 5) reads each binding's NAME and SORT to build the environment trust-ir's reader reads the payload over (`linked_var_env`); the PLACE is not read there — basis K's kernel replay, via trust-ir's grounder, binds it. Rule 5 only refuses. Neither discharge lane reads it: `native_discharge` binds a payload's names by its own convention and `trust_ir_body` never reads a formula, so a clause whose producer bindings disagree with that convention is not detected by those lanes; that remains an open gap, not a checked property. The native_scalar_cast.rs union site is a same-name field in the bounded unbound-data observation sink; it does not read producer bindings or grant native verdict/proof authority.",
     },
     ProducerField {
         ty: "ProofObligationSourceIdentity",
@@ -1423,8 +1550,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "PublicObligationIdentity",
         field: "obligation_id",
         kind: ProducerFieldKind::StructField,
-        read_sites: &["lib.rs", "mir_memory.rs", "multi_assertion_proof_tests.rs", "native_artifact.rs", "native_assertion_id.rs", "native_discharge/mod.rs", "native_trust_ir_bundle.rs"],
-        note: "P6/E22 — the `vc:` identity taken verbatim as the unit id. `multi_assertion_proof_tests.rs` (test-only) calls the engine's own `TrustProofEvidence::obligation_id()` accessor, not this field; the name scan cannot tell the two apart. ROUND 13: `native_assertion_id.rs` reads it in `AssertionIdIndex::of`, as part of the identity two obligations sharing an assertion number must agree on. The read can only WITHDRAW a license: a number whose carriers differ here publishes no id (`MissingAssertionId`). It never licenses an id the rest of the rule would refuse.",
+        read_sites: &["lib.rs", "mir_memory.rs", "multi_assertion_proof_tests.rs", "native_artifact.rs", "native_assertion_id.rs", "native_discharge/mod.rs", "native_scalar_cast.rs", "native_trust_ir_bundle.rs"],
+        note: "P6/E22 — the `vc:` identity taken verbatim as the unit id. `multi_assertion_proof_tests.rs` (test-only) calls the engine's own `TrustProofEvidence::obligation_id()` accessor, not this field; the name scan cannot tell the two apart. ROUND 13: `native_assertion_id.rs` reads it in `AssertionIdIndex::of`, as part of the identity two obligations sharing an assertion number must agree on. The read can only WITHDRAW a license: a number whose carriers differ here publishes no id (`MissingAssertionId`). It never licenses an id the rest of the rule would refuse. The native_scalar_cast.rs union site compares its own private observation/certificate identities. It does not admit a producer label as evidence or change native verdicts or proof grades.",
     },
     ProducerField {
         ty: "PublicObligationIdentity",
@@ -1507,8 +1634,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "NativeCompilerFacts",
         field: "casts",
         kind: ProducerFieldKind::StructField,
-        read_sites: &[],
-        note: "NOT READ — a `CastOp` is checked against the DECLARED sorts instead.",
+        read_sites: &["native_scalar_cast.rs"],
+        note: "NOT READ — a `CastOp` is checked against the DECLARED sorts instead. The native_scalar_cast.rs union site is a same-name field containing actual encoder cast emissions, not NativeCompilerFacts casts. It checks availability of unbound observation data only; no producer cast fact is assumed and no native verdict/grade changes.",
     },
     ProducerField {
         ty: "NativeCompilerFacts",
@@ -1703,8 +1830,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "NativeVerificationBundle",
         field: "module",
         kind: ProducerFieldKind::StructField,
-        read_sites: &["native_assertion_id.rs", "native_coverage.rs", "native_discharge/body.rs", "native_discharge/mod.rs", "native_trust_ir_bundle.rs", "trust_ir_body/mod.rs"],
-        note: "P1 — the module, gated by the producer validator first. MERGED 2026-09-23, upstream's ADVISORY body lane: `trust_ir_body/mod.rs` drives the advisory lane: it locates the cited `Assert` site, scopes the obligation kinds it answers, and reads statuses, certificates, formulas, annotations and `requires` ONLY to set `ignored_inputs` (seen and deliberately not used). The invariant holds there by construction: that lane's answer writes back no `ProofStatus`, mints no `trust_ir::ProofCertificate`, never enters `proof_evidence`, and its verdicts never satisfy `is_ok` (see `TrustVcNativeTrustIrDischargeAnswer`). `native_coverage.rs` reads the module's obligations for coverage rule 5, after the producer validator gate. `native_assertion_id.rs` reads it only in its unit tests, to hand the corpus bundle to the replay-atom input gate.",
+        read_sites: &["native_assertion_id.rs", "native_coverage.rs", "native_discharge/body.rs", "native_discharge/mod.rs", "native_scalar_cast.rs", "native_trust_ir_bundle.rs", "trust_ir_body/mod.rs"],
+        note: "P1 — the module, gated by the producer validator first. MERGED 2026-09-23, upstream's ADVISORY body lane: `trust_ir_body/mod.rs` drives the advisory lane: it locates the cited `Assert` site, scopes the obligation kinds it answers, and reads statuses, certificates, formulas, annotations and `requires` ONLY to set `ignored_inputs` (seen and deliberately not used). The invariant holds there by construction: that lane's answer writes back no `ProofStatus`, mints no `trust_ir::ProofCertificate`, never enters `proof_evidence`, and its verdicts never satisfy `is_ok` (see `TrustVcNativeTrustIrDischargeAnswer`). `native_coverage.rs` reads the module's obligations for coverage rule 5, after the producer validator gate. `native_assertion_id.rs` reads it only in its unit tests, to hand the corpus bundle to the replay-atom input gate. native_scalar_cast.rs retains the complete original module through the canonical writer for optional same-input data matching. It prunes no fields, changes no admission rule, and issues no translation/source proof authority.",
     },
     ProducerField {
         ty: "NativeVerificationBundle",
@@ -1804,6 +1931,13 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         kind: ProducerFieldKind::EnumVariant,
         read_sites: &["native_discharge/body.rs", "trust_ir_body/check.rs"],
         note: "LOWERED by `lower_inst`, with the `CastOp` modelled faithfully (round 2) — an op it cannot model declines. MERGED 2026-09-23, upstream's ADVISORY body lane: `trust_ir_body/check.rs` is the advisory lane's structural check, which admits or REFUSES by variant (a refusal is `NotAnswerable` naming the instruction). The invariant holds there by construction: that lane's answer writes back no `ProofStatus`, mints no `trust_ir::ProofCertificate`, never enters `proof_evidence`, and its verdicts never satisfy `is_ok` (see `TrustVcNativeTrustIrDischargeAnswer`).",
+    },
+    ProducerField {
+        ty: "Inst",
+        field: "BoxDeref",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["trust_ir_body/check.rs"],
+        note: "The advisory v0 checker refuses this instruction by name before interpreting its site-bound validity hypothesis. Test-only canonical premise construction grants no established validity, source refinement or proof grade.",
     },
     ProducerField {
         ty: "Inst",
@@ -2431,6 +2565,13 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
     },
     ProducerField {
         ty: "Ty",
+        field: "FnItem",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["trust_ir_body/check.rs"],
+        note: "A test-only negative verifies that nominal function items remain outside the modeled scalar types. Neither function identity nor zero storage is interpreted as a pointer or integer.",
+    },
+    ProducerField {
+        ty: "Ty",
         field: "Storage",
         kind: ProducerFieldKind::EnumVariant,
         read_sites: &["native_discharge/ty.rs"],
@@ -2447,8 +2588,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "Ty",
         field: "Ptr",
         kind: ProducerFieldKind::EnumVariant,
-        read_sites: &["native_discharge/ty.rs"],
-        note: "Decided by `TypeDecoder::sort` (`native_discharge/ty.rs`), which matches `Ty` exhaustively: a type it does not accept DECLINES before any value is lowered.",
+        read_sites: &["native_discharge/ty.rs", "trust_ir_body/check.rs"],
+        note: "Decided by `TypeDecoder::sort` (`native_discharge/ty.rs`), which matches `Ty` exhaustively: a type it does not accept DECLINES before any value is lowered. `trust_ir_body/check.rs` constructs Ptr only as the result type in the named-premise BoxDeref refusal control; it remains outside the scalar lane.",
     },
     ProducerField {
         ty: "Ty",
@@ -2716,6 +2857,13 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         kind: ProducerFieldKind::EnumVariant,
         read_sites: &["native_discharge/body.rs", "trust_ir_body/check.rs"],
         note: "NOT MODELLED. trust-ir v50's uniform array constant `[elem; len]` (wire Constant tag 16). At its only legal type, an array, `TypeDecoder::sort` declines before the value is read. At a scalar sort, `native_discharge/body.rs`'s constant lowering declines it by name in its own arm, and names it in `constant_name`. `trust_ir_body/check.rs`'s `Const` arm refuses it as ill-typed at a scalar type, by name (the array type is refused before the value is read). `#[cfg(test)]` fixtures in both files pin both refusals at two, at 2^40 and at `u64::MAX` copies. Neither `elem` nor `len` is read.",
+    },
+    ProducerField {
+        ty: "Constant",
+        field: "FnItem",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &[],
+        note: "NOT READ. Nominal function-item constants have no modeled scalar carrier; default constant refusal remains. The exhaustive producer inventory records the upstream spelling without adding semantics.",
     },
     ProducerField {
         ty: "Constant",
@@ -3546,6 +3694,13 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         kind: ProducerFieldKind::EnumVariant,
         read_sites: &["native_trust_ir_bundle.rs"],
         note: "The producer's statement of what it lowered FROM. Identity only; it licenses nothing in the lane.",
+    },
+    ProducerField {
+        ty: "NativeAdapterInput",
+        field: "RustThir",
+        kind: ProducerFieldKind::EnumVariant,
+        read_sites: &["native_trust_ir_bundle.rs"],
+        note: "The producer's THIR source digest is retained as distinct input identity. It is never relabelled as a MIR body and grants no source refinement or proof authority.",
     },
     ProducerField {
         ty: "NativeAdapterInput",
@@ -4710,8 +4865,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "ClosureTy",
         field: "captures",
         kind: ProducerFieldKind::StructField,
-        read_sites: &[],
-        note: "NOT READ. Only a valid test fixture constructs capture types. Ordered live captures are outside both body lanes and grant no proof authority.",
+        read_sites: &["lib.rs"],
+        note: "NOT READ. Only a valid test fixture constructs capture types. Ordered live captures are outside both body lanes and grant no proof authority. The lib.rs union site is a same-name field in TrustScalarCastVerification, not ClosureTy captures. It returns bounded encoder observations separately from the unchanged native report and grants no proof authority.",
     },
     // --- FuncTy ----------------------------------------------------------
     ProducerField {
@@ -5059,8 +5214,8 @@ pub const PRODUCER_FIELDS: &[ProducerField] = &[
         ty: "TrustVcNativeEvidenceBundle",
         field: "request",
         kind: ProducerFieldKind::StructField,
-        read_sites: &["native_discharge/mod.rs", "native_trust_ir_bundle.rs"],
-        note: "Which request the release-evidence bundle belongs to.",
+        read_sites: &["native_discharge/mod.rs", "native_scalar_cast.rs", "native_trust_ir_bundle.rs"],
+        note: "Which request the release-evidence bundle belongs to. The native_scalar_cast.rs union site retains the same actual typed request inside bounded observation data. It creates no second question, assumes no producer witness, and grants no source/translation/proof-grade authority.",
     },
     ProducerField {
         ty: "TrustVcNativeEvidenceBundle",
@@ -5921,6 +6076,11 @@ mod tests {
         coverageundeterminedreason_value: &trust_ir_build::CoverageUndeterminedReason,
         kernelclaimfamily_value: &trust_ir::proof::KernelClaimFamily,
         dropresolution_value: &trust_ir::DropResolution,
+        boxpointee_value: &trust_ir::box_validity::BoxPointee,
+        boxvalidityfact_value: &trust_ir::box_validity::BoxValidityFact,
+        boxderefsite_value: &trust_ir::box_validity::BoxDerefSite,
+        boxfactsession_value: &trust_ir::box_validity::BoxFactSession,
+        premiseroot_value: &trust_ir::box_validity::PremiseRoot,
     ) -> Vec<&'static str> {
         match inst_value {
             trust_ir::Inst::BinOp {
@@ -5957,6 +6117,12 @@ mod tests {
                 src_ty: _,
                 dst_ty: _,
                 operand: _,
+            } => {}
+            trust_ir::Inst::BoxDeref {
+                ptr_ty: _,
+                pointee: _,
+                operand: _,
+                fact: _,
             } => {}
             trust_ir::Inst::Load {
                 ty: _,
@@ -6275,6 +6441,7 @@ mod tests {
             trust_ir::Ty::Refine(_, _) => {}
             trust_ir::Ty::Dialect(_) => {}
             trust_ir::Ty::Handle(_) => {}
+            trust_ir::Ty::FnItem(_) => {}
             trust_ir::Ty::Storage(_) => {}
             trust_ir::Ty::Tensor(_, _) => {}
             trust_ir::Ty::Ext(never) => never.unreachable(),
@@ -6304,6 +6471,7 @@ mod tests {
             trust_ir::Constant::Uninit => {}
             trust_ir::Constant::Splat { elem: _, len: _ } => {}
             trust_ir::Constant::Ext(never) => never.unreachable(),
+            trust_ir::Constant::FnItem(_) => {}
             trust_ir::Constant::TensorBlob { digest: _, dims: _ } => {}
         }
         match proofevidence_value {
@@ -6444,6 +6612,7 @@ mod tests {
         }
         match nativeadapterinput_value {
             trust_ir::request::NativeAdapterInput::RustMir { body_digest: _ } => {}
+            trust_ir::request::NativeAdapterInput::RustThir { source_digest: _ } => {}
             trust_ir::request::NativeAdapterInput::TrustIrModule => {}
         }
         match nativeverificationrequest_value {
@@ -6916,7 +7085,36 @@ mod tests {
             | trust_ir::DropResolution::Unresolved
             | trust_ir::DropResolution::Ambiguous => {}
         }
+        match boxpointee_value {
+            trust_ir::box_validity::BoxPointee::Sized { ty: _ } => {}
+        }
+        let trust_ir::box_validity::BoxValidityFact {
+            site: _,
+            session: _,
+            evidence: _,
+            not_claimed: _,
+        } = boxvalidityfact_value;
+        let trust_ir::box_validity::BoxDerefSite {
+            item: _,
+            ordinal: _,
+        } = boxderefsite_value;
+        let trust_ir::box_validity::BoxFactSession {
+            judged: _,
+            producing: _,
+        } = boxfactsession_value;
+        match premiseroot_value {
+            trust_ir::box_validity::PremiseRoot::ParamByValue
+            | trust_ir::box_validity::PremiseRoot::AllocPostcondition
+            | trust_ir::box_validity::PremiseRoot::ReturnedBoxDischarged
+            | trust_ir::box_validity::PremiseRoot::ReturnedBoxAssumed
+            | trust_ir::box_validity::PremiseRoot::ReferenceArgBoxValid => {}
+        }
         vec![
+            "BoxPointee",
+            "BoxValidityFact",
+            "BoxDerefSite",
+            "BoxFactSession",
+            "PremiseRoot",
             "Inst",
             "Ty",
             "Constant",

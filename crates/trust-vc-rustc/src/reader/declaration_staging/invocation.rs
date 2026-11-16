@@ -36,13 +36,13 @@ fn normalized_library_args(argv: &[String], keep: bool) -> Option<Vec<String>> {
     let mut outputs = 0;
     let mut body_flags = 0;
     while at < argv.len() {
-        if argv[at] == "-o" {
+        if argv[at] == "--out-dir" {
             let path = argv.get(at + 1)?;
             if !std::path::Path::new(path).is_absolute() {
                 return None;
             }
             outputs += 1;
-            normalized.extend(["-o".into(), "<owned-metadata-output>".into()]);
+            normalized.extend(["--out-dir".into(), "<owned-library-output>".into()]);
             at += 2;
         } else if argv[at] == "--cfg"
             && argv
@@ -169,14 +169,14 @@ mod tests {
         let erase = [
             "compiler",
             "--crate-name=vstd",
-            "-o",
-            "/tmp/erase.rmeta",
+            "--out-dir",
+            "/tmp/erase",
             "library.rs",
         ]
         .map(String::from)
         .to_vec();
         let mut keep = erase.clone();
-        keep[3] = "/tmp/keep.rmeta".into();
+        keep[3] = "/tmp/keep".into();
         keep.extend(["--cfg".into(), "verus_keep_ghost_body".into()]);
         assert_eq!(
             normalized_library_args(&keep, true),

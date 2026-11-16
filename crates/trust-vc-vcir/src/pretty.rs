@@ -26,7 +26,7 @@ pub fn crate_to_string(krate: &VcCrate) -> String {
             let fields: Vec<String> = variant
                 .fields
                 .iter()
-                .map(|f| format!("{}: {}", f.name, ty_name(krate, &f.ty)))
+                .map(|f| format!("{} {}: {}", f.mode.name(), f.name, ty_name(krate, &f.ty)))
                 .collect();
             let _ = write!(out, " {} {{ {} }}", variant.name, fields.join(", "));
         }
@@ -82,6 +82,9 @@ pub fn fn_to_string(krate: &VcCrate, decl: &FnDecl) -> String {
         let _ = writeln!(out, "  #[declaration-kind={:?}]", decl.kind);
     }
     let attrs = &decl.attrs;
+    if attrs.prophetic {
+        out.push_str("  #[prophetic]\n");
+    }
     if attrs.inline {
         out.push_str("  #[inline]\n");
     }
@@ -113,6 +116,15 @@ pub fn fn_to_string(krate: &VcCrate, decl: &FnDecl) -> String {
     ] {
         for clause in clauses {
             let _ = writeln!(out, "  {word} {}", p.clause(clause));
+        }
+    }
+    if let Some(unwind) = &decl.unwind {
+        match unwind {
+            crate::UnwindSpec::NoUnwind => out.push_str("  no_unwind\n"),
+            crate::UnwindSpec::MayUnwind => out.push_str("  may_unwind\n"),
+            crate::UnwindSpec::NoUnwindWhen(condition) => {
+                let _ = writeln!(out, "  no_unwind when {}", p.expr(condition));
+            }
         }
     }
     if !decl.decreases.is_empty() {
@@ -154,7 +166,12 @@ impl Printer<'_> {
     fn local_decl(&self, index: usize) -> String {
         match self.decl.locals.get(index) {
             Some(l) => format!(
-                "{}{}: {} {}",
+                "{}{}{}: {} {}",
+                match l.prophecy {
+                    crate::DeclProphecy::Default => "",
+                    crate::DeclProphecy::Prophetic => "#[prophetic] ",
+                    crate::DeclProphecy::DelayedInfer => "#[infer-prophecy] ",
+                },
                 if l.mutable { "mut " } else { "" },
                 l.name,
                 l.mode.name(),
@@ -274,11 +291,24 @@ impl Printer<'_> {
             } => format!("{}.{variant}:{field}", self.expr(base)),
             ExprKind::TupleField { base, index } => format!("{}.{index}", self.expr(base)),
             ExprKind::Borrow(inner) => format!("&{}", self.expr(inner)),
-            ExprKind::ProofInSpec(block) => {
+            ExprKind::MutRefCurrent(inner) => format!("current({})", self.expr(inner)),
+            ExprKind::MutRefFuture(inner) => format!("future({})", self.expr(inner)),
+            ExprKind::HasResolved(inner) => format!("has_resolved({})", self.expr(inner)),
+            ExprKind::MutRefUpdate { reference, value } => format!(
+                "update_current({}, {})",
+                self.expr(reference),
+                self.expr(value)
+            ),
+            ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
                 let mut inner = String::new();
                 self.block(block, 0, &mut inner);
                 let stmts: Vec<&str> = inner.lines().map(str::trim).collect();
-                format!("proof {{ {} }}", stmts.join("; "))
+                let tail = if let ExprKind::ProofInSpecTail { tail, .. } = &e.kind {
+                    format!("; {}", self.expr(tail))
+                } else {
+                    String::new()
+                };
+                format!("proof {{ {}{} }}", stmts.join("; "), tail)
             }
             ExprKind::Quant {
                 kind,
@@ -380,6 +410,14 @@ impl Printer<'_> {
                 }
                 out.push('\n');
             }
+            StmtKind::BorrowMut { dest, place } => {
+                let _ = writeln!(
+                    out,
+                    "{pad}{} := &mut {}",
+                    self.local_decl(dest.index()),
+                    self.place(place)
+                );
+            }
             StmtKind::Assign { place, value } => {
                 let _ = writeln!(out, "{pad}{} := {}", self.place(place), self.expr(value));
             }
@@ -466,12 +504,21 @@ impl Printer<'_> {
             StmtKind::Reveal { callee, fuel } => {
                 let _ = writeln!(out, "{pad}reveal {} fuel={fuel:?}", self.fn_name(*callee));
             }
+            StmtKind::BroadcastUse { callee } => {
+                let _ = writeln!(out, "{pad}broadcast use {}", self.fn_name(*callee));
+            }
             StmtKind::Hide { callee } => {
                 let _ = writeln!(out, "{pad}hide {}", self.fn_name(*callee));
             }
             StmtKind::Ghost(block) => {
                 let _ = writeln!(out, "{pad}ghost {{");
                 self.block(block, depth + 1, out);
+                let _ = writeln!(out, "{pad}}}");
+            }
+            StmtKind::GhostTail { block, tail } => {
+                let _ = writeln!(out, "{pad}ghost {{");
+                self.block(block, depth + 1, out);
+                let _ = writeln!(out, "{pad}    {}", self.expr(tail));
                 let _ = writeln!(out, "{pad}}}");
             }
             StmtKind::Block(block) => {
@@ -600,6 +647,7 @@ pub fn ty_name(krate: &VcCrate, ty: &Ty) -> String {
                 format!("{name}<{}>", args.join(", "))
             }
         }
+        Ty::MutRef(inner) => format!("mut_ref<{}>", ty_name(krate, inner)),
         Ty::Ref { mutable, inner } => format!(
             "&{}{}",
             if *mutable { "mut " } else { "" },
@@ -621,6 +669,7 @@ mod tests {
             name: name.to_string(),
             ty,
             mode: Mode::Exec,
+            prophecy: crate::DeclProphecy::Default,
             mutable: false,
             kind,
             span: SpanId(0),
@@ -652,6 +701,7 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             recommends: vec![],
+            unwind: None,
             decreases: Vec::new(),
             decreases_when: None,
             decreases_by: None,

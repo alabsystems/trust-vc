@@ -497,6 +497,7 @@ fn bootstrap_prepared_encoder_with_prune_plan(
     let inline_names: HashSet<String> = encoder.state.inline_bodies.keys().cloned().collect();
     encoder.state.overflow_behavior = ctx.overflow_behavior;
     encoder.state.div0_behavior = ctx.div0_behavior;
+    encoder.state.scalar_cast_capture = ctx.scalar_cast_capture.clone();
     encoder.state.bitshift_behavior = ctx.bitshift_behavior;
     let mut declared_variables: Vec<&VariableDecl> = ctx
         .variables
@@ -1078,6 +1079,9 @@ impl AYEncoder {
         cached_prune_plan: Option<&super::pruning::PrunePlan>,
         logic: Logic,
     ) -> TrustVcResult<Self> {
+        #[cfg(test)]
+        let _phase_observer =
+            crate::encoder::verification::phase_observer::span("setup", "encoder_setup");
         let ctx = slices.ctx;
         super::test_hooks::bump_setup_from_prepared_count();
         let wall_backstop_ms = ctx

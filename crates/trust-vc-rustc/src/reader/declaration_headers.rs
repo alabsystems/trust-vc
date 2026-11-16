@@ -40,6 +40,22 @@ pub(super) struct EmptyHeader<'tcx> {
     body: &'tcx hir::Body<'tcx>,
 }
 
+/// A syntax fact about one original, leading recommendation call. The
+/// authenticated producer must still bind its builtin, lower its expression,
+/// check modes/types/WF and retain its source before importing any clause.
+pub(super) struct RecommendationHeader<'tcx> {
+    owner: LocalDefId,
+    body: &'tcx hir::Body<'tcx>,
+    builtin: DefId,
+    argument: &'tcx hir::Expr<'tcx>,
+}
+
+impl<'tcx> RecommendationHeader<'tcx> {
+    pub(super) fn argument(&self) -> &'tcx hir::Expr<'tcx> {
+        self.argument
+    }
+}
+
 enum Outcome<'tcx> {
     Empty(EmptyHeader<'tcx>),
     Nonempty,
@@ -52,6 +68,7 @@ pub(super) struct CheckedHeaders<'tcx> {
     owner: LocalDefId,
     outcome: Outcome<'tcx>,
     walk: HeaderWalk<'tcx>,
+    recommendation: Option<RecommendationHeader<'tcx>>,
 }
 
 impl<'tcx> CheckedHeaders<'tcx> {
@@ -74,12 +91,39 @@ impl<'tcx> CheckedHeaders<'tcx> {
         let Outcome::Empty(empty) = &self.outcome else {
             return None;
         };
-        if empty.owner != owner || !original_body_available(tcx, owner) {
+        if !std::ptr::eq(*self.tcx, *tcx)
+            || empty.owner != owner
+            || !original_body_available(tcx, owner)
+            || original_attributes(tcx, owner).is_none()
+        {
             return None;
         }
         tcx.hir_maybe_body_owned_by(owner)
             .is_some_and(|body| std::ptr::eq(body, empty.body))
             .then_some(empty)
+    }
+
+    /// The caller must supply the actual fresh, authenticated builtin DefId;
+    /// a diagnostic spelling or observation cannot establish that selection.
+    pub(super) fn recommends_for(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        owner: LocalDefId,
+        authenticated_builtin: DefId,
+    ) -> Option<&RecommendationHeader<'tcx>> {
+        let fact = self.recommendation.as_ref()?;
+        if !std::ptr::eq(*self.tcx, *tcx)
+            || fact.owner != owner
+            || fact.builtin != authenticated_builtin
+            || !original_body_available(tcx, owner)
+            || original_attributes(tcx, owner).is_none()
+            || tcx
+                .hir_maybe_body_owned_by(owner)
+                .is_none_or(|body| !std::ptr::eq(body, fact.body))
+        {
+            return None;
+        }
+        Some(fact)
     }
 
     /// Diagnostic JSON only. Even an empty traversal retains Unknown header
@@ -121,6 +165,13 @@ impl<'tcx> CheckedHeaders<'tcx> {
                 "native header observations still require source/macro authentication, builtin artifact authentication, and Erase declaration alignment"},
             "ordered_header_validation": {"state": "Unknown", "reason":
                 "nonempty, duplicate, malformed or misplaced headers require an ordered header producer"},
+            "single_leading_recommends_observation": self.recommendation.as_ref()
+                .and_then(|fact| self.recommends_for(self.tcx, self.owner, fact.builtin)).map(|fact|
+                json!({"state": "ObservedSingleOriginalLeadingRecommends",
+                    "builtin": definition(self.tcx, fact.builtin),
+                    "argument_span_debug": format!("{:?}", fact.argument.span),
+                    "expression_semantics_checked": false,
+                    "permission_from_observation": false})),
         })
     }
 }
@@ -130,6 +181,7 @@ struct HeaderReference {
     definition: DefId,
     span: Span,
     expression_owner: LocalDefId,
+    expression: hir::HirId,
 }
 
 struct HeaderWalk<'tcx> {
@@ -157,6 +209,7 @@ impl HeaderWalk<'_> {
                     definition,
                     span: expr.span,
                     expression_owner: expr.hir_id.owner.def_id,
+                    expression: expr.hir_id,
                 });
             }
         }
@@ -253,7 +306,77 @@ impl<'tcx> Visitor<'tcx> for HeaderWalk<'tcx> {
     }
 }
 
+fn original_attributes<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: LocalDefId,
+) -> Option<&'tcx [rustc_attr_ir::Attribute]> {
+    let hir_id = tcx.local_def_id_to_hir_id(owner);
+    let original = tcx
+        .lower_to_hir(owner)
+        .as_owner()?
+        .attrs
+        .get(hir_id.local_id);
+    std::ptr::eq(original, tcx.hir_attrs(hir_id)).then_some(original)
+}
+
+fn leading_recommendation<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: LocalDefId,
+    body: &'tcx hir::Body<'tcx>,
+    walk: &HeaderWalk<'tcx>,
+) -> Option<RecommendationHeader<'tcx>> {
+    if !walk.unknowns.is_empty()
+        || attrs::item_attrs(original_attributes(tcx, owner)?).mode
+            != Some(trust_vc_vcir::Mode::Spec)
+    {
+        return None;
+    }
+    let [reference] = walk.references.as_slice() else {
+        return None;
+    };
+    if reference.item != VerusItem::Recommends || reference.expression_owner != owner {
+        return None;
+    }
+    let hir::ExprKind::Block(block, None) = body.value.kind else {
+        return None;
+    };
+    let hir::StmtKind::Semi(call) = block.stmts.first()?.kind else {
+        return None;
+    };
+    let hir::ExprKind::Call(function, [argument]) = call.kind else {
+        return None;
+    };
+    let hir::ExprKind::Path(ref path) = function.kind else {
+        return None;
+    };
+    let typeck = tcx.typeck(tcx.typeck_root_def_id_local(owner));
+    if function.hir_id != reference.expression
+        || !matches!(typeck.qpath_res(path, function.hir_id), Res::Def(DefKind::Fn, definition) if definition == reference.definition)
+    {
+        return None;
+    }
+    Some(RecommendationHeader {
+        owner,
+        body,
+        builtin: reference.definition,
+        argument,
+    })
+}
+
 pub(super) fn check<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> CheckedHeaders<'tcx> {
+    check_inner(tcx, owner, false)
+}
+
+/// Inline declarations cannot donate an empty-header fact through this path.
+/// Their actual body still needs its separate checked forwarding capability.
+pub(super) fn check_inline_recommendations<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: LocalDefId,
+) -> CheckedHeaders<'tcx> {
+    check_inner(tcx, owner, true)
+}
+
+fn check_inner<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId, inline: bool) -> CheckedHeaders<'tcx> {
     let mut walk = HeaderWalk {
         tcx,
         owner,
@@ -284,11 +407,34 @@ pub(super) fn check<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> CheckedHeader
         }
         let attributes = tcx.hir_attrs(tcx.local_def_id_to_hir_id(owner));
         let parsed = attrs::item_attrs(attributes);
-        if !parsed.verus_macro || attrs::verus_parse(attributes).is_err() {
+        let bodyless_spec = parsed.mode == Some(trust_vc_vcir::Mode::Spec)
+            && parsed.uninterp
+            && parsed.external_body;
+        let inline_spec = inline
+            && parsed.mode == Some(trust_vc_vcir::Mode::Spec)
+            && parsed.inline
+            && parsed.open
+            && !parsed.uninterp
+            && !parsed.external_body
+            && tcx.visibility(owner).is_public();
+        if !parsed.verus_macro
+            || attrs::verus_parse(attributes).is_err()
+            || original_attributes(tcx, owner).is_none()
+            || (inline && !inline_spec)
+        {
             walk.unknowns
                 .push("an unclassified declaration attribute or non-Verus origin".into());
         }
         for (attribute, span) in attrs::verus_attrs(attributes) {
+            // A bodyless Spec declaration supplies only a pure signature.
+            // Still traverse its actual original body: hidden, misplaced or
+            // nonempty headers cannot be erased along with the placeholder.
+            if bodyless_spec && matches!(attribute, VerusAttr::Uninterp | VerusAttr::ExternalBody) {
+                continue;
+            }
+            if inline_spec && matches!(attribute, VerusAttr::Inline) {
+                continue;
+            }
             if !matches!(
                 attribute,
                 VerusAttr::VerusMacro
@@ -313,7 +459,8 @@ pub(super) fn check<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> CheckedHeader
             walk.visit_body(body);
         }
     }
-    let outcome = if !walk.unknowns.is_empty() {
+    let recommendation = body.and_then(|body| leading_recommendation(tcx, owner, body, &walk));
+    let outcome = if !walk.unknowns.is_empty() || (inline && walk.references.is_empty()) {
         Outcome::Unknown
     } else if walk.references.is_empty() {
         match body {
@@ -328,5 +475,6 @@ pub(super) fn check<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> CheckedHeader
         owner,
         outcome,
         walk,
+        recommendation,
     }
 }

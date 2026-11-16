@@ -80,6 +80,7 @@ fn declaration(n: u64) -> AdtDecl {
                 fields: vec![FieldDecl {
                     name: "value".into(),
                     ty: Ty::Param(0),
+                    mode: Mode::Exec,
                 }],
             },
         ],
@@ -92,6 +93,7 @@ fn source(goal: Expr, params: Vec<Ty>, type_params: usize) -> VcCrate {
         name: "result".into(),
         ty: Ty::Unit,
         mode: Mode::Spec,
+        prophecy: trust_vc_vcir::DeclProphecy::Default,
         mutable: false,
         kind: LocalKind::Return,
         span: SpanId(0),
@@ -101,6 +103,7 @@ fn source(goal: Expr, params: Vec<Ty>, type_params: usize) -> VcCrate {
             name: format!("x{index}"),
             ty: ty.clone(),
             mode: Mode::Spec,
+            prophecy: trust_vc_vcir::DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Param,
             span: SpanId(0),
@@ -123,6 +126,7 @@ fn source(goal: Expr, params: Vec<Ty>, type_params: usize) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Stmts(Block::new(vec![
             Stmt {

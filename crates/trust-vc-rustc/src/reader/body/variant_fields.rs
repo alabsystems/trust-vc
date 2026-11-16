@@ -72,6 +72,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
             || !adt.is_enum()
             || self.cx.adt_id(adt.did()).is_none()
             || self.cx.imported_nominal(adt.did()).is_some()
+            || self.cx.source_opaque_nominal(adt.did())
         {
             return refuse(
                 "variant-test",
@@ -164,6 +165,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
             || !adt.is_enum()
             || self.cx.adt_id(adt.did()).is_none()
             || self.cx.imported_nominal(adt.did()).is_some()
+            || self.cx.source_opaque_nominal(adt.did())
         {
             return refuse(
                 "variant-field",
@@ -217,7 +219,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
         };
         let field_type = self
             .tcx
-            .try_normalize_erasing_regions(env, field.ty(self.tcx, arguments))
+            .try_normalize_erasing_regions(env, field.ty(self.tcx, *arguments))
             .map_err(|_| {
                 super::FnProblem::Refused(super::Refusal::new(
                     "variant-field",

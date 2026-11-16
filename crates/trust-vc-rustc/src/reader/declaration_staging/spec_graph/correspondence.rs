@@ -32,7 +32,10 @@ struct Bound {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Origin {
     Free,
-    Inherent(DeclarationType),
+    Inherent {
+        implementation: NativeKey,
+        self_type: DeclarationType,
+    },
     Trait(NativeKey),
     ExplicitImpl {
         implementation: NativeKey,
@@ -46,6 +49,9 @@ enum Shape {
     Implementation {
         declaration: Reference,
         arguments: Vec<DeclarationType>,
+    },
+    InherentImplementation {
+        self_type: DeclarationType,
     },
     Function {
         origin: Origin,
@@ -89,7 +95,7 @@ impl<'tcx> Capture<'_, 'tcx> {
         })
     }
 
-    fn arguments(&self, args: ty::GenericArgsRef<'tcx>) -> Result<Vec<DeclarationType>, String> {
+    fn arguments(&self, args: ty::GenericArgs<'tcx>) -> Result<Vec<DeclarationType>, String> {
         if args.len() > 256 {
             return Err("Spec companion generic arity exceeds its bound".into());
         }
@@ -152,12 +158,23 @@ impl<'tcx> Capture<'_, 'tcx> {
                         env,
                         tcx.impl_trait_ref(definition).instantiate_identity(),
                     )
-                    .map_err(|_| {
-                        "Spec companion native impl trait reference cannot be normalized"
-                    })?;
+                    .map_err(
+                        |_| "Spec companion native impl trait reference cannot be normalized",
+                    )?;
                 Shape::Implementation {
                     declaration: self.reference(native.def_id)?,
                     arguments: self.arguments(native.args)?,
+                }
+            }
+            DefKind::Impl { of_trait: false } => {
+                let self_type = tcx
+                    .try_normalize_erasing_regions(
+                        env,
+                        tcx.type_of(definition).instantiate_identity(),
+                    )
+                    .map_err(|_| "Spec companion inherent impl Self normalization failed")?;
+                Shape::InherentImplementation {
+                    self_type: self.types.encode(self_type, 0)?,
                 }
             }
             DefKind::Fn | DefKind::AssocFn => {
@@ -174,7 +191,10 @@ impl<'tcx> Capture<'_, 'tcx> {
                                 tcx.type_of(parent).instantiate_identity(),
                             )
                             .map_err(|_| "Spec companion inherent Self normalization failed")?;
-                        Origin::Inherent(self.types.encode(self_type, 0)?)
+                        Origin::Inherent {
+                            implementation: declaration_native::key(tcx, parent),
+                            self_type: self.types.encode(self_type, 0)?,
+                        }
                     }
                     DefKind::Impl { of_trait: true } => {
                         let item = tcx.associated_item(definition);
@@ -190,7 +210,7 @@ impl<'tcx> Capture<'_, 'tcx> {
                         }
                     }
                     _ => {
-                        return Err("a Spec companion function has unsupported native origin".into())
+                        return Err("a Spec companion function has unsupported native origin".into());
                     }
                 };
                 let native = tcx
@@ -269,7 +289,7 @@ impl View {
         for definition in definitions {
             if !matches!(
                 tcx.def_kind(definition),
-                DefKind::Trait | DefKind::Fn | DefKind::AssocFn | DefKind::Impl { of_trait: true }
+                DefKind::Trait | DefKind::Fn | DefKind::AssocFn | DefKind::Impl { .. }
             ) {
                 continue;
             }
@@ -394,6 +414,10 @@ fn equal(
     let shape = match (&a.shape, &b.shape) {
         (Shape::Trait, Shape::Trait) => true,
         (
+            Shape::InherentImplementation { self_type: a },
+            Shape::InherentImplementation { self_type: b },
+        ) => type_equal(a, b, nominals, 0),
+        (
             Shape::Implementation {
                 declaration: ad,
                 arguments: aa,
@@ -417,7 +441,16 @@ fn equal(
         ) => {
             let origin = match (ao, bo) {
                 (Origin::Free, Origin::Free) => true,
-                (Origin::Inherent(a), Origin::Inherent(b)) => type_equal(a, b, nominals, 0),
+                (
+                    Origin::Inherent {
+                        implementation: ai,
+                        self_type: a,
+                    },
+                    Origin::Inherent {
+                        implementation: bi,
+                        self_type: b,
+                    },
+                ) => pairs.get(ai) == Some(bi) && type_equal(a, b, nominals, 0),
                 (Origin::Trait(a), Origin::Trait(b)) => pairs.get(a) == Some(b),
                 (
                     Origin::ExplicitImpl {

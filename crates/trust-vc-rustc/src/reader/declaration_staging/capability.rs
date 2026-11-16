@@ -7,7 +7,7 @@
 use super::*;
 
 mod client;
-mod facts;
+pub(super) mod facts;
 mod imports;
 mod lower;
 
@@ -28,8 +28,7 @@ impl StagedLibrary {
     pub(super) fn new(inputs: Inputs, prepared: keep::KeepInputs) -> Result<Self, String> {
         inputs.revalidate()?;
         prepared.common.revalidate()?;
-        prepared.erase.target_metadata.revalidate()?;
-        prepared.erase.file.read()?;
+        prepared.erase.revalidate_artifacts()?;
         if prepared.erase.view.stable_crate_id != prepared.keep_view.stable_crate_id
             || prepared.erase.view.selected_rmeta_sha256 != Some(prepared.erase.file.sha256)
             || prepared.erase.view.common != prepared.keep_view.common
@@ -40,6 +39,18 @@ impl StagedLibrary {
         }
         for function in &prepared.functions {
             let facts = &function.native;
+            if let Some(requirement) = facts.source_header() {
+                if !prepared
+                    .source_families
+                    .values()
+                    .any(|family| family.covers(requirement))
+                {
+                    return Err(
+                        "a source header signature lacks its exact complete owned semantic family"
+                            .into(),
+                    );
+                }
+            }
             if facts.keep_key() != function.policy.owner()
                 || facts.source_identity() != inputs.sources.identity()
                 || facts.keep_cfg() != prepared.keep_view.cfg_sha256
@@ -59,8 +70,8 @@ impl StagedLibrary {
             }
         }
         // Pending dependency inputs cannot be substituted for the separate
-        // signature-only import facts. Retain their exact source/counterpart
-        // binding while all value/body imports remain unavailable.
+        // signature-only import facts or the separate checked definitions.
+        // Both retain their exact source and native counterpart bindings.
         let spec_pairs = spec_graph::Pairs::compare(
             &prepared.spec_view,
             &prepared.erase.spec_view,
@@ -71,6 +82,26 @@ impl StagedLibrary {
             return Err("the retained Spec companion views changed correspondence".into());
         }
         spec_graph::revalidate_all(&inputs, &prepared.spec_pairs, prepared.spec_inputs.values())?;
+        for graph in prepared.spec_definitions.values() {
+            graph.revalidate(&inputs, &prepared.spec_pairs)?;
+        }
+        for (root, family) in &prepared.source_families {
+            family.revalidate(&inputs, &prepared.spec_pairs)?;
+            family.validate_functions(&prepared.functions)?;
+            if *root != family.root()
+                || prepared
+                    .functions
+                    .iter()
+                    .filter_map(|packet| packet.native.source_header())
+                    .filter(|requirement| family.covers(requirement))
+                    .count()
+                    != 2
+            {
+                return Err(
+                    "the atomic source family lost a required native header/function".into(),
+                );
+            }
+        }
         Ok(Self { inputs, prepared })
     }
 
@@ -79,7 +110,7 @@ impl StagedLibrary {
     pub(crate) fn write_observation(&self) -> Result<(), String> {
         self.inputs.revalidate()?;
         self.prepared.common.revalidate()?;
-        self.prepared.erase.target_metadata.revalidate()?;
+        self.prepared.erase.revalidate_artifacts()?;
         super::write_observation(&self.inputs, &self.prepared.report)
     }
 }

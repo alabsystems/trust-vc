@@ -53,6 +53,8 @@ use trust_vc_vcir::{ClauseAttrs, FnDecl, FnId, InvariantKind, Rlimit, SiteId, Sp
 use crate::reader::CrateRead;
 use crate::verdict::{SiteCounts, Verdict};
 
+mod unwind;
+
 /// Verus's default `--rlimit`, in its "roughly seconds" unit.
 const DEFAULT_RLIMIT_SECS: f32 = 10.0;
 /// Wall-clock bound per query for `rlimit(infinity)`.
@@ -137,7 +139,16 @@ pub struct Verification {
 
 /// Verify every function of `read.krate`.
 pub fn verify(read: &CrateRead, opts: VerifyOptions) -> Verification {
-    let vcs = vcgen::generate(&read.krate);
+    let policy = if read.read_options.no_bv_simplify {
+        vcgen::BitvectorPolicy::PreserveOperations
+    } else {
+        vcgen::BitvectorPolicy::VerusSyntactic
+    };
+    let vcs = vcgen::generate_with_spec_definitions_and_bv_policy(
+        &read.krate,
+        &read.spec_definitions,
+        policy,
+    );
     let span = |id: SpanId| read.span(id).unwrap_or(rustc_span::DUMMY_SP);
     let mut out = Verification::default();
 
@@ -211,8 +222,13 @@ pub fn verify(read: &CrateRead, opts: VerifyOptions) -> Verification {
         // A timeout/refusal is not an actual invalid proof query. Preserve
         // the already demonstrated failure before optional diagnostics.
         if outcome.verdict == Verdict::Failed && opts.auto_recommends {
-            let queries = recommendation_queries
-                .get_or_insert_with(|| vcgen::Recommendations::new(&read.krate));
+            let queries = recommendation_queries.get_or_insert_with(|| {
+                vcgen::Recommendations::new_with_spec_definitions_and_bv_policy(
+                    &read.krate,
+                    &read.spec_definitions,
+                    policy,
+                )
+            });
             let checks = queries
                 .as_ref()
                 .map_err(Clone::clone)
@@ -423,7 +439,6 @@ fn check_function(
             match result {
                 Answer::Proved => {}
                 Answer::Refuted { architecture } => {
-                    state.0 = true;
                     if is_pre {
                         decided_calls.insert(call);
                     }
@@ -434,12 +449,30 @@ fn check_function(
                             ..
                         }
                     );
-                    if specialized || base_reported.insert(index) {
-                        failures.push((
-                            check.group,
-                            if specialized { architecture } else { None },
-                            failure(read, decl, check, architecture),
-                        ));
+                    if specialized || !base_reported.contains(&index) {
+                        match failure(read, decl, check, architecture) {
+                            Ok(failure) => {
+                                state.0 = true;
+                                if !specialized {
+                                    base_reported.insert(index);
+                                }
+                                failures.push((
+                                    check.group,
+                                    if specialized { architecture } else { None },
+                                    failure,
+                                ));
+                            }
+                            Err(error) => {
+                                state.1 = true;
+                                refusals.push(Report::Refusal {
+                                    span: unwind::source_anchor(read, decl, check),
+                                    tag: unwind::SOURCE_TAG,
+                                    detail: error.0.into(),
+                                });
+                            }
+                        }
+                    } else {
+                        state.0 = true;
                     }
                 }
                 Answer::Refused { tag, detail } => {
@@ -565,16 +598,21 @@ fn check_recommendations(
         }
         match answer(&check, &format!("recommends {}", decl.name), limits) {
             Answer::Proved => {}
-            Answer::Refuted { architecture } => {
-                calls.insert((call, callee));
-                *reported.entry(check.group).or_default() += 1;
-                reports.push(Report::Recommendation(failure(
-                    read,
-                    decl,
-                    &check,
-                    architecture,
-                )));
-            }
+            Answer::Refuted { architecture } => match failure(read, decl, &check, architecture) {
+                Ok(failure) => {
+                    calls.insert((call, callee));
+                    *reported.entry(check.group).or_default() += 1;
+                    reports.push(Report::Recommendation(failure));
+                }
+                Err(error) => reports.push(Report::Note {
+                    span: unwind::source_anchor(read, decl, &check),
+                    message: format!(
+                        "trust-vc could not complete recommends diagnostics: {}: {}",
+                        unwind::SOURCE_TAG,
+                        error.0
+                    ),
+                }),
+            },
             Answer::Refused { tag, detail } => {
                 reports.push(Report::Note {
                     span: span(call),
@@ -596,7 +634,9 @@ fn check_span(check: &Check) -> SpanId {
         | CheckKind::Overflow { span }
         | CheckKind::DivByZero { span }
         | CheckKind::ChoiceRecommendation { span } => *span,
-        CheckKind::Precondition { call, .. } | CheckKind::Recommendation { call, .. } => *call,
+        CheckKind::Precondition { call, .. }
+        | CheckKind::Recommendation { call, .. }
+        | CheckKind::Unwind { call, .. } => *call,
         CheckKind::Postcondition { exit, .. } => *exit,
         CheckKind::LoopInvariant { at, invariant, .. } => match at {
             InvariantAt::Entry | InvariantAt::End => *invariant,
@@ -627,9 +667,12 @@ fn failure(
     decl: &FnDecl,
     check: &Check,
     refuted_architecture: Option<u32>,
-) -> Failure {
+) -> Result<Failure, unwind::SourceError> {
     let span = |id: SpanId| read.span(id).unwrap_or(rustc_span::DUMMY_SP);
-    match &check.kind {
+    Ok(match &check.kind {
+        CheckKind::Unwind { call, callee } => {
+            return unwind::failure(read, decl, *call, *callee);
+        }
         CheckKind::Assert { span: at, attrs } => {
             let at = span(*at);
             let (note, custom) = notes(attrs);
@@ -789,7 +832,7 @@ fn failure(
             primary: vec![span(*at)],
             labels: Vec::new(),
         },
-    }
+    })
 }
 
 /// Verus's hint on an `invariant` that fails at a `break`.

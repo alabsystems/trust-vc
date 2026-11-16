@@ -18,6 +18,7 @@ fn local(ty: Ty, kind: LocalKind) -> LocalDecl {
         name: "same_name".into(),
         ty,
         mode: Mode::Spec,
+        prophecy: trust_vc_vcir::DeclProphecy::Default,
         mutable: false,
         kind,
         span: SpanId(0),
@@ -45,6 +46,7 @@ fn original() -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::None,
     }

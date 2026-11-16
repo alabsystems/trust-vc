@@ -73,7 +73,9 @@ pub(super) fn expression(work: &Cell<usize>, expression: &crate::Expr, span: Spa
                         ty(work, child, span, depth + 1)?;
                     }
                 }
-                crate::Ty::Ref { inner, .. } => ty(work, inner, span, depth + 1)?,
+                crate::Ty::Ref { inner, .. } | crate::Ty::MutRef(inner) => {
+                    ty(work, inner, span, depth + 1)?
+                }
                 _ => {}
             }
             Ok(())
@@ -97,7 +99,7 @@ pub(super) fn expression(work: &Cell<usize>, expression: &crate::Expr, span: Spa
                 }
             }
             // A key cannot silently omit embedded proof statements.
-            crate::ExprKind::ProofInSpec(_) => {
+            crate::ExprKind::ProofInSpec(_) | crate::ExprKind::ProofInSpecTail { .. } => {
                 return Err(refusal(
                     "inline-size",
                     "a choice key with embedded proof statements",

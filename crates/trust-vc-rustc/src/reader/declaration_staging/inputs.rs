@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use crate::declaration_alignment::source_bindings::{
-    CompatibilityInput, PinnedFile, SourceCompatibility, SourceIdentity, Sources,
-};
+use crate::declaration_alignment::source_bindings::{CompatibilityInput, PinnedFile, Sources};
 use crate::declaration_alignment::Digest;
 
 pub(super) struct Inputs {
@@ -120,28 +118,9 @@ impl Inputs {
                 patch: pinned(&compatibility["patch"])?,
             }),
         )?;
-        let identity = sources.identity();
-        // This recipe admits the actual pinned source, with its reviewed
-        // compatibility change. Paths and user-supplied source labels cannot
-        // select another library while retaining this source identity.
-        let expected_source = SourceIdentity {
-            manifest_sha256: sha(
-                "dab8d7c7732d498ce4fc80dce93cbd073488338c2b0e3e6d3a2c231634940187",
-            )?,
-            compatibility: SourceCompatibility::Applied {
-                recipe_sha256: sha(
-                    "8c76b07b40c8013f7f05db2966d239e9f9e99ee87092513881c4397b2b17fbb9",
-                )?,
-                patch_sha256: sha(
-                    "67c3ec8d35127f98536fc0272109557b567405c0ad9ca0db90bdbb035b11b522",
-                )?,
-            },
-        };
-        if identity != expected_source {
-            return Err(
-                "the source/compatibility inputs are outside the native staging recipe".into(),
-            );
-        }
+        // The complete new A40 graph and its actual current-compiler patch
+        // have their own identity; no historical manifest is substituted.
+        super::profile::check_source(sources.identity())?;
         let mut common_files = BTreeMap::new();
         for row in value["common_metadata"]
             .as_array()
@@ -258,7 +237,11 @@ impl Inputs {
         if let Some(cohort) = &self.build_origin {
             cohort.revalidate(&self.sources)?;
         }
-        self.compiler_driver.read()?;
+        if let Some(cohort) = &self.build_origin {
+            cohort.revalidate_compiler_driver(&self.compiler_driver)?;
+        } else {
+            self.compiler_driver.read()?;
+        }
         if super::identity::loaded_driver_path()? != self.compiler_driver.path {
             return Err("the loaded native compiler driver changed".into());
         }
@@ -273,6 +256,21 @@ impl Inputs {
 
     pub(super) fn library_args(&self, keep: bool) -> Vec<String> {
         let mut args = self.base("vstd");
+        // Both outputs come from this one actual Erase compiler invocation.
+        // Keep stops at its checked callback, but retains the identical native
+        // output plan so output configuration cannot change library semantics.
+        for arg in &mut args {
+            if arg == "--emit=metadata" {
+                *arg = "--emit=metadata,link".into();
+            }
+        }
+        args.extend([
+            "--out-dir".into(),
+            self.output
+                .join(if keep { "keep" } else { "erase" })
+                .display()
+                .to_string(),
+        ]);
         if keep {
             args.extend(["--cfg".into(), "verus_keep_ghost_body".into()]);
         }

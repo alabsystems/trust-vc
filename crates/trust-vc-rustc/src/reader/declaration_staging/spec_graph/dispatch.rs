@@ -5,9 +5,9 @@ use super::*;
 pub(super) struct Call<'tcx> {
     span: AuthoredSpan,
     declared: DefId,
-    declared_args: ty::GenericArgsRef<'tcx>,
+    declared_args: ty::GenericArgs<'tcx>,
     target: DefId,
-    target_args: ty::GenericArgsRef<'tcx>,
+    target_args: ty::GenericArgs<'tcx>,
     selected_impl: Option<DefId>,
     declaration_clauses: Vec<ClauseInput<'tcx>>,
     target_clauses: Vec<ClauseInput<'tcx>>,
@@ -48,7 +48,7 @@ pub(super) struct ClauseInput<'tcx> {
 pub(super) fn clauses<'tcx>(
     tcx: TyCtxt<'tcx>,
     definition: DefId,
-    args: ty::GenericArgsRef<'tcx>,
+    args: ty::GenericArgs<'tcx>,
     env: ty::TypingEnv<'tcx>,
 ) -> Result<Vec<ClauseInput<'tcx>>, String> {
     let mut result = Vec::new();
@@ -83,7 +83,7 @@ pub(super) fn capture<'tcx>(
     owner: LocalDefId,
     span: Span,
     declared: DefId,
-    original_args: ty::GenericArgsRef<'tcx>,
+    original_args: ty::GenericArgs<'tcx>,
     scope: &Intrinsics<'_, 'tcx>,
 ) -> Result<Call<'tcx>, String> {
     scope.current(tcx)?;
@@ -168,6 +168,12 @@ pub(super) fn capture<'tcx>(
     } else {
         (declared, args, None, Vec::new())
     };
+    if intrinsic.is_some() {
+        scope.validate_selection(target)?;
+        if let Some(implementation) = selected_impl {
+            scope.validate_selection(implementation)?;
+        }
+    }
     Ok(Call {
         span: declaration_native::span(tcx, &scope.inputs.sources, span)?,
         declared,

@@ -161,6 +161,15 @@ fn pair(name: &str, body: &str, yes: &str, no: &str, outcome: &str, error: &str)
     assert_eq!(first["imported_verified_functions"], 0);
     assert_eq!(first["ordinary_import_cli_enabled"], false);
     let second = read(1);
+    if name.starts_with("imported_math_") {
+        let minimum = if name == "imported_math_max3" { 2 } else { 1 };
+        for report in [&first, &second] {
+            let definitions = report["imported_spec_definitions"]
+                .as_u64()
+                .expect("actual checked definition count");
+            assert!(definitions >= minimum, "{report}");
+        }
+    }
     assert_eq!(second["normal_verdict"]["outcome"], outcome, "{second}");
     assert_eq!(second["normal_verdict"]["exit_code"], 1);
     assert_eq!(second["publication"], "NoSuccessfulPublication");
@@ -249,5 +258,55 @@ fn tracked_proof_moves_are_checked_in_the_original_mir() {
         "proof fn check<A>(tracked a: A) { consume(a); consume(a); }",
         "verus-rejected",
         "E0382",
+    );
+}
+
+#[test]
+fn genuine_imported_math_add_and_false_twin_use_checked_definitions() {
+    pair(
+        "imported_math_add",
+        "proof fn check(x: int, y: int) { assert(vstd::math::add(x, y) == x + y); }",
+        "== x + y",
+        "== x + y + 1",
+        "verification-failed",
+        "assertion failed",
+    );
+}
+
+#[test]
+fn genuine_imported_math_max_and_false_twin_use_checked_definitions() {
+    pair(
+        "imported_math_max",
+        "proof fn check(x: int, y: int) { assert(vstd::math::max(x, y) >= x); }",
+        ">= x",
+        "< x",
+        "verification-failed",
+        "assertion failed",
+    );
+}
+
+#[test]
+fn genuine_imported_math_max3_and_false_twin_use_the_complete_dependency_graph() {
+    pair(
+        "imported_math_max3",
+        "proof fn check(x: int, y: int, z: int) { assert(vstd::math::max3(x, y, z) >= x); }",
+        ">= x",
+        "< x",
+        "verification-failed",
+        "assertion failed",
+    );
+}
+
+#[test]
+fn genuine_imported_length_type_fact_does_not_prove_a_zero_value() {
+    // These outcomes check native proof behavior, not structural absence of
+    // every possible value equation. The bodyless/channel guards remain separate.
+    pair(
+        "imported_signature_only",
+        "proof fn check(items: vstd::set::Set<int>) { assert(items.len() as int >= 0); }",
+        "assert(items.len() as int >= 0)",
+        "assert(items.len() as int == 0)",
+        "verification-failed",
+        "assertion failed",
     );
 }

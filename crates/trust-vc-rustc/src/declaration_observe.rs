@@ -23,7 +23,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 use serde_json::{json, Value};
 
-const EXPECTED_COMPILER: &str = "29ebb403de7a102850d6cb10a62d5cc3baf723ed";
+const EXPECTED_COMPILER: &str = "82bb867eddb94599f68194f701c766f2b6f5a02f";
 
 #[derive(Default)]
 struct Observe {
@@ -142,7 +142,7 @@ pub fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     if env!("VC_SHIM_COMPILER_COMMIT") != EXPECTED_COMPILER {
-        return Err("this prototype requires the recorded Trust29ebb compiler".into());
+        return Err("this prototype requires the recorded Trust82bb compiler".into());
     }
     let mut args = std::env::args();
     let program = args.next().ok_or("missing program name")?;

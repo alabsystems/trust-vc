@@ -18,10 +18,9 @@ fn term(work: &mut Pay<'_>, t: &Term) -> R<()> {
     fact_closure::term_work(t, &mut |n| work(n)).map(|_| ())
 }
 fn equal(work: &mut Pay<'_>, a: &Term, b: &Term) -> R<bool> {
-    term(work, a)?;
-    term(work, b)?;
-    Ok(a == b)
+    equality::equal(work, a, b)
 }
+mod equality;
 fn owned(work: &mut Pay<'_>, t: &Term) -> R<Term> {
     term(work, t)?;
     Ok(t.clone())
@@ -560,8 +559,8 @@ fn split_traced<P: Copy>(
             // The original is borrowed only to pre-admit and then own each
             // selected child. No origin is shared between sibling formulas.
             pay(work, children.len().saturating_add(1))?;
-            for index in 0..children.len() {
-                let child = owned(work, &children[index])?;
+            for (index, child) in children.iter().enumerate() {
+                let child = owned(work, child)?;
                 let copy = Formula {
                     term: owned(work, &f.term)?,
                     tag: f.tag,

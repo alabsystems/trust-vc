@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::ids::{AdtId, FnId, SpanId};
-use crate::item::{AdtDecl, AdtKind, DefOrder, FnDecl, RecGroup, VcCrate};
+use crate::ids::{AdtId, FnId, LocalId, SpanId};
+use crate::item::{AdtDecl, AdtKind, Clause, DefOrder, FnDecl, RecGroup, VcCrate};
 use crate::ty::{IntRange, Ty};
 
 use super::query::VcRefusal;
@@ -24,6 +24,7 @@ use super::type_encoding::{
     ProductFamily, RecipeAdt, TypeArgument, TypeEnv, TypeRecipe, Vocabulary,
 };
 
+mod mut_refs;
 mod product_values;
 mod sum_values;
 pub(crate) use product_values::{FormalPosition, FormalValue};
@@ -231,11 +232,22 @@ struct NominalTypes {
     indices: HashMap<Ty, u32>,
 }
 
+/// The checked source's diagnostic clauses retain its own parameter indices.
+/// No body or header is installed onto a bodyless imported declaration.
+pub(crate) struct SpecRecommendations {
+    pub(crate) params: Vec<LocalId>,
+    pub(crate) clauses: Vec<Clause>,
+}
+
 /// Lookup tables shared by everything the generator does for one crate.
 pub(crate) struct Ctx<'a> {
+    pub(crate) bitvector_policy: super::BitvectorPolicy,
+    pub(crate) source: &'a VcCrate,
     pub(crate) pointer_width: u32,
     pub(crate) architecture: crate::bitvector::Architecture,
     pub(crate) fns: HashMap<FnId, &'a FnDecl>,
+    checked_spec_recommendations: HashMap<FnId, SpecRecommendations>,
+    checked_inline_forwarders: HashMap<FnId, FnDecl>,
     validated_instances: std::collections::HashSet<FnId>,
     pub(crate) adts: HashMap<AdtId, &'a AdtDecl>,
     def_order: BTreeMap<FnId, BTreeMap<FnId, DefOrder>>,
@@ -250,6 +262,7 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    #[cfg(test)]
     pub(crate) fn new(krate: &'a VcCrate) -> Self {
         Self::for_width(krate, krate.pointer_width)
     }
@@ -286,9 +299,13 @@ impl<'a> Ctx<'a> {
             }
         }
         Self {
+            bitvector_policy: super::BitvectorPolicy::default(),
+            source: krate,
             pointer_width,
             architecture: krate.architecture,
             fns,
+            checked_spec_recommendations: HashMap::new(),
+            checked_inline_forwarders: HashMap::new(),
             validated_instances,
             adts: krate.adts.iter().map(|adt| (adt.id, adt)).collect(),
             def_order,
@@ -297,6 +314,43 @@ impl<'a> Ctx<'a> {
             nominal_types: std::cell::RefCell::default(),
             types: std::cell::RefCell::default(),
         }
+    }
+
+    /// Retain separate checked source environments after exact signature
+    /// validation. The ordinary declaration table remains bodyless; only the
+    /// bounded inline path consumes a finite forwarder's actual source body.
+    pub(crate) fn for_width_with_checked_spec(
+        krate: &'a VcCrate,
+        pointer_width: u32,
+        definitions: &crate::CheckedSpecDefinitions,
+    ) -> Self {
+        let mut ctx = Self::for_width(krate, pointer_width);
+        ctx.checked_inline_forwarders = definitions
+            .definitions()
+            .filter(|definition| definition.attrs.inline)
+            .map(|definition| (definition.id, definition.clone()))
+            .collect();
+        ctx.checked_spec_recommendations = definitions
+            .recommendation_declarations()
+            .map(|definition| {
+                (
+                    definition.id,
+                    SpecRecommendations {
+                        params: definition.params.clone(),
+                        clauses: definition.recommends.clone(),
+                    },
+                )
+            })
+            .collect();
+        ctx
+    }
+
+    pub(crate) fn checked_spec_recommendations(&self, owner: FnId) -> Option<&SpecRecommendations> {
+        self.checked_spec_recommendations.get(&owner)
+    }
+
+    pub(crate) fn checked_inline_forwarder(&self, owner: FnId) -> Option<&FnDecl> {
+        self.checked_inline_forwarders.get(&owner)
     }
 
     /// The group of recursive functions `id` belongs to.
@@ -767,7 +821,7 @@ impl<'a> Ctx<'a> {
                 Ok(Shape::Node(children))
             }
             Ty::Ref { inner, .. } => self.shape_inner(inner, owner, span, depth + 1),
-            Ty::Param(_) => self.poly_shape(ty, owner, span),
+            Ty::Param(_) | Ty::MutRef(_) => self.poly_shape(ty, owner, span),
         }
     }
 }

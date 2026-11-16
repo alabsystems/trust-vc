@@ -125,6 +125,13 @@ pub const NO_CHEATING_EXTERNAL_BODY: &str =
 pub mod header {
     /// A spec function with `requires` or `ensures`.
     pub const SPEC_REQUIRES_ENSURES: &str = "spec functions cannot have requires/ensures";
+    /// `returns` is an exec/proof contract, never a spec definition.
+    pub const SPEC_RETURNS: &str = "spec functions cannot have `returns` clause";
+    /// The pure entry-state value has the actual function result type.
+    pub const RETURNS_TYPE: &str =
+        "type of `returns` clause does not match function return type";
+    /// A returns marker has exactly one semantic expression.
+    pub const RETURNS_COUNT: &str = "`returns` clause should have exactly 1 expression";
     /// A proof or exec function with `recommends`.
     pub const NON_SPEC_RECOMMENDS: &str = "non-spec functions cannot have recommends";
     /// `ensures` on a function whose written return type has no name.
@@ -143,6 +150,8 @@ pub mod header {
     /// A second `ensures` call.
     pub const SECOND_ENSURES: &str =
         "only one call to ensures allowed (use ensures([e1, ..., en]) for multiple expressions";
+    /// A second returns marker, including one written in the function body.
+    pub const SECOND_RETURNS: &str = "only one call to returns allowed";
     /// A second invariant mask spec (`opens_invariants ..`).
     pub const SECOND_MASK: &str = "only one invariant mask spec allowed";
     /// A second unwind spec (`no_unwind ..`).
@@ -157,8 +166,9 @@ pub mod header {
             V::Requires => Some(SECOND_REQUIRES),
             V::Recommends => Some(SECOND_RECOMMENDS),
             V::Ensures => Some(SECOND_ENSURES),
+            V::Returns => Some(SECOND_RETURNS),
             V::OpensInvariantsNone => Some(SECOND_MASK),
-            V::NoUnwind => Some(SECOND_UNWIND),
+            V::NoUnwind | V::NoUnwindWhen => Some(SECOND_UNWIND),
             _ => None,
         }
     }
@@ -379,6 +389,9 @@ pub mod modes {
 
     /// `ExprX::VarAt`: `old(x)` in exec code.
     pub const OLD_IN_EXEC: &str = "cannot use `old` in exec-code";
+
+    /// `check_one_expr`: pre-state values have no meaning in spec functions.
+    pub const OLD_IN_SPEC: &str = "`old` is meaningless in spec functions";
 
     /// `ExprX::NeverToAny`: a diverging expression used as a spec value.
     pub const NEVER_TO_ANY_SPEC: &str = "never-to-any coercion is not allowed in spec mode";
@@ -611,9 +624,10 @@ pub mod traits {
         "verus internal error: the function body is more public than the function itself";
     /// `rust_verify/src/external.rs`, which checks it before
     /// `rust_to_vir_trait.rs` would.
-    pub const EXTERNAL_TRAIT_ITEM: &str = "An individual item of a trait cannot be marked external. Perhaps you meant to mark the entire trait external?";
-    /// `rust_verify/src/external.rs`.
-    pub const EXTERNAL_IMPL_ITEM: &str = "An individual item of a trait impl cannot be marked external. Perhaps you meant to mark the entire trait impl external, or you meant to mark this item as `external_body`?";
+    pub const EXTERNAL_TRAIT_ITEM: &str = "a trait item cannot be marked 'external'. Perhaps you meant to mark the entire trait external?";
+    /// `rust_verify/src/external.rs`. Keep both established summaries of
+    /// this rule in the same diagnostic for every trait implementation.
+    pub const EXTERNAL_IMPL_ITEM: &str = "an item in a trait impl cannot be marked 'external'. An individual item of a trait impl cannot be marked external independently of the implementation. Perhaps you meant to mark the entire trait impl external, or you meant to mark this item as `external_body`?";
     /// `vir/src/modes.rs`, `check_function`: a trait method implemented in
     /// another mode.
     #[must_use]

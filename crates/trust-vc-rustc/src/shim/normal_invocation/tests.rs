@@ -81,6 +81,22 @@ fn one_actual_split_derives_native_vectors_and_nondefault_semantics() {
 }
 
 #[test]
+fn bitvector_preprocessing_is_retained_from_each_actual_invocation() {
+    let source = Source::new();
+    let normal = source.request(&[]).unwrap();
+    let disabled = source.request(&["-V", "no-bv-simplify"]).unwrap();
+    assert!(!normal.options().read.no_bv_simplify);
+    assert!(disabled.options().read.no_bv_simplify);
+    assert_eq!(disabled.original().unwrap().extended(), ["no-bv-simplify"]);
+    assert!(!disabled.verify().iter().any(|arg| arg == "no-bv-simplify"));
+    assert!(!disabled.erase().iter().any(|arg| arg == "no-bv-simplify"));
+    // These typed options are copied into the invocation-owned read binding,
+    // then retained by CrateRead; VerifyOptions cannot choose another policy.
+    normal.source_matches(&source.pin()).unwrap();
+    disabled.source_matches(&source.pin()).unwrap();
+}
+
+#[test]
 fn invalid_options_never_fall_back_to_default_verification() {
     let source = Source::new();
     for options in [

@@ -44,6 +44,8 @@ pub(super) fn try_check_sat_with_details(
         if super::test_hooks::take_forced_solve_panic() {
             panic!("simulated ay solve panic");
         }
+        #[cfg(test)]
+        let _phase_observer = super::phase_observer::span("solver_call", "check_sat_with_details");
         solver.check_sat_with_details()
     }))
     .map_err(|e| {
@@ -702,7 +704,16 @@ impl AYEncoder {
                     // model-validated SAT); a still-Unknown / unvalidated-SAT
                     // fallback leaves the original fail-closed Unknown in place.
                     if details.result.result().is_unknown() {
+                        #[cfg(test)]
+                        super::phase_observer::retry("check_sat_assuming_fallback");
+                        #[cfg(test)]
+                        let assuming_phase = super::phase_observer::span(
+                            "solver_call",
+                            "try_check_sat_assuming_with_details",
+                        );
                         let fallback = self.solver.try_check_sat_assuming_with_details(&[negated]);
+                        #[cfg(test)]
+                        drop(assuming_phase);
                         note_solver_panic(&fallback, &mut self.state.solver_panic);
                         if let Ok(fb) = fallback {
                             let fb_result = fb.solve.result.result();

@@ -40,6 +40,8 @@ fn run_vacuous_precheck(
     use_int_for_measures: bool,
     loop_modified_vars: Option<&HashSet<String>>,
 ) -> Result<VacuousCheckOutput, crate::error::TrustVcError> {
+    #[cfg(test)]
+    let _phase_observer = super::phase_observer::span("phase", "vacuity");
     let slices = VerificationSlices::new(ctx, assumptions, broadcast_assumptions, &[], &[], &[]);
     // POST-LOOP framing for the precheck (2026-09-10). A function's entry facts
     // (`requires(i == 0)`) and a loop's auto-generated normal-exit fact

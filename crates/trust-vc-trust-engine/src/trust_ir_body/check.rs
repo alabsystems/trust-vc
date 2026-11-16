@@ -221,6 +221,7 @@ pub(crate) fn inst_name(inst: &Inst) -> &'static str {
         Inst::ICmp { .. } => "ICmp",
         Inst::FCmp { .. } => "FCmp",
         Inst::Cast { .. } => "Cast",
+        Inst::BoxDeref { .. } => "BoxDeref",
         Inst::Load { .. } => "Load",
         Inst::Store { .. } => "Store",
         Inst::Alloca { .. } => "Alloca",
@@ -1188,6 +1189,11 @@ fn check_node(
             "a tensor operation over run-time tensor values; v0 models scalars and static \
              tuples only, so a body containing it is not decided",
         )),
+        Inst::BoxDeref { .. } => Err(at.unsupported(
+            "BoxDeref",
+            "Box pointee validity is not decided by v0; a named premise is not an established \
+             validity fact and cannot authorize an unchecked scalar memory operation",
+        )),
         // Every other instruction is outside v0. Listed rather than matched
         // by a wildcard, so an instruction trust-ir adds later fails to
         // compile HERE and is classified by hand instead of inheriting a
@@ -1288,6 +1294,14 @@ mod tests {
         }
         assert_eq!(ScalarTy::from_ty(&Ty::Bool), Some(ScalarTy::Bool));
         assert_eq!(ScalarTy::from_ty(&Ty::U128), None);
+        // Nominal function items have no modeled scalar payload. Distinct
+        // definitions must never be reinterpreted as pointer-sized integers.
+        for id in [0, 1] {
+            assert_eq!(
+                ScalarTy::from_ty(&Ty::FnItem(trust_ir::FuncId::new(id))),
+                None
+            );
+        }
     }
 
     /// The layer BEHIND the wire-identity probe: while trust-ir's binary
@@ -1324,6 +1338,22 @@ mod tests {
                     dst: v(0),
                     byte: v(1),
                     bytes: v(0),
+                },
+            ),
+            (
+                "BoxDeref",
+                Inst::BoxDeref {
+                    ptr_ty: Ty::Ptr,
+                    pointee: trust_ir::box_validity::BoxPointee::Sized { ty: Ty::U8 },
+                    operand: v(0),
+                    fact: Box::new(trust_ir::box_validity::BoxValidityFact::premise(
+                        trust_ir::box_validity::BoxDerefSite {
+                            item: [7; 16],
+                            ordinal: 0,
+                        },
+                        trust_ir::box_validity::BoxFactSession::PROOF_SNAPSHOT,
+                        trust_ir::box_validity::PremiseRoot::ParamByValue,
+                    )),
                 },
             ),
             // trust-ir v47: a drop runs a destructor; v0 models none.

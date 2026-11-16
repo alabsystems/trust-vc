@@ -295,6 +295,92 @@ def failed_test_output(logs_dir: Path, binary: str) -> dict:
 
 # --------------------------------------------------------------------------- a run
 
+def ordinary_test_entry(file, test_dir):
+    """The normal harness's exact input suffix, without resolving files."""
+    if (not isinstance(file, str) or not file or not isinstance(test_dir, str)
+            or not test_dir or "/" in test_dir or test_dir in (".", "..")):
+        return False
+    path = Path(file)
+    return (path.is_absolute() and str(path) == file and ".." not in path.parts
+            and path.parts[-3:] == ("test_inputs", test_dir, "test.rs"))
+
+
+def reference_rejection_match(records, reference, reference_ran, reference_outcome,
+                              test_dir, entry, captures, native_entry):
+    """Recognize two recorded compiler rejections despite a red reference harness.
+
+    This establishes rejection coverage, not identical diagnostic causes. No
+    accepted or verified function can use this exception to the coverage guard.
+    Every native record must have a real source range covering a placed error
+    from the reference. Unknown shapes retain the ordinary conservative guard.
+    """
+    if (reference_outcome != "FAILED" or reference_ran is not True or reference is None
+            or not records or entry is not None or not captures):
+        return False
+    sites, unplaced = reference
+    if type(unplaced) is not int or unplaced != 0 or not sites:
+        return False
+    if any(not isinstance(file, str) or not file or type(line) is not int or line < 1
+           for file, line in sites):
+        return False
+    for reference_entry, text in captures:
+        if not ordinary_test_entry(reference_entry, test_dir) or not isinstance(text, str):
+            return False
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines or lines[-1] != "exit=1":
+            return False
+        for line in lines:
+            try:
+                diagnostic = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(diagnostic, dict) or diagnostic.get("level") != "error":
+                continue
+            if ABORTING_RE.match(diagnostic.get("message", "")):
+                continue
+            primary = [span for span in diagnostic.get("spans", []) if span.get("is_primary") is True]
+            if not primary or any(span.get("file_name") != reference_entry for span in primary):
+                return False
+    for record in records:
+        if (not isinstance(record, dict) or "corrupt" in record
+                or record.get("schema") != "trust-vc.verdict@1"
+                or record.get("outcome") != "verus-rejected"
+                or type(record.get("exit_code")) is not int or record["exit_code"] != 1
+                or "erase_exit" not in record or record["erase_exit"] is not None
+                or not ordinary_test_entry(record.get("entry_file"), test_dir)
+                or record["entry_file"] != native_entry
+                or not isinstance(record.get("compiler_commit"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", record["compiler_commit"]) is None
+                or record.get("refused") is not False or record.get("crate_refusals") != []):
+            return False
+        functions = record.get("functions")
+        if not isinstance(functions, list) or not functions:
+            return False
+        matched = False
+        for function in functions:
+            if (not isinstance(function, dict)
+                    or function.get("verdict") not in ("rejected", "external")
+                    or function.get("kind") not in ("Fn", "AssocFn", "Const", "AssocConst")
+                    or not isinstance(function.get("def_path"), str) or not function["def_path"].strip()
+                    or "tag" not in function or function["tag"] is not None):
+                return False
+            for key in ("sites_proved", "sites_failed"):
+                if key not in function or not (function[key] is None
+                        or type(function[key]) is int and function[key] == 0):
+                    return False
+            file, span = function.get("file"), function.get("lines")
+            if (file != record["entry_file"] or not isinstance(span, list) or len(span) != 2
+                    or any(type(line) is not int or line < 1 for line in span) or span[0] > span[1]):
+                return False
+            file = norm_file(file)
+            if not file:
+                return False
+            matched |= any(site_file == file and span[0] <= line <= span[1] for site_file, line in sites)
+        if not matched:
+            return False
+    return True
+
+
 def score_run(rows, verdict_dir: Path, logs_dir: Path, verus_src: Path, reference_dir: Path | None,
               reference_outcomes: dict | None):
     """Score every row of a run's results (the dicts load_results makes).
@@ -308,7 +394,7 @@ def score_run(rows, verdict_dir: Path, logs_dir: Path, verus_src: Path, referenc
             outputs[binary] = failed_test_output(logs_dir, binary)
         test_dir, entry = test_dir_of(binary, test, examples)
         records = read_records(verdict_dir, test_dir, entry)
-        reference, reference_ran = None, None
+        reference, reference_ran, caps = None, None, None
         if reference_dir is not None:
             caps = reference_captures(reference_dir, test_dir, entry)
             reference_ran = caps is not None
@@ -318,9 +404,17 @@ def score_run(rows, verdict_dir: Path, logs_dir: Path, verus_src: Path, referenc
         if reference_ran is False and ref_outcome != "ok":
             reference_ran = None  # a reference that did not pass the test says nothing about it
         s = score_test(r["outcome"], records, [outputs[binary].get(test, "")], reference, reference_ran)
+        s["reference_rejection_match"] = 0
         if s["score"] == "pass" and reference_outcomes is not None and ref_outcome != "ok":
-            # A pass the reference run did not have cannot be cross-checked.
-            s["unchecked_verified_fns"] = max(s["unchecked_verified_fns"], 1)
+            native_entry = (verdict_dir.parent / "stage/source/target.noindex/debug/test_inputs"
+                            / test_dir / "test.rs")
+            if reference_rejection_match(records, reference, reference_ran, ref_outcome,
+                                         test_dir, entry, caps, str(native_entry)):
+                # Both compilers rejected before verification. Keep the red
+                # reference harness visible without inventing a verified fn.
+                s["reference_rejection_match"] = 1
+            else:
+                s["unchecked_verified_fns"] = max(s["unchecked_verified_fns"], 1)
         scored.append({
             "binary": binary, "test_name": test, "test_dir": test_dir, "harness": r["outcome"],
             "reference": ref_outcome, **{k: v for k, v in s.items() if k != "compiler_commits"},
@@ -354,6 +448,7 @@ def summarize(scored):
         "not_run": count["not-run"],
         "verified_fns": sum(s["verified_fns"] for s in scored),
         "unchecked_verified_fns": sum(s["unchecked_verified_fns"] for s in scored),
+        "reference_rejection_matches": sum(s.get("reference_rejection_match", 0) for s in scored),
         "sites_proved_in_passes": sum(s["sites_proved"] for s in scored if s["score"] == "pass"),
         "sites_failed_in_passes": sum(s["sites_failed"] for s in scored if s["score"] == "pass"),
     }
@@ -368,7 +463,7 @@ def summarize(scored):
 
 SCORE_FIELDS = ["binary", "test_name", "test_dir", "harness", "reference", "score", "tags", "records",
                 "verified_fns", "refused_fns", "sites_proved", "sites_failed", "false_pass_ref_fns",
-                "unchecked_verified_fns"]
+                "unchecked_verified_fns", "reference_rejection_match"]
 
 
 def summary_lines(scored, totals, per_binary=True):

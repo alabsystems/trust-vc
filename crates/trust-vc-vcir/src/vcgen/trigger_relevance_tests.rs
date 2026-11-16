@@ -135,10 +135,10 @@ fn initial_source_admission_stops_under_the_original_shared_budget() {
 }
 
 #[test]
-fn admitted_disjoint_facts_exhaust_inside_the_actual_arithmetic_fact_closure() {
+fn admitted_disjoint_facts_pay_for_the_actual_arithmetic_fact_index() {
     // B1 family: N unrelated comparisons plus M independent Add carriers.
     // Their initial syntax is small. The real seeds->rel->filter->arithmetic
-    // search must pay the N*M closure scans rather than only selected facts.
+    // search must pay construction of the entire fact index before using it.
     let n = 128usize;
     let m = 64usize;
     let mut hypotheses = Vec::new();
@@ -181,9 +181,9 @@ fn admitted_disjoint_facts_exhaust_inside_the_actual_arithmetic_fact_closure() {
         "must actually reach the new arithmetic witness path"
     );
     assert!(analysis.fact_closure_calls > 0 && analysis.fact_closure_input_rows > 0);
-    assert!(
-        analysis.fact_closure_passes > 0 && analysis.fact_closure_scanned_rows > 0,
-        "must pass input/key admission and enter actual closure scanning"
+    assert_eq!(
+        analysis.fact_closure_passes, 0,
+        "the index itself exhausts the grant before frontier traversal"
     );
     assert!(
         analysis.fact_closure_exhaustions > 0,

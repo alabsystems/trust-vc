@@ -79,11 +79,8 @@ impl<'library, 'tcx> ClientFrame<'library, 'tcx> {
         }
         self.owner.check_retained_inputs()?;
         let library = self.library();
-        let (common, target) = collect::client_selections(
-            tcx,
-            self.owner.common_files(),
-            &library.prepared.erase.file,
-        )?;
+        let (common, target) =
+            collect::client_selections(tcx, self.owner.common_files(), &library.prepared.erase)?;
         let target = target.ok_or("the normal client lost its actual Erase crate")?;
         if target.native_crate != self.target
             || target.stable_crate_id != library.prepared.erase.view.stable_crate_id

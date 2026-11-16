@@ -5,6 +5,7 @@
 //! Bind one normal invocation request to the real source and native owner.
 
 use super::super::invocation::NormalNativeRequest;
+use super::super::standalone_client::prepared_sdk::PreparedSdk;
 use super::*;
 use crate::shim::NormalInvocation;
 use std::collections::BTreeSet;
@@ -18,11 +19,13 @@ pub(crate) struct NormalPlanIdentity {
 
 pub(crate) struct NormalClientPlan<'owner> {
     owner: &'owner standalone_client::StandaloneImported<'owner>,
+    sdk: Option<&'owner PreparedSdk<'owner>>,
     source: &'owner ClientSource,
     invocation: NormalInvocation,
     source_operand: PathBuf,
     identity: Arc<NormalPlanIdentity>,
     native: NormalNativeRequest,
+    compiler_environment: Option<crate::compiler_environment::CompilerEnvironment>,
 }
 
 impl<'owner> NormalClientPlan<'owner> {
@@ -35,7 +38,12 @@ impl<'owner> NormalClientPlan<'owner> {
         owner.check_retained_inputs()?;
         let macros = owner.macro_files().collect::<Vec<_>>();
         let args = normal_client_args(owner.library(), source, &macros, output, erase_output)?;
-        Self::finish(owner, source, NormalInvocation::closed_standalone(args)?)
+        Self::finish(
+            owner,
+            None,
+            source,
+            NormalInvocation::closed_standalone(args)?,
+        )
     }
 
     /// This represents the supplied CLI request; it never regenerates the
@@ -45,23 +53,43 @@ impl<'owner> NormalClientPlan<'owner> {
         source: &'owner ClientSource,
         invocation: NormalInvocation,
     ) -> Result<Self, String> {
+        Self::from_bound_invocation(owner, None, source, invocation)
+    }
+
+    pub(in crate::reader::declaration_staging) fn from_prepared_invocation(
+        owner: &'owner standalone_client::StandaloneImported<'owner>,
+        sdk: &'owner PreparedSdk<'owner>,
+        source: &'owner ClientSource,
+        invocation: NormalInvocation,
+    ) -> Result<Self, String> {
+        sdk.check_owner(owner)?;
+        Self::from_bound_invocation(owner, Some(sdk), source, invocation)
+    }
+
+    fn from_bound_invocation(
+        owner: &'owner standalone_client::StandaloneImported<'owner>,
+        sdk: Option<&'owner PreparedSdk<'owner>>,
+        source: &'owner ClientSource,
+        invocation: NormalInvocation,
+    ) -> Result<Self, String> {
         owner.check_retained_inputs()?;
         let split = invocation
             .original()
             .ok_or("a closed standalone plan is not a CLI request")?;
-        represented_options(split)?;
+        represented_options(owner, sdk, split)?;
         invocation.source_matches(source.file())?;
         if invocation.source_operand()? != source.file().path.as_path() {
             return Err(
                 "the owned CLI source operand must be its exact canonical source path".into(),
             );
         }
-        represented_operands(owner, split, source)?;
-        Self::finish(owner, source, invocation)
+        represented_operands(owner, sdk, split, source)?;
+        Self::finish(owner, sdk, source, invocation)
     }
 
     fn finish(
         owner: &'owner standalone_client::StandaloneImported<'owner>,
+        sdk: Option<&'owner PreparedSdk<'owner>>,
         source: &'owner ClientSource,
         invocation: NormalInvocation,
     ) -> Result<Self, String> {
@@ -69,14 +97,38 @@ impl<'owner> NormalClientPlan<'owner> {
         let source_operand = invocation.source_operand()?.to_path_buf();
         let native = NormalNativeRequest::capture(invocation.verify())?;
         owner.check_retained_inputs()?;
+        if let Some(sdk) = sdk {
+            sdk.check_owner(owner)?;
+        }
         Ok(Self {
             owner,
+            sdk,
             source,
             invocation,
             source_operand,
             identity: Arc::new(NormalPlanIdentity { _private: 0 }),
             native,
+            compiler_environment: None,
         })
+    }
+
+    /// Explicit request data for the dedicated serial coordinator only. It
+    /// changes neither the source/plan identity nor its native import owner.
+    pub(in crate::reader::declaration_staging) fn with_compiler_environment(
+        mut self,
+        environment: crate::compiler_environment::CompilerEnvironment,
+    ) -> Result<Self, String> {
+        crate::compiler_environment::CompilerEnvironment::require_absent_process()
+            .map_err(|error| error.to_string())?;
+        self.native.bind_compiler_environment(environment.clone());
+        self.compiler_environment = Some(environment);
+        Ok(self)
+    }
+
+    pub(crate) fn compiler_environment(
+        &self,
+    ) -> Option<&crate::compiler_environment::CompilerEnvironment> {
+        self.compiler_environment.as_ref()
     }
 
     pub(crate) fn verify(&self) -> &[String] {
@@ -93,6 +145,9 @@ impl<'owner> NormalClientPlan<'owner> {
     }
     pub(crate) fn source_operand(&self) -> &Path {
         &self.source_operand
+    }
+    pub(crate) fn prepared_sdk_root(&self) -> Option<&Path> {
+        self.sdk.map(PreparedSdk::root)
     }
     pub(crate) fn identity(&self) -> Arc<NormalPlanIdentity> {
         Arc::clone(&self.identity)
@@ -121,13 +176,33 @@ impl<'owner> NormalClientPlan<'owner> {
             );
         }
         self.invocation.source_matches(source.file())?;
+        if let Some(sdk) = self.sdk {
+            sdk.check_owner(owner)?;
+        }
         owner.check_retained_inputs()
     }
 }
 
-fn represented_options(split: &crate::args::SplitArgs) -> Result<(), String> {
+fn represented_options(
+    owner: &standalone_client::StandaloneImported<'_>,
+    sdk: Option<&PreparedSdk<'_>>,
+    split: &crate::args::SplitArgs,
+) -> Result<(), String> {
+    let mut imports = 0;
     for option in &split.verus {
         match option.name.as_str() {
+            "import" => {
+                imports += 1;
+                let valid = match (sdk, option.value.as_deref()) {
+                    (Some(sdk), Some(value)) => sdk.represents_import(owner, value)?,
+                    _ => false,
+                };
+                if imports != 1 || !valid {
+                    return Err(
+                        "the import operand is not this exact live native SDK reference".into(),
+                    );
+                }
+            }
             "no-external-by-default"
             | "no-verify"
             | "no-lifetime"
@@ -139,7 +214,7 @@ fn represented_options(split: &crate::args::SplitArgs) -> Result<(), String> {
             | "compile"
             | "no-vstd" => {}
             "V" if option.value.as_deref() == Some("new-mut-ref") => {}
-            // Import/export descriptors and their replay worker are not yet
+            // Exported libraries and ordinary serialized imports are not
             // represented. Their spelling cannot supply a native permission.
             name => {
                 return Err(format!(
@@ -153,31 +228,34 @@ fn represented_options(split: &crate::args::SplitArgs) -> Result<(), String> {
 
 fn represented_operands(
     owner: &standalone_client::StandaloneImported<'_>,
+    sdk: Option<&PreparedSdk<'_>>,
     split: &crate::args::SplitArgs,
     source: &ClientSource,
 ) -> Result<(), String> {
     let library = owner.library();
     // Aliases are request operands, never authority. Bind the actual files;
     // the following compiler's CStore supplies their real native identities.
-    let mut expected = BTreeSet::from([
-        library.prepared.erase.file.path.clone(),
-        library.inputs.builtin.path.clone(),
-    ]);
+    let mut expected = BTreeSet::from([library.inputs.builtin.path.clone()]);
     for file in owner.macro_files() {
         if !expected.insert(file.path.clone()) {
             return Err("the native owner duplicates an actual image".into());
         }
     }
-    if expected.len() != 4 {
-        return Err("the owned normal request lacks its exact four externs".into());
+    if expected.len() != 3 {
+        return Err("the owned normal request lacks its exact three builtin externs".into());
     }
-    let directories = owner.native_dependency_directories()?;
+    let mut directories = owner.native_dependency_directories()?;
+    if let Some(sdk) = sdk {
+        sdk.check_owner(owner)?;
+        directories.insert(sdk.root().to_path_buf());
+    }
     let args = &split.rustc;
     if args.iter().any(|argument| argument.starts_with('@')) {
         return Err("response files are not represented by the owned normal request".into());
     }
     let mut seen = BTreeSet::new();
     let mut selected = BTreeSet::new();
+    let mut selected_library = None;
     let mut outputs = 0;
     let mut sources = 0;
     let mut emits = 0;
@@ -274,10 +352,22 @@ fn represented_operands(
                     .split_once('=')
                     .ok_or("an owned extern is incomplete")?;
                 let name = name.strip_prefix("force:").unwrap_or(name);
+                let operand = Path::new(path);
+                let path = match sdk.map(|sdk| sdk.resolve(owner, operand)).transpose()? {
+                    Some(Some(target)) => target.path.as_path(),
+                    _ => operand,
+                };
+                let library_image = library
+                    .prepared
+                    .erase
+                    .native_images()
+                    .into_iter()
+                    .any(|image| image.path == path);
                 if name.is_empty()
                     || !seen.insert(name.to_string())
-                    || !expected.contains(Path::new(path))
-                    || !selected.insert(PathBuf::from(path))
+                    || (!expected.contains(path) && !library_image)
+                    || !selected.insert(path.to_path_buf())
+                    || (library_image && selected_library.replace(path.to_path_buf()).is_some())
                 {
                     return Err(
                         "the actual CLI extern is outside the exact owned image inventory".into(),
@@ -342,6 +432,9 @@ fn represented_operands(
         }
         at += consumed;
     }
+    let library_image =
+        selected_library.ok_or("the CLI request lacks its live producer library image")?;
+    expected.insert(library_image);
     if selected != expected {
         return Err(
             "the CLI request does not select the complete exact native owner inventory".into(),

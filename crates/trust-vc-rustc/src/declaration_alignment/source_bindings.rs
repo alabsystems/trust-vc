@@ -66,7 +66,7 @@ struct SourceFile {
 /// into owned bytes; span binding cannot observe later, unpinned edits. Call
 /// `revalidate` at the staging boundary to check the on-disk graph again.
 pub struct Sources {
-    root: PathBuf,
+    requested_root: PathBuf,
     canonical_root: PathBuf,
     manifest: PinnedFile,
     compatibility: Option<CompatibilityInput>,
@@ -203,7 +203,7 @@ impl Sources {
             );
         }
         Ok(Self {
-            root: root.into(),
+            requested_root: root.into(),
             canonical_root,
             manifest,
             compatibility,
@@ -305,7 +305,7 @@ impl Sources {
     pub fn anchor(&self, observed: &ObservedAnchor) -> Result<AuthoredSpan, String> {
         let path = Path::new(&observed.local_path);
         let name = path
-            .strip_prefix(&self.root)
+            .strip_prefix(&self.requested_root)
             .or_else(|_| path.strip_prefix(&self.canonical_root))
             .map_err(|_| "source anchor is outside the approved root")?;
         let name = name.to_str().ok_or("source path is not UTF-8")?;
@@ -339,7 +339,12 @@ impl Sources {
     /// Reject graph/input changes before a later staging consumer uses this
     /// snapshot. This is an input check, not a claim of race-free execution.
     pub fn revalidate(&self) -> Result<(), String> {
-        if self.root.canonicalize().map_err(|e| e.to_string())? != self.canonical_root {
+        if self
+            .requested_root
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            != self.canonical_root
+        {
             return Err("approved source root changed its canonical identity".into());
         }
         self.manifest.read()?;
@@ -391,6 +396,7 @@ impl Metadata {
     /// canonical files already admitted by the caller's input inventory. This
     /// records byte/path correspondence only; it supplies no native-context,
     /// image-owner, declaration, mode, body or verification authority.
+    #[cfg(any(feature = "rustc", test))]
     pub(crate) fn load_native_selections(
         inputs: impl IntoIterator<Item = (MetadataInput, PathBuf)>,
     ) -> Result<Self, String> {

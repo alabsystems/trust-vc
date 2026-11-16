@@ -104,19 +104,22 @@ impl LiveClientRead<'_, '_, '_> {
                 .krate
                 .fn_decl(*id)
                 .ok_or("a native read record has no VcIR body")?;
-            if declaration.role != FnRole::Item
-                || declaration.attrs.external_body
-                || !matches!(declaration.mode, Mode::Proof | Mode::Spec)
-                || declaration
-                    .locals
-                    .iter()
-                    .any(|value| value.mode != Mode::Spec)
-            {
-                return Err("this owned client needs a canonical non-ghost ownership check".into());
-            }
             let ghost = read.ghost_ownership.get(&record.def_id).ok_or(
                 "the original native body is outside the checked ghost-only ownership fragment",
             )?;
+            if declaration.role != FnRole::Item
+                || declaration.attrs.external_body
+                || !matches!(declaration.mode, Mode::Proof | Mode::Spec)
+                || declaration.locals.iter().enumerate().any(|(index, value)| {
+                    value.mode != Mode::Spec
+                        && !(index == declaration.ret.index()
+                            && value.mode == Mode::Proof
+                            && value.ty == trust_vc_vcir::Ty::Unit
+                            && ghost.permits_implicit_unit_return(*tcx, record.def_id))
+                })
+            {
+                return Err("this owned client needs a canonical non-ghost ownership check".into());
+            }
             if !ghost.current(*tcx, record.def_id) {
                 return Err(
                     "the native ghost-only component no longer belongs to this original body"

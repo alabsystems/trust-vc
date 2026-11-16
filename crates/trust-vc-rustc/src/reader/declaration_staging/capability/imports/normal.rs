@@ -140,6 +140,10 @@ impl<'tcx> LiveNormalClientRead<'_, '_, '_, 'tcx> {
         self.imports.functions.len()
     }
 
+    pub(in crate::reader::declaration_staging) fn imported_spec_definition_count(&self) -> usize {
+        self.read.spec_definitions.len()
+    }
+
     pub(in crate::reader::declaration_staging) fn native_ownership_roots(&self) -> usize {
         self.read.native_ownership.len()
     }

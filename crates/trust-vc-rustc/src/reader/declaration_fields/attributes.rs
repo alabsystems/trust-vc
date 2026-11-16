@@ -19,7 +19,7 @@ fn ident(tree: &TokenTree, expected: &str) -> bool {
 // spec keyword, that parser permits only bare spec or spec(checked), and drops
 // commas and delimiter spelling in the same way as the pinned Verus parser.
 fn spec_checked(attribute: &Attribute) -> bool {
-    let Attribute::Unparsed(item) = attribute else {
+    let Attribute::Tool(item) = attribute else {
         return false;
     };
     let AttrArgs::Delimited(args) = &item.args else {
@@ -51,8 +51,9 @@ fn bounded(attributes: &[Attribute]) -> Result<(), String> {
     }
     let mut remaining = MAX_ATTRIBUTE_WORK;
     for attribute in attributes {
-        let Attribute::Unparsed(item) = attribute else {
-            continue;
+        let item = match attribute {
+            Attribute::Tool(item) | Attribute::DeriveHelper(item) => item,
+            _ => continue,
         };
         let AttrArgs::Delimited(args) = &item.args else {
             continue;
@@ -101,7 +102,7 @@ pub(super) fn mode(attributes: &[Attribute]) -> Result<Mode, String> {
 }
 
 pub(super) fn empty_verifier(attribute: &Attribute, expected: &str) -> bool {
-    let Attribute::Unparsed(item) = attribute else {
+    let Attribute::Tool(item) = attribute else {
         return false;
     };
     let path = item
@@ -115,7 +116,7 @@ pub(super) fn empty_verifier(attribute: &Attribute, expected: &str) -> bool {
 }
 
 pub(super) fn verifier_named(attribute: &Attribute, expected: &str) -> bool {
-    let Attribute::Unparsed(item) = attribute else {
+    let Attribute::Tool(item) = attribute else {
         return false;
     };
     let path = item

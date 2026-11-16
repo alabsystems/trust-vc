@@ -46,10 +46,10 @@ use rustc_span::Span;
 
 use trust_vc_vcir::wf::msg_not_mutable;
 use trust_vc_vcir::{
-    BinOp, Block, Body, CastKind, Clause, ClauseAttrs, ConstMode, DefOrder, Expr, ExprKind,
-    FnAttrs, FnDecl, FnKind, FnRole, IntLit, IntRange, InvariantKind, Lit, LocalDecl, LocalId,
-    LocalKind, Loop, LoopCond, LoopId, LoopInvariant, LoopSites, Mode, Place, Projection,
-    QuantKind, SiteId, SpanId, Stmt, StmtKind, Ty, UnOp,
+    BinOp, Block, Body, CastKind, Clause, ClauseAttrs, ConstMode, DeclProphecy, DefOrder, Expr,
+    ExprKind, FnAttrs, FnDecl, FnKind, FnRole, IntLit, IntRange, InvariantKind, Lit, LocalDecl,
+    LocalId, LocalKind, Loop, LoopCond, LoopId, LoopInvariant, LoopSites, Mode, Place, Projection,
+    QuantKind, SiteId, SpanId, Stmt, StmtKind, Ty, UnOp, UnwindSpec,
 };
 
 use super::attr_walk::{self, AttrFinding};
@@ -59,10 +59,19 @@ use crate::messages::{self, Phase};
 use crate::verus_items::{BuiltinArith, ChainOp, OrdOp, SpecArith, SpecBitwise, VerusItem};
 use crate::vtyp::spec_eq_compatible;
 
+mod binding_modes;
 mod bitvector;
+mod constructors;
+mod enum_casts;
+mod header_binding_scope;
 mod patterns;
+mod primitive_eq;
 mod quant;
+mod returns;
+mod seq;
+mod spec_bindings;
 mod structs;
+mod unwind;
 mod variant_fields;
 
 /// Why a function was not lowered completely.
@@ -128,8 +137,10 @@ enum Area {
     Requires,
     Recommends,
     Ensures,
+    Returns,
     Decreases,
     When,
+    Unwind,
     Body,
 }
 
@@ -203,7 +214,7 @@ fn check_lit_int(
 pub(crate) fn read_instance<'tcx>(
     cx: &Cx<'tcx>,
     def_id: LocalDefId,
-    args: ty::GenericArgsRef<'tcx>,
+    args: ty::GenericArgs<'tcx>,
     id: trust_vc_vcir::FnId,
 ) -> R<FnDecl> {
     let mut reader = FnReader::build(cx, def_id, Some((args, id)), false)?;
@@ -249,6 +260,9 @@ pub(crate) fn read_instance<'tcx>(
         type_args,
     });
     decl.name = format!("{}::<{args:?}>", decl.name);
+    cx.ghost_tail_occurrences
+        .borrow_mut()
+        .append(&mut reader.ghost_tail_occurrences);
     Ok(decl)
 }
 
@@ -299,6 +313,11 @@ pub(crate) fn read_fn(cx: &Cx<'_>, def_id: LocalDefId, mode_rejected: bool) -> F
     };
     reader.attr_finding.clone_from(&finding);
     let result = with_finding(reader.read());
+    if result.is_ok() && !mode_rejected {
+        cx.ghost_tail_occurrences
+            .borrow_mut()
+            .append(&mut reader.ghost_tail_occurrences);
+    }
     FnOutcome {
         result,
         errors: reader.errors,
@@ -395,6 +414,7 @@ fn abstract_constant(cx: &Cx<'_>, def: LocalDefId) -> R<FnDecl> {
             name: "result".into(),
             ty: result,
             mode: Mode::Exec,
+            prophecy: DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Return,
             span: cx.span_id(span),
@@ -404,6 +424,7 @@ fn abstract_constant(cx: &Cx<'_>, def: LocalDefId) -> R<FnDecl> {
         requires: Vec::new(),
         ensures: Vec::new(),
         recommends: Vec::new(),
+        unwind: None,
         decreases: Vec::new(),
         decreases_when: None,
         decreases_by: None,
@@ -443,10 +464,13 @@ struct FnReader<'a, 'tcx> {
     /// The item whose body is read: the function itself, or the
     /// specification method (`VERUS_SPEC__f`) of a trait method declaration.
     body_def: LocalDefId,
+    checked_modes: Option<std::rc::Rc<super::modes::CheckedModes<'tcx>>>,
+    header_binding_scopes: header_binding_scope::Scopes<'a, 'tcx>,
+    ghost_tail_occurrences: Vec<super::modes::ExpectedGhostTail>,
     /// Concrete type arguments every type of the body is read at: those of
     /// an instance, or those of an implementation while its trait's
     /// clauses are read.
-    subst: Option<ty::GenericArgsRef<'tcx>>,
+    subst: Option<ty::GenericArgs<'tcx>>,
     /// What the function stands for.
     role: FnRole,
     /// VcIR type parameters, by name.
@@ -479,6 +503,7 @@ struct FnReader<'a, 'tcx> {
     /// The `ensures` names the return value (`ensures(|r: T| ..)`); holds
     /// the type the closure gives it.
     ensures_ret_ty: Option<ty::Ty<'tcx>>,
+    returns_clause: Option<returns::Value<'tcx>>,
     /// The mode checker rejected the function; see [`read_fn`].
     mode_rejected: bool,
     /// The `hide` calls Verus takes as headers of the function; see
@@ -503,8 +528,8 @@ struct FnReader<'a, 'tcx> {
     own_id: trust_vc_vcir::FnId,
     /// The header holds `opens_invariants none`.
     opens_none: bool,
-    /// The header holds `no_unwind`.
-    no_unwind: bool,
+    /// The actual declared or inherited unwind contract.
+    unwind: Option<UnwindSpec>,
     /// The header's `decreases` measure.
     decreases: Vec<Expr>,
     /// The header's `decreases_when` condition.
@@ -516,6 +541,9 @@ struct FnReader<'a, 'tcx> {
     trigger_marks: Vec<trust_vc_vcir::triggers::Mark>,
     /// The quantifiers being read, innermost last.
     quant_frames: Vec<quant::QuantFrame>,
+    /// Original outer hints of a local broadcast proof's complete header.
+    broadcast_triggers: Option<Vec<Vec<Expr>>>,
+    broadcast_header_active: bool,
     /// Verus's well-formedness warnings found while reading.
     warnings: Vec<UserError>,
 }
@@ -527,6 +555,7 @@ struct Inherited {
     requires: Vec<Clause>,
     ensures: Vec<Clause>,
     recommends: Vec<Clause>,
+    unwind: Option<UnwindSpec>,
 }
 
 /// What a call runs: see [`FnReader::call_target`].
@@ -565,7 +594,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn build(
         cx: &'a Cx<'tcx>,
         def_id: LocalDefId,
-        instance: Option<(ty::GenericArgsRef<'tcx>, trust_vc_vcir::FnId)>,
+        instance: Option<(ty::GenericArgs<'tcx>, trust_vc_vcir::FnId)>,
         mode_rejected: bool,
     ) -> R<Self> {
         let tcx = cx.tcx;
@@ -582,6 +611,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
         if matches!(tcx.def_kind(parent), DefKind::Impl { of_trait: true })
             && super::trait_impl_problem(tcx, parent, loose).is_some()
+            && !cx.derived_clones.admitted(cx, def_id)
         {
             return refuse(
                 "trait-impl",
@@ -638,6 +668,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             typeck,
             def_id,
             body_def,
+            checked_modes: cx.checked_modes.borrow().get(&def_id).cloned(),
+            header_binding_scopes: header_binding_scope::Scopes::default(),
+            ghost_tail_occurrences: Vec::new(),
             subst: instance.map(|(args, _)| args),
             role,
             type_params,
@@ -660,6 +693,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 .map_or(span, |sig| sig.span),
             area: Area::Body,
             ensures_ret_ty: None,
+            returns_clause: None,
             mode_rejected,
             header_hides: HashSet::new(),
             body_tail: None,
@@ -679,12 +713,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 |(_, id)| id,
             ),
             opens_none: false,
-            no_unwind: false,
+            unwind: None,
             decreases: Vec::new(),
             decreases_when: None,
             decreases_by: None,
             trigger_marks: Vec::new(),
             quant_frames: Vec::new(),
+            broadcast_triggers: None,
+            broadcast_header_active: false,
             warnings: Vec::new(),
         };
         if const_param {
@@ -732,7 +768,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     }
 
     /// Generic arguments from the type-check results, at [`Self::subst`].
-    fn at_args(&self, args: ty::GenericArgsRef<'tcx>) -> ty::GenericArgsRef<'tcx> {
+    fn at_args(&self, args: ty::GenericArgs<'tcx>) -> ty::GenericArgs<'tcx> {
         let Some(subst) = self.subst else {
             return args;
         };
@@ -813,6 +849,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             name: name.to_string(),
             ty,
             mode,
+            prophecy: DeclProphecy::Default,
             mutable,
             kind,
             span: self.sp(span),
@@ -909,6 +946,12 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                         self.operand_mode(prev, ctx),
                         source.span,
                     );
+                    if self.locals[t.index()].mode == Mode::Spec {
+                        // This saves an expression for its later consumer;
+                        // it is not an authored Unit declaration, whose mode
+                        // check deliberately clears a Unit prophecy effect.
+                        self.locals[t.index()].prophecy = DeclProphecy::DelayedInfer;
+                    }
                     saves.push(Stmt::new(
                         self.sp(source.span),
                         StmtKind::Let {
@@ -982,7 +1025,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     /// Verus allows one of them in total and reports the second after the
     /// clause's operands ([`attr_walk`]).
     fn clause_attrs(&self, hir_id: HirId) -> R<ClauseAttrs> {
-        self.clause_attrs_in(hir_id, false)
+        self.clause_attrs_in(hir_id, self.broadcast_header_active)
     }
 
     /// [`Self::clause_attrs`] of a clause that is the body of a quantifier
@@ -1044,11 +1087,20 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let sig = self.typeck.liberated_fn_sigs()[body_hir];
         self.verus_item_rules(sig.safety().is_unsafe(), span)?;
         let ret_rustc = self.at(sig.output());
+        if self.cx.opts.new_mut_ref
+            && self.mode != Mode::Spec
+            && ret_rustc.walk().any(|arg| {
+                arg.as_type()
+                    .is_some_and(|t| matches!(t.kind(), ty::Ref(_, _, m) if m.is_mut()))
+            })
+        {
+            return refuse("new-mut-ref", "an executable or proof return holding `&mut` without native availability and resolution", span);
+        }
         let ret_ty = match self.vc_ty(ret_rustc)? {
             Some(ty) => ty,
             None => self.pending_type("the return value", ret_rustc, span),
         };
-        let ret_mode = self
+        let mut ret_mode = self
             .cx
             .native_ownership
             .borrow()
@@ -1065,6 +1117,22 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 },
                 |ownership| ownership.ret_mode(),
             );
+        // Upstream uses the function mode for an omitted Unit return type;
+        // get_ret_mode's Spec default applies only to a written return type.
+        // Explicit tracked results still require the original ownership gate.
+        if self.mode == Mode::Proof && ret_ty == Ty::Unit {
+            if let Some(checked) = &self.checked_modes {
+                if checked.signature.def_id == def_id.to_def_id()
+                    && checked.signature.body_owner == self.body_def
+                    && matches!(
+                        checked.signature.ret.origin,
+                        super::modes::ModeOrigin::ImplicitReturn
+                    )
+                {
+                    ret_mode = checked.signature.ret.mode;
+                }
+            }
+        }
         // A tracked result needs the same original-root ownership gate as
         // tracked parameters and local values.
         if let Some(declared) = item_attrs.ret_mode {
@@ -1154,12 +1222,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 arg.as_type()
                     .is_some_and(|t| matches!(t.kind(), ty::Ref(_, _, m) if m.is_mut()))
             });
-            if self.cx.opts.new_mut_ref && has_mut_ref {
-                // Under `-V new-mut-ref` postconditions read `&mut`
-                // parameters through `old`/`final`, which VcIR does not have.
+            if self.cx.opts.new_mut_ref && has_mut_ref && self.mode != Mode::Spec {
+                // Pure Spec inputs are immutable logical carrier values.
+                // Executable/Proof storage still requires native shadow-read
+                // availability and owned-value resolution before admission.
                 return refuse(
                     "new-mut-ref",
-                    "a parameter holding `&mut` under -V new-mut-ref",
+                    "an executable or proof parameter holding `&mut` without native availability and resolution",
                     param.span,
                 );
             }
@@ -1209,8 +1278,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             // clauses and a placeholder the macro emits (`unimplemented!()`).
             // The clauses are read for Verus's header rules.
             if let hir::ExprKind::Block(block, None) = body.value.kind {
-                let header_len =
-                    self.header(block, &mut requires, &mut ensures, &mut recommends)?;
+                let header_len = self.broadcast_header(
+                    block,
+                    &mut requires,
+                    &mut ensures,
+                    &mut recommends,
+                    item_attrs.broadcast_forall,
+                )?;
                 self.termination_rules(&item_attrs, &requires, &ensures);
                 self.area = Area::Body;
                 self.external_body_headers(&block.stmts[header_len..], block.expr)?;
@@ -1224,7 +1298,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     body.value.span,
                 );
             };
-            let header_len = self.header(block, &mut requires, &mut ensures, &mut recommends)?;
+            let header_len = self.broadcast_header(
+                block,
+                &mut requires,
+                &mut ensures,
+                &mut recommends,
+                item_attrs.broadcast_forall,
+            )?;
             // Verus checks these before the body (`check_function`).
             self.termination_rules(&item_attrs, &requires, &ensures);
             self.area = Area::Body;
@@ -1232,9 +1312,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             if item_attrs.external_body {
                 self.external_body_headers(rest, block.expr)?;
             }
-            if let Some(trait_fn) = self.implemented_trait_fn() {
+            let implemented_trait_fn = self.implemented_trait_fn();
+            if let Some(trait_fn) = implemented_trait_fn {
                 self.impl_rules(trait_fn, &requires, &recommends);
-                inherited = Some(self.inherited_clauses(trait_fn)?);
             }
             self.decl_rules();
             // Verus builds an `external_body` function's body keeping only
@@ -1288,6 +1368,12 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                         messages::traits::NO_METHOD_BODY_OUTSIDE_DECL,
                     )))
                 }
+            }
+            // Reject an invalid local body marker before requesting inherited
+            // binding facts. That marker can itself prevent a complete native
+            // mode walk; it grants no permission to read an inherited header.
+            if let Some(trait_fn) = implemented_trait_fn {
+                inherited = Some(self.inherited_clauses(trait_fn)?);
             }
             self.header_hides = self.leading_hides(rest)?;
             self.body_tail = block.expr.map(|tail| tail.hir_id);
@@ -1359,8 +1445,15 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 }
             }
         }
+        self.finish_returns_clause(&mut ensures, ret_rustc)?;
+        self.derived_clone_ensures(&mut ensures, span)?;
         self.drop_rules(&requires);
-        self.unwind_and_mask(&vc_body)?;
+        self.unwind_rules();
+        self.invariant_mask(&vc_body)?;
+
+        if item_attrs.broadcast_forall {
+            self.broadcast_rules(span)?;
+        }
 
         if let Some(refusal) = self.pending.take() {
             return Err(FnProblem::Refused(refusal));
@@ -1387,6 +1480,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     inherited.requires.len(),
                     inherited.ensures.len(),
                     inherited.recommends.len(),
+                    inherited.unwind.is_some(),
                 ),
             );
             inherited.requires.append(&mut requires);
@@ -1395,6 +1489,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             ensures = inherited.ensures;
             inherited.recommends.append(&mut recommends);
             recommends = inherited.recommends;
+            self.unwind = inherited.unwind;
         }
         // A body Verus shows only inside part of the crate is hidden from
         // the functions outside it (`module_hidden_definitions`), except for
@@ -1431,13 +1526,17 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             requires,
             ensures,
             recommends,
+            unwind: self.unwind.take(),
             decreases: std::mem::take(&mut self.decreases),
             decreases_when: self.decreases_when.take(),
             decreases_by,
             attrs: FnAttrs {
+                bitvector_scalar_inputs: true,
                 inline: item_attrs.inline,
+                prophetic: item_attrs.prophetic,
                 opaque: item_attrs.opaque,
                 external_body: item_attrs.external_body,
+                broadcast_triggers: self.broadcast_triggers.take(),
                 rlimit: item_attrs.rlimit,
                 exec_allows_no_decreases: self.loop_settings.allow_no_decreases
                     || item_attrs.assume_termination,
@@ -1545,6 +1644,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if self.mode == Mode::Spec && !(requires.is_empty() && ensures.is_empty()) {
             return self.reject_at_sig(header::SPEC_REQUIRES_ENSURES);
         }
+        if self.mode == Mode::Spec && self.returns_clause.is_some() {
+            return self.reject_at_sig(header::SPEC_RETURNS);
+        }
         if self.mode != Mode::Spec && !recommends.is_empty() {
             return self.reject_at_sig(header::NON_SPEC_RECOMMENDS);
         }
@@ -1625,10 +1727,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn required_area(&self) -> Option<(ty::Visibility<ModId>, &'static str)> {
         use messages::wf;
         match self.area {
-            Area::Requires | Area::Recommends => Some((self.fn_visibility(), wf::REASON_REQUIRES)),
+            Area::Requires | Area::Recommends | Area::Returns => {
+                Some((self.fn_visibility(), wf::REASON_REQUIRES))
+            }
             Area::Ensures => Some((self.fn_visibility(), wf::REASON_ENSURES)),
             Area::Decreases => Some((self.fn_visibility(), wf::REASON_DECREASES)),
             Area::When => Some((self.fn_visibility(), wf::REASON_WHEN)),
+            Area::Unwind => Some((self.fn_visibility(), "unwind clause of public function")),
             Area::Body if self.mode == Mode::Spec => {
                 let hir_id = self.tcx.local_def_id_to_hir_id(self.def_id);
                 let body = if attrs::item_attrs(self.tcx.hir_attrs(hir_id)).open
@@ -1644,17 +1749,30 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
     }
 
-    /// `check_path_and_get_function`: a function referred to where it may
-    /// be less visible than the area requires.
+    /// `check_path_and_get_function`: a function or constant referred to
+    /// where it may be less visible than the area requires.
     fn check_function_access(&mut self, callee: DefId, span: Span) {
         let Some((required, reason)) = self.required_area() else {
             return;
         };
         if !covers(self.tcx, self.tcx.visibility(callee), required) {
+            // Spec constants can reach this path through their checked native
+            // function proxies. Their spelling is not a classification rule.
+            let kind = if matches!(
+                self.tcx.def_kind(callee),
+                DefKind::Const | DefKind::AssocConst
+            ) || callee
+                .as_local()
+                .is_some_and(|local| self.cx.constants.mode(local).is_some())
+            {
+                "const"
+            } else {
+                "function"
+            };
             self.errors.push(UserError::new(
                 Phase::WellFormed,
                 span,
-                messages::wf::private_reference(reason, "function"),
+                messages::wf::private_reference(reason, kind),
             ));
         }
     }
@@ -1859,11 +1977,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
         let trait_args = tcx
             .impl_trait_ref(impl_id)
-            .instantiate(tcx, &own[..impl_count])
+            .instantiate(tcx, &own.as_slice()[..impl_count])
             .skip_normalization()
             .args;
-        let args =
-            tcx.mk_args_from_iter(trait_args.iter().chain(own[impl_count..].iter().copied()));
+        let args = tcx.mk_args_from_iter(
+            trait_args
+                .iter()
+                .chain(own.as_slice()[impl_count..].iter().copied()),
+        );
         if tcx.generics_of(source).count() != args.len() {
             return refuse(
                 "generics",
@@ -1881,6 +2002,17 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             };
             self.local_ids.insert(pat_hir, local);
         }
+        let binding_scope = if self.mode_rejected {
+            // Earlier-phase diagnostics never grant verification permission.
+            None
+        } else {
+            Some(header_binding_scope::Source::for_inherited(
+                self, trait_fn, source, body,
+            )?)
+        };
+        let binding_guard = binding_scope
+            .map(|scope| self.header_binding_scopes.enter(scope))
+            .transpose()?;
         let saved_typeck = std::mem::replace(&mut self.typeck, tcx.typeck(source));
         let saved_subst = self.subst.replace(args);
         let saved_ret_ty = self.ensures_ret_ty.take();
@@ -1889,12 +2021,18 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let saved_errors = self.errors.len();
         let saved_finding = self.attr_finding.take();
         let saved_inheriting = std::mem::replace(&mut self.inheriting, true);
+        let saved_unwind = self.unwind.take();
+        #[cfg(test)]
+        header_binding_scope::inspect(self);
         let result = self.header(
             block,
             &mut out.requires,
             &mut out.ensures,
             &mut out.recommends,
         );
+        drop(binding_guard);
+        out.unwind = self.unwind.take();
+        self.unwind = saved_unwind;
         self.typeck = saved_typeck;
         self.subst = saved_subst;
         self.ensures_ret_ty = saved_ret_ty;
@@ -1942,7 +2080,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             traits::IMPL_REQUIRES
         } else if self.opens_none {
             traits::IMPL_OPENS_INVARIANTS
-        } else if self.no_unwind {
+        } else if self.unwind.is_some() {
             traits::IMPL_UNWIND
         } else if decl_attrs(trait_fn).uninterp || decl_attrs(spec).uninterp {
             traits::IMPL_UNINTERP
@@ -1991,7 +2129,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             messages::traits::DROP_REQUIRES
         } else if !self.opens_none {
             messages::traits::DROP_OPENS_INVARIANTS
-        } else if !self.no_unwind {
+        } else if !matches!(self.unwind, Some(UnwindSpec::NoUnwind)) {
             messages::traits::DROP_NO_UNWIND
         } else if self.mode != Mode::Exec {
             messages::traits::EXTERNAL_TRAIT_MODE
@@ -2002,13 +2140,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             .push(UserError::new(Phase::WellFormed, self.sig_span, message));
     }
 
-    /// `opens_invariants none` and `no_unwind` are read where they cannot
-    /// matter: on an exec function outside traits whose body calls no
-    /// function (a call is what could open an invariant or unwind; a
-    /// function with neither header calls with Verus's defaults, which
-    /// accept such a callee).
-    fn unwind_and_mask(&self, body: &Body) -> R<()> {
-        if !(self.opens_none || self.no_unwind) {
+    /// The closed invariant-mask fragment remains separate from the typed
+    /// unwind contract. Calls still require invariant-opening semantics.
+    fn invariant_mask(&self, body: &Body) -> R<()> {
+        if !self.opens_none {
             return Ok(());
         }
         let tcx = self.tcx;
@@ -2016,7 +2151,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if self.mode != Mode::Exec {
             return refuse(
                 "header",
-                "opens_invariants or no_unwind on a function that is not exec",
+                "opens_invariants on a function that is not exec",
                 span,
             );
         }
@@ -2024,7 +2159,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if in_trait {
             return refuse(
                 "header",
-                "opens_invariants or no_unwind on a trait method declaration",
+                "opens_invariants on a trait method declaration",
                 span,
             );
         }
@@ -2037,7 +2172,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             if trust_vc_vcir::vcgen::calls_anything(block) {
                 return refuse(
                     "header",
-                    "a call in a function marked opens_invariants none or no_unwind",
+                    "a call in a function marked opens_invariants none",
                     span,
                 );
             }
@@ -2170,6 +2305,15 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             if !item.is_header() {
                 break;
             }
+            if matches!(item, VerusItem::NoUnwind | VerusItem::NoUnwindWhen)
+                && self.unwind.is_some()
+            {
+                return Err(FnProblem::Rejected(UserError::new(
+                    Phase::RustToVir,
+                    e.span,
+                    messages::header::SECOND_UNWIND,
+                )));
+            }
             if let Some(message) = messages::header::second_call(item) {
                 if seen.contains(&item) {
                     return Err(FnProblem::Rejected(UserError::new(
@@ -2187,7 +2331,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     continue;
                 }
                 (VerusItem::NoUnwind, []) => {
-                    self.no_unwind = true;
+                    self.unwind = Some(UnwindSpec::NoUnwind);
                     count += 1;
                     continue;
                 }
@@ -2197,6 +2341,22 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 return refuse("header-shape", "a header call without one argument", e.span);
             };
             match item {
+                VerusItem::NoUnwindWhen => {
+                    self.area = Area::Unwind;
+                    let condition = self.spec(arg)?;
+                    if condition.ty != Ty::Bool {
+                        return refuse(
+                            "header-shape",
+                            "a no_unwind_when condition that is not Boolean",
+                            arg.span,
+                        );
+                    }
+                    if let Some((name, at)) = self.mut_ref_read(&condition) {
+                        self.errors.push(UserError::new(Phase::WellFormed, at,
+                            format!("in opens_invariants clause, use `old({name})` to refer to the pre-state of an &mut variable")));
+                    }
+                    self.unwind = Some(UnwindSpec::NoUnwindWhen(condition));
+                }
                 VerusItem::Requires => {
                     self.area = Area::Requires;
                     requires.extend(self.clause_list(arg, item)?);
@@ -2209,6 +2369,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     self.area = Area::Ensures;
                     ensures.extend(self.ensures_clauses(arg)?);
                 }
+                VerusItem::Returns => self.read_returns_clause(item_def, e, arg)?,
                 VerusItem::OtherHeader
                     if external_body
                         && matches!(
@@ -2750,6 +2911,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             requires: Vec::new(),
             ensures: Vec::new(),
             recommends: Vec::new(),
+            unwind: None,
             decreases: Vec::new(),
             decreases_when: None,
             decreases_by: None,
@@ -2901,10 +3063,6 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             Some(tail) if matches!(tail.kind, hir::ExprKind::Ret(_)) => {
                 self.stmt_expr(tail, ctx, &mut out)?;
             }
-            Some(tail) if *ret_ty == Ty::Unit => {
-                self.stmt_expr(tail, ctx, &mut out)?;
-                self.push_return(None, tail.span, &mut out);
-            }
             Some(tail) => {
                 let value = self.expr(tail, ctx, &mut out)?;
                 self.push_return(Some(value), tail.span, &mut out);
@@ -2966,11 +3124,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if local.els.is_some() {
             return refuse("let-else", "`let .. else`", local.span);
         }
-        // `let ghost`: a spec local, whose value only ghost code reads and
-        // writes (the mode checker holds it to that). The markers of a
-        // binding `verus!` unwraps only change warnings and prophecy
-        // inference. A tracked local needs a checked declaration in a body
-        // whose original MIR retains its ownership uses.
+        // A tracked local needs a checked declaration in a body whose
+        // original MIR retains its ownership uses. Prophecy markers use the
+        // original declared mode, before the ghost-block promotion.
         let native_mode = match local.pat.kind {
             PatKind::Binding(BindingMode(ByRef::No, _), binding, _, None) => self
                 .cx
@@ -2980,20 +3136,33 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 .and_then(|ownership| ownership.local_mode(local.hir_id, binding)),
             _ => None,
         };
-        let mut spec_local = false;
-        for (attr, span) in attrs::verus_attrs(self.tcx.hir_attrs(local.hir_id)) {
+        let mut declared_mode = None;
+        let local_attrs = self.tcx.hir_attrs(local.hir_id);
+        for (attr, span) in attrs::verus_attrs(local_attrs) {
+            if let VerusAttr::Mode(mode) = &attr {
+                declared_mode.get_or_insert(*mode);
+            }
             match attr {
                 VerusAttr::Mode(_) if native_mode == Some(Mode::Proof) => {}
-                VerusAttr::Mode(Mode::Spec) => spec_local = true,
-                VerusAttr::LetMarker(_) => {}
+                VerusAttr::Mode(Mode::Spec) => {}
+                VerusAttr::Prophetic | VerusAttr::LetMarker(_) => {}
                 // A function the mode checker rejected is only read for
                 // errors of earlier phases, which a `let`'s mode does not
                 // change.
                 VerusAttr::Mode(_) | VerusAttr::InferMode if self.mode_rejected => {}
+                VerusAttr::InferMode => {
+                    self.checked_inferred_value_mode(local)?;
+                }
                 _ => return refuse("attribute", format!("{attr:?} on a let"), span),
             }
         }
-        let ctx = if spec_local && ctx == Ctx::Exec {
+        let original_mode = declared_mode.unwrap_or(if self.mode == Mode::Proof {
+            Mode::Spec
+        } else {
+            self.mode
+        });
+        let prophecy = attrs::local_prophecy(local_attrs, original_mode);
+        let ctx = if declared_mode == Some(Mode::Spec) && ctx == Ctx::Exec {
             Ctx::Proof
         } else {
             ctx
@@ -3024,6 +3193,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     ),
                     local.init.is_some(),
                 );
+                self.locals[id.index()].prophecy = prophecy;
                 self.local_ids.insert(pat_hir, id);
                 Ok(())
             }
@@ -3042,6 +3212,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                         local.pat.span,
                     );
                 };
+                let local_mode = self.checked_binding_mode(local.pat, ctx)?;
                 let id = self.add_local(
                     self.local_decl(
                         ident.name.as_str(),
@@ -3053,6 +3224,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     ),
                     init.is_some(),
                 );
+                self.locals[id.index()].prophecy = prophecy;
                 self.local_ids.insert(pat_hir, id);
                 out.push(Stmt::new(
                     self.sp(local.span),
@@ -3084,7 +3256,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     }
                     None => None,
                 };
-                self.value_let_bindings(local.pat, value, ctx, LocalKind::Let, out)
+                self.value_let_bindings(local.pat, value, ctx, LocalKind::Let, out)?;
+                self.pattern_prophecy(local.pat, prophecy);
+                Ok(())
             }
             PatKind::Wild => match local.init {
                 Some(init) => self.stmt_expr(init, ctx, out),
@@ -3175,10 +3349,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     return refuse("expr", "`return` inside ghost code", e.span);
                 }
                 let value = match value {
-                    Some(v) => {
-                        let v = self.expr(v, ctx, out)?;
-                        (v.ty != Ty::Unit).then_some(v)
-                    }
+                    Some(v) => Some(self.expr(v, ctx, out)?),
                     None => None,
                 };
                 let span = self.push_return(value, e.span, out);
@@ -3275,10 +3446,47 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             ));
         }
         let mut ghost = Vec::new();
-        self.block_stmts(block, Ctx::Proof, &mut ghost)?;
+        let original_tail = if self.mode_rejected { None } else { block.expr };
+        let Some(original_tail) = original_tail else {
+            self.block_stmts(block, Ctx::Proof, &mut ghost)?;
+            out.push(Stmt::new(
+                self.sp(e.span),
+                StmtKind::Ghost(Block::new(ghost)),
+            ));
+            return Ok(());
+        };
+        for statement in block.stmts {
+            self.stmt(statement, Ctx::Proof, &mut ghost)?;
+        }
+        let tail = self.expr(original_tail, Ctx::Proof, &mut ghost)?;
+        let span = self.sp(e.span);
+        let checked = self.checked_modes.as_ref().ok_or_else(|| {
+            FnProblem::Refused(Refusal::new(
+                "ghost-tail-modes",
+                "a native ghost tail lacks a completed mode walk",
+                e.span,
+            ))
+        })?;
+        let occurrence = checked
+            .ghost_tails
+            .expected(
+                self.tcx,
+                self.def_id,
+                self.body_def,
+                e,
+                original_tail,
+                (self.own_id, span),
+            )
+            .map_err(|message| {
+                FnProblem::Refused(Refusal::new("ghost-tail-modes", message, e.span))
+            })?;
+        self.ghost_tail_occurrences.push(occurrence);
         out.push(Stmt::new(
-            self.sp(e.span),
-            StmtKind::Ghost(Block::new(ghost)),
+            span,
+            StmtKind::GhostTail {
+                block: Block::new(ghost),
+                tail,
+            },
         ));
         Ok(())
     }
@@ -3873,6 +4081,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         match self.expr_rty_adj(base).kind() {
             ty::Tuple(_) => Ok(Projection::TupleField(index)),
             ty::Adt(adt, _) if adt.is_struct() => {
+                if self.cx.source_opaque_nominal(adt.did()) {
+                    return refuse(
+                        "source-opaque-representation",
+                        "an opaque source carrier has no field projection authority",
+                        e.span,
+                    );
+                }
                 if self.cx.imported_nominal(adt.did()).is_some() {
                     return refuse(
                         "opaque-import",
@@ -4022,6 +4237,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         ctx: Ctx,
         out: &mut Vec<Stmt>,
     ) -> R<Expr> {
+        if self.new_spec_reborrow(e, ctx) {
+            return self.expr(e, ctx, out);
+        }
         let adjustments = self.typeck.expr_adjustments(e);
         if adjustments
             .iter()
@@ -4049,20 +4267,12 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         for adjustment in adjustments {
             value = match adjustment.kind {
                 Adjust::Deref(_) => match value.ty.clone() {
-                    Ty::Ref { inner, .. } => match value.kind {
-                        ExprKind::Borrow(referent) => *referent,
-                        ExprKind::Read(mut place) => {
-                            place.projections.push(Projection::Deref);
-                            Expr::read(place, *inner, self.sp(e.span))
-                        }
-                        _ => {
-                            return refuse(
-                                "adjustment",
-                                "a dereference of a reference that is not a variable",
-                                e.span,
-                            )
-                        }
-                    },
+                    Ty::MutRef(inner) => Expr::new(
+                        *inner,
+                        self.sp(e.span),
+                        ExprKind::MutRefCurrent(Box::new(value)),
+                    ),
+                    Ty::Ref { inner, .. } => self.builtin_reference_value(value, *inner, e.span)?,
                     _ => {
                         return refuse(
                             "adjustment",
@@ -4101,11 +4311,39 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
 
     /// Lower `e` to a pure expression, emitting its effects into `out`.
     fn expr(&mut self, e: &'tcx hir::Expr<'tcx>, ctx: Ctx, out: &mut Vec<Stmt>) -> R<Expr> {
+        if self.adjusting != Some(e.hir_id) && self.new_spec_reborrow(e, ctx) {
+            let previous = self.adjusting;
+            self.adjusting = Some(e.hir_id);
+            let result = self.expr(e, ctx, out);
+            self.adjusting = previous;
+            let value = result?;
+            if self.vc_ty(self.expr_rty_adj(e))?.as_ref() != Some(&value.ty) {
+                return refuse(
+                    "new-mut-ref",
+                    "a Spec reborrow changed its logical carrier type",
+                    e.span,
+                );
+            }
+            return Ok(value);
+        }
         self.attr_hook(e, false)?;
         let value = self.expr_unhooked(e, ctx, out)?;
         self.attr_hook(e, true)?;
         self.trigger_attrs(e, &value);
         Ok(value)
+    }
+
+    /// The actual compiler's exact implicit reborrow, interpreted as a Spec
+    /// read only in a pure Spec function. Explicit borrows and every runtime
+    /// storage use retain their separate availability/ownership requirements.
+    fn new_spec_reborrow(&self, e: &hir::Expr<'_>, ctx: Ctx) -> bool {
+        self.cx.opts.new_mut_ref
+            && self.mode == Mode::Spec
+            && ctx == Ctx::Spec
+            && self.is_reborrow(e)
+            && matches!(self.expr_rty(e).kind(), ty::Ref(_, _, m) if m.is_mut())
+            && self.tcx.erase_and_anonymize_regions(self.expr_rty(e))
+                == self.tcx.erase_and_anonymize_regions(self.expr_rty_adj(e))
     }
 
     fn expr_unhooked(
@@ -4230,7 +4468,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             hir::ExprKind::Cast(inner, _) => {
                 let value = self.expr(inner, ctx, out)?;
                 let to = self.expr_ty(e)?;
-                self.int_cast(value, to, span)
+                self.scalar_cast(inner, value, to, ctx, span)
             }
             hir::ExprKind::Assign(..) | hir::ExprKind::AssignOp(..) | hir::ExprKind::Loop(..) => {
                 self.stmt_expr(e, ctx, out)?;
@@ -4256,10 +4494,27 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
     }
 
-    /// An explicit integer cast. Keep its clip boundary even when the
-    /// source range fits: the isolated BV language distinguishes an explicit
-    /// `as nat` clip from a mathematical type coercion.
+    /// A Boolean-to-integer or explicit integer cast. Keep each integer clip
+    /// boundary even when the source range fits: the isolated BV language
+    /// distinguishes an explicit `as nat` clip from a mathematical coercion.
     fn int_cast(&self, value: Expr, to: Ty, span: Span) -> R<Expr> {
+        if value.ty == Ty::Bool && to.int_range().is_some_and(|range| range != IntRange::Char) {
+            // Rust and Verus map false/true to 0/1 in the destination type.
+            // Keep the already-read operand exactly once, including its modes
+            // and effects; the ordinary conditional lowering checks it.
+            let at = self.sp(span);
+            let one = Expr::int_lit(1, to.clone(), at);
+            let zero = Expr::int_lit(0, to.clone(), at);
+            return Ok(Expr::new(
+                to,
+                at,
+                ExprKind::If {
+                    cond: Box::new(value),
+                    then_expr: Box::new(one),
+                    else_expr: Box::new(zero),
+                },
+            ));
+        }
         let (Some(from_range), Some(to_range)) = (value.ty.int_range(), to.int_range()) else {
             return refuse("expr", "a cast that is not between integer types", span);
         };
@@ -4368,6 +4623,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     return refuse("adt", "a unit constructor with native fields", e.span);
                 }
                 if let ty::Adt(adt, _) = self.expr_rty(e).kind() {
+                    if self.cx.source_opaque_nominal(adt.did()) {
+                        return refuse(
+                            "source-opaque-representation",
+                            "an opaque source carrier has no unit constructor authority",
+                            e.span,
+                        );
+                    }
                     if self.cx.imported_nominal(adt.did()).is_some() {
                         return refuse(
                             "opaque-import",
@@ -4406,6 +4668,40 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let span = e.span;
         match op {
             hir::UnOp::Deref => {
+                // `final_` has no first-class value semantics: only its
+                // immediately enclosing `*` denotes the future projection.
+                if let hir::ExprKind::Call(func, [inner]) = arg.kind {
+                    if matches!(self.callee_item(func), Some((VerusItem::Final, _))) {
+                        if !self.cx.opts.new_mut_ref || ctx == Ctx::Exec {
+                            return refuse(
+                                "new-mut-ref",
+                                "`*final_` requires ghost code under -V new-mut-ref",
+                                span,
+                            );
+                        }
+                        let reference = self.mut_ref_intrinsic_arg(inner, ctx, out)?;
+                        let Ty::MutRef(referent) = &reference.ty else {
+                            return refuse(
+                                "new-mut-ref",
+                                "`final_` expects an opaque mutable reference",
+                                arg.span,
+                            );
+                        };
+                        let result = self.expr_ty(e)?;
+                        if referent.as_ref() != &result {
+                            return refuse(
+                                "new-mut-ref",
+                                "`final_` changed its native referent type",
+                                arg.span,
+                            );
+                        }
+                        return Ok(Expr::new(
+                            result,
+                            self.sp(span),
+                            ExprKind::MutRefFuture(Box::new(reference)),
+                        ));
+                    }
+                }
                 // `*old(x)`: the entry value behind a `&mut` parameter.
                 if let hir::ExprKind::Call(func, [inner]) = arg.kind {
                     if matches!(self.callee_item(func), Some((VerusItem::Old, _))) {
@@ -4418,6 +4714,18 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                         place.projections.push(Projection::Deref);
                         let ty = self.expr_ty(e)?;
                         return Ok(Expr::new(ty, self.sp(span), ExprKind::Old(place)));
+                    }
+                }
+                if self.cx.opts.new_mut_ref
+                    && matches!(self.expr_rty_adj(arg).kind(), ty::Ref(_, _, m) if m.is_mut())
+                {
+                    let reference = self.expr(arg, ctx, out)?;
+                    if let Ty::MutRef(inner) = reference.ty.clone() {
+                        return Ok(Expr::new(
+                            *inner,
+                            self.sp(span),
+                            ExprKind::MutRefCurrent(Box::new(reference)),
+                        ));
                     }
                 }
                 let place = self.place(e)?;
@@ -4517,6 +4825,16 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         out: &mut Vec<Stmt>,
     ) -> R<Expr> {
         let span = e.span;
+        if matches!(op, BinOpKind::Eq | BinOpKind::Ne)
+            && (self.cx.mentions_source_opaque(self.expr_rty_adj(lhs))
+                || self.cx.mentions_source_opaque(self.expr_rty_adj(rhs)))
+        {
+            return refuse(
+                "source-opaque-representation",
+                "opaque source equality requires its own semantic consumer",
+                span,
+            );
+        }
         match op {
             BinOpKind::BitAnd | BinOpKind::BitOr
                 if self.expr_rty_adj(lhs).is_bool() && self.expr_rty_adj(rhs).is_bool() =>
@@ -4720,14 +5038,8 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         };
         let sid = self.sp(span);
         if then_out.is_empty() && else_out.is_empty() {
-            // Pure branches: an `if` expression. Check sites inside a branch
-            // are checked under the branch condition by the VC generator. A
-            // unit `if` carries nothing unless it holds a check or a call
-            // (which a termination check looks at).
-            let matters = |e: &Expr| has_checks(e) || has_calls(e);
-            if ty == Ty::Unit && !matters(&cond) && !matters(&tv) && !matters(&ev) {
-                return Ok(self.unit(span));
-            }
+            // Unit values still carry the condition's prophetic effect.
+            // Only statement position discards that effect.
             return Ok(Expr::new(
                 ty,
                 sid,
@@ -4741,12 +5053,15 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if ctx == Ctx::Spec && !self.mode_rejected {
             return refuse("effect-in-spec", "spec code with an effect", span);
         }
-        // Branches with effects: an `if` statement. A non-unit value goes
-        // through a temporary; a unit value carries nothing.
-        let result = if ty == Ty::Unit {
-            None
-        } else {
+        // Branches with effects use a value temporary, including Unit:
+        // control and arm effects must reach a value consumer.
+        let result = {
             let t = self.temp(ty.clone(), ctx, span);
+            if self.locals[t.index()].mode == Mode::Spec {
+                // This generated expression result is initialized by both
+                // arms. The flow checker joins their effects and the guard.
+                self.locals[t.index()].prophecy = DeclProphecy::DelayedInfer;
+            }
             out.push(Stmt::new(
                 sid,
                 StmtKind::Let {
@@ -4828,6 +5143,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let ty::Adt(adt_def, _) = self.expr_rty(e).kind() else {
             return refuse("expr", "a struct constructor of a non-ADT type", span);
         };
+        if self.cx.source_opaque_nominal(adt_def.did()) {
+            return refuse(
+                "source-opaque-representation",
+                "an opaque source carrier has no tuple constructor authority",
+                span,
+            );
+        }
         if self.cx.imported_nominal(adt_def.did()).is_some() {
             return refuse(
                 "opaque-import",
@@ -4857,7 +5179,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
         self.check_datatype_access(*adt_def, span, "constructor");
         let args: Vec<&'tcx hir::Expr<'tcx>> = args.iter().collect();
-        let values = self.operands(&args, ctx, out)?;
+        let modes = variant
+            .fields
+            .iter()
+            .map(|field| {
+                super::datatypes::field_mode(self.tcx, field, span).map_err(FnProblem::Refused)
+            })
+            .collect::<R<Vec<_>>>()?;
+        let values = self.constructor_operands(&args, &modes, ctx, out)?;
         Ok(Expr::new(
             ty,
             self.sp(span),
@@ -4925,6 +5254,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     VerusAttr::Mode(mode) => {
                         declared.get_or_insert(mode);
                     }
+                    VerusAttr::Prophetic | VerusAttr::LetMarker(_) => {}
                     other => {
                         return refuse("attribute", format!("{other:?} on a spec let"), attr_span)
                     }
@@ -4942,6 +5272,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             }
             let value = self.spec(init)?;
             bindings.extend(self.spec_value_bindings(local.pat, value, local.span)?);
+            let original_mode = declared.unwrap_or(if self.mode == Mode::Proof {
+                Mode::Spec
+            } else {
+                self.mode
+            });
+            let prophecy = attrs::local_prophecy(self.tcx.hir_attrs(local.hir_id), original_mode);
+            self.pattern_prophecy(local.pat, prophecy);
         }
         let mut body = match tail {
             Some(tail) => self.spec(tail)?,
@@ -5002,7 +5339,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         &mut self,
         e: &'tcx hir::Expr<'tcx>,
         def_id: DefId,
-        generic_args: ty::GenericArgsRef<'tcx>,
+        generic_args: ty::GenericArgs<'tcx>,
         args: &[&'tcx hir::Expr<'tcx>],
         ctx: Ctx,
         out: &mut Vec<Stmt>,
@@ -5056,14 +5393,25 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 }
                 let values = self.operands(args, ctx, out)?;
                 let ty = self.expr_ty(e)?;
-                let dest = if ty == Ty::Unit || discard {
+                let dest = if discard {
                     None
                 } else {
-                    let t = self.temp_with_mode(
-                        ty.clone(),
-                        target.ret_mode.unwrap_or(ctx.local_mode()),
-                        span,
-                    );
+                    // A used Unit expression still transports its raw
+                    // prophecy effect. This compiler-only ghost slot is not
+                    // an authored declaration or the callee's return mode;
+                    // the eventual source consumer performs Unit clearing.
+                    let transport_mode = if ty == Ty::Unit {
+                        Mode::Spec
+                    } else {
+                        target.ret_mode.unwrap_or(ctx.local_mode())
+                    };
+                    let t = self.temp_with_mode(ty.clone(), transport_mode, span);
+                    if self.locals[t.index()].mode == Mode::Spec {
+                        // The call, rather than a source no-init declaration,
+                        // initializes this generated result. Infer its effect
+                        // once from the actual call's arguments.
+                        self.locals[t.index()].prophecy = DeclProphecy::DelayedInfer;
+                    }
                     out.push(Stmt::new(
                         self.sp(span),
                         StmtKind::Let {
@@ -5099,10 +5447,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     /// this whole read instead of selecting the generic declaration fallback.
     fn selection_args(
         &self,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         env: ty::TypingEnv<'tcx>,
         span: Span,
-    ) -> R<ty::GenericArgsRef<'tcx>> {
+    ) -> R<ty::GenericArgs<'tcx>> {
         let tcx = self.tcx;
         let erased = tcx.erase_and_anonymize_regions(args);
         if erased.has_escaping_bound_vars() {
@@ -5147,10 +5495,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn resolve_trait_call(
         &self,
         def_id: DefId,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         env: ty::TypingEnv<'tcx>,
         span: Span,
-    ) -> R<Option<(DefId, ty::GenericArgsRef<'tcx>)>> {
+    ) -> R<Option<(DefId, ty::GenericArgs<'tcx>)>> {
         let tcx = self.tcx;
         let Some(trait_id) = tcx.trait_of_assoc(def_id) else {
             return Ok(None);
@@ -5182,7 +5530,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn selected_impl(
         &self,
         def_id: DefId,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         span: Span,
     ) -> R<Option<DefId>> {
         let tcx = self.tcx;
@@ -5236,7 +5584,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn call_target(
         &mut self,
         def_id: DefId,
-        generic_args: ty::GenericArgsRef<'tcx>,
+        generic_args: ty::GenericArgs<'tcx>,
         span: Span,
     ) -> R<Target> {
         if let Some(problem) = self.enum_diagnostic_call(def_id, span) {
@@ -5533,6 +5881,28 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     }
 
     /// A call of a Verus marker.
+    ///
+    /// A Spec intrinsic snapshots its logical reference argument; rustc's
+    /// exact implicit reborrow does not create executable borrowed storage.
+    /// Explicit `&mut` expressions still take the normal, closed borrow path.
+    fn mut_ref_intrinsic_arg(
+        &mut self,
+        arg: &'tcx hir::Expr<'tcx>,
+        ctx: Ctx,
+        out: &mut Vec<Stmt>,
+    ) -> R<Expr> {
+        if self.is_reborrow(arg) {
+            let previous = self.adjusting;
+            self.adjusting = Some(arg.hir_id);
+            let value = self.expr(arg, ctx, out);
+            self.adjusting = previous;
+            value
+        } else {
+            self.expr_adjusted(arg, ctx, out)
+        }
+    }
+
+    /// A call of a Verus marker.
     fn marker(
         &mut self,
         e: &'tcx hir::Expr<'tcx>,
@@ -5545,6 +5915,108 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let span = e.span;
         let name = || self.tcx.def_path_str(def_id);
         match (item, args) {
+            (VerusItem::SeqLen, _) => self.owned_seq_len(e, def_id, args, ctx, out),
+            (VerusItem::SeqIndex, _) => self.owned_seq_index(e, def_id, args, ctx, out),
+            (VerusItem::MutRefCurrent | VerusItem::MutRefFuture, [arg]) => {
+                if !self.cx.opts.new_mut_ref || ctx == Ctx::Exec {
+                    return refuse(
+                        "new-mut-ref",
+                        "mutable-reference spec functions require ghost code under -V new-mut-ref",
+                        span,
+                    );
+                }
+                let reference = self.mut_ref_intrinsic_arg(arg, ctx, out)?;
+                let Ty::MutRef(inner) = &reference.ty else {
+                    return refuse(
+                        "new-mut-ref",
+                        "a reference projection requires an opaque mutable reference",
+                        span,
+                    );
+                };
+                let result = self.expr_ty(e)?;
+                if inner.as_ref() != &result {
+                    return refuse(
+                        "new-mut-ref",
+                        "a reference projection changed its native referent type",
+                        span,
+                    );
+                }
+                let kind = if item == VerusItem::MutRefCurrent {
+                    ExprKind::MutRefCurrent(Box::new(reference))
+                } else {
+                    ExprKind::MutRefFuture(Box::new(reference))
+                };
+                Ok(Expr::new(result, self.sp(span), kind))
+            }
+            (VerusItem::HasResolved | VerusItem::HasResolvedUnsized, [arg]) => {
+                if !self.cx.opts.new_mut_ref || ctx == Ctx::Exec {
+                    return refuse(
+                        "new-mut-ref",
+                        "has_resolved requires ghost code under -V new-mut-ref",
+                        span,
+                    );
+                }
+                if self.expr_ty(e)? != Ty::Bool {
+                    return refuse(
+                        "new-mut-ref",
+                        "has_resolved has a non-Boolean native result",
+                        span,
+                    );
+                }
+                let mut value = self.mut_ref_intrinsic_arg(arg, ctx, out)?;
+                if item == VerusItem::HasResolvedUnsized {
+                    let Ty::Ref {
+                        mutable: false,
+                        inner,
+                    } = value.ty.clone()
+                    else {
+                        return refuse(
+                            "new-mut-ref",
+                            "has_resolved_unsized expects a shared reference",
+                            span,
+                        );
+                    };
+                    value =
+                        match value.kind {
+                            ExprKind::Borrow(inner) => *inner,
+                            ExprKind::Read(mut place) => {
+                                place.projections.push(Projection::Deref);
+                                Expr::read(place, *inner, self.sp(arg.span))
+                            }
+                            _ => return refuse(
+                                "new-mut-ref",
+                                "has_resolved_unsized of an unrepresented shared-reference value",
+                                span,
+                            ),
+                        };
+                }
+                Ok(Expr::new(
+                    Ty::Bool,
+                    self.sp(span),
+                    ExprKind::HasResolved(Box::new(value)),
+                ))
+            }
+            (VerusItem::Final, [_]) => refuse(
+                "new-mut-ref",
+                "`final_` must be directly dereferenced",
+                span,
+            ),
+            (VerusItem::Old, [arg]) if self.cx.opts.new_mut_ref => {
+                // Only the original parameter place, not a fresh reborrow,
+                // is named by this entry-state operation.
+                if !self.is_reborrow(arg) {
+                    self.no_adjustments(arg)?;
+                }
+                let place = self.place_unadjusted(arg)?;
+                if !place.projections.is_empty() || !self.params.contains(&place.local) {
+                    return refuse("old", "old requires the original parameter value", span);
+                }
+                let result = self.expr_ty(e)?;
+                if self.locals[place.local.index()].ty != result {
+                    return refuse("old", "old changed its original parameter type", span);
+                }
+                Ok(Expr::new(result, self.sp(span), ExprKind::Old(place)))
+            }
             (VerusItem::GetVariantField, [receiver, variant, field]) => {
                 self.local_variant_field(e, def_id, receiver, variant, field, ctx, out)
             }
@@ -5638,6 +6110,15 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 self.short_circuit_with(false, not_lv, rv, rhs_out, span, ctx, out)
             }
             (VerusItem::SpecEq | VerusItem::Equal, [lhs, rhs]) => {
+                if self.cx.mentions_source_opaque(self.expr_rty_adj(lhs))
+                    || self.cx.mentions_source_opaque(self.expr_rty_adj(rhs))
+                {
+                    return refuse(
+                        "source-opaque-representation",
+                        "opaque source equality requires its own semantic consumer",
+                        span,
+                    );
+                }
                 self.spec_eq(e, lhs, rhs, ctx, out)
             }
             (VerusItem::SpecOrd(ord), [lhs, rhs]) => {
@@ -5721,7 +6202,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             (VerusItem::SpecCastInteger, [arg]) => {
                 let value = self.expr(arg, ctx, out)?;
                 let to = self.expr_ty(e)?;
-                self.int_cast(value, to, span)
+                self.scalar_cast(arg, value, to, ctx, span)
             }
             (
                 VerusItem::Requires
@@ -5866,12 +6347,19 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             return refuse("expr", "a proof block that is not a block", span);
         };
         let mut out = Vec::new();
-        self.block_stmts(block, Ctx::Proof, &mut out)?;
-        Ok(Expr::new(
-            Ty::Unit,
-            self.sp(span),
-            ExprKind::ProofInSpec(Block::new(out)),
-        ))
+        for stmt in block.stmts {
+            self.stmt(stmt, Ctx::Proof, &mut out)?;
+        }
+        let kind = if let Some(tail) = block.expr {
+            let value = self.expr(tail, Ctx::Proof, &mut out)?;
+            ExprKind::ProofInSpecTail {
+                block: Block::new(out),
+                tail: Box::new(value),
+            }
+        } else {
+            ExprKind::ProofInSpec(Block::new(out))
+        };
+        Ok(Expr::new(Ty::Unit, self.sp(span), kind))
     }
 
     /// A chained comparison (`fn_call_to_vir.rs`, `ChainedItem`; expanded
@@ -6019,6 +6507,11 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             return refuse("effect-in-spec", "spec code with an effect", span);
         }
         let t = self.temp(Ty::Bool, ctx, span);
+        if self.locals[t.index()].mode == Mode::Spec {
+            // Preserve this short-circuit expression's guard/arm effect
+            // through the generated result's branch initialization.
+            self.locals[t.index()].prophecy = DeclProphecy::DelayedInfer;
+        }
         let sid = self.sp(span);
         out.push(Stmt::new(
             sid,
@@ -6192,7 +6685,11 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 }
             }
         }
-        let (lv, rv) = self.operand_pair(lhs, rhs, ctx, out)?;
+        let (mut lv, mut rv) = self.operand_pair(lhs, rhs, ctx, out)?;
+        if lv.ty != rv.ty {
+            lv = self.primitive_spec_eq_value(self.expr_rty(lhs), t1, lv, lhs.span)?;
+            rv = self.primitive_spec_eq_value(self.expr_rty(rhs), t2, rv, rhs.span)?;
+        }
         if lv.ty.int_range().is_none() && lv.ty != rv.ty {
             return refuse(
                 "spec-eq-type",
@@ -6279,6 +6776,22 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     "`broadcast use` of an item the reader does not read",
                     span,
                 );
+            }
+            if target_attrs.broadcast_forall && info.mode == Mode::Proof {
+                if self.tcx.generics_of(callee).count() != 0
+                    || self.tcx.def_kind(self.tcx.parent(callee)) != DefKind::Mod
+                {
+                    return refuse(
+                        "broadcast-use",
+                        "a broadcast target outside the local monomorphic free-function fragment",
+                        span,
+                    );
+                }
+                out.push(Stmt::new(
+                    self.sp(span),
+                    StmtKind::BroadcastUse { callee: info.id },
+                ));
+                return Ok(());
             }
             self.errors.push(UserError::new(
                 Phase::WellFormed,
@@ -6492,16 +7005,6 @@ fn termination_slot(name: &str) -> &'static str {
     }
 }
 
-/// Does `e` call a function? A termination check walks a proof block's
-/// statements.
-fn has_calls(e: &Expr) -> bool {
-    e.any(&|sub| match &sub.kind {
-        ExprKind::Call { .. } => true,
-        ExprKind::ProofInSpec(block) => !block.stmts.is_empty(),
-        _ => false,
-    })
-}
-
 /// Verus's error for `&` or `|` (and `&=`, `|=`) on two bools, which it does
 /// not support, at the left operand.
 fn bool_bitwise_error(op: BinOpKind, lhs: Span) -> UserError {
@@ -6519,11 +7022,12 @@ fn bool_bitwise_error(op: BinOpKind, lhs: Span) -> UserError {
 fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
     stmts.iter().any(|stmt| match &stmt.kind {
         StmtKind::Assign { place, .. } => place.local == root,
+        StmtKind::BorrowMut { dest, place } => *dest == root || place.local == root,
         StmtKind::Call { args, dest, .. } => {
             dest.as_ref().is_some_and(|dest| dest.local == root)
                 || args
                     .iter()
-                    .any(|arg| matches!(arg.ty, Ty::Ref { mutable: true, .. }))
+                    .any(|arg| matches!(arg.ty, Ty::Ref { mutable: true, .. } | Ty::MutRef(_)))
         }
         StmtKind::If {
             then_block,
@@ -6531,6 +7035,9 @@ fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
             ..
         } => may_write_local(&then_block.stmts, root) || may_write_local(&else_block.stmts, root),
         StmtKind::Ghost(block) | StmtKind::Block(block) => may_write_local(&block.stmts, root),
+        StmtKind::GhostTail { block, tail } => {
+            may_write_local(&block.stmts, root) || expr_may_write_local(tail, root)
+        }
         StmtKind::Loop(lp) => {
             lp.cond
                 .as_ref()
@@ -6542,12 +7049,24 @@ fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
         | StmtKind::AssertBitVector { .. }
         | StmtKind::Assume { .. }
         | StmtKind::Return { .. }
+        | StmtKind::BroadcastUse { .. }
         | StmtKind::Reveal { .. }
         | StmtKind::Hide { .. }
         | StmtKind::Break { .. }
         | StmtKind::Continue { .. }
         | StmtKind::Unreachable => false,
     })
+}
+
+fn expr_may_write_local(expr: &Expr, root: LocalId) -> bool {
+    let mut writes = match &expr.kind {
+        ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
+            may_write_local(&block.stmts, root)
+        }
+        _ => false,
+    };
+    expr.for_each_child(&mut |child| writes |= expr_may_write_local(child, root));
+    writes
 }
 
 /// The binary operator of a compound assignment.

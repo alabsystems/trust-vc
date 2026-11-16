@@ -43,7 +43,7 @@ pub const TRUST_IR_BODY_BINDING_SCHEMA: &str = "trust-vc.trust-ir-body.binding.v
 /// (`tests/trust_ir_pin_label.rs` checks both). A superproject that patches in
 /// another trust-ir links that one, and its IR cohort check compares the two.
 pub const TRUST_IR_BODY_TRUST_IR_PIN: &str =
-    "trust-ir 0.14.0@bd313b4fbfae2c2826bade463e23224f1df9a61a bin v70";
+    "trust-ir 0.14.0@ba039cfea77ae44eeaba0dc8e2946c27d5d97ddd bin v74";
 
 const SEMANTIC_DIGEST_DOMAIN: &str = "trust-vc.trust_ir_body.semantic.v0";
 

@@ -31,21 +31,25 @@ pub(super) fn selections(
     inputs: &Inputs,
     fresh: Option<&PinnedFile>,
 ) -> Result<(Metadata, Option<SelectedTarget>), String> {
-    selections_from(tcx, &inputs.common_files, fresh)
+    match fresh {
+        Some(file) => selections_from(tcx, &inputs.common_files, &[file]),
+        None => selections_from(tcx, &inputs.common_files, &[]),
+    }
 }
 
 pub(super) fn client_selections(
     tcx: TyCtxt<'_>,
     common: &std::collections::BTreeMap<PathBuf, PinnedFile>,
-    fresh: &PinnedFile,
+    fresh: &super::OwnedErase,
 ) -> Result<(Metadata, Option<SelectedTarget>), String> {
-    selections_from(tcx, common, Some(fresh))
+    fresh.revalidate_artifacts()?;
+    selections_from(tcx, common, &fresh.native_images())
 }
 
 fn selections_from(
     tcx: TyCtxt<'_>,
     files: &std::collections::BTreeMap<PathBuf, PinnedFile>,
-    fresh: Option<&PinnedFile>,
+    fresh: &[&PinnedFile],
 ) -> Result<(Metadata, Option<SelectedTarget>), String> {
     let mut common = Vec::new();
     let mut seen = BTreeSet::new();
@@ -61,7 +65,7 @@ fn selections_from(
         let path = native_path.canonicalize().map_err(|e| e.to_string())?;
         let id = tcx.stable_crate_id(*krate).as_u64();
         let svh = tcx.crate_hash(*krate).as_u128();
-        if let Some(fresh) = fresh.filter(|fresh| fresh.path == path) {
+        if let Some(fresh) = fresh.iter().copied().find(|fresh| fresh.path == path) {
             if target.is_some() {
                 return Err("the fresh Erase artifact has multiple native identities".into());
             }
@@ -110,8 +114,14 @@ fn selections_from(
             ));
         }
     }
-    if seen != files.keys().cloned().collect() || target.is_some() != fresh.is_some() {
-        return Err("the native common/target inventory differs from the staging recipe".into());
+    let expects_target = !fresh.is_empty();
+    if seen != files.keys().cloned().collect() || target.is_some() != expects_target {
+        return Err(format!(
+            "the native common/target inventory differs from the staging recipe; actual common selections: {:?}; expected target: {}; actual target: {}",
+            seen.iter().collect::<Vec<_>>(),
+            expects_target,
+            target.is_some(),
+        ));
     }
     Ok((Metadata::load_native_selections(common)?, target))
 }

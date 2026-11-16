@@ -11,13 +11,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::{DefId, LocalDefId, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{self as hir};
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::{Span, Symbol};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use trust_vc_vcir::Mode;
 
 use super::*;
@@ -26,10 +26,17 @@ use crate::declaration_alignment::{AuthoredSpan, DeclarationType, GenericScope, 
 use crate::reader::{attrs, declaration_modes};
 
 mod correspondence;
+mod definitions;
 mod dispatch;
 mod intrinsics;
 
-pub(super) use correspondence::{roundtrip, Pairs, View};
+pub(super) use correspondence::{Pairs, View, roundtrip};
+pub(in crate::reader) use definitions::ClientDefinitions;
+pub(in crate::reader) use definitions::{CheckedSourceFunction, OwnedSourceHeader};
+pub(super) use definitions::capture_forwarding;
+pub(super) use definitions::{
+    OwnedDefinitions, OwnedSourceFamily, for_client as definitions_for_client,
+};
 pub(super) use intrinsics::Intrinsics;
 
 pub(super) fn nominal_pairs(
@@ -320,7 +327,7 @@ impl<'tcx> Visitor<'tcx> for Walk<'_, '_, 'tcx> {
                             return Err(
                                 "an unresolved Spec graph call is not omitted from the closure"
                                     .into(),
-                            )
+                            );
                         }
                     }
                 }

@@ -108,6 +108,28 @@ fn test() -> u64 { VALUE }
 }
 
 #[test]
+fn trait_default_constant_requires_an_exec_initializer() {
+    let source = "verus! {\nspec const Q: u8 = 3;\ntrait T {\n    const C: u8 = Q;\n}\n}";
+    let rejected = common::run("constant_trait_spec_initializer", source, &[]);
+    assert_eq!(rejected.outcome(), "verus-rejected", "{rejected:?}");
+    let errors = rejected.errors();
+    assert_eq!(errors.len(), 1, "{rejected:?}");
+    assert_eq!(
+        errors[0].message,
+        "expression has mode spec, expected mode exec"
+    );
+
+    let accepted = common::run(
+        "constant_trait_dual_initializer",
+        &source.replace("spec const Q", "const Q"),
+        &[],
+    );
+    assert_eq!(accepted.outcome(), "checked", "{accepted:?}");
+    assert_eq!(accepted.exit, 0, "{accepted:?}");
+    assert!(accepted.errors().is_empty(), "{accepted:?}");
+}
+
+#[test]
 fn a_similarly_named_function_does_not_define_a_rust_constant() {
     let run = common::run(
         "constant_prefix",

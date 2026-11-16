@@ -183,7 +183,10 @@ pub(crate) fn crate_warnings(
 
 /// The span of the first `proof { .. }` block in a spec expression.
 fn first_proof_in_spec(e: &Expr) -> Option<trust_vc_vcir::SpanId> {
-    if let ExprKind::ProofInSpec(_) = e.kind {
+    if matches!(
+        e.kind,
+        ExprKind::ProofInSpec(_) | ExprKind::ProofInSpecTail { .. }
+    ) {
         return Some(e.span);
     }
     let mut found = None;
@@ -287,6 +290,11 @@ fn for_each_call(decl: &FnDecl, f: &mut dyn FnMut(FnId, trust_vc_vcir::SpanId)) 
         .collect();
     exprs.extend(&decl.decreases);
     exprs.extend(&decl.decreases_when);
+    exprs.extend(
+        decl.unwind
+            .as_ref()
+            .and_then(trust_vc_vcir::UnwindSpec::condition),
+    );
     for e in exprs {
         expr_calls(e, f);
     }
@@ -315,7 +323,9 @@ fn visit<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
                 visit(then_block, f);
                 visit(else_block, f);
             }
-            StmtKind::Ghost(inner) | StmtKind::Block(inner) => visit(inner, f),
+            StmtKind::Ghost(inner)
+            | StmtKind::Block(inner)
+            | StmtKind::GhostTail { block: inner, .. } => visit(inner, f),
             StmtKind::Loop(lp) => {
                 if let Some(cond) = &lp.cond {
                     visit(&cond.block, f);
@@ -343,6 +353,7 @@ fn stmt_exprs(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
         }
         StmtKind::If { cond, .. } => f(cond),
         StmtKind::Return { value, .. } => value.iter().for_each(f),
+        StmtKind::GhostTail { tail, .. } => f(tail),
         StmtKind::Loop(lp) => {
             if let Some(cond) = &lp.cond {
                 f(&cond.expr);
@@ -350,7 +361,9 @@ fn stmt_exprs(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
             lp.invariants.iter().for_each(|inv| f(&inv.expr));
             lp.decreases.iter().for_each(f);
         }
-        StmtKind::Reveal { .. }
+        StmtKind::BroadcastUse { .. }
+        | StmtKind::Reveal { .. }
+        | StmtKind::BorrowMut { .. }
         | StmtKind::Hide { .. }
         | StmtKind::Ghost(_)
         | StmtKind::Block(_)
@@ -364,12 +377,14 @@ fn stmt_exprs(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
 fn expr_calls(e: &Expr, f: &mut dyn FnMut(FnId, trust_vc_vcir::SpanId)) {
     match &e.kind {
         ExprKind::Call { callee, .. } => f(*callee, e.span),
-        ExprKind::ProofInSpec(block) => visit(block, &mut |stmt| {
-            if let StmtKind::Call { callee, .. } = &stmt.kind {
-                f(*callee, stmt.span);
-            }
-            stmt_exprs(stmt, &mut |e| expr_calls(e, f));
-        }),
+        ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
+            visit(block, &mut |stmt| {
+                if let StmtKind::Call { callee, .. } = &stmt.kind {
+                    f(*callee, stmt.span);
+                }
+                stmt_exprs(stmt, &mut |e| expr_calls(e, f));
+            })
+        }
         _ => {}
     }
     e.for_each_child(&mut |child| expr_calls(child, f));

@@ -8,7 +8,6 @@ use rustc_attr_ir::{AttrArgs, Attribute};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::AttrId;
 
 use super::*;
 use crate::reader::attrs::{self, ItemAttrs};
@@ -17,8 +16,9 @@ pub(super) struct Checked<'tcx> {
     tcx: TyCtxt<'tcx>,
     owner: LocalDefId,
     original: &'tcx [Attribute],
+    // Current HIR attributes retain no AttrId; the original slice and exact
+    // physical slot identify this occurrence without source-name authority.
     index: usize,
-    id: AttrId,
 }
 
 impl<'tcx> Checked<'tcx> {
@@ -41,8 +41,7 @@ impl<'tcx> Checked<'tcx> {
     ) -> bool {
         self.current(tcx, owner)
             && self.original.get(self.index).is_some_and(|actual| {
-                std::ptr::eq(actual, attribute)
-                    && matches!(attribute, Attribute::Unparsed(item) if item.id.attr_id == self.id)
+                std::ptr::eq(actual, attribute) && matches!(attribute, Attribute::Tool(_))
             })
     }
 
@@ -82,7 +81,7 @@ pub(super) fn capture<'tcx>(
     })?;
     let mut occurrence = None;
     for (index, attribute) in original.iter().enumerate() {
-        let Attribute::Unparsed(item) = attribute else {
+        let Attribute::Tool(item) = attribute else {
             continue;
         };
         if item
@@ -97,10 +96,10 @@ pub(super) fn capture<'tcx>(
                     "the getter inline occurrence is not its unique canonical attribute".into(),
                 ));
             }
-            occurrence = Some((index, item.id.attr_id));
+            occurrence = Some(index);
         }
     }
-    let (index, id) = occurrence.ok_or_else(|| {
+    let index = occurrence.ok_or_else(|| {
         Failure::Unknown("the original getter has no canonical inline attribute".into())
     })?;
     let checked = Checked {
@@ -108,7 +107,6 @@ pub(super) fn capture<'tcx>(
         owner,
         original,
         index,
-        id,
     };
     let attributes = checked.mode_attrs(tcx, owner).ok_or_else(|| {
         Failure::Unknown("the helper inline occurrence is no longer current".into())

@@ -169,6 +169,7 @@ pub mod query;
 pub(crate) mod recursion_graph;
 pub(crate) mod ref_binding_desugar;
 pub(crate) mod runtime_check;
+pub mod scalar_cast_capture;
 #[cfg(test)]
 pub(crate) mod smtlib2_emit;
 pub mod solver_budget;

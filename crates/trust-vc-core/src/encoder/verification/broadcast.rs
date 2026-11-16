@@ -578,74 +578,6 @@ impl AYEncoder {
         // on `AstExpressionParser` have the same shape, so the CLASS is closed
         // below instead, at this closure boundary, by the assertion watermark:
         // see `crate::encoder::binder_capture`.
-        let will_universally_close = match obligation.bound_vars.as_deref() {
-            Some(names) => !names.is_empty(),
-            None => !all_var_terms.is_empty(),
-        };
-        // GENERAL BACKSTOP for the same defect class. `pending_universal_closure`
-        // lets the handful of helpers we have inlined decline their hoist; this
-        // watermark catches every helper we have NOT — including ones added
-        // later — by asking, at the closure boundary itself, whether anything
-        // hoisted during the encode mentions a term the `forall` is about to
-        // bind. See `crate::encoder::binder_capture`.
-        let capture_watermark = self.assertion_watermark();
-        let body = crate::encoder::with_flag_unwind_safe!(
-            self.state.pending_universal_closure,
-            will_universally_close,
-            {
-                crate::encoder::with_flag_unwind_safe!(self.state.in_assumption_context, true, {
-                    self.resolve_condition_typed(&obligation.expr)
-                })
-            }
-        );
-        let body = body.map_err(|e| {
-            encoding_error(
-                "encode typed broadcast",
-                format!(
-                    "Failed to encode broadcast assumption '{}': {}",
-                    obligation.name, e
-                ),
-            )
-        })?;
-
-        // Build `guard ==> body` when broadcast has requires clauses (#2575).
-        // The guard is resolved in assumption context so nested foralls are not
-        // Skolemized. The guarded body is used for both the quantified axiom
-        // and the ground-pool replay path.
-        let body = if let Some(ref guard_expr) = obligation.broadcast_guard {
-            let guard = crate::encoder::with_flag_unwind_safe!(
-                self.state.pending_universal_closure,
-                will_universally_close,
-                {
-                    crate::encoder::with_flag_unwind_safe!(
-                        self.state.in_assumption_context,
-                        true,
-                        { self.resolve_condition_typed(guard_expr) }
-                    )
-                }
-            );
-            let guard = guard.map_err(|e| {
-                encoding_error(
-                    "encode typed broadcast",
-                    format!(
-                        "Failed to encode broadcast guard for '{}': {}",
-                        obligation.name, e
-                    ),
-                )
-            })?;
-            self.solver.try_implies(guard, body).map_err(|e| {
-                encoding_error(
-                    "encode typed broadcast",
-                    format!(
-                        "Failed to create guard implication for broadcast '{}': {}",
-                        obligation.name, e
-                    ),
-                )
-            })?
-        } else {
-            body
-        };
-
         let var_terms: Vec<Term> = if let Some(ref bound_names) = obligation.bound_vars {
             let filtered: Vec<Term> = bound_names
                 .iter()
@@ -670,6 +602,80 @@ impl AYEncoder {
             filtered
         } else {
             all_var_terms.to_vec()
+        };
+
+        let will_universally_close = match obligation.bound_vars.as_deref() {
+            Some(names) => !names.is_empty(),
+            None => !all_var_terms.is_empty(),
+        };
+        // GENERAL BACKSTOP for the same defect class. `pending_universal_closure`
+        // lets the handful of helpers we have inlined decline their hoist; this
+        // watermark catches every helper we have NOT — including ones added
+        // later — by asking, at the closure boundary itself, whether anything
+        // hoisted during the encode mentions a term the `forall` is about to
+        // bind. See `crate::encoder::binder_capture`.
+        let capture_watermark = self.assertion_watermark();
+        let body = self.with_ground_template_scope(&var_terms, |encoder| {
+            crate::encoder::with_flag_unwind_safe!(
+                encoder.state.pending_universal_closure,
+                will_universally_close,
+                {
+                    crate::encoder::with_flag_unwind_safe!(
+                        encoder.state.in_assumption_context,
+                        true,
+                        { encoder.resolve_condition_typed(&obligation.expr) }
+                    )
+                }
+            )
+        });
+        let body = body.map_err(|e| {
+            encoding_error(
+                "encode typed broadcast",
+                format!(
+                    "Failed to encode broadcast assumption '{}': {}",
+                    obligation.name, e
+                ),
+            )
+        })?;
+
+        // Build `guard ==> body` when broadcast has requires clauses (#2575).
+        // The guard is resolved in assumption context so nested foralls are not
+        // Skolemized. The guarded body is used for both the quantified axiom
+        // and the ground-pool replay path.
+        let body = if let Some(ref guard_expr) = obligation.broadcast_guard {
+            let guard = self.with_ground_template_scope(&var_terms, |encoder| {
+                crate::encoder::with_flag_unwind_safe!(
+                    encoder.state.pending_universal_closure,
+                    will_universally_close,
+                    {
+                        crate::encoder::with_flag_unwind_safe!(
+                            encoder.state.in_assumption_context,
+                            true,
+                            { encoder.resolve_condition_typed(guard_expr) }
+                        )
+                    }
+                )
+            });
+            let guard = guard.map_err(|e| {
+                encoding_error(
+                    "encode typed broadcast",
+                    format!(
+                        "Failed to encode broadcast guard for '{}': {}",
+                        obligation.name, e
+                    ),
+                )
+            })?;
+            self.solver.try_implies(guard, body).map_err(|e| {
+                encoding_error(
+                    "encode typed broadcast",
+                    format!(
+                        "Failed to create guard implication for broadcast '{}': {}",
+                        obligation.name, e
+                    ),
+                )
+            })?
+        } else {
+            body
         };
 
         let has_type_param_bound = expr_contains_type_param(&obligation.expr)
@@ -713,7 +719,9 @@ impl AYEncoder {
             // for the witness sets and the soundness argument.
             self.replay_interpreted_trigger_broadcast_ground(obligation, &dead_trigger_patterns)?;
         } else {
-            let mut parsed_groups = self.encode_broadcast_trigger_groups(obligation)?;
+            let mut parsed_groups = self.with_ground_template_scope(&var_terms, |encoder| {
+                encoder.encode_broadcast_trigger_groups(obligation)
+            })?;
 
             // Automatic trigger inference (#2461): if no explicit triggers
             // exist, infer them from the obligation body. Uses the names-only
@@ -733,7 +741,9 @@ impl AYEncoder {
                         for group in &inferred {
                             let mut group_terms = Vec::new();
                             for trigger_expr in group {
-                                match self.resolve_condition_typed(trigger_expr) {
+                                match self.with_ground_template_scope(&var_terms, |encoder| {
+                                    encoder.resolve_condition_typed(trigger_expr)
+                                }) {
                                     Ok(term) => group_terms.push(term),
                                     Err(_) => break,
                                 }
@@ -1040,17 +1050,38 @@ mod tests {
         encoder
             .add_typed_broadcast(obligation, &all_var_terms)
             .expect("typed broadcast should encode");
-        // Trigger encoding auto-registers ground entries via encode_fn_call
-        // at quantifier_depth 0. Verify entries exist from trigger encoding.
         assert_eq!(
             encoder.state.ground_pool.ground_term_count(),
-            2,
-            "trigger encoding should auto-register f(x) and g(x) as ground entries"
+            0,
+            "bound-template triggers must not become free caller demand"
         );
         assert_eq!(
-            encoder.state.ground_pool.pending_instantiation_count_for_tests(),
-            1,
-            "alternative singleton trigger groups should register all seed symbols without duplicating instantiations"
+            encoder
+                .state
+                .ground_pool
+                .pending_instantiation_count_for_tests(),
+            0
+        );
+        for (name, value) in [("f", 5), ("g", 7)] {
+            encoder
+                .encode_condition_typed(&TrustVcExpr::FnCall {
+                    name: name.into(),
+                    args: vec![TrustVcExpr::IntLit {
+                        value,
+                        ty: TrustVcType::Int { width: 32 },
+                    }],
+                    return_ty: TrustVcType::Bool,
+                })
+                .expect("genuine caller");
+        }
+        assert_eq!(encoder.state.ground_pool.ground_term_count(), 2);
+        assert_eq!(
+            encoder
+                .state
+                .ground_pool
+                .pending_instantiation_count_for_tests(),
+            2,
+            "both alternative singleton seed symbols must accept genuine caller bindings"
         );
     }
 
@@ -1096,13 +1127,24 @@ mod tests {
         encoder
             .add_typed_broadcast(obligation, &all_var_terms)
             .expect("typed broadcast should encode");
-        // Trigger encoding auto-registers ground entries even for solver-only
-        // multi-trigger groups (encode_fn_call at quantifier_depth 0).
         assert_eq!(
             encoder.state.ground_pool.ground_term_count(),
-            2,
-            "trigger encoding should auto-register f(x) and g(x) regardless of trigger group structure"
+            0,
+            "multi-trigger templates must not become free caller demand"
         );
+        for name in ["f", "g"] {
+            encoder
+                .encode_condition_typed(&TrustVcExpr::FnCall {
+                    name: name.into(),
+                    args: vec![TrustVcExpr::IntLit {
+                        value: 5,
+                        ty: TrustVcType::Int { width: 32 },
+                    }],
+                    return_ty: TrustVcType::Bool,
+                })
+                .expect("genuine caller");
+        }
+        assert_eq!(encoder.state.ground_pool.ground_term_count(), 2);
         assert_eq!(
             encoder.state.ground_pool.pending_instantiation_count_for_tests(),
             0,

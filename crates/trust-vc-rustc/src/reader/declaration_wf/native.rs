@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, GenericArgs, Ty, TyCtxt};
 use rustc_span::Symbol;
 
 use super::super::declaration_policy::{self, OwnedPolicy};
@@ -185,7 +185,7 @@ impl<'tcx> Capture<'_, 'tcx> {
         (self.tcx.lang_items().owned_box() == Some(owner)).then_some(BuiltinRole::OwnedBox)
     }
 
-    fn arguments(&self, owner: DefId, args: GenericArgsRef<'tcx>) -> Result<Vec<Ty<'tcx>>, String> {
+    fn arguments(&self, owner: DefId, args: GenericArgs<'tcx>) -> Result<Vec<Ty<'tcx>>, String> {
         if args.len() > 256 || args.len() > self.type_work {
             return Err("native datatype argument inventory exceeds its bound".into());
         }
@@ -234,7 +234,7 @@ impl<'tcx> Capture<'_, 'tcx> {
             }
             ty::Adt(adt, args) => {
                 let definition = adt.did();
-                let arguments = self.arguments(definition, args)?;
+                let arguments = self.arguments(definition, *args)?;
                 match self.builtin(definition) {
                     Some(role @ (BuiltinRole::MathematicalInteger | BuiltinRole::NaturalNumber)) => {
                         if !arguments.is_empty() { return Err("a numeric builtin has unexpected arguments".into()); }
@@ -263,7 +263,7 @@ impl<'tcx> Capture<'_, 'tcx> {
                         if !matches!(parameter.kind, ty::GenericParamDefKind::Type { has_default: true, .. }) {
                             return Err("native Box allocator has no declared default".into());
                         }
-                        let default = self.tcx.type_of(parameter.def_id).instantiate(self.tcx, args).skip_normalization();
+                        let default = self.tcx.type_of(parameter.def_id).instantiate(self.tcx, *args).skip_normalization();
                         if default != *allocator { return Err("custom Box allocator validation is not represented".into()); }
                         self.require_builtin(definition, BuiltinRole::OwnedBox)?;
                         // Pinned Verus decorates the inner type and excludes

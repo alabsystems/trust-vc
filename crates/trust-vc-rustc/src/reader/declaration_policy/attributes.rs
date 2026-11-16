@@ -109,6 +109,7 @@ fn directive(
     name: &str,
     argument: Option<String>,
     internal: bool,
+    bodyless_spec: bool,
 ) -> Result<(), String> {
     if let Some(policy) = policy(name, argument.as_deref()) {
         match (context, argument) {
@@ -123,6 +124,15 @@ fn directive(
         return Ok(());
     }
     if internal && argument.is_none() {
+        // These affect body interpretation, not binders. Admit them only as
+        // the complete parsed Spec/uninterp/external_body combination; the
+        // separate factory still checks modes and traverses every header.
+        if context == Context::Function
+            && bodyless_spec
+            && matches!(name, "uninterp" | "external_body")
+        {
+            return Ok(());
+        }
         match name {
             "verus_macro" if context != Context::Parameter => {
                 out.verus_macro = true;
@@ -180,8 +190,14 @@ pub(super) fn read(attributes: &[Attribute], context: Context) -> Result<Directi
     if attributes.len() > MAX_ATTRIBUTES {
         return Err("native attribute inventory exceeds its bound".into());
     }
+    let parsed = super::super::attrs::item_attrs(attributes);
+    let bodyless_spec = context == Context::Function
+        && parsed.mode == Some(Mode::Spec)
+        && parsed.uninterp
+        && parsed.external_body
+        && super::super::attrs::verus_parse(attributes).is_ok();
     if attributes.iter().any(|attribute| {
-        matches!(attribute, Attribute::Unparsed(item)
+        matches!(attribute, Attribute::Tool(item)
         if item.path.segments.iter().map(|name| name.as_str()).eq(["verifier", "inline"]))
     }) {
         super::super::attrs::verus_parse(attributes).map_err(|problem| {
@@ -190,8 +206,10 @@ pub(super) fn read(attributes: &[Attribute], context: Context) -> Result<Directi
     }
     let mut result = Directives::default();
     for attribute in attributes {
-        let Attribute::Unparsed(item) = attribute else {
-            continue;
+        let item = match attribute {
+            Attribute::Tool(item) => item,
+            Attribute::DeriveHelper(item) if item.path.segments.len() == 1 => item,
+            _ => continue,
         };
         let path = item
             .path
@@ -200,9 +218,14 @@ pub(super) fn read(attributes: &[Attribute], context: Context) -> Result<Directi
             .map(|name| name.as_str())
             .collect::<Vec<_>>();
         match path.as_slice() {
-            ["verifier", name] => {
-                directive(&mut result, context, name, arguments(&item.args)?, false)?
-            }
+            ["verifier", name] => directive(
+                &mut result,
+                context,
+                name,
+                arguments(&item.args)?,
+                false,
+                bodyless_spec,
+            )?,
             ["verus", "internal"] => {
                 let AttrArgs::Delimited(delimited) = &item.args else {
                     return Err("a Verus internal policy attribute has no token list".into());
@@ -222,7 +245,7 @@ pub(super) fn read(attributes: &[Attribute], context: Context) -> Result<Directi
                     ),
                     _ => return Err("an unsupported internal policy token shape".into()),
                 };
-                directive(&mut result, context, &name, argument, true)?;
+                directive(&mut result, context, &name, argument, true, bodyless_spec)?;
             }
             ["verus", ..] | ["verifier", ..] => {
                 return Err("an unsupported verifier policy attribute path".into())

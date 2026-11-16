@@ -192,6 +192,25 @@ python3 scripts/verus_suite/run_suite.py --frontend trust-vc \
     --label <fresh-label> --full-suite --include-ignored
 ```
 
+Current native drivers that require a GNU scheduler at process entry can use
+`--execution-lender <actual-source-built-lend_execution> --threads 1 --parallel-bins 1`
+inside an existing fixed build-slot protocol 1 reservation. The selected lender must
+retain its zero-token GNU owner until its actual compiler child exits and preserve
+that child's exit status and signals. The runner records the selected lender and
+Python interpreter identities, stages the lender and original native driver bytes,
+and wraps both `rust_verify` and `verus`. The latter remains beside `cargo-verus`
+for its unchanged sibling lookup. Diagnostic capture preserves ordinary exit 139
+separately from an actual signal.
+
+This lane refuses native epochs, inherited GNU/CPU/SDK advertisements and `--env`
+changes to admission context before environment filtering. It runs one harness and
+one test thread at a time; a lender grants no additional CPU, SDK, import or proof
+authority. The caller's real fixed reservation remains held throughout the suite.
+The runner's wrapper tests establish argv, process-status and input-identity
+behavior only; actual GNU custody needs a genuine source-built lender and native
+compiler execution. Use a fresh label for qualification. Per-binary caches also
+bind the staged frontend and lender inputs, so changing them reruns the cases.
+
 `--verus-driver` and `--cargo-verus` are supplied together. Selecting the
 first-root `cargo` harness requires them; selecting only the Cargo argument-planning
 integration harnesses still uses their compiled-in genuine helpers and their

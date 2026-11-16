@@ -479,11 +479,20 @@ impl Registry {
                     (TriggerHead::Arithmetic(op), _) => {
                         out.arithmetic.insert(op);
                     }
-                    (TriggerHead::Clip(range), _) => {
+                    (TriggerHead::Clip(range), Term::Ite(_, value, _, _)) => {
                         if !pay(128) {
                             return None;
                         }
                         out.calls.insert(super::spec::clip_oob_name(range));
+                        // The complete canonical clip remains the matching
+                        // key. Its actual UF value branch can also witness
+                        // relevance while this exact ITE is still present.
+                        if let Term::Call { name, .. } = &**value {
+                            if !pay(name.len().saturating_mul(4)) {
+                                return None;
+                            }
+                            out.calls.insert(name.clone());
+                        }
                         out.clips.insert(range);
                     }
                     _ => return None,
@@ -557,7 +566,6 @@ fn charge_substitution(
 
 /// `t` with the parameters at `args` and the variables at `binding`. Production
 /// callers reserve the walk and all copies with charge_substitution first.
-
 fn at(t: &Term, args: &[Term], binding: &[Term], params: &[Sort], vars: &[Sort]) -> Option<Term> {
     if !native_tuple(args, params)
         || !native_tuple(binding, vars)
@@ -899,33 +907,6 @@ pub(crate) fn instantiate(
                     QuantKind::Forall => call.clone(),
                     QuantKind::Exists => call.clone().not(),
                 };
-                if skolemized.insert(call.clone()) {
-                    if analysis.charge(template.vars.len()).is_err() {
-                        continue;
-                    }
-                    let witness = skolems(&template.vars, &mut out.symbols);
-                    if !charge_substitution(&template.body, args, &witness, &mut |cost| {
-                        analysis.charge(cost).is_ok()
-                    }) {
-                        continue;
-                    }
-                    let Some(body) = at(
-                        &template.body,
-                        args,
-                        &witness,
-                        &template.params,
-                        &template.vars,
-                    ) else {
-                        continue;
-                    };
-                    let fact = match template.kind {
-                        QuantKind::Forall => Term::implies(call.clone().not(), body.clone().not()),
-                        QuantKind::Exists => Term::implies(call.clone(), body.clone()),
-                    };
-                    let when = Term::and([cond.clone(), holds.clone().not()]);
-                    read(&body, when, &mut analysis, &mut found);
-                    new_facts.push((fact, None));
-                }
                 for group in &template.triggers {
                     if !group.iter().all(|term| {
                         charge_substitution(term.term(), args, &[], &mut |cost| {
@@ -986,6 +967,37 @@ pub(crate) fn instantiate(
                         read(&body, when, &mut analysis, &mut found);
                         new_facts.push((fact, Some(gate)));
                     }
+                }
+                // The current index is already fixed. Expansion applications
+                // only enter the next round, so match existing ground terms
+                // before spending this same grant on Skolem construction and
+                // expansion. Every emitted fact keeps its original guard.
+                if skolemized.insert(call.clone()) {
+                    if analysis.charge(template.vars.len()).is_err() {
+                        continue;
+                    }
+                    let witness = skolems(&template.vars, &mut out.symbols);
+                    if !charge_substitution(&template.body, args, &witness, &mut |cost| {
+                        analysis.charge(cost).is_ok()
+                    }) {
+                        continue;
+                    }
+                    let Some(body) = at(
+                        &template.body,
+                        args,
+                        &witness,
+                        &template.params,
+                        &template.vars,
+                    ) else {
+                        continue;
+                    };
+                    let fact = match template.kind {
+                        QuantKind::Forall => Term::implies(call.clone().not(), body.clone().not()),
+                        QuantKind::Exists => Term::implies(call.clone(), body.clone()),
+                    };
+                    let when = Term::and([cond.clone(), holds.clone().not()]);
+                    read(&body, when, &mut analysis, &mut found);
+                    new_facts.push((fact, None));
                 }
             } else if let Some((k, _)) = choose_of(name) {
                 let Some(template) = reg.chooses.get(k) else {
@@ -1380,6 +1392,11 @@ fn node_label(kind: &ExprKind) -> String {
         ExprKind::Field { variant, field, .. } => format!("field{variant}:{field}"),
         ExprKind::TupleField { index, .. } => format!("tfield{index}"),
         ExprKind::Borrow(_) => "borrow".to_string(),
+        ExprKind::MutRefCurrent(_) => "mut-ref-current".into(),
+        ExprKind::MutRefFuture(_) => "mut-ref-future".into(),
+        ExprKind::MutRefUpdate { .. } => "mut-ref-update".into(),
+        ExprKind::HasResolved(_) => "has-resolved".into(),
+        ExprKind::ProofInSpecTail { .. } => "proof-tail".into(),
         ExprKind::ProofInSpec(_) => "proof".to_string(),
         ExprKind::IntegerConstant(value) => format!("integer_constant({value:?})"),
         ExprKind::UntriggeredQuant { .. } => "untriggered-quant".into(),

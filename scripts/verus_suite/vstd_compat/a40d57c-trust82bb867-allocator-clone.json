@@ -1,0 +1,11 @@
+{
+  "affected_file": "source/vstd/std_specs/btree.rs",
+  "base_upstream_commit": "a40d57c73650cd3648b09386bfdb96ab5c270626",
+  "base_upstream_tree": "801b7b246fccdc1a90ffbbcfad47e5d63067d5f7",
+  "compiler_commit": "82bb867eddb94599f68194f701c766f2b6f5a02f",
+  "original_file_sha256": "396f445c811f9ed0fdddd565c45b6107beef3dea7c64c093861102d331a49d57",
+  "patch": "a40d57c-trust82bb867-allocator-clone.patch",
+  "patch_sha256": "67c3ec8d35127f98536fc0272109557b567405c0ad9ca0db90bdbb035b11b522",
+  "patched_file_sha256": "c6b8b00046054808f4192df06cb82f18fa655a2f5042bf9b782829210fa59733",
+  "schema": "trust-vc.vstd-source-compat@1"
+}

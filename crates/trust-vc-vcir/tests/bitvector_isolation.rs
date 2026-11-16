@@ -5,9 +5,13 @@ use trust_vc_vcir::bitvector::{Architecture, Sort as BvSort};
 use trust_vc_vcir::vcgen::{self, Check, CheckKind, FnVcs};
 use trust_vc_vcir::*;
 
+#[path = "bitvector_isolation/source_fragment.rs"]
+mod source_fragment;
+
 fn read(local: u32, ty: Ty) -> Expr {
     Expr::read(Place::local(LocalId(local)), ty, SpanId(0))
 }
+#[cfg(feature = "solve")]
 fn integer(value: u128) -> Expr {
     Expr::new(
         Ty::nat(),
@@ -49,6 +53,7 @@ fn proof(ty: Ty, mut statements: Vec<Stmt>) -> FnDecl {
                 name: "ret".into(),
                 ty: Ty::Unit,
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Return,
                 span: SpanId(0),
@@ -57,6 +62,7 @@ fn proof(ty: Ty, mut statements: Vec<Stmt>) -> FnDecl {
                 name: "x".into(),
                 ty,
                 mode: Mode::Spec,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Param,
                 span: SpanId(0),
@@ -70,6 +76,7 @@ fn proof(ty: Ty, mut statements: Vec<Stmt>) -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Stmts(Block::new(statements)),
     }
@@ -609,6 +616,7 @@ fn ordinary_dead_local_initialization_supplies_availability_but_no_bv_value_fact
         name: "dead_x".into(),
         ty,
         mode: Mode::Spec,
+        prophecy: trust_vc_vcir::DeclProphecy::Default,
         mutable: false,
         kind: LocalKind::Let,
         span: SpanId(0),

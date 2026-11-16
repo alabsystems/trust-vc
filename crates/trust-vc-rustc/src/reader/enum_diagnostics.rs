@@ -236,7 +236,7 @@ pub(super) fn prepare<'tcx>(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> Result<Pend
                 .checked_sub(1)
                 .ok_or("the enum diagnostic field inventory exceeds its bound")?;
             let value = tcx
-                .try_normalize_erasing_regions(env, field.ty(tcx, args))
+                .try_normalize_erasing_regions(env, field.ty(tcx, *args))
                 .map_err(|_| "an enum diagnostic field type cannot be normalized")?;
             fields.entry(field.ident(tcx).name).or_default().push(value);
         }

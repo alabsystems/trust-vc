@@ -29,6 +29,14 @@
 //!     observations before a separate authentication/alignment step.
 
 #![cfg_attr(feature = "rustc", feature(rustc_private))]
+#![cfg_attr(
+    all(test, feature = "rustc", any(target_os = "linux", target_os = "macos")),
+    feature(test, custom_test_frameworks, exitcode_exit_method)
+)]
+#![cfg_attr(
+    all(test, feature = "rustc", any(target_os = "linux", target_os = "macos")),
+    test_runner(crate::native_entry::test_main)
+)]
 
 pub mod args;
 pub mod cargo;
@@ -60,11 +68,21 @@ extern crate rustc_span;
 #[cfg(feature = "rustc")]
 mod cargo_native;
 #[cfg(feature = "rustc")]
+pub(crate) mod compiler_environment;
+#[cfg(feature = "rustc")]
 pub mod declaration_observe;
 #[cfg(feature = "rustc")]
 mod diagnostic_compat;
 #[cfg(feature = "rustc")]
 pub mod metadata_inspect;
+#[cfg(feature = "rustc")]
+pub mod native_entry;
+#[cfg(all(feature = "rustc", any(target_os = "linux", target_os = "macos")))]
+pub(crate) mod native_requests;
+#[cfg(feature = "rustc")]
+pub(crate) mod output_environment;
+#[cfg(all(feature = "rustc", any(target_os = "linux", target_os = "macos")))]
+pub use native_requests::forwarding_main as native_request_forwarding_main;
 #[cfg(feature = "rustc")]
 pub mod reader;
 #[cfg(feature = "rustc")]

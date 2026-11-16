@@ -542,6 +542,28 @@ impl Gather<'_, '_> {
                 (pure, T::App(App::Field(label, 0, *index), vec![arg]))
             }
             ExprKind::Borrow(inner) => return self.gather(inner, depth),
+            ExprKind::MutRefCurrent(inner)
+            | ExprKind::MutRefFuture(inner)
+            | ExprKind::HasResolved(inner) => {
+                let (pure, inner) = self.gather(inner, depth + 1);
+                let name = match &e.kind {
+                    ExprKind::MutRefCurrent(_) => "mut_ref_current",
+                    ExprKind::MutRefFuture(_) => "mut_ref_future",
+                    _ => "has_resolved",
+                };
+                (pure, T::App(App::Const(name.into()), vec![inner]))
+            }
+            ExprKind::MutRefUpdate { reference, value } => {
+                let (p, reference) = self.gather(reference, depth + 1);
+                let (q, value) = self.gather(value, depth + 1);
+                (
+                    p && q,
+                    T::App(
+                        App::Const("mut_ref_update_current".into()),
+                        vec![reference, value],
+                    ),
+                )
+            }
             ExprKind::Cast {
                 arg,
                 kind: CastKind::Exact,
@@ -606,7 +628,8 @@ impl Gather<'_, '_> {
             | ExprKind::Choose { .. }
             | ExprKind::UntriggeredQuant { .. }
             | ExprKind::UntriggeredChoose { .. }
-            | ExprKind::ProofInSpec(_) => {
+            | ExprKind::ProofInSpec(_)
+            | ExprKind::ProofInSpecTail { .. } => {
                 let app = self.other();
                 (false, T::App(app, Vec::new()))
             }

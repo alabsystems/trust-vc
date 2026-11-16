@@ -49,6 +49,7 @@ pub(crate) struct GhostOnly {
     owner: LocalDefId,
     body: hir::BodyId,
     builtins: Vec<DefId>,
+    implicit_proof_unit_return: bool,
 }
 impl GhostOnly {
     pub(crate) fn current(&self, tcx: TyCtxt<'_>, owner: LocalDefId) -> bool {
@@ -60,6 +61,11 @@ impl GhostOnly {
     }
     pub(crate) fn builtins(&self) -> &[DefId] {
         &self.builtins
+    }
+    /// The canonical omitted Unit return is Proof mode, without a tracked
+    /// value use. This exception belongs only to this original checked body.
+    pub(crate) fn permits_implicit_unit_return(&self, tcx: TyCtxt<'_>, owner: LocalDefId) -> bool {
+        self.implicit_proof_unit_return && self.current(tcx, owner)
     }
 }
 
@@ -313,7 +319,7 @@ impl<'tcx> Walk<'_, 'tcx> {
 pub(crate) fn classify<'tcx>(
     cx: &Cx<'tcx>,
     owner: LocalDefId,
-    checked: &CheckedModes,
+    checked: &CheckedModes<'tcx>,
     work: &mut Work,
 ) -> Option<GhostOnly> {
     work.charge(cx.tcx, 1)?;
@@ -328,6 +334,10 @@ pub(crate) fn classify<'tcx>(
     {
         return None;
     }
+    checked
+        .availability
+        .checked(tcx, owner, checked.signature.body_owner)
+        .ok()?;
     let attributes = tcx.hir_attrs(tcx.local_def_id_to_hir_id(owner));
     work.charge(tcx, attributes.len())?;
     if attributes.len() > 256 {
@@ -427,6 +437,10 @@ pub(crate) fn classify<'tcx>(
         owner,
         body: body.id(),
         builtins,
+        implicit_proof_unit_return: unit
+            && checked.signature.mode == Mode::Proof
+            && checked.signature.ret.mode == Mode::Proof
+            && matches!(checked.signature.ret.origin, ModeOrigin::ImplicitReturn),
     })
 }
 

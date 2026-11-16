@@ -141,12 +141,11 @@ impl<'library> ClientImages<'library> {
         self.revalidate()?;
         unique_native_candidates(tcx, &self.copies)?;
         let (common, target) =
-            collect::client_selections(tcx, self.common_files(), &library.prepared.erase.file)?;
+            collect::client_selections(tcx, self.common_files(), &library.prepared.erase)?;
         let target = target.ok_or("the client did not load the actual fresh Erase library")?;
         if target.stable_crate_id != library.prepared.erase.view.stable_crate_id
             || target.svh != library.prepared.erase.target_svh
-            || target.file.path != library.prepared.erase.file.path
-            || target.file.sha256 != library.prepared.erase.file.sha256
+            || !library.prepared.erase.contains_image(&target.file)
             || common.crate_ids() != library.prepared.common.crate_ids()
         {
             return Err(

@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import random
+import shlex
 import signal
 import subprocess
 import sys
@@ -163,7 +164,12 @@ class ShimCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="verus-suite-shim-")
         self.tmp = Path(self._tmp.name)
         self.fake = self.tmp / "fake-solver"
-        self.fake.write_text(f"#!{sys.executable}\n" + FAKE_SOLVER)
+        source = self.tmp / "fake_solver.py"
+        source.write_text(FAKE_SOLVER)
+        # A shebang splits an interpreter path at whitespace. Keep the actual
+        # selected Python even when its installation directory contains spaces.
+        self.fake.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " "
+                             + shlex.quote(str(source)) + ' "$@"\n')
         self.fake.chmod(0o755)
         self.events = self.tmp / "events"
 

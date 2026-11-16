@@ -99,6 +99,8 @@ pub(super) fn ty(ty: &Ty, budget: &mut Budget, depth: usize) -> Result<Value, St
         Ty::Param(index) => json!({"kind": "Parameter", "index": index}),
         Ty::Ref { mutable, inner } => json!({"kind": "Reference", "mutable": mutable,
             "inner": self::ty(inner, budget, depth + 1)?}),
+        Ty::MutRef(inner) => json!({"kind": "MutableReferenceCarrier",
+            "inner": self::ty(inner, budget, depth + 1)?}),
         Ty::Tuple(elements) => {
             json!({"kind": "Tuple", "elements": types(elements, budget, depth + 1)?})
         }
@@ -120,6 +122,17 @@ pub(super) fn types(
 }
 
 pub(super) fn signature(decl: &FnDecl, budget: &mut Budget) -> Result<Value, String> {
+    if decl.attrs.broadcast_triggers.is_some() {
+        return Err("client footprint does not represent broadcast contract authority".into());
+    }
+    if matches!(
+        decl.unwind,
+        Some(trust_vc_vcir::UnwindSpec::NoUnwindWhen(_))
+    ) {
+        return Err(
+            "client footprint does not yet represent conditional unwind header scopes".into(),
+        );
+    }
     budget.charge(
         decl.locals.len() + decl.params.len() + decl.type_params.len(),
         0,
@@ -150,6 +163,11 @@ pub(super) fn signature(decl: &FnDecl, budget: &mut Budget) -> Result<Value, Str
             "recommends": decl.recommends.len(), "decreases": decl.decreases.len(),
             "decreases_when": decl.decreases_when.is_some(), "decreases_by": decl.decreases_by.is_some()},
         "instance_metadata": decl.attrs.instance.is_some(),
+        "prophetic": decl.attrs.prophetic,
+        "unwind": {"declared": decl.unwind.is_some(), "kind": match decl.unwind_spec() {
+            trust_vc_vcir::UnwindSpec::NoUnwind => "NoUnwind",
+            trust_vc_vcir::UnwindSpec::MayUnwind => "MayUnwind",
+            trust_vc_vcir::UnwindSpec::NoUnwindWhen(_) => "NoUnwindWhen"}},
         "parameters": params, "return": {"local": decl.ret.0, "mode": ret.mode.name(),
             "type": ty(&ret.ty, budget, 0)?}}),
     )
@@ -267,6 +285,19 @@ impl<'a> Walk<'a> {
             ExprKind::Borrow(arg) => {
                 json!({"kind": "Borrow", "argument": self.expr(arg, budget, depth + 1)?})
             }
+            ExprKind::MutRefCurrent(arg)
+            | ExprKind::MutRefFuture(arg)
+            | ExprKind::HasResolved(arg) => {
+                let kind = match &expr.kind {
+                    ExprKind::MutRefCurrent(_) => "MutRefCurrent",
+                    ExprKind::MutRefFuture(_) => "MutRefFuture",
+                    _ => "HasResolved",
+                };
+                json!({"kind": kind, "argument": self.expr(arg, budget, depth + 1)?})
+            }
+            ExprKind::MutRefUpdate { reference, value } => json!({"kind": "MutRefUpdate",
+                "reference": self.expr(reference, budget, depth + 1)?,
+                "value": self.expr(value, budget, depth + 1)?}),
             ExprKind::Field {
                 base,
                 variant,
@@ -310,7 +341,10 @@ impl<'a> Walk<'a> {
                     "client footprint cannot contain incomplete source construction".into(),
                 );
             }
-            ExprKind::ProofInSpec(_) | ExprKind::Quant { .. } | ExprKind::Choose { .. } => {
+            ExprKind::ProofInSpec(_)
+            | ExprKind::ProofInSpecTail { .. }
+            | ExprKind::Quant { .. }
+            | ExprKind::Choose { .. } => {
                 return Err("client footprint does not yet represent embedded proof, quantifier or choice scopes".into());
             }
         };
@@ -338,6 +372,11 @@ impl<'a> Walk<'a> {
                 json!({"kind": "Assign", "place": self.place(place, budget)?,
                 "value": self.expr(value, budget, depth + 1)?})
             }
+            StmtKind::BorrowMut { dest, place } => {
+                self.place(&Place::local(*dest), budget)?;
+                json!({"kind": "BorrowMut", "destination": dest.0,
+                    "place": self.place(place, budget)?})
+            }
             StmtKind::Assume { expr, .. } => {
                 json!({"kind": "Assume", "condition": self.expr(expr, budget, depth + 1)?})
             }
@@ -363,8 +402,12 @@ impl<'a> Walk<'a> {
             StmtKind::Block(block) | StmtKind::Ghost(block) => json!({"kind":
                 if matches!(&stmt.kind, StmtKind::Ghost(_)) { "Ghost" } else { "Block" },
                 "body": self.block(block, budget, depth + 1)?}),
+            StmtKind::GhostTail { block, tail } => json!({"kind": "GhostTail",
+                "body": self.block(block, budget, depth + 1)?,
+                "tail": self.expr(tail, budget, depth + 1)?}),
             StmtKind::Unreachable => json!({"kind": "Unreachable"}),
-            StmtKind::Reveal { .. }
+            StmtKind::BroadcastUse { .. }
+            | StmtKind::Reveal { .. }
             | StmtKind::AssertBitVector { .. }
             | StmtKind::Hide { .. }
             | StmtKind::Loop(_)
@@ -399,6 +442,7 @@ impl<'a> Walk<'a> {
             || !self.function.decreases.is_empty()
             || self.function.decreases_when.is_some()
             || self.function.decreases_by.is_some()
+            || self.function.unwind.is_some()
         {
             return Err("client footprint does not yet represent function header scopes".into());
         }

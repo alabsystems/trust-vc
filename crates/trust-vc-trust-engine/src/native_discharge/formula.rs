@@ -176,6 +176,19 @@ enum ArithReading {
     MachineWidth,
 }
 
+/// The original typed operands, shared by binary lowering and width checks.
+#[derive(Clone, Copy)]
+struct BinaryOperands<'a> {
+    lhs: &'a Formula,
+    rhs: &'a Formula,
+}
+
+impl<'a> BinaryOperands<'a> {
+    fn new(lhs: &'a Formula, rhs: &'a Formula) -> Self {
+        Self { lhs, rhs }
+    }
+}
+
 /// Lowers `trust-types.Formula@1` nodes against a declared variable scope.
 pub(crate) struct FormulaDecoder<'a> {
     scope: &'a Scope,
@@ -287,22 +300,22 @@ impl<'a> FormulaDecoder<'a> {
             Le(lhs, rhs) => self.comparison(lhs, rhs, TrustCompareOp::Le, tag, None, expected),
             Gt(lhs, rhs) => self.comparison(lhs, rhs, TrustCompareOp::Gt, tag, None, expected),
             Ge(lhs, rhs) => self.comparison(lhs, rhs, TrustCompareOp::Ge, tag, None, expected),
-            BvULt(lhs, rhs, width) => self.bv_comparison(lhs, rhs, *width, TrustCompareOp::Lt, tag, false, expected),
-            BvULe(lhs, rhs, width) => self.bv_comparison(lhs, rhs, *width, TrustCompareOp::Le, tag, false, expected),
-            BvSLt(lhs, rhs, width) => self.bv_comparison(lhs, rhs, *width, TrustCompareOp::Lt, tag, true, expected),
-            BvSLe(lhs, rhs, width) => self.bv_comparison(lhs, rhs, *width, TrustCompareOp::Le, tag, true, expected),
-            Add(lhs, rhs) => self.arith(lhs, rhs, crate::TrustArithOp::Add, tag, None, expected, ArithReading::Mathematical),
-            Sub(lhs, rhs) => self.arith(lhs, rhs, crate::TrustArithOp::Sub, tag, None, expected, ArithReading::Mathematical),
-            Mul(lhs, rhs) => self.arith(lhs, rhs, crate::TrustArithOp::Mul, tag, None, expected, ArithReading::Mathematical),
-            Div(lhs, rhs) => self.arith(lhs, rhs, crate::TrustArithOp::Div, tag, None, expected, ArithReading::Mathematical),
-            Rem(lhs, rhs) => self.arith(lhs, rhs, crate::TrustArithOp::Rem, tag, None, expected, ArithReading::Mathematical),
-            BvAdd(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Add, tag, None, expected),
-            BvSub(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Sub, tag, None, expected),
-            BvMul(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Mul, tag, None, expected),
-            BvUDiv(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Div, tag, Some(false), expected),
-            BvSDiv(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Div, tag, Some(true), expected),
-            BvURem(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Rem, tag, Some(false), expected),
-            BvSRem(lhs, rhs, width) => self.bv_arith(lhs, rhs, *width, crate::TrustArithOp::Rem, tag, Some(true), expected),
+            BvULt(lhs, rhs, width) => self.bv_comparison(BinaryOperands::new(lhs, rhs), *width, TrustCompareOp::Lt, tag, false, expected),
+            BvULe(lhs, rhs, width) => self.bv_comparison(BinaryOperands::new(lhs, rhs), *width, TrustCompareOp::Le, tag, false, expected),
+            BvSLt(lhs, rhs, width) => self.bv_comparison(BinaryOperands::new(lhs, rhs), *width, TrustCompareOp::Lt, tag, true, expected),
+            BvSLe(lhs, rhs, width) => self.bv_comparison(BinaryOperands::new(lhs, rhs), *width, TrustCompareOp::Le, tag, true, expected),
+            Add(lhs, rhs) => self.arith(BinaryOperands::new(lhs, rhs), crate::TrustArithOp::Add, tag, None, expected, ArithReading::Mathematical),
+            Sub(lhs, rhs) => self.arith(BinaryOperands::new(lhs, rhs), crate::TrustArithOp::Sub, tag, None, expected, ArithReading::Mathematical),
+            Mul(lhs, rhs) => self.arith(BinaryOperands::new(lhs, rhs), crate::TrustArithOp::Mul, tag, None, expected, ArithReading::Mathematical),
+            Div(lhs, rhs) => self.arith(BinaryOperands::new(lhs, rhs), crate::TrustArithOp::Div, tag, None, expected, ArithReading::Mathematical),
+            Rem(lhs, rhs) => self.arith(BinaryOperands::new(lhs, rhs), crate::TrustArithOp::Rem, tag, None, expected, ArithReading::Mathematical),
+            BvAdd(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Add, tag, None, expected),
+            BvSub(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Sub, tag, None, expected),
+            BvMul(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Mul, tag, None, expected),
+            BvUDiv(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Div, tag, Some(false), expected),
+            BvSDiv(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Div, tag, Some(true), expected),
+            BvURem(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Rem, tag, Some(false), expected),
+            BvSRem(lhs, rhs, width) => self.bv_arith(BinaryOperands::new(lhs, rhs), *width, crate::TrustArithOp::Rem, tag, Some(true), expected),
             Ite(cond, yes, no) => self.ite(cond, yes, no, expected),
             Forall(bindings, body) => self.quantifier(bindings, body, TrustQuantifierKind::Forall, tag, expected),
             Exists(bindings, body) => self.quantifier(bindings, body, TrustQuantifierKind::Exists, tag, expected),
@@ -394,8 +407,8 @@ impl<'a> FormulaDecoder<'a> {
         expected: Option<&TrustSort>,
     ) -> Result<TrustExpr, Decline> {
         let operand = self.operand_sort(
-            &lhs,
-            &rhs,
+            lhs,
+            rhs,
             None,
             &format!("`{tag}` compares two literals, so the comparison's sort is not recoverable"),
         )?;
@@ -413,22 +426,22 @@ impl<'a> FormulaDecoder<'a> {
         if let Some(require_signed) = require_signed {
             require_bitvector_signedness(&operand, require_signed, tag)?;
         }
-        let left = self.lower(&lhs, Some(&operand))?;
-        let right = self.lower(&rhs, Some(&operand))?;
+        let left = self.lower(lhs, Some(&operand))?;
+        let right = self.lower(rhs, Some(&operand))?;
         self.expect_sort(expected, &TrustSort::Bool, tag)?;
         Ok(TrustExpr::compare(op, left, right))
     }
 
     fn bv_comparison(
         &mut self,
-        lhs: &Formula,
-        rhs: &Formula,
+        operands: BinaryOperands<'_>,
         width: u32,
         op: TrustCompareOp,
         tag: &str,
         signed: bool,
         expected: Option<&TrustSort>,
     ) -> Result<TrustExpr, Decline> {
+        let BinaryOperands { lhs, rhs } = operands;
         let result = self.comparison(lhs, rhs, op, tag, Some(signed), expected)?;
         self.check_width(lhs, rhs, width, tag)?;
         Ok(result)
@@ -436,17 +449,17 @@ impl<'a> FormulaDecoder<'a> {
 
     fn arith(
         &mut self,
-        lhs: &Formula,
-        rhs: &Formula,
+        operands: BinaryOperands<'_>,
         op: crate::TrustArithOp,
         tag: &str,
         require_signed: Option<bool>,
         expected: Option<&TrustSort>,
         reading: ArithReading,
     ) -> Result<TrustExpr, Decline> {
+        let BinaryOperands { lhs, rhs } = operands;
         let sort = self.operand_sort(
-            &lhs,
-            &rhs,
+            lhs,
+            rhs,
             expected,
             &format!("`{tag}` combines two literals, so the result sort is not recoverable"),
         )?;
@@ -486,8 +499,8 @@ impl<'a> FormulaDecoder<'a> {
                 )));
             }
         }
-        let left = self.lower(&lhs, Some(&sort))?;
-        let right = self.lower(&rhs, Some(&sort))?;
+        let left = self.lower(lhs, Some(&sort))?;
+        let right = self.lower(rhs, Some(&sort))?;
         if matches!(reading, ArithReading::Mathematical)
             && sort == TrustSort::MathInt
             && matches!(op, crate::TrustArithOp::Div | crate::TrustArithOp::Rem)
@@ -502,8 +515,7 @@ impl<'a> FormulaDecoder<'a> {
 
     fn bv_arith(
         &mut self,
-        lhs: &Formula,
-        rhs: &Formula,
+        operands: BinaryOperands<'_>,
         width: u32,
         op: crate::TrustArithOp,
         tag: &str,
@@ -513,15 +525,14 @@ impl<'a> FormulaDecoder<'a> {
         // A `Bv*` node DENOTES the fixed-width operation, so deciding it at that
         // width is what it means, not an approximation of something else.
         let result = self.arith(
-            lhs,
-            rhs,
+            operands,
             op,
             tag,
             require_signed,
             expected,
             ArithReading::MachineWidth,
         )?;
-        self.check_width(lhs, rhs, width, tag)?;
+        self.check_width(operands.lhs, operands.rhs, width, tag)?;
         Ok(result)
     }
 
@@ -649,8 +660,8 @@ impl<'a> FormulaDecoder<'a> {
         tag: &str,
     ) -> Result<(), Decline> {
         let sort = self.operand_sort(
-            &lhs,
-            &rhs,
+            lhs,
+            rhs,
             None,
             &format!("`{tag}` operands have no recoverable sort"),
         )?;

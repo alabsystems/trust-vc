@@ -29,6 +29,7 @@ fn function(number: u64, parameters: Vec<Ty>, result: Ty) -> FnDecl {
         name: "result".into(),
         ty: result,
         mode: Mode::Spec,
+        prophecy: trust_vc_vcir::DeclProphecy::Default,
         mutable: false,
         kind: LocalKind::Return,
         span: SpanId(0),
@@ -38,6 +39,7 @@ fn function(number: u64, parameters: Vec<Ty>, result: Ty) -> FnDecl {
             name: format!("p{index}"),
             ty: ty.clone(),
             mode: Mode::Spec,
+            prophecy: trust_vc_vcir::DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Param,
             span: SpanId(0),
@@ -62,6 +64,7 @@ fn function(number: u64, parameters: Vec<Ty>, result: Ty) -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::None,
     }

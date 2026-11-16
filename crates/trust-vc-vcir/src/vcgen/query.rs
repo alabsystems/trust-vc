@@ -156,6 +156,14 @@ pub enum CheckKind {
         /// Index into the callee's `requires`.
         clause: usize,
     },
+    /// The caller's entry-state unwind promise must imply the callee's
+    /// promise at the actual call arguments.
+    Unwind {
+        /// The call being checked, at its existing call site.
+        call: SpanId,
+        /// The callee whose unwind contract is required.
+        callee: FnId,
+    },
     /// Optional failed-function diagnostic at an actual Spec call. This
     /// never enters the normal obligation set or supplies an assumed fact.
     Recommendation {

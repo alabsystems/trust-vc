@@ -10,11 +10,40 @@ use rustc_ast::{BindingMode, ByRef};
 use rustc_hir::{self as hir, PatKind};
 use rustc_middle::ty;
 use rustc_span::Span;
-use trust_vc_vcir::{Expr, ExprKind, LocalId, LocalKind, Mode, Stmt, StmtKind, Ty};
+use trust_vc_vcir::{DeclProphecy, Expr, ExprKind, LocalKind, Stmt, StmtKind, Ty};
 
 use super::{refuse, Ctx, FnReader, R};
 
 impl<'tcx> FnReader<'_, 'tcx> {
+    /// Apply a declaration marker to its authored bindings, never to the
+    /// temporary that saves a destructured initializer or its nested locals.
+    pub(super) fn pattern_prophecy(&mut self, pat: &hir::Pat<'tcx>, prophecy: DeclProphecy) {
+        if prophecy == DeclProphecy::Default {
+            return;
+        }
+        match pat.kind {
+            PatKind::Binding(_, binding, _, sub) => {
+                if let Some(id) = self.local_ids.get(&binding) {
+                    self.locals[id.index()].prophecy = prophecy;
+                }
+                if let Some(sub) = sub {
+                    self.pattern_prophecy(sub, prophecy);
+                }
+            }
+            PatKind::Tuple(parts, _) | PatKind::TupleStruct(_, parts, _) => {
+                for part in parts {
+                    self.pattern_prophecy(part, prophecy);
+                }
+            }
+            PatKind::Struct(_, fields, _) => {
+                for field in fields {
+                    self.pattern_prophecy(field.pat, prophecy);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Bind projections of one saved initializer. Compiler-inferred borrows
     /// need place/ownership semantics and must never become value bindings.
     pub(super) fn value_let_bindings(
@@ -67,7 +96,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
                     self.local_decl(
                         ident.name.as_str(),
                         ty,
-                        ctx.local_mode(),
+                        self.checked_binding_mode(pat, ctx)?,
                         kind != LocalKind::Bound && mutability.is_mut(),
                         kind,
                         pat.span,
@@ -172,7 +201,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
         &mut self,
         pat: &hir::Pat<'_>,
         value: &Option<Expr>,
-    ) -> R<(ty::AdtDef<'tcx>, ty::GenericArgsRef<'tcx>)> {
+    ) -> R<(ty::AdtDef<'tcx>, ty::GenericArgs<'tcx>)> {
         let rustc_ty = self.pat_rty(pat);
         let ty::Adt(adt, args) = rustc_ty.kind() else {
             return refuse(
@@ -181,6 +210,13 @@ impl<'tcx> FnReader<'_, 'tcx> {
                 pat.span,
             );
         };
+        if self.cx.source_opaque_nominal(adt.did()) {
+            return refuse(
+                "source-opaque-representation",
+                "an opaque source carrier has no structural pattern authority",
+                pat.span,
+            );
+        }
         if !adt.is_struct() || !adt.did().is_local() {
             return refuse(
                 "let-pattern",
@@ -417,63 +453,5 @@ impl<'tcx> FnReader<'_, 'tcx> {
             }
             _ => Ok(()),
         }
-    }
-
-    /// Pure patterns become nested expression lets; even a wildcard retains
-    /// evaluation of the initializer and its checks.
-    pub(super) fn spec_value_bindings(
-        &mut self,
-        pat: &'tcx hir::Pat<'tcx>,
-        value: Expr,
-        span: Span,
-    ) -> R<Vec<(LocalId, Expr, Span)>> {
-        if let PatKind::Binding(BindingMode(ByRef::No, _), pat_hir, ident, None) = pat.kind {
-            // Keep the existing plain Spec-let path: a rejected proof block
-            // can translate to Unit while its binding retains the compiler
-            // type. The recorded source error must reach its proper phase.
-            let rustc_ty = self.pat_rty(pat);
-            let Some(ty) = self.vc_ty(rustc_ty)? else {
-                return refuse("type", format!("`{ident}` has type `{rustc_ty}`"), pat.span);
-            };
-            let id = self.add_local(
-                self.local_decl(
-                    ident.name.as_str(),
-                    ty,
-                    Mode::Spec,
-                    false,
-                    LocalKind::Bound,
-                    pat.span,
-                ),
-                true,
-            );
-            self.local_ids.insert(pat_hir, id);
-            return Ok(vec![(id, value, span)]);
-        }
-        let id = self.add_local(
-            self.local_decl(
-                "_pattern",
-                value.ty.clone(),
-                Mode::Spec,
-                false,
-                LocalKind::Bound,
-                span,
-            ),
-            true,
-        );
-        let mut bindings = vec![(id, value, span)];
-        let value = self.read_local(id, span);
-        let mut stmts = Vec::new();
-        self.value_let_bindings(pat, Some(value), Ctx::Spec, LocalKind::Bound, &mut stmts)?;
-        for stmt in stmts {
-            let StmtKind::Let {
-                local,
-                init: Some(value),
-            } = stmt.kind
-            else {
-                return refuse("let-pattern", "a non-binding in a pure value pattern", span);
-            };
-            bindings.push((local, value, span));
-        }
-        Ok(bindings)
     }
 }

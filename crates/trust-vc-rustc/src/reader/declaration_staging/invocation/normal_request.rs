@@ -7,6 +7,8 @@ use super::*;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_session::config::{ErrorOutputType, OutputType};
 use rustc_session::search_paths::PathKind;
+use rustc_span::source_map::FilePathMapping;
+use rustc_span::RealFileName;
 use std::collections::BTreeMap;
 
 mod untracked;
@@ -25,6 +27,8 @@ pub(in crate::reader::declaration_staging) struct NormalNativeRequest {
     attrs: Vec<String>,
     unstable_options: bool,
     write_long_types: bool,
+    working_dir: RealFileName,
+    compiler_environment: Option<crate::compiler_environment::CompilerEnvironment>,
 }
 
 fn cfg_value(text: &str) -> Result<(String, Option<String>), String> {
@@ -208,8 +212,36 @@ impl NormalNativeRequest {
             attrs,
             unstable_options,
             write_long_types,
+            working_dir: working_directory(
+                &std::env::current_dir()
+                    .and_then(|path| path.canonicalize())
+                    .map_err(|error| {
+                        format!("cannot bind the actual request working directory: {error}")
+                    })?,
+            ),
+            compiler_environment: None,
         })
     }
+
+    pub(in crate::reader::declaration_staging) fn bind_compiler_environment(
+        &mut self,
+        environment: crate::compiler_environment::CompilerEnvironment,
+    ) {
+        self.compiler_environment = Some(environment);
+    }
+
+    fn check_working_dir(&self, actual: &RealFileName) -> Result<(), String> {
+        if actual != &self.working_dir {
+            return Err(
+                "the actual native working directory differs from its captured request".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn working_directory(path: &std::path::Path) -> RealFileName {
+    FilePathMapping::empty().to_real_filename(&RealFileName::empty(), path)
 }
 
 impl Invocation {
@@ -325,6 +357,16 @@ impl Invocation {
         // selectors. Account for every untracked field with typed native facts
         // before using the existing tracking comparison as a supplementary check.
         untracked::check(&self.options, &tcx.sess.opts)?;
+        // A coordinator executes each original request in that request's cwd.
+        // Bind the actual native SourceMap path before accounting for this
+        // represented dimension in the producer's tracking baseline. Remapped
+        // paths and a post-capture cwd change are not silently normalized.
+        request.check_working_dir(tcx.sess.source_map().working_dir())?;
+        if let Some(environment) = &request.compiler_environment {
+            environment
+                .check_options(&tcx.sess.opts)
+                .map_err(|error| error.to_string())?;
+        }
         // Retain the existing Invocation native tracking comparison for all
         // other tracked options. Normalize only the request dimensions just
         // compared independently above; this is never an argv-equality hash
@@ -339,6 +381,12 @@ impl Invocation {
         baseline.unstable_opts.crate_attr = tcx.sess.opts.unstable_opts.crate_attr.clone();
         baseline.unstable_opts.unstable_options = request.unstable_options;
         baseline.unstable_opts.write_long_types_to_disk = request.write_long_types;
+        baseline.working_dir = request.working_dir.clone();
+        if request.compiler_environment.is_some() {
+            // The exact map, including missing keys, was independently bound
+            // above. Every other tracked dimension retains its comparison.
+            baseline.logical_env = tcx.sess.opts.logical_env.clone();
+        }
         if baseline.dep_tracking_hash(false) != tcx.sess.opts.dep_tracking_hash(false) {
             return Err(
                 "the remaining actual native options are outside this represented owner recipe"
@@ -346,5 +394,51 @@ impl Invocation {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod working_directory_tests {
+    use super::*;
+
+    #[test]
+    fn cwd_binding_keeps_wrong_directories_and_other_tracked_options_refused() {
+        let request = NormalNativeRequest::capture(&[
+            "actual-request".into(),
+            "--crate-name=original".into(),
+            "--crate-type=lib".into(),
+            "--edition=2021".into(),
+            "-o".into(),
+            "original.rmeta".into(),
+        ])
+        .unwrap();
+        let native = Options::default();
+        assert!(request.check_working_dir(&native.working_dir).is_ok());
+        let mut changed = native.clone();
+        changed.working_dir = working_directory(
+            &std::env::current_dir()
+                .unwrap()
+                .join("different-native-cwd"),
+        );
+        assert!(request.check_working_dir(&changed.working_dir).is_err());
+        assert!(request
+            .check_working_dir(&RealFileName::from_virtual_path(
+                request.working_dir.local_path().unwrap()
+            ))
+            .is_err());
+        assert_ne!(
+            native.dep_tracking_hash(false),
+            changed.dep_tracking_hash(false)
+        );
+        changed.working_dir = request.working_dir.clone();
+        assert_eq!(
+            native.dep_tracking_hash(false),
+            changed.dep_tracking_hash(false)
+        );
+        changed.test = !native.test;
+        assert_ne!(
+            native.dep_tracking_hash(false),
+            changed.dep_tracking_hash(false)
+        );
     }
 }

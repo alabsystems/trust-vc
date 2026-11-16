@@ -8,6 +8,39 @@
 use super::*;
 use rustc_hir::def::Res;
 
+/// A field's mode comes only from its original local declaration. Opaque or
+/// foreign carriers have no field-layout authority in the native reader.
+pub(super) fn field_mode(
+    tcx: TyCtxt<'_>,
+    field: &mty::FieldDef,
+    span: Span,
+) -> Result<Mode, Refusal> {
+    let Some(local) = field.did.as_local() else {
+        return Err(Refusal::new(
+            "field-mode",
+            "a field without its original local declaration",
+            span,
+        ));
+    };
+    let mut mode = None;
+    for (attribute, at) in attrs::verus_attrs(tcx.hir_attrs(tcx.local_def_id_to_hir_id(local))) {
+        match attribute {
+            VerusAttr::Mode(value) => {
+                mode.get_or_insert(value);
+            }
+            VerusAttr::VerusMacro => {}
+            other => {
+                return Err(Refusal::new(
+                    "attribute",
+                    format!("{other:?} on field `{}`", field.name),
+                    at,
+                ))
+            }
+        }
+    }
+    Ok(mode.unwrap_or(Mode::Exec))
+}
+
 /// Resolve through actual native constructor/variant IDs, never a display name.
 /// This lookup grants no datatype access or imported representation permission.
 pub(super) fn constructor_variant<'tcx>(
@@ -146,29 +179,13 @@ pub(super) fn lower<'tcx>(
         }
         let mut fields = Vec::new();
         for field in &variant.fields {
-            // Fields are exec unless marked `ghost` or `tracked`; VcIR has no
-            // field modes, so marked fields are refused.
-            if let Some(local) = field.did.as_local() {
-                let hir_id = tcx.local_def_id_to_hir_id(local);
-                for (attr, attr_span) in attrs::verus_attrs(tcx.hir_attrs(hir_id)) {
-                    match attr {
-                        VerusAttr::Mode(Mode::Exec) => {}
-                        VerusAttr::Mode(mode) => {
-                            return Err(Refusal::new(
-                                "field-mode",
-                                format!("field `{}` has mode {mode:?}", field.name),
-                                attr_span,
-                            ))
-                        }
-                        other => {
-                            return Err(Refusal::new(
-                                "attribute",
-                                format!("{other:?} on field `{}`", field.name),
-                                attr_span,
-                            ))
-                        }
-                    }
-                }
+            let mode = field_mode(tcx, field, tcx.def_span(field.did))?;
+            if mode != Mode::Exec {
+                return Err(Refusal::new(
+                    "field-mode",
+                    "mixed native field modes await coherent consumers",
+                    tcx.def_span(field.did),
+                ));
             }
             let ty = tcx
                 .try_normalize_erasing_regions(
@@ -226,6 +243,7 @@ pub(super) fn lower<'tcx>(
             fields.push(FieldDecl {
                 name: field.name.to_string(),
                 ty: vc,
+                mode,
             });
         }
         variants.push(VariantDecl {
@@ -235,7 +253,11 @@ pub(super) fn lower<'tcx>(
     }
     Ok(AdtDecl {
         id,
-        name: tcx.def_path_str(def_id.to_def_id()),
+        name: format!(
+            "{}::{}",
+            tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE),
+            tcx.def_path_str(def_id.to_def_id())
+        ),
         type_params,
         span: cx.span_id(span),
         kind: if adt.is_enum() {

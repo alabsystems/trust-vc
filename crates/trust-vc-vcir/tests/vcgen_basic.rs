@@ -19,6 +19,9 @@ use trust_vc_vcir::{
     WfClass,
 };
 
+#[path = "broadcast_contracts/mod.rs"]
+mod broadcast_contracts;
+
 #[path = "reveal_scopes/mod.rs"]
 mod reveal_scopes;
 
@@ -60,6 +63,7 @@ impl Fb {
                     name: "result".to_string(),
                     ty: ret_ty,
                     mode: ret_mode,
+                    prophecy: trust_vc_vcir::DeclProphecy::Default,
                     mutable: false,
                     kind: LocalKind::Return,
                     span: SpanId(0),
@@ -72,6 +76,7 @@ impl Fb {
                 decreases: Vec::new(),
                 decreases_when: None,
                 decreases_by: None,
+                unwind: None,
                 attrs: FnAttrs::default(),
                 body: Body::None,
             },
@@ -110,6 +115,7 @@ impl Fb {
             name: name.to_string(),
             ty,
             mode,
+            prophecy: trust_vc_vcir::DeclProphecy::Default,
             mutable,
             kind,
             span,
@@ -1019,6 +1025,7 @@ fn structs_are_flattened() {
             fields: vec![FieldDecl {
                 name: "b".to_string(),
                 ty: Ty::Bool,
+                mode: Mode::Exec,
             }],
         }],
     };
@@ -1126,6 +1133,8 @@ fn mut_ref_rules() {
     let mut f = Fb::new(1, "stuff", Mode::Exec, Ty::Unit);
     let x = f.param("x", mref);
     let y = f.let_local("y", Ty::uint(64));
+    // Keep the Spec value well-moded; its Exec statement location is the refusal under test.
+    f.decl.locals[y.index()].mode = Mode::Spec;
     let span = f.span();
     let old = Expr::new(Ty::uint(64), span, ExprKind::Old(Place::deref(x)));
     let l = f.let_stmt(y, Some(old));

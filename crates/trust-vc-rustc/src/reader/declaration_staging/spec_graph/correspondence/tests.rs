@@ -184,3 +184,133 @@ fn changed_source_duplicate_anchor_or_metadata_roundtrip_never_supplies_a_pair()
     let pairs = Pairs::compare(&a, &view(20), &missing, BTreeMap::new()).unwrap();
     assert_eq!(pairs.erase(key(10, 5)), None);
 }
+
+fn inherent_view(krate: u64) -> View {
+    let carrier = DeclarationType::LocalNominal {
+        declaration: key(krate, 9),
+        arguments: vec![DeclarationType::Parameter(0)],
+    };
+    let bound = Bound {
+        scope: Reference {
+            key: key(krate, 1),
+            artifact: None,
+        },
+        declaration: Reference {
+            key: key(99, 1),
+            artifact: Some([1; 32]),
+        },
+        arguments: vec![DeclarationType::Parameter(0)],
+    };
+    let Anchor::Named(source) = anchor(1) else {
+        panic!()
+    };
+    View {
+        entries: BTreeMap::from([
+            (
+                key(krate, 1),
+                Observation::Observed(Entry {
+                    anchor: Anchor::Implementation(source.identifier),
+                    generics: scopes(0, 1),
+                    clauses: vec![bound.clone()],
+                    shape: Shape::InherentImplementation {
+                        self_type: carrier.clone(),
+                    },
+                }),
+            ),
+            (
+                key(krate, 2),
+                Observation::Observed(Entry {
+                    anchor: anchor(2),
+                    generics: scopes(1, 0),
+                    clauses: vec![bound],
+                    shape: Shape::Function {
+                        origin: Origin::Inherent {
+                            implementation: key(krate, 1),
+                            self_type: carrier.clone(),
+                        },
+                        inputs: vec![carrier],
+                        output: DeclarationType::Parameter(0),
+                    },
+                }),
+            ),
+        ]),
+    }
+}
+
+fn compare_inherent(a: &View, b: &View) -> Pairs {
+    Pairs::compare(
+        a,
+        b,
+        &BTreeSet::new(),
+        BTreeMap::from([(key(10, 9), key(20, 9))]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn generic_inherent_methods_require_their_complete_native_parent_scope() {
+    let a = inherent_view(10);
+    let b = inherent_view(20);
+    let pairs = compare_inherent(&a, &b);
+    assert_eq!(pairs.erase(key(10, 1)), Some(&key(20, 1)));
+    assert_eq!(pairs.erase(key(10, 2)), Some(&key(20, 2)));
+    let mut missing = inherent_view(20);
+    missing.entries.remove(&key(20, 1));
+    assert_eq!(compare_inherent(&a, &missing).erase(key(10, 2)), None);
+    // Signature equality alone cannot stand in for the native impl owner.
+    let mut other = inherent_view(20);
+    let Shape::Function {
+        origin: Origin::Inherent { implementation, .. },
+        ..
+    } = &mut entry(&mut other, 20, 2).shape
+    else {
+        panic!()
+    };
+    *implementation = key(20, 3);
+    assert_eq!(compare_inherent(&a, &other).erase(key(10, 2)), None);
+    assert_eq!(compare(&a, &b).erase(key(10, 2)), None);
+}
+
+#[test]
+fn inherent_parent_binder_self_type_and_bound_changes_remove_method_pairs() {
+    let a = inherent_view(10);
+    let mut b = inherent_view(20);
+    entry(&mut b, 20, 1).generics = scopes(0, 2);
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+    let mut b = inherent_view(20);
+    let Shape::InherentImplementation { self_type } = &mut entry(&mut b, 20, 1).shape else {
+        panic!()
+    };
+    *self_type = DeclarationType::LocalNominal {
+        declaration: key(20, 8),
+        arguments: vec![DeclarationType::Parameter(0)],
+    };
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+    let mut b = inherent_view(20);
+    entry(&mut b, 20, 1).clauses[0].declaration.artifact = Some([2; 32]);
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+    let mut b = inherent_view(20);
+    entry(&mut b, 20, 2).clauses[0].scope.key = key(20, 3);
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+}
+
+#[test]
+fn inherent_scope_requires_original_source_and_actual_metadata_roundtrip() {
+    let a = inherent_view(10);
+    let mut b = inherent_view(20);
+    entry(&mut b, 20, 1).anchor = anchor(9);
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+    let mut b = inherent_view(20);
+    let duplicate = entry(&mut b, 20, 1).clone();
+    b.entries
+        .insert(key(20, 3), Observation::Observed(duplicate));
+    assert_eq!(compare_inherent(&a, &b).erase(key(10, 2)), None);
+    let b = inherent_view(20);
+    let mut loaded = inherent_view(20);
+    entry(&mut loaded, 20, 1).clauses.clear();
+    let missing = roundtrip(&b, &loaded);
+    assert!(missing.contains(&key(20, 1)));
+    let pairs =
+        Pairs::compare(&a, &b, &missing, BTreeMap::from([(key(10, 9), key(20, 9))])).unwrap();
+    assert_eq!(pairs.erase(key(10, 2)), None);
+}

@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LocalDefId};
+use rustc_hir::def_id::{CrateNum, DefId, DefIndex};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{ExpnId, FileName, Pos, Span};
 use serde_json::{json, Value};
@@ -227,6 +227,7 @@ pub(crate) fn observe(tcx: TyCtxt<'_>) -> Value {
                 local,
                 parsed.mode.unwrap_or(Mode::Exec),
                 &parsed,
+                false,
                 tcx.def_span(def),
             ) {
                 Ok(signature) => json!({
@@ -257,6 +258,9 @@ pub(crate) fn observe(tcx: TyCtxt<'_>) -> Value {
         }
         let original_body = !trait_origin && mode_index.has_original_body(local);
         let header = super::declaration_headers::check(tcx, local).observation();
+        let inline_header = attrs::item_attrs(tcx.hir_attrs(hir_id)).inline.then(|| {
+            super::declaration_headers::check_inline_recommendations(tcx, local).observation()
+        });
         let body_modes = if !original_body {
             unknown("a projected/quarantined or unavailable original body cannot supply whole-body mode facts")
         } else if trait_origin || !attrs_unknown.is_empty() {
@@ -305,6 +309,7 @@ pub(crate) fn observe(tcx: TyCtxt<'_>) -> Value {
                 else { unknown("no original body-mode/header receipt is granted for this declaration") },
             "body_mode_observation": body_modes,
             "header_observation": header,
+            "inline_recommendation_observation": inline_header,
             "item_expansion_graph": expansion_chain(tcx, tcx.expn_that_defined(def)),
             "unclassified_item_directives": attrs_unknown,
             "keep_erase_alignment": unknown("no Erase row is joined by this observation tool"),

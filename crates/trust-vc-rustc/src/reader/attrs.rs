@@ -7,7 +7,7 @@
 //! * `#[verifier::<keyword>(<args>)]`, written by users or emitted by the
 //!   macro (`proof_block`, `opaque`, `rlimit(20)`, `proof_note("..")`).
 //!
-//! rustc keeps both as unparsed tool attributes: a path plus a token stream.
+//! rustc keeps both as tool attributes: a path plus a token stream.
 //! [`verus_attrs`] turns them into [`VerusAttr`] values. Every other
 //! attribute (lint levels, `doc`, `derive`, ...) is ignored, as Verus ignores
 //! it. A Verus keyword the reader does not know becomes
@@ -19,7 +19,7 @@ use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_attr_ir::{AttrArgs, Attribute};
 use rustc_span::Span;
 
-use trust_vc_vcir::{Mode, Rlimit};
+use trust_vc_vcir::{DeclProphecy, Mode, Rlimit};
 
 /// One recognized Verus attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +52,9 @@ pub enum VerusAttr {
     External,
     /// `#[verifier::opaque]`.
     Opaque,
+    /// `#[verifier::prophetic]`: a Spec function effect or an explicit
+    /// prophetic local declaration. This grants no proof authority.
+    Prophetic,
     /// `#[verifier::inline]`, with no arguments. Body/mode/visibility rules
     /// are checked by the function reader before its IR is usable.
     Inline,
@@ -77,6 +80,8 @@ pub enum VerusAttr {
     /// `#[verus::internal(broadcast_use_reveal)]`: on the last expression of
     /// a reveal's target block, marks the reveal as a `broadcast use`.
     BroadcastUseReveal,
+    /// A macro-marked broadcast proof declaration.
+    BroadcastForall,
     /// `#[verifier::loop_isolation]` (true), `loop_isolation(true)` or
     /// `loop_isolation(false)`: on a loop, or inherited by the loops of a
     /// function from it and the items around it.
@@ -118,8 +123,10 @@ enum Tree {
 pub fn verus_attrs(attrs: &[Attribute]) -> Vec<(VerusAttr, Span)> {
     let mut out = Vec::new();
     for attr in attrs {
-        let Attribute::Unparsed(item) = attr else {
-            continue;
+        let item = match attr {
+            Attribute::Tool(item) => item,
+            Attribute::DeriveHelper(item) if item.path.segments.len() == 1 => item,
+            _ => continue,
         };
         let segments: Vec<&str> = item.path.segments.iter().map(|s| s.as_str()).collect();
         let parsed = match segments.as_slice() {
@@ -208,8 +215,10 @@ pub fn verus_parse(attrs: &[Attribute]) -> Result<VerusParse, AttrProblem> {
     use crate::messages::attr as msg;
     let mut out = VerusParse::default();
     for attr in attrs {
-        let Attribute::Unparsed(item) = attr else {
-            continue;
+        let item = match attr {
+            Attribute::Tool(item) => item,
+            Attribute::DeriveHelper(item) if item.path.segments.len() == 1 => item,
+            _ => continue,
         };
         let span = item.span;
         let error = |message: &str| Err(AttrProblem::Error(span, message.to_string()));
@@ -559,6 +568,7 @@ fn internal_attr(tree: &Tree) -> VerusAttr {
             "external_body" => VerusAttr::ExternalBody,
             "reveal_fn" => VerusAttr::RevealFn,
             "broadcast_use_reveal" => VerusAttr::BroadcastUseReveal,
+            "broadcast_forall" => VerusAttr::BroadcastForall,
             "proof_block" => VerusAttr::ProofBlock,
             "infer_mode" => VerusAttr::InferMode,
             "unwrapped_binding" => VerusAttr::LetMarker("unwrapped_binding"),
@@ -607,6 +617,7 @@ fn verifier_attr(keyword: &str, args: Option<&[Tree]>) -> VerusAttr {
         },
         ("opaque", None) => VerusAttr::Opaque,
         ("inline", None) => VerusAttr::Inline,
+        ("prophetic", None) => VerusAttr::Prophetic,
         ("external_body", None) => VerusAttr::ExternalBody,
         ("external", None) => VerusAttr::External,
         ("proof_note", Some([Tree::Lit(LitKind::Str, text)])) => VerusAttr::ProofNote(text.clone()),
@@ -728,6 +739,8 @@ fn token_trees(stream: &TokenStream) -> Option<Vec<Tree>> {
 pub struct ItemAttrs {
     /// The unique directive's effect; full attribute syntax is still parsed.
     pub inline: bool,
+    /// `prophetic`: the function result may depend on prophecy.
+    pub prophetic: bool,
     /// Came from `verus!`.
     pub verus_macro: bool,
     /// Declared mode, from the first mode attribute; `None` means exec.
@@ -739,6 +752,8 @@ pub struct ItemAttrs {
     pub uninterp: bool,
     /// `external_body`.
     pub external_body: bool,
+    /// Macro-marked broadcast proof function (distinct from deprecated syntax).
+    pub broadcast_forall: bool,
     /// `external`.
     pub external: bool,
     /// `opaque`.
@@ -790,9 +805,11 @@ pub fn item_attrs(attrs: &[Attribute]) -> ItemAttrs {
             // path)` puts in a function's body; on an item it does nothing.
             VerusAttr::OpenVisibilityQualifier => {}
             VerusAttr::ExternalBody => out.external_body = true,
+            VerusAttr::BroadcastForall => out.broadcast_forall = true,
             VerusAttr::External => out.external = true,
             VerusAttr::Opaque => out.opaque = true,
             VerusAttr::Inline => out.inline = true,
+            VerusAttr::Prophetic => out.prophetic = true,
             VerusAttr::Rlimit(r) => out.rlimit = Some(r),
             VerusAttr::RevealFn => out.reveal_fn = true,
             VerusAttr::ProofBlock => out
@@ -829,4 +846,74 @@ pub fn item_attrs(attrs: &[Attribute]) -> ItemAttrs {
         }
     }
     out
+}
+
+/// Declaration markers are read before the ghost-block mode promotion, as in
+/// upstream `let_stmt_to_vir`. `unwrapped_binding` only controls a warning.
+pub(crate) fn local_prophecy(attrs: &[Attribute], declared_mode: Mode) -> DeclProphecy {
+    let parsed = verus_attrs(attrs);
+    declaration_prophecy(
+        parsed.iter().any(|(attr, _)| *attr == VerusAttr::Prophetic),
+        parsed
+            .iter()
+            .any(|(attr, _)| *attr == VerusAttr::LetMarker("infer_proph")),
+        declared_mode,
+    )
+}
+
+fn declaration_prophecy(prophetic: bool, infer_proph: bool, mode: Mode) -> DeclProphecy {
+    if prophetic {
+        DeclProphecy::Prophetic
+    } else if infer_proph && mode == Mode::Spec {
+        DeclProphecy::DelayedInfer
+    } else {
+        DeclProphecy::Default
+    }
+}
+
+#[cfg(test)]
+mod prophecy_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_prophetic_is_semantic_and_requires_no_arguments() {
+        assert_eq!(verifier_attr("prophetic", None), VerusAttr::Prophetic);
+        assert!(matches!(
+            verifier_attr("prophetic", Some(&[])),
+            VerusAttr::Unknown(_)
+        ));
+        assert!(matches!(
+            verifier_attr("prophetic", Some(&[Tree::Fun("true".into(), None)])),
+            VerusAttr::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn declaration_markers_match_original_mode_and_explicit_precedence() {
+        assert_eq!(
+            declaration_prophecy(false, false, Mode::Spec),
+            DeclProphecy::Default
+        );
+        assert_eq!(
+            declaration_prophecy(false, true, Mode::Spec),
+            DeclProphecy::DelayedInfer
+        );
+        for mode in [Mode::Exec, Mode::Proof] {
+            assert_eq!(
+                declaration_prophecy(false, true, mode),
+                DeclProphecy::Default
+            );
+        }
+        for mode in [Mode::Spec, Mode::Proof, Mode::Exec] {
+            // Mode validation rejects the latter two; parsing preserves the marker.
+            assert_eq!(
+                declaration_prophecy(true, true, mode),
+                DeclProphecy::Prophetic
+            );
+        }
+        assert_eq!(
+            internal_attr(&Tree::Fun("unwrapped_binding".into(), None)),
+            VerusAttr::LetMarker("unwrapped_binding")
+        );
+    }
 }

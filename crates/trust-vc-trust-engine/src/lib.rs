@@ -70,6 +70,7 @@ pub use native_artifact::{
 pub mod native_coverage;
 pub use native_coverage::{TrustVcNativeCoverageBasis, TrustVcNativeKernelClaimFamily};
 pub mod native_discharge;
+pub mod native_scalar_cast;
 pub mod native_trust_ir_bundle;
 pub use native_trust_ir_bundle::{
     TrustVcNativeTrustIrAdvisoryOutcome, TrustVcNativeTrustIrBodyReading,
@@ -325,6 +326,37 @@ impl TrustVcTrustEngine {
         TrustVerifier::verify(self, &request)
     }
 
+    /// Run the existing typed verifier once and observe its actual cast terms.
+    /// Capture refusal leaves the native report unchanged and unavailable for
+    /// mathematical binding. Captured data does not certify a translation.
+    pub fn verify_with_scalar_cast_capture(
+        &self,
+        request: &TrustVerificationRequest,
+    ) -> Result<TrustScalarCastVerification, TrustEngineError> {
+        self.validate_request(request)?;
+        let mut units = Vec::new();
+        let mut captures = Vec::new();
+        for unit in &request.units {
+            let capture = trust_vc_core::scalar_cast_capture::ScalarCastCapture::new();
+            units.push(self.verify_unit(
+                &request.source_id,
+                unit,
+                request.mode,
+                request.proof_policy,
+                &request.metadata,
+                Some(capture.clone()),
+            )?);
+            captures.push(capture.finish());
+        }
+        Ok(TrustScalarCastVerification {
+            report: TrustVerificationReport {
+                source_id: request.source_id.clone(),
+                units,
+            },
+            captures,
+        })
+    }
+
     fn verify_unit(
         &self,
         source_id: &str,
@@ -332,8 +364,12 @@ impl TrustVcTrustEngine {
         mode: TrustVerificationMode,
         proof_policy: TrustProofPolicy,
         request_metadata: &BTreeMap<String, String>,
+        cast_capture: Option<trust_vc_core::scalar_cast_capture::ScalarCastCapture>,
     ) -> Result<TrustUnitReport, TrustEngineError> {
-        let context = self.lower_unit_for_mode(unit, mode)?;
+        let mut context = self.lower_unit_for_mode(unit, mode)?;
+        if let Some(capture) = cast_capture {
+            context.observe_scalar_casts(capture);
+        }
         let result = context.verify_with_report(VerificationReportOptions::new());
         let outcome = TrustOutcome::from(result.result().clone());
         let proof_artifacts = TrustReplayableProofArtifact::from_verified_report_if_requested(
@@ -426,6 +462,7 @@ impl TrustVerifier for TrustVcTrustEngine {
                     request.mode,
                     request.proof_policy,
                     &request.metadata,
+                    None,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -434,6 +471,32 @@ impl TrustVerifier for TrustVcTrustEngine {
             source_id: request.source_id.clone(),
             units,
         })
+    }
+}
+
+/// Native report and bounded data observed during that same verification.
+/// This is not a Clean acceptance, translation theorem, or proof-grade token.
+#[derive(Debug)]
+pub struct TrustScalarCastVerification {
+    report: TrustVerificationReport,
+    captures: Vec<Result<trust_vc_core::scalar_cast_capture::ScalarCastCaptureData, String>>,
+}
+impl TrustScalarCastVerification {
+    pub fn report(&self) -> &TrustVerificationReport {
+        &self.report
+    }
+    pub fn captures(
+        &self,
+    ) -> &[Result<trust_vc_core::scalar_cast_capture::ScalarCastCaptureData, String>] {
+        &self.captures
+    }
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        TrustVerificationReport,
+        Vec<Result<trust_vc_core::scalar_cast_capture::ScalarCastCaptureData, String>>,
+    ) {
+        (self.report, self.captures)
     }
 }
 

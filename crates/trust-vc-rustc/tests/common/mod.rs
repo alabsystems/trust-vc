@@ -90,17 +90,33 @@ impl Run {
 /// Run the binary on `source` (the prelude is prepended) with the Verus
 /// options `verus_args`.
 pub fn run(name: &str, source: &str, verus_args: &[&str]) -> Run {
-    run_with_prelude(name, PRELUDE, source, verus_args)
+    run_with_prelude(name, PRELUDE, source, verus_args, &[])
+}
+
+/// Apply explicit child environment values without changing the test process.
+pub fn run_with_environment(
+    name: &str,
+    source: &str,
+    verus_args: &[&str],
+    environment: &[(&str, Option<&str>)],
+) -> Run {
+    run_with_prelude(name, PRELUDE, source, verus_args, environment)
 }
 
 /// Run the binary on `source` as a whole file, with no prelude.
 pub fn run_raw(name: &str, source: &str, verus_args: &[&str]) -> Run {
-    run_with_prelude(name, "", source, verus_args)
+    run_with_prelude(name, "", source, verus_args, &[])
 }
 
 /// Run the binary on `prelude` followed by `source`; lines are counted from
 /// the first line of `source`.
-fn run_with_prelude(name: &str, prelude: &str, source: &str, verus_args: &[&str]) -> Run {
+fn run_with_prelude(
+    name: &str,
+    prelude: &str,
+    source: &str,
+    verus_args: &[&str],
+    environment: &[(&str, Option<&str>)],
+) -> Run {
     let builtins = builtins();
     let dir = std::env::temp_dir().join(format!("trust-vc-test-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -110,7 +126,18 @@ fn run_with_prelude(name: &str, prelude: &str, source: &str, verus_args: &[&str]
     let _ = std::fs::remove_file(&dump);
     let _ = std::fs::remove_file(dir.join("trust-vc-verdict.jsonl"));
     let b = |file: &str| format!("{}", builtins.join(file).display());
-    let output = Command::new(env!("CARGO_BIN_EXE_rust_verify"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rust_verify"));
+    for (key, value) in environment {
+        match value {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+    let output = command
         .arg("--internal-test-mode")
         .args(verus_args)
         .args(["--crate-name", "test_crate", "--crate-type", "lib"])

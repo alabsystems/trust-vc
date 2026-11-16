@@ -5200,8 +5200,33 @@ fn regenerate_discharge_fixtures() {
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&path).expect("fixture should read");
-        let mut bundle: NativeVerificationBundle =
+        let authored: NativeVerificationBundle =
             serde_json::from_str(&source).expect("fixture should decode");
+        // These are authored request-only fixtures, not persisted verifier
+        // results. Construct their current producer envelope through trust-ir;
+        // never relabel an old wire envelope or carry old evidence into it.
+        assert!(
+            authored.evidence_bundles.is_empty(),
+            "fixture regeneration cannot migrate verifier evidence"
+        );
+        let mut bundle = NativeVerificationBundle::new(
+            authored.producer,
+            authored.input,
+            authored.trust_ir_module_digest,
+            authored.module,
+            authored.lineage,
+        );
+        bundle.provenance = authored.provenance;
+        bundle.diagnostics = authored.diagnostics;
+        bundle.compiler_facts = authored.compiler_facts;
+        bundle.requests = authored.requests;
+        // Preserve every authored serialization choice. The new constructor
+        // owns the schema; the ordinary consumer still judges the policy.
+        bundle.serialization.canonical_order = authored.serialization.canonical_order;
+        bundle.serialization.sort_unordered_sets = authored.serialization.sort_unordered_sets;
+        bundle.serialization.messagepack_named_fields =
+            authored.serialization.messagepack_named_fields;
+        bundle.serialization.unknown_fields = authored.serialization.unknown_fields;
         // Each TrustVc request carries the `Assertion` replay atoms a producer
         // writes (the obligation's formula and compiler-fact number), rebuilt
         // from the edited module; this also reseals.

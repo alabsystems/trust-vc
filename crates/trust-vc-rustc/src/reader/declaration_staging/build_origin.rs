@@ -13,6 +13,7 @@ use std::process::Command;
 use crate::declaration_alignment::source_bindings::{PinnedFile, SourceIdentity, Sources};
 use crate::declaration_alignment::Digest;
 
+mod driver_bytes;
 mod macro_images;
 pub(super) use macro_images::{CopiedMacro, LoadedMacro};
 mod dependency_view;
@@ -82,6 +83,7 @@ pub(super) struct BuiltCohort {
     artifacts: BTreeMap<PathBuf, PinnedFile>,
     linker: Option<PinnedFile>,
     compiler_driver: PinnedFile,
+    compiler_driver_bytes: driver_bytes::ApprovedDriverBytes,
     host_tools: Vec<PinnedFile>,
     host_links: Vec<(PathBuf, PathBuf)>,
 }
@@ -161,7 +163,7 @@ fn compiler() -> Result<(PinnedFile, String), String> {
         );
     }
     let actual_root = Command::new(&file.path)
-        .args(["--print", "sysroot"])
+        .arg("--print=sysroot")
         .output()
         .map_err(|e| e.to_string())?;
     if !actual_root.status.success() {
@@ -253,6 +255,7 @@ pub(super) fn build(
         "/usr/bin/shasum",
         "/usr/bin/perl",
         "/usr/bin/tar",
+        "/usr/bin/xcrun",
         "/bin/mkdir",
         "/usr/bin/dirname",
         "/usr/bin/tee",
@@ -282,18 +285,25 @@ pub(super) fn build(
             })
         })
         .transpose()?;
-    let mut command = Command::new("/bin/bash");
+    let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     command
-        .arg(&script.path)
-        .arg(&output)
-        .arg(sources.root())
         .env_clear()
         .env("PATH", &tools)
         .env("HOME", output.join("home"))
         .env("CARGO_HOME", output.join("cargo-home"))
         .env("TMPDIR", output.join(".ubd"))
         .env("LANG", "C")
-        .env("RUST_MIN_STACK", "20971520");
+        .env("RUST_MIN_STACK", "20971520")
+        .env(
+            "DYLD_LIBRARY_PATH",
+            Path::new(env!("VC_SHIM_COMPILER_SYSROOT")).join("lib"),
+        );
+    crate::native_entry::configure_builtin_builder(
+        &mut command,
+        &script.path,
+        &output,
+        sources.root(),
+    )?;
     if let Some(linker) = &linker {
         command.env("TRUST_VC_BUILTINS_LINKER", &linker.path);
     }
@@ -337,6 +347,7 @@ pub(super) fn build(
         artifacts,
         linker,
         compiler_driver: compiler_driver.clone(),
+        compiler_driver_bytes: driver_bytes::ApprovedDriverBytes::capture(compiler_driver)?,
         host_tools,
         host_links,
     };
@@ -416,6 +427,12 @@ impl BuiltCohort {
         })
     }
 
+    /// Recheck an actual caller's pin against the same initially SHA-approved
+    /// bytes. This retains a full file read and supplies no import authority.
+    pub(super) fn revalidate_compiler_driver(&self, pin: &PinnedFile) -> Result<(), String> {
+        self.compiler_driver_bytes.revalidate(pin)
+    }
+
     pub(super) fn revalidate(&self, sources: &Sources) -> Result<(), String> {
         sources.revalidate()?;
         if sources.identity() != self.source {
@@ -423,7 +440,8 @@ impl BuiltCohort {
         }
         self.script.read()?;
         self.compiler.read()?;
-        self.compiler_driver.read()?;
+        self.compiler_driver_bytes
+            .revalidate(&self.compiler_driver)?;
         if super::identity::loaded_driver_path()? != self.compiler_driver.path {
             return Err("the producer compiler image changed after builtin construction".into());
         }

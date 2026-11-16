@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import session_owner
+import native_request_channel
 
 
 class Cancelled(RuntimeError):
@@ -27,12 +28,13 @@ class Cancelled(RuntimeError):
 
 
 class Registry:
-    def __init__(self):
+    def __init__(self, native_channel=None):
         self.cancelled = None
         self.lock = threading.Lock()
         self.children = set()
         self.records = []
         self.record_path = None
+        self.native_channel = native_channel
 
     def cancel(self, reason):
         # Also called by the main-thread signal handler: do not acquire a lock.
@@ -99,6 +101,11 @@ class Child:
         # an unopened numeric locator cannot select a newly allocated report fd.
         for fd in passed:
             os.fstat(fd)
+        environment = kwargs.pop("env", None)
+        environment, passed = native_request_channel.bind(
+            self.registry.native_channel,
+            os.environ if environment is None else environment, passed)
+        kwargs["env"] = environment
         status_read, status_write = os.pipe()
         try:
             life_read, self.life_write = os.pipe()
@@ -343,9 +350,9 @@ def parallel_map(function, values, workers):
 
 
 @contextlib.contextmanager
-def scope(owned_stdin=False):
+def scope(owned_stdin=False, native_channel=None):
     global CURRENT
-    previous, CURRENT = CURRENT, Registry()
+    previous, CURRENT = CURRENT, Registry(native_channel)
     registry = CURRENT
     previous_handlers = {}
     stopped = False

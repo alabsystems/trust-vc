@@ -10,6 +10,7 @@ pub(super) enum Kind {
     IsVariant,
     VariantField,
     Recommends,
+    Language(crate::verus_items::VerusItem),
 }
 
 impl Kind {
@@ -18,6 +19,9 @@ impl Kind {
             Self::IsVariant => "verus::verus_builtin::is_variant",
             Self::VariantField => "verus::verus_builtin::get_variant_field",
             Self::Recommends => "verus::verus_builtin::recommends",
+            Self::Language(_) => {
+                unreachable!("language items are captured from native diagnostics")
+            }
         }
     }
 }
@@ -27,6 +31,9 @@ pub(in crate::reader::declaration_staging) struct Intrinsics<'scope, 'tcx> {
     pub(super) inputs: &'scope Inputs,
     metadata: &'scope Metadata,
     definitions: Vec<(Kind, DefId)>,
+    items: std::collections::HashMap<DefId, crate::verus_items::VerusItem>,
+    names: std::collections::HashMap<DefId, Symbol>,
+    validated_members: std::cell::RefCell<HashSet<DefId>>,
     artifacts: Vec<build_origin::BuiltArtifact>,
 }
 
@@ -83,11 +90,32 @@ impl<'scope, 'tcx> Intrinsics<'scope, 'tcx> {
             }
             definitions.push((kind, definition));
         }
+        let mut items = std::collections::HashMap::new();
+        let mut names = std::collections::HashMap::new();
+        for (name, definition) in &tcx.all_diagnostic_items(()).name_to_id {
+            if !name.as_str().starts_with("verus::verus_builtin::") {
+                continue;
+            }
+            let Some(item) = crate::verus_items::VerusItem::from_name(name.as_str()) else {
+                continue;
+            };
+            // The spelling classifies a candidate. Its actual CStore artifact
+            // and the retained fresh build owner supply the language meaning.
+            meaning::validate_builtin_member(tcx, *definition, inputs, metadata)?;
+            items.insert(*definition, item);
+            names.insert(*definition, *name);
+            if !definitions.iter().any(|(_, actual)| actual == definition) {
+                definitions.push((Kind::Language(item), *definition));
+            }
+        }
         let result = Self {
             tcx,
             inputs,
             metadata,
             definitions,
+            validated_members: std::cell::RefCell::new(items.keys().copied().collect()),
+            items,
+            names,
             artifacts,
         };
         result.current(tcx)?;
@@ -98,9 +126,19 @@ impl<'scope, 'tcx> Intrinsics<'scope, 'tcx> {
         diagnostics(tcx)?;
         if !std::ptr::eq(*tcx, *self.tcx)
             || std::env::var("VSTD_KIND").as_deref() != Ok("IsVstd")
-            || self.definitions.iter().any(|(kind, definition)| {
-                tcx.get_diagnostic_item(Symbol::intern(kind.diagnostic())) != Some(*definition)
-            })
+            || self
+                .definitions
+                .iter()
+                .any(|(kind, definition)| match kind {
+                    Kind::Language(_) => self
+                        .names
+                        .get(definition)
+                        .is_none_or(|name| tcx.get_diagnostic_item(*name) != Some(*definition)),
+                    _ => {
+                        tcx.get_diagnostic_item(Symbol::intern(kind.diagnostic()))
+                            != Some(*definition)
+                    }
+                })
         {
             return Err("the original Spec graph intrinsic context changed".into());
         }
@@ -111,6 +149,25 @@ impl<'scope, 'tcx> Intrinsics<'scope, 'tcx> {
         self.definitions
             .iter()
             .find_map(|(kind, actual)| (*actual == definition).then_some(*kind))
+    }
+
+    pub(super) fn reader_items(
+        &self,
+    ) -> std::collections::HashMap<DefId, crate::verus_items::VerusItem> {
+        self.items.clone()
+    }
+
+    /// Trait operators are resolved in the caller's actual generic context.
+    /// Their selected implementation and member must belong to the same fresh
+    /// builtin image as the diagnostic declaration before they are intrinsic.
+    pub(super) fn validate_selection(&self, definition: DefId) -> Result<(), String> {
+        self.current(self.tcx)?;
+        if self.validated_members.borrow().contains(&definition) {
+            return Ok(());
+        }
+        meaning::validate_builtin_member(self.tcx, definition, self.inputs, self.metadata)?;
+        self.validated_members.borrow_mut().insert(definition);
+        Ok(())
     }
 
     /// Bind a consumer to this exact live construction context. This grants

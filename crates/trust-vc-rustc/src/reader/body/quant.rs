@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use rustc_ast::{BindingMode, ByRef};
-use rustc_hir::{self as hir, PatKind};
+use rustc_hir::{self as hir, def::DefKind, PatKind};
 use rustc_span::Span;
 
 use trust_vc_vcir::triggers::{self, AutoMode, Mark, Quantifier};
@@ -77,6 +77,105 @@ fn failed_candidates(marks: Vec<Mark>, frame: QuantFrame) -> Vec<Expr> {
 }
 
 impl<'tcx> FnReader<'_, 'tcx> {
+    pub(super) fn broadcast_rules(&mut self, span: Span) -> R<()> {
+        if self.mode != Mode::Proof {
+            self.errors.push(UserError::new(
+                Phase::WellFormed,
+                self.sig_span,
+                "broadcast function must be declared as proof",
+            ));
+        } else if self.locals[self.ret.index()].ty != Ty::Unit || self.ensures_ret_ty.is_some() {
+            self.errors.push(UserError::new(
+                Phase::WellFormed,
+                self.sig_span,
+                "broadcast function cannot have return type",
+            ));
+        } else if self
+            .params
+            .iter()
+            .any(|id| self.locals[id.index()].mode != Mode::Spec)
+        {
+            self.errors.push(UserError::new(
+                Phase::WellFormed,
+                self.sig_span,
+                "broadcast function must have spec parameters",
+            ));
+        } else if self.params.iter().any(|id| {
+            matches!(
+                self.locals[id.index()].ty,
+                Ty::MutRef(_) | Ty::Ref { mutable: true, .. }
+            )
+        }) {
+            self.errors.push(UserError::new(
+                Phase::WellFormed,
+                self.sig_span,
+                "broadcast function cannot have &mut parameters",
+            ));
+        }
+        if !self.type_params.is_empty()
+            || self.tcx.def_kind(self.tcx.local_parent(self.def_id)) != DefKind::Mod
+        {
+            return refuse(
+                "broadcast-contract",
+                "a broadcast outside the local monomorphic free-function fragment",
+                span,
+            );
+        }
+        if self.params.iter().any(|id| self.locals[id.index()].mutable) {
+            return refuse(
+                "broadcast-contract",
+                "a broadcast with a mutable by-value parameter binding",
+                span,
+            );
+        }
+        Ok(())
+    }
+
+    /// Capture only the declaration's outer header hints. Nested quantifier
+    /// frames still own their binders and hints, exactly as ordinary quantifiers.
+    pub(super) fn broadcast_header(
+        &mut self,
+        block: &'tcx hir::Block<'tcx>,
+        requires: &mut Vec<trust_vc_vcir::Clause>,
+        ensures: &mut Vec<trust_vc_vcir::Clause>,
+        recommends: &mut Vec<trust_vc_vcir::Clause>,
+        broadcast: bool,
+    ) -> R<usize> {
+        if !broadcast {
+            return self.header(block, requires, ensures, recommends);
+        }
+        let start = self.trigger_marks.len();
+        self.quant_frames.push(QuantFrame::default());
+        self.broadcast_header_active = true;
+        let result = self.header(block, requires, ensures, recommends);
+        self.broadcast_header_active = false;
+        let frame = self.quant_frames.pop().unwrap_or_default();
+        let marks = self.trigger_marks.split_off(start);
+        let length = result?;
+        let at = self.sp(block.span);
+        let conjunction = |clauses: &[trust_vc_vcir::Clause]| {
+            clauses
+                .iter()
+                .fold(Expr::bool_lit(true, at), |body, clause| {
+                    Expr::binary(BinOp::And, body, clause.expr.clone(), Ty::Bool, at)
+                })
+        };
+        let body = Expr::binary(
+            BinOp::Implies,
+            conjunction(requires),
+            conjunction(ensures),
+            Ty::Bool,
+            at,
+        );
+        let vars = self.params.clone();
+        self.broadcast_triggers = if vars.is_empty() {
+            Some(Vec::new())
+        } else {
+            self.triggers_for(&vars, &body, &marks, &frame, block.span)
+        };
+        Ok(length)
+    }
+
     /// Record the trigger attributes of `e`, whose value is `value`: a
     /// `#[trigger]` mark, or the annotation of the quantifier being read.
     pub(super) fn trigger_attrs(&mut self, e: &hir::Expr<'_>, value: &Expr) {

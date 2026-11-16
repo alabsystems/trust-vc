@@ -58,7 +58,13 @@ pub(super) fn normal_client_args(
     output: &Path,
     erase_output: &Path,
 ) -> Result<NormalClientArgs, String> {
-    let mut verify = client_args(library, source, macros, output)?;
+    let mut verify = client_args_for_image(
+        library,
+        source,
+        macros,
+        output,
+        library.prepared.erase.rlib.file(),
+    )?;
     let mut erase = Vec::with_capacity(verify.len());
     let mut at = 0;
     let mut bodies = 0;
@@ -128,13 +134,31 @@ pub(super) fn client_args(
     macros: &[&PinnedFile],
     output: &Path,
 ) -> Result<Vec<String>, String> {
+    client_args_for_image(
+        library,
+        source,
+        macros,
+        output,
+        &library.prepared.erase.file,
+    )
+}
+
+fn client_args_for_image(
+    library: &StagedLibrary,
+    source: &ClientSource,
+    macros: &[&PinnedFile],
+    output: &Path,
+    image: &PinnedFile,
+) -> Result<Vec<String>, String> {
+    library.prepared.erase.revalidate_artifacts()?;
+    if !library.prepared.erase.contains_image(image) {
+        return Err("the client native image is outside its live producer pair".into());
+    }
     source.file.read()?;
     if macros.len() != 2 {
         return Err("the client requires the genuine two macro images".into());
     }
-    let mut args = library
-        .inputs
-        .client_args(&library.prepared.erase.file.path, &source.file.path);
+    let mut args = library.inputs.client_args(&image.path, &source.file.path);
     let mut replaced = std::collections::BTreeSet::new();
     let mut at = 0;
     while at < args.len() {
@@ -344,6 +368,31 @@ fn save(
     .map_err(|e| e.to_string())
 }
 
+/// Execute both native observations on one unchanged client. Physical copies
+/// alone do not show that the proc macro's cached IsVstd context was isolated.
+/// These observations carry no declarations, bodies or verification permission.
+pub(super) fn compare_imported_images(
+    library: &StagedLibrary,
+    source: &ClientSource,
+    images: &client_images::ClientImages<'_>,
+) -> Result<(), String> {
+    let original = observe(library, source, None, "CachedOriginalMacroImages")?;
+    save(library, source, &original, None)?;
+    if original["compiler_returned"] != false || original["callback"]["state"] != "NotReached" {
+        return Err(
+            "the original macro image did not exhibit the expected cached-context refusal".into(),
+        );
+    }
+    let copied = observe(library, source, Some(images), "OwnedCopyMacroImages")?;
+    save(library, source, &original, Some(&copied))?;
+    if copied["compiler_returned"] != true || copied["callback"]["state"] != "Observed" {
+        return Err(
+            "the owned copied macro image did not complete the actual client observation".into(),
+        );
+    }
+    Ok(())
+}
+
 /// # Safety
 /// This is a standalone command entry, not a host-engine callback. The caller
 /// must have created no background threads and exclude other process-wide
@@ -358,21 +407,7 @@ pub(super) unsafe fn run(request: &Path, client: &Path) -> Result<(), String> {
     library.write_observation()?;
     let images = client_images::ClientImages::prepare(&library)?;
     let _environment = unsafe { ImportedEnvironment::enter()? };
-    let original = observe(&library, &source, None, "CachedOriginalMacroImages")?;
-    save(&library, &source, &original, None)?;
-    if original["compiler_returned"] != false || original["callback"]["state"] == "Observed" {
-        return Err(
-            "the original macro image did not exhibit the expected cached-context refusal".into(),
-        );
-    }
-    let copied = observe(&library, &source, Some(&images), "OwnedCopyMacroImages")?;
-    save(&library, &source, &original, Some(&copied))?;
-    if copied["compiler_returned"] != true || copied["callback"]["state"] != "Observed" {
-        return Err(
-            "the owned copied macro image did not complete the actual client observation".into(),
-        );
-    }
-    Ok(())
+    compare_imported_images(&library, &source, &images)
 }
 
 /// Run the closed, observation-only macro-state comparison command.

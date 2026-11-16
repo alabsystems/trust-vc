@@ -135,16 +135,19 @@ impl<'a> AstExpressionParser<'a> {
                 // witness_var`: let the capture-aware helpers (`match_encode.rs`,
                 // `arith/int_arith.rs`) INLINE their result rather than hoist a
                 // fresh const, as every other wired closure boundary does.
-                let witness_condition = crate::encoder::with_flag_unwind_safe!(
-                    self.pending_universal_closure,
-                    true,
-                    {
-                        self.with_local_bindings(
-                            [(var_name.to_string(), witness_var, var_ty.clone())],
-                            |s| s.encode_trust_vc_expr(condition),
+                let witness_condition =
+                    self.with_ground_template_scope(&[witness_var], |parser| {
+                        crate::encoder::with_flag_unwind_safe!(
+                            parser.pending_universal_closure,
+                            true,
+                            {
+                                parser.with_local_bindings(
+                                    [(var_name.to_string(), witness_var, var_ty.clone())],
+                                    |s| s.encode_trust_vc_expr(condition),
+                                )
+                            }
                         )
-                    }
-                )?;
+                    })?;
                 let witness_antecedent = if var_ty.bit_width().is_none() {
                     let guards = self.build_range_guards(
                         &[(var_name.to_string(), var_ty.clone())],

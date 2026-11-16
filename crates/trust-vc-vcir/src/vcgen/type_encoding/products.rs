@@ -57,7 +57,9 @@ pub(super) fn field_recipe(
             }
             Some(())
         }
-        TypeRecipe::SharedRef(inner) => field_recipe(inner, owner, arity, left),
+        TypeRecipe::SharedRef(inner) | TypeRecipe::MutRef(inner) => {
+            field_recipe(inner, owner, arity, left)
+        }
         TypeRecipe::Int(range) => super::super::val::supported_range(*range)
             .is_ok()
             .then_some(()),
@@ -74,7 +76,9 @@ pub(super) fn arguments(terms: &[Term], arity: usize) -> Option<Vec<TypeArgument
         return None;
     }
     terms
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| TypeArgument::new(pair[0].clone(), pair[1].clone()))
         .collect()
 }
@@ -414,7 +418,14 @@ impl Vocabulary {
         roots: &[&Term],
         budget: &mut usize,
     ) -> Option<Vec<Term>> {
-        let mut sums = self.sum_bridge_axioms(roots, budget)?;
+        let mut reference_facts = self.mut_ref_bridge_axioms(roots, budget)?;
+        let reference_roots: Vec<_> = roots
+            .iter()
+            .copied()
+            .chain(reference_facts.iter())
+            .collect();
+        let mut sums = self.sum_bridge_axioms(&reference_roots, budget)?;
+        sums.append(&mut reference_facts);
         let sum_roots: Vec<_> = roots.iter().copied().chain(sums.iter()).collect();
         let mut products = if self.products.schemas.is_empty() {
             Vec::new()

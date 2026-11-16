@@ -11,6 +11,12 @@ use crate::{Body, Clause, Expr, ExprKind, FnDecl, FnId, FnRole, Mode, Ty};
 
 type Functions<'a> = HashMap<FnId, &'a FnDecl>;
 
+mod types;
+mod unwind;
+use types::{canonical_call, type_work};
+pub(crate) use unwind::matches as unwind_matches;
+const MATCH_WORK: usize = 16_384;
+
 /// Local structural substitution plus closure over all instance-call edges.
 /// Cycles survive only when every member has a matching substituted body.
 pub(crate) fn validated_origins(functions: &Functions<'_>) -> HashSet<FnId> {
@@ -40,7 +46,6 @@ pub(crate) fn validated_origins(functions: &Functions<'_>) -> HashSet<FnId> {
     }
     candidates.into_keys().collect()
 }
-
 fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnId>> {
     let origin = instance.attrs.instance.as_ref()?;
     let original = functions.get(&origin.declaration)?;
@@ -70,13 +75,15 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
         arguments: &origin.type_args,
         checked_initializer: matches!(original.body, Body::Constant(_)),
         depth: Cell::new(0),
+        parameters: None,
     };
-    let mut budget = 16_384;
+    let mut budget = MATCH_WORK;
     let mut dependencies = HashSet::new();
     for (formal, actual) in original.locals.iter().zip(&instance.locals) {
         if formal.kind != actual.kind
             || formal.mode != actual.mode
             || formal.mutable != actual.mutable
+            || formal.prophecy != actual.prophecy
             || !matcher.ty(&formal.ty, &actual.ty, &mut budget)
         {
             return None;
@@ -106,6 +113,14 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
             if matcher.expr(formal, actual, &mut budget, &mut dependencies) => {}
         _ => return None,
     }
+    if !matcher.unwind(
+        &original.unwind,
+        &instance.unwind,
+        &mut budget,
+        &mut dependencies,
+    ) {
+        return None;
+    }
     match (&original.body, &instance.body) {
         (Body::None, Body::None) => {}
         (Body::Spec(formal), Body::Spec(actual))
@@ -121,6 +136,7 @@ struct Matcher<'a, 'b> {
     arguments: &'a [Ty],
     checked_initializer: bool,
     depth: Cell<u32>,
+    parameters: Option<(&'a [crate::LocalId], &'a [crate::LocalId])>,
 }
 
 struct Depth<'a>(&'a Cell<u32>);
@@ -153,12 +169,13 @@ impl Matcher<'_, '_> {
         use ExprKind as E;
         match (&formal.kind, &actual.kind) {
             (E::Lit(a), E::Lit(b)) => a == b,
+            (E::IntegerConstant(a), E::IntegerConstant(b)) => a == b,
             (E::Read(a), E::Read(b)) | (E::Old(a), E::Old(b)) => {
                 if a.projections.len() > *budget || b.projections.len() > *budget {
                     return false;
                 }
                 *budget -= a.projections.len().max(b.projections.len());
-                a == b
+                a.projections == b.projections && self.local(a.local, b.local, budget)
             }
             (
                 E::Unary {
@@ -297,6 +314,19 @@ impl Matcher<'_, '_> {
                 b == y && self.expr(a, x, budget, dependencies)
             }
             (E::Borrow(a), E::Borrow(b)) => self.expr(a, b, budget, dependencies),
+            (E::MutRefCurrent(a), E::MutRefCurrent(b))
+            | (E::MutRefFuture(a), E::MutRefFuture(b))
+            | (E::HasResolved(a), E::HasResolved(b)) => self.expr(a, b, budget, dependencies),
+            (
+                E::MutRefUpdate {
+                    reference: a,
+                    value: x,
+                },
+                E::MutRefUpdate {
+                    reference: b,
+                    value: y,
+                },
+            ) => self.expr(a, b, budget, dependencies) && self.expr(x, y, budget, dependencies),
             (
                 E::Quant {
                     kind: a,
@@ -359,7 +389,7 @@ impl Matcher<'_, '_> {
         if !type_work(formal, budget, 0) || !type_work(actual, budget, 0) {
             return false;
         }
-        formal.subst(self.arguments) == *actual
+        types::substituted(formal, self.arguments, actual)
     }
 
     fn clauses(
@@ -406,42 +436,4 @@ impl Matcher<'_, '_> {
                 .zip(actual)
                 .all(|(formal, actual)| self.exprs(formal, actual, budget, dependencies))
     }
-}
-
-fn type_work(ty: &Ty, budget: &mut usize, depth: u32) -> bool {
-    if depth >= 64 {
-        return false;
-    }
-    let Some(left) = budget.checked_sub(1) else {
-        return false;
-    };
-    *budget = left;
-    match ty {
-        Ty::Ref { inner, .. } => type_work(inner, budget, depth + 1),
-        Ty::Adt(_, args) | Ty::Tuple(args) => {
-            args.len() <= *budget && args.iter().all(|ty| type_work(ty, budget, depth + 1))
-        }
-        _ => true,
-    }
-}
-
-fn canonical_call<'a>(
-    functions: &'a Functions<'_>,
-    callee: FnId,
-    arguments: &'a [Ty],
-) -> Option<(FnId, &'a [Ty], Option<FnId>)> {
-    let function = functions.get(&callee)?;
-    let Some(origin) = &function.attrs.instance else {
-        return Some((callee, arguments, None));
-    };
-    let original = functions.get(&origin.declaration)?;
-    if function.role != FnRole::Instance
-        || !arguments.is_empty()
-        || original.role != FnRole::Item
-        || original.attrs.instance.is_some()
-        || original.attrs.is_trait_method_impl
-    {
-        return None;
-    }
-    Some((origin.declaration, &origin.type_args, Some(callee)))
 }

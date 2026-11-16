@@ -62,9 +62,13 @@ pub(in crate::reader) struct ImportedFunction {
     inputs: Vec<Ty>,
     output: Ty,
     modes: super::super::super::modes::CallModes,
+    source_recommendations: bool,
 }
 
 impl ImportedFunction {
+    pub(in crate::reader) fn source_recommendations(&self) -> bool {
+        self.source_recommendations
+    }
     pub(in crate::reader) fn id(&self) -> FnId {
         self.id
     }
@@ -78,7 +82,7 @@ impl ImportedFunction {
         self.modes.clone()
     }
     pub(in crate::reader) fn declaration(&self, span: SpanId) -> FnDecl {
-        use trust_vc_vcir::{Body, FnAttrs, FnKind, LocalDecl, LocalId, LocalKind};
+        use trust_vc_vcir::{Body, DeclProphecy, FnAttrs, FnKind, LocalDecl, LocalId, LocalKind};
         let mut locals = self
             .inputs
             .iter()
@@ -87,6 +91,7 @@ impl ImportedFunction {
                 name: format!("arg{index}"),
                 ty: ty.clone(),
                 mode: Mode::Spec,
+                prophecy: DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Param,
                 span,
@@ -97,6 +102,7 @@ impl ImportedFunction {
             name: "result".into(),
             ty: self.output.clone(),
             mode: Mode::Spec,
+            prophecy: DeclProphecy::Default,
             mutable: false,
             kind: LocalKind::Return,
             span,
@@ -115,10 +121,14 @@ impl ImportedFunction {
             requires: Vec::new(),
             ensures: Vec::new(),
             recommends: Vec::new(),
+            unwind: None,
             decreases: Vec::new(),
             decreases_when: None,
             decreases_by: None,
-            attrs: FnAttrs::default(),
+            attrs: FnAttrs {
+                prophetic: self.modes.prophetic,
+                ..FnAttrs::default()
+            },
             body: Body::None,
         }
     }
@@ -132,6 +142,7 @@ pub(in crate::reader) struct ClientImports<'library, 'tcx> {
     library: &'library StagedLibrary,
     nominals: HashMap<DefId, ImportedNominal<'library>>,
     functions: HashMap<DefId, ImportedFunction>,
+    spec_definitions: spec_graph::ClientDefinitions,
     wf_requirements: Vec<declaration_wf::BuiltinRequirement>,
     refused: Vec<(NativeKey, String)>,
 }
@@ -301,6 +312,7 @@ impl<'library, 'tcx> ClientImports<'library, 'tcx> {
                 let output = types.lower(output)?;
                 let modes = super::super::super::modes::CallModes {
                     mode: Mode::Spec,
+                    prophetic: native.prophetic(),
                     params: native
                         .parameter_modes()
                         .iter()
@@ -319,6 +331,9 @@ impl<'library, 'tcx> ClientImports<'library, 'tcx> {
                     inputs,
                     output,
                     modes,
+                    source_recommendations: native
+                        .source_header()
+                        .is_some_and(|header| header.recommendations_only()),
                 })
             })();
             match result {
@@ -330,12 +345,37 @@ impl<'library, 'tcx> ClientImports<'library, 'tcx> {
                 Err(reason) => refused.push((native.keep_key(), reason)),
             }
         }
+        let signatures = functions
+            .values()
+            .map(|function| {
+                // Decoding this genuine foreign declaration also registers its
+                // current SourceFile before original definition spans are joined.
+                let _ = tcx.def_span(function.definition);
+                (
+                    declaration_native::key(tcx, function.definition),
+                    function.declaration(SpanId(0)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let nominal_declarations = nominals
+            .values()
+            .map(|nominal| nominal.declaration(SpanId(0)))
+            .collect();
+        let (spec_definitions, definition_refusals) = spec_graph::definitions_for_client(
+            tcx,
+            library,
+            &signatures,
+            nominal_declarations,
+            &nominal_ids,
+        )?;
+        refused.extend(definition_refusals);
         diagnostics(tcx)?;
         Ok(Self {
             frame,
             library,
             nominals,
             functions,
+            spec_definitions,
             wf_requirements,
             refused,
         })
@@ -352,6 +392,14 @@ impl<'library, 'tcx> ClientImports<'library, 'tcx> {
             self.frame.common(),
         )?;
         diagnostics(tcx)
+    }
+
+    pub(in crate::reader) fn definition_packet(
+        &self,
+        tcx: TyCtxt<'tcx>,
+    ) -> Result<spec_graph::ClientDefinitions, String> {
+        self.revalidate(tcx)?;
+        Ok(self.spec_definitions.clone())
     }
 
     /// A diagnostic of the actual current client match, never an input

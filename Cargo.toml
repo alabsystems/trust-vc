@@ -25,7 +25,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alabsystems/trust-vc"
@@ -48,14 +48,14 @@ trust-vc-bitvector = { path = "crates/trust-vc-bitvector" }
 # all four revisions together; Cargo.lock records that same Git source for the
 # complete AY closure. Normal resolution uses Cargo's authenticated checkout,
 # without a sibling-worktree redirect.
-ay-core = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
-ay-dpll = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
-ay-frontend = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
-ay-sys = { version = "0.28.0", git = "https://github.com/alabsystems/ay.git", rev = "9dfa20b5790b03c8ffe57fbbe67316ece665c5be" }
+ay-core = { version = "0.28.2", git = "https://github.com/alabsystems/ay.git", rev = "8bbc43108643d475a81a89b2b4f262e817ee1724" }
+ay-dpll = { version = "0.28.2", git = "https://github.com/alabsystems/ay.git", rev = "8bbc43108643d475a81a89b2b4f262e817ee1724" }
+ay-frontend = { version = "0.28.2", git = "https://github.com/alabsystems/ay.git", rev = "8bbc43108643d475a81a89b2b4f262e817ee1724" }
+ay-sys = { version = "0.28.2", git = "https://github.com/alabsystems/ay.git", rev = "8bbc43108643d475a81a89b2b4f262e817ee1724" }
 # trust-ir is rev-pinned (not branch=main) for reproducible standalone builds;
 # its three legs below move together. No ty crate is linked: the protocol
 # lane runs the `ty` binary (`trust-vc-core/src/protocol/`).
-trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87", default-features = false, features = ["clean-expr"] }
+trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "8bae728257b123d6394b2dc049b3573ad885049f", default-features = false, features = ["clean-expr"] }
 # The PRODUCER's own validator, used by the discharge lane as an INPUT GATE.
 # `trust-ir-build::validate_module` is the well-formedness authority for the
 # format this crate consumes; adversarial review rounds 1-4 each found a
@@ -74,10 +74,10 @@ trust-ir = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbb
 # `clean-tv-anchor` feature is needed: without it the Clean-kernel contract
 # re-check always fails closed, so neither the input gate nor basis K could
 # accept a CleanCic certificate that does re-check.
-trust-ir-build = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87" }
+trust-ir-build = { git = "https://github.com/alabsystems/trust-ir.git", rev = "8bae728257b123d6394b2dc049b3573ad885049f" }
 # The native engine decodes the shared question with the IR-owned Formula/Sort
 # codec. Keep the exact source identical to trust-ir and trust-ir-build above.
-trust-ir-contract = { git = "https://github.com/alabsystems/trust-ir.git", rev = "a98dfbbe7f0b7ee8c60f2ee7c2cfd641ba850b87" }
+trust-ir-contract = { git = "https://github.com/alabsystems/trust-ir.git", rev = "8bae728257b123d6394b2dc049b3573ad885049f" }
 
 # BigInt for 128-bit bitvector constants
 num-bigint = "0.4"

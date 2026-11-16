@@ -394,12 +394,34 @@ pub enum ExprKind {
     /// `Ref { mutable: false, .. }` of the operand's type. Shared references
     /// are transparent: the value is the operand's.
     Borrow(Box<Expr>),
+    /// The present referent of an opaque new-mode mutable reference.
+    MutRefCurrent(Box<Expr>),
+    /// Its eventual referent, a prophetic expression.
+    MutRefFuture(Box<Expr>),
+    /// Replace the current projection, preserving the future projection.
+    /// The resulting reference remains opaque; no extensionality is implied.
+    MutRefUpdate {
+        /// Original reference.
+        reference: Box<Expr>,
+        /// New current referent.
+        value: Box<Expr>,
+    },
+    /// Whether an owned value has resolved. For a mutable reference this
+    /// equates current and future without resolving anything behind it.
+    HasResolved(Box<Expr>),
     /// A `proof { .. }` block in the body of a spec function with a
     /// measure (Verus's `ProofInSpec`), of type `()`. Its statements are
     /// proof code that only the function's termination check walks, where
     /// Verus evaluates it; the function's definition ignores it. A producer
     /// sequences it with a `Let` of a `()` local.
     ProofInSpec(crate::stmt::Block),
+    /// A proof block whose unit-valued tail contributes its prophecy effect.
+    ProofInSpecTail {
+        /// Statements preceding the tail.
+        block: crate::stmt::Block,
+        /// The actual final expression, including a flattened call result.
+        tail: Box<Expr>,
+    },
     /// `forall|vars| body` or `exists|vars| body`, of type `bool`. Each var
     /// is a local of kind [`crate::LocalKind::Bound`] bound only here, and
     /// ranges over the values of its type, as in Verus (a `u8` over
@@ -593,7 +615,15 @@ impl Expr {
             ExprKind::Field { base, .. }
             | ExprKind::IsVariant { base, .. }
             | ExprKind::TupleField { base, .. }
-            | ExprKind::Borrow(base) => f(base),
+            | ExprKind::Borrow(base)
+            | ExprKind::MutRefCurrent(base)
+            | ExprKind::MutRefFuture(base)
+            | ExprKind::HasResolved(base) => f(base),
+            ExprKind::ProofInSpecTail { tail, .. } => f(tail),
+            ExprKind::MutRefUpdate { reference, value } => {
+                f(reference);
+                f(value);
+            }
             ExprKind::Quant { triggers, body, .. } => {
                 for term in triggers.iter().flatten() {
                     f(term);
@@ -744,7 +774,18 @@ impl Expr {
                 index: *index,
             },
             ExprKind::Borrow(inner) => ExprKind::Borrow(b(inner)),
+            ExprKind::MutRefCurrent(inner) => ExprKind::MutRefCurrent(b(inner)),
+            ExprKind::MutRefFuture(inner) => ExprKind::MutRefFuture(b(inner)),
+            ExprKind::MutRefUpdate { reference, value } => ExprKind::MutRefUpdate {
+                reference: b(reference),
+                value: b(value),
+            },
+            ExprKind::HasResolved(inner) => ExprKind::HasResolved(b(inner)),
             ExprKind::ProofInSpec(block) => ExprKind::ProofInSpec(block.clone()),
+            ExprKind::ProofInSpecTail { block, tail } => ExprKind::ProofInSpecTail {
+                block: block.clone(),
+                tail: b(tail),
+            },
             ExprKind::Quant {
                 kind,
                 vars,

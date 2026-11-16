@@ -47,9 +47,9 @@ use super::solve::{
     format_solver_observation_error, model_gate_rejection, solver_unknown_outcome,
     try_check_sat_with_details,
 };
-use super::timeout::{
-    effective_conflict_budget, far_out_watchdog_timeout, reserve_solver_thread_slot,
-};
+#[cfg(not(test))]
+use super::timeout::reserve_solver_thread_slot;
+use super::timeout::{effective_conflict_budget, far_out_watchdog_timeout};
 use super::unknown_category::UnknownCategory;
 use crate::counterexample_names::CounterexampleVarMeta;
 use crate::encoder::types::sort_for_type;
@@ -277,7 +277,10 @@ fn solve_once(query: NativeQuestion<'_>, limits: &Limits, mode: SolveMode) -> At
 
     // ay honours its own wall deadline; the watchdog is hang protection on
     // top of it and fires only well past that deadline.
+    #[cfg(not(test))]
     let slot = reserve_solver_thread_slot();
+    #[cfg(test)]
+    let slot = super::timeout::reserve_solver_thread_slot_for_current_work();
     let interrupt = encoder.interrupt_handle();
     let timeout = far_out_watchdog_timeout(Some(limits.wall_ms));
     let watched = run_with_timeout_watchdog(interrupt, timeout, false, || {

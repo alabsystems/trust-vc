@@ -8,12 +8,13 @@ use trust_vc_bitvector::integer::{Arithmetic, Comparison, Integer};
 use trust_vc_bitvector::{Op, Query, Sort, Term};
 
 use super::expr::{Reads, R};
-use super::val::{refusal, Ctx, Val};
+use super::val::{refusal, Ctx};
 use crate::{
     BinOp, Body, Expr, ExprKind, FnId, FnRole, IntRange, Lit, LocalId, Mode, Place, Projection,
     QuantKind, Ty, UnOp,
 };
 
+mod source_simplify;
 mod specialization;
 mod values;
 
@@ -58,6 +59,8 @@ struct Lower<'a, 'ctx> {
     /// Syntax admission visits dead code without creating a value witness.
     /// Its translated data are always discarded; live queries use false.
     admission_only: bool,
+    /// A source-language restriction, independent of the IR's product support.
+    scalar_inputs: bool,
 }
 
 impl Lower<'_, '_> {
@@ -100,7 +103,7 @@ impl Lower<'_, '_> {
 
     fn range_bits(&self, e: &Expr, range: IntRange) -> R<(u32, bool)> {
         if !range.is_valid() || matches!(range, IntRange::Int | IntRange::Nat | IntRange::Char) {
-            return self.error(e, "a BV input without a supported finite integer width");
+            return self.error(e, "expected finite-width integer");
         }
         Ok((
             range
@@ -298,6 +301,42 @@ impl Lower<'_, '_> {
     }
 
     fn place(&mut self, e: &Expr, place: &Place, old: bool) -> R<Value> {
+        let scalar_ty = if self.scalar_inputs {
+            Some(self.ty(e, &e.ty)?)
+        } else {
+            None
+        };
+        if let Some(ty) = &scalar_ty {
+            let mut input = ty;
+            while let Ty::Ref { inner, .. } | Ty::MutRef(inner) = input {
+                self.debit(e, 1)?;
+                input = inner;
+            }
+            if !matches!(input, Ty::Bool | Ty::Int(_)) {
+                return Err(refusal(
+                    "bit-vector-type",
+                    format!(
+                        "bit_vector prover cannot handle type `{}`",
+                        crate::pretty::ty_name(self.ctx.source, input)
+                    ),
+                    e.span,
+                ));
+            }
+        }
+        if let Some(value) = self.available_place(e, place, old)? {
+            return Ok(value.clone());
+        }
+        let ty = match scalar_ty {
+            Some(ty) => ty,
+            None => self.ty(e, &e.ty)?,
+        };
+        self.place_value(e, place, old, &ty, 0)
+    }
+
+    /// Source availability is independent of finite BV input conversion.
+    /// A preprocessing identity may remove a product/integer input, but may
+    /// never manufacture an initialized value or cross an inline namespace.
+    fn available_place(&mut self, e: &Expr, place: &Place, old: bool) -> R<Option<&Value>> {
         self.debit(e, place.projections.len().saturating_add(1))?;
         if !old {
             if let Some(value) = self.bound.get(&place.local) {
@@ -322,7 +361,7 @@ impl Lower<'_, '_> {
                         _ => return self.error(e, "an unsupported inline product projection"),
                     };
                 }
-                return Ok(value.clone());
+                return Ok(Some(value));
             }
         }
         if !self.inline_stack.is_empty() {
@@ -370,8 +409,7 @@ impl Lower<'_, '_> {
                 };
             }
         }
-        let ty = self.ty(e, &e.ty)?;
-        self.place_value(e, place, old, &ty, 0)
+        Ok(None)
     }
 
     fn scalar_place(
@@ -410,6 +448,11 @@ impl Lower<'_, '_> {
         self.debit(e, 1)?;
         if depth >= 256 {
             return self.error(e, "isolated BV translation depth exhausted");
+        }
+        if self.ctx.bitvector_policy == super::BitvectorPolicy::VerusSyntactic {
+            if let Some(value) = source_simplify::comparison(self, e, depth)? {
+                return Ok(Value::Bool(Term::Bool(value)));
+            }
         }
         let next = depth + 1;
         match &e.kind {
@@ -620,6 +663,15 @@ impl Lower<'_, '_> {
                 })
             }
             ExprKind::Borrow(inner) => self.expr(inner, next),
+            ExprKind::MutRefCurrent(_)
+            | ExprKind::MutRefFuture(_)
+            | ExprKind::MutRefUpdate { .. }
+            | ExprKind::HasResolved(_)
+            | ExprKind::ProofInSpecTail { .. } => Err(refusal(
+                "bit-vector-type",
+                "an opaque reference or embedded proof in a BV expression",
+                e.span,
+            )),
             ExprKind::Quant {
                 kind,
                 vars,
@@ -893,6 +945,9 @@ pub(super) fn lower_detailed(
         validity_guard: Term::Bool(true),
         validity: Vec::new(),
         admission_only: false,
+        scalar_inputs: owner
+            .and_then(|id| ctx.fns.get(&id))
+            .is_some_and(|decl| decl.attrs.bitvector_scalar_inputs),
     };
     let mut hypotheses = Vec::new();
     for requirement in requires {
@@ -948,22 +1003,24 @@ pub(super) fn admit_syntax(ctx: &Ctx<'_>, expr: &Expr, work: &mut usize) -> R<()
         validity_guard: Term::Bool(true),
         validity: Vec::new(),
         admission_only: true,
+        scalar_inputs: false,
     };
     // Both branches, Boolean operands and every inline body use exactly the
     // same typed operation rules as live lowering. Only place availability is
     // deferred. No resulting term, variable or premise leaves this function.
     let result = lower.boolean(expr, 0);
     *work = lower.work;
-    // Source syntax/typing admission precedes SST pruning. Effective BV
-    // conversion is checked by live lowering of every retained independent
-    // source event, including ordinary-dead paths; it must not reject an
-    // actual Maybe::Never-pruned suffix that never becomes an SST BV query.
+    // Reader/WF/effect admission already checked the complete source. This
+    // conversion walk applies to every retained independent SST event,
+    // including ordinary-dead paths. An actual Maybe::Never-pruned suffix
+    // never becomes an SST BV query and never calls this conversion phase.
     result.map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::term::Term as MathTerm;
+    use super::super::val::Val;
     use super::*;
     use crate::{IntLit, SpanId};
 

@@ -27,8 +27,8 @@ use crate::declaration_alignment::source_bindings::{Metadata, PinnedFile};
 use crate::declaration_alignment::{self as alignment, NativeKey, Observation, View};
 
 use super::{
-    declaration_factory as factory, declaration_fields, declaration_headers, declaration_modes,
-    declaration_native, declaration_policy, declaration_wf, function_identity_observer,
+    declaration_factory as factory, declaration_fields, declaration_modes, declaration_native,
+    declaration_policy, declaration_wf, function_identity_observer,
 };
 
 mod build_origin;
@@ -36,6 +36,7 @@ mod builtins;
 mod capability;
 mod client_images;
 mod collect;
+mod emitted_rlib;
 mod fields;
 mod identity;
 mod inputs;
@@ -44,8 +45,13 @@ mod keep;
 mod macro_context;
 mod meaning;
 mod nominal_helpers;
+mod profile;
+mod source_nominals;
 mod spec_graph;
 mod standalone_client;
+
+pub(in crate::reader) use source_nominals::SourceNominals;
+pub(in crate::reader) use spec_graph::{CheckedSourceFunction, OwnedSourceHeader};
 
 pub(super) use capability::ClientImports;
 pub(crate) use capability::LiveNormalClientRead;
@@ -54,6 +60,8 @@ use inputs::Inputs;
 use invocation::Invocation;
 pub use macro_context::main as macro_context_main;
 pub(crate) use macro_context::{NormalClientArgs, NormalClientPlan, NormalPlanIdentity};
+pub(in crate::reader) use spec_graph::ClientDefinitions;
+pub use standalone_client::coordinator_main as standalone_sdk_coordinator_main;
 pub use standalone_client::main as standalone_client_main;
 pub use standalone_client::normal_verification_main as standalone_client_normal_verify_main;
 pub use standalone_client::verification_main as standalone_client_verify_main;
@@ -69,10 +77,26 @@ struct EraseAnalysis {
 struct EmittedErase {
     analysis: EraseAnalysis,
     file: PinnedFile,
+    rlib: PinnedFile,
 }
 
 /// No TyCtxt, DefId, CrateNum or original HIR ID escapes its compiler session.
 /// Only `LoadErase::after_analysis` constructs this private handoff.
+struct LoadedEraseMetadata {
+    view: View,
+    spec_view: spec_graph::View,
+    spec_roundtrip_unknown: BTreeSet<NativeKey>,
+    invocation: Invocation,
+    target_metadata: Metadata,
+    target_svh: u128,
+    file: PinnedFile,
+    roundtrip_unknown: BTreeMap<NativeKey, String>,
+    loader_observation: Value,
+    rlib: PinnedFile,
+}
+
+/// The same fresh compiler emission has survived both real metadata loaders.
+/// The RLIB pin is never supplied by a request or reconstructed from a report.
 struct OwnedErase {
     view: View,
     spec_view: spec_graph::View,
@@ -83,6 +107,25 @@ struct OwnedErase {
     file: PinnedFile,
     roundtrip_unknown: BTreeMap<NativeKey, String>,
     loader_observation: Value,
+    rlib: emitted_rlib::CheckedRlib,
+}
+
+impl OwnedErase {
+    fn native_images(&self) -> [&PinnedFile; 2] {
+        [&self.file, self.rlib.file()]
+    }
+
+    fn contains_image(&self, selected: &PinnedFile) -> bool {
+        self.native_images()
+            .into_iter()
+            .any(|image| image.path == selected.path && image.sha256 == selected.sha256)
+    }
+
+    fn revalidate_artifacts(&self) -> Result<(), String> {
+        self.file.read()?;
+        self.target_metadata.revalidate()?;
+        self.rlib.revalidate()
+    }
 }
 
 fn diagnostics(tcx: TyCtxt<'_>) -> Result<(), String> {
@@ -176,7 +219,7 @@ struct LoadErase<'a> {
     inputs: &'a Inputs,
     emitted: Option<EmittedErase>,
     argv: &'a [String],
-    result: Option<Result<OwnedErase, String>>,
+    result: Option<Result<LoadedEraseMetadata, String>>,
 }
 
 impl Callbacks for LoadErase<'_> {
@@ -187,6 +230,7 @@ impl Callbacks for LoadErase<'_> {
                 .emitted
                 .take()
                 .ok_or("Erase emission handoff was already consumed")?;
+            emitted.rlib.read()?;
             let loader = Invocation::capture(tcx, self.argv)?;
             if !loader.same_target(&emitted.analysis.invocation) {
                 return Err(
@@ -215,7 +259,7 @@ impl Callbacks for LoadErase<'_> {
                 );
             }
             diagnostics(tcx)?;
-            Ok(OwnedErase {
+            Ok(LoadedEraseMetadata {
                 view,
                 spec_view,
                 spec_roundtrip_unknown,
@@ -225,6 +269,7 @@ impl Callbacks for LoadErase<'_> {
                 file: target.file,
                 roundtrip_unknown: unknown,
                 loader_observation: loader.observation(),
+                rlib: emitted.rlib,
             })
         })());
         Compilation::Stop
@@ -277,11 +322,7 @@ fn produce_inner(
     path: &Path,
     #[cfg(test)] probe: Option<nominal_helpers::TransactionProbe>,
 ) -> Result<StagedLibrary, String> {
-    if env!("VC_SHIM_COMPILER_COMMIT") != "29ebb403de7a102850d6cb10a62d5cc3baf723ed" {
-        return Err(
-            "the current staging recipe requires the actual recorded Trust29 compiler".into(),
-        );
-    }
+    profile::check_compiler()?;
     let inputs = Inputs::load(path)?;
     if inputs.output.starts_with(inputs.sources.root()) {
         return Err("staging outputs cannot modify the approved source graph".into());
@@ -292,8 +333,7 @@ fn produce_inner(
     }
     inputs.revalidate()?;
     let metadata_path = collect::target_path(&inputs.output);
-    let mut erase_args = inputs.library_args(false);
-    erase_args.extend(["-o".into(), metadata_path.display().to_string()]);
+    let erase_args = inputs.library_args(false);
     let mut compiler = CompileErase {
         inputs: &inputs,
         argv: &erase_args,
@@ -310,11 +350,9 @@ fn produce_inner(
     let analysis = compiler
         .result
         .ok_or("the Erase native callback was not reached")??;
-    let file = PinnedFile {
-        path: metadata_path.canonicalize().map_err(|e| e.to_string())?,
-        sha256: inputs::digest(&metadata_path)?,
-    };
-    file.read()?;
+    let file = emitted_rlib::pin_output(&metadata_path)?;
+    let rlib_path = metadata_path.with_extension("rlib");
+    let rlib = emitted_rlib::pin_output(&rlib_path)?;
     inputs.revalidate()?;
     let client = inputs.output.join("load/client.rs");
     std::fs::write(&client, "extern crate verus_builtin;\nextern crate verus_builtin_macros;\nextern crate verus_state_machines_macros;\nextern crate vstd as staged_library;\n")
@@ -330,7 +368,11 @@ fn produce_inner(
     ]);
     let mut loader = LoadErase {
         inputs: &inputs,
-        emitted: Some(EmittedErase { analysis, file }),
+        emitted: Some(EmittedErase {
+            analysis,
+            file,
+            rlib,
+        }),
         argv: &load_args,
         result: None,
     };
@@ -342,24 +384,18 @@ fn produce_inner(
         loader.result.as_ref(),
     )?;
     result?;
-    let erase = loader
+    let metadata = loader
         .result
         .ok_or("the fresh metadata callback was not reached")??;
     inputs.revalidate()?;
+    let erase = emitted_rlib::load(&inputs, metadata, &client)?;
+    erase.revalidate_artifacts()?;
     let adapter = function_identity_observer::Inputs::from_staging(
         &inputs.sources,
         &inputs.builtin,
         &inputs.macros,
     )?;
-    let mut keep_args = inputs.library_args(true);
-    keep_args.extend([
-        "-o".into(),
-        inputs
-            .output
-            .join("keep/unused.rmeta")
-            .display()
-            .to_string(),
-    ]);
+    let keep_args = inputs.library_args(true);
     let mut keep = keep::ConsumeKeep::new(&inputs, erase, &keep_args, adapter);
     #[cfg(test)]
     keep.set_transaction_probe(probe);

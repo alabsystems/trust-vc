@@ -63,6 +63,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ids::FnId;
 use crate::item::{Body, FnDecl, FnRole, Mode, VcCrate};
 use crate::ty::IntRange;
+use crate::CheckedSpecDefinitions;
 
 use super::expr::{Reads, Tr, R};
 use super::query::{Function, VcRefusal};
@@ -302,7 +303,16 @@ fn result_name(prefix: &str, index: usize, result: &Shape, leaf: usize) -> Strin
 }
 
 impl Tables {
+    #[cfg(test)]
     pub(crate) fn build(ctx: &Ctx<'_>, krate: &VcCrate) -> Self {
+        Self::build_with_spec_definitions(ctx, krate, &CheckedSpecDefinitions::default())
+    }
+
+    pub(crate) fn build_with_spec_definitions(
+        ctx: &Ctx<'_>,
+        krate: &VcCrate,
+        definitions: &CheckedSpecDefinitions,
+    ) -> Self {
         let mut functions = Vec::new();
         let mut families = HashMap::new();
         let mut ranged = HashMap::new();
@@ -419,7 +429,11 @@ impl Tables {
         let mut rec_defs: HashMap<FnId, Vec<RecDef>> = HashMap::new();
         let mut callees: HashMap<FnId, BTreeSet<FnId>> = HashMap::new();
         let mut problems: HashMap<FnId, VcRefusal> = HashMap::new();
-        'bodies: for decl in &spec_fns {
+        'bodies: for signature in &spec_fns {
+            // The current client owns the signature and solver identity. A
+            // separately checked definition keeps its own coherent local
+            // scope; no body or clause is installed on the imported FnDecl.
+            let decl = definitions.get(signature.id).unwrap_or(*signature);
             let Some(sig) = sigs.get(&decl.id) else {
                 continue;
             };
@@ -464,9 +478,11 @@ impl Tables {
                         }
                     }
                     let reads = Reads {
+                        local_types: Reads::decl_types(decl),
                         read: decl.params.iter().copied().zip(native_params).collect(),
                         old: HashMap::new(),
                         types,
+                        ..Reads::default()
                     };
                     let mut tr = Tr::new(ctx, &sigs, &functions, &reads);
                     let value = match tr.expr(expr) {

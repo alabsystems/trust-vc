@@ -429,10 +429,14 @@ impl AYEncoder {
     /// solver-backed unit tests, preventing ay-dpll non-determinism (#2273).
     pub fn verify(ctx: &VerificationContext) -> VerifyResult {
         // Prepare context outside the gate (pure lowering, no solver). Part of #2646.
+        #[cfg(test)]
+        let preparation_phase = verification::phase_observer::span("phase", "preparation");
         let prepared = match prepare_context(ctx) {
             Ok(prepared) => prepared,
             Err(err) => return VerifyResult::from(err),
         };
+        #[cfg(test)]
+        drop(preparation_phase);
         // Cache lookup before acquiring the solver gate. Part of #2646.
         if let Some(cached) = verification::cache::lookup_cache(&prepared) {
             return cached;

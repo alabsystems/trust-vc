@@ -19,7 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-trust-ir = { workspace = true, features = ["serde"] }
+trust-ir = { workspace = true, features = ["serde", "binary"] }
 # INPUT GATE: the producer validator. See the workspace note. Also
 # `coverage_establishment_report`: release admission of a certificate's
 # coverage (src/native_coverage.rs) admits only what trust-ir-build derives

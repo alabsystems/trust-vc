@@ -4,10 +4,15 @@
 //! caller's remaining Analysis grant.
 use super::super::term::Term;
 use super::{TooBig, R};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::hash::Hash;
 
 const MAX_DEPTH: usize = 256;
+
+mod prepared;
+pub(super) use prepared::Prepared;
 
 fn tick(pay: &mut impl FnMut(usize) -> bool, cost: usize) -> R<()> {
     if pay(cost) {
@@ -90,6 +95,7 @@ pub(super) fn reserve_cache<K: Eq + Hash, V, P: FnMut(usize) -> bool>(
     Ok(())
 }
 
+#[cfg(test)]
 fn subterms<'a>(
     term: &'a Term,
     seen: &mut HashSet<&'a Term>,
@@ -105,6 +111,7 @@ fn subterms<'a>(
     }
     children(term, &mut |child| subterms(child, seen, pay))
 }
+#[cfg(test)]
 fn shares(term: &Term, seen: &HashSet<&Term>, pay: &mut impl FnMut(usize) -> bool) -> R<bool> {
     tick(pay, 1)?;
     if matches!(term, Term::Bool(_) | Term::Int(_)) {
@@ -124,6 +131,7 @@ fn shares(term: &Term, seen: &HashSet<&Term>, pay: &mut impl FnMut(usize) -> boo
     })?;
     Ok(found)
 }
+#[cfg(test)]
 fn calls_any(term: &Term, names: &HashSet<&str>, pay: &mut impl FnMut(usize) -> bool) -> R<bool> {
     tick(pay, 1)?;
     if let Term::Call { name, .. } = term {
@@ -150,6 +158,7 @@ pub(super) enum Event {
     FactRow,
 }
 
+#[cfg(test)]
 pub(super) fn close(
     list: &[(usize, Term)],
     current: usize,
@@ -160,16 +169,6 @@ pub(super) fn close(
 }
 
 #[cfg(test)]
-pub(super) fn close_observed(
-    list: &[(usize, Term)],
-    current: usize,
-    node: &Term,
-    pay: &mut impl FnMut(usize) -> bool,
-    observer: &mut impl FnMut(Event),
-) -> R<Vec<usize>> {
-    close_impl(list, current, node, pay, observer)
-}
-
 fn close_impl(
     list: &[(usize, Term)],
     current: usize,

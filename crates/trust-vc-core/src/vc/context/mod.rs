@@ -236,6 +236,7 @@ impl Default for DemandInlineConfig {
 #[derive(Debug, Clone, Default)]
 #[must_use = "verification contexts should be configured or verified, not dropped"]
 pub struct VerificationContext {
+    pub(crate) scalar_cast_capture: Option<crate::scalar_cast_capture::ScalarCastCapture>,
     pub(crate) obligations: Vec<ProofObligation>,
     /// Non-fatal VERIFIER WARNINGS raised while extracting this unit, in source
     /// order.
@@ -684,6 +685,11 @@ impl VariableDecl {
 }
 
 impl VerificationContext {
+    /// Attach data observation without changing this context's solver inputs.
+    pub fn observe_scalar_casts(&mut self, capture: crate::scalar_cast_capture::ScalarCastCapture) {
+        self.scalar_cast_capture = Some(capture);
+    }
+
     /// Creates an empty verification context with default configuration.
     pub fn new() -> Self {
         Self::default()
@@ -1356,6 +1362,7 @@ impl VerificationContext {
             diagnostic_source_file,
             ambient_source_location,
             postcondition_result_var,
+            scalar_cast_capture,
         } = self;
 
         // DIAGNOSTIC ONLY, and deliberately absent from the key: neither names
@@ -1367,7 +1374,11 @@ impl VerificationContext {
         // That is intended: the key's contract is SOLVER-INPUT-COMPLETE, and
         // the only consumer (`TERMINATION_QUERY_MEMO`) stores a location-free
         // `TerminationCheck`, so a stale location can never reach a caller.
-        let _ = (diagnostic_source_file, ambient_source_location);
+        let _ = (
+            diagnostic_source_file,
+            ambient_source_location,
+            scalar_cast_capture,
+        );
 
         /// Renders a hash-ordered container canonically: each entry is rendered
         /// with `Debug` and the resulting strings are sorted, so iteration order

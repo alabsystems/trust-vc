@@ -48,12 +48,12 @@ fn unary_tuple_product_keeps_unit_and_nested_type_identities_distinct() {
         .pack_product(ProductFamily::Unit, &[], vec![])
         .unwrap();
     let tuple = vocabulary
-        .pack_product(family, &[unit_type.clone()], vec![unit.clone()])
+        .pack_product(family, std::slice::from_ref(&unit_type), vec![unit.clone()])
         .unwrap();
     assert_ne!(unit, tuple);
     assert_eq!(
         vocabulary
-            .project_product(family, &[unit_type.clone()], tuple.clone())
+            .project_product(family, std::slice::from_ref(&unit_type), tuple.clone())
             .unwrap()
             .len(),
         1
@@ -62,7 +62,7 @@ fn unary_tuple_product_keeps_unit_and_nested_type_identities_distinct() {
         .project_product(family, &[], tuple.clone())
         .is_none());
     assert!(vocabulary
-        .pack_product(family, &[unit_type.clone()], vec![])
+        .pack_product(family, std::slice::from_ref(&unit_type), vec![])
         .is_none());
     assert!(vocabulary
         .pack_product(ProductFamily::Unit, &[unit_type], vec![tuple])
@@ -172,10 +172,14 @@ fn pack_signatures_reject_wrong_value_arity_and_sorts() {
         .pack_product(family(1), &[], vec![p("x"), p("b")])
         .is_none());
     assert!(vocabulary
-        .pack_product(family(1), &[integer.clone()], vec![p("x")])
+        .pack_product(family(1), std::slice::from_ref(&integer), vec![p("x")])
         .is_none());
     assert!(vocabulary
-        .pack_product(family(1), &[integer.clone()], vec![Term::Int(0), p("b")])
+        .pack_product(
+            family(1),
+            std::slice::from_ref(&integer),
+            vec![Term::Int(0), p("b")]
+        )
         .is_none());
     assert!(vocabulary
         .project_product(family(1), &[integer], Term::Bool(true))
@@ -219,7 +223,7 @@ fn full_nominal_argument_and_decoration_vectors_do_not_collapse() {
     assert_ne!(integer.terms(), borrowed.terms());
     let fields = vec![p("x"), p("b")];
     let first = vocabulary
-        .pack_product(family(1), &[integer.clone()], fields.clone())
+        .pack_product(family(1), std::slice::from_ref(&integer), fields.clone())
         .unwrap();
     assert_ne!(
         first,
@@ -255,7 +259,7 @@ fn zero_child_and_phantom_products_retain_their_full_identity() {
         .pack_product(ProductFamily::Unit, &[], vec![])
         .unwrap();
     let empty = vocabulary
-        .pack_product(family(1), &[integer.clone()], vec![])
+        .pack_product(family(1), std::slice::from_ref(&integer), vec![])
         .unwrap();
     assert_ne!(unit, empty);
     assert_ne!(
@@ -320,7 +324,7 @@ fn packs_need_each_typed_child_before_they_supply_membership() {
     let natural = argument(&mut vocabulary, TypeRecipe::Int(IntRange::Nat));
     let child = p("unknown_child");
     let packed = vocabulary
-        .pack_product(f, &[natural.clone()], vec![child.clone()])
+        .pack_product(f, std::slice::from_ref(&natural), vec![child.clone()])
         .unwrap();
     let facts = vocabulary.bridge_axioms(&[&packed], &mut 100_000).unwrap();
     let schema = vocabulary.products.schemas[0].clone();

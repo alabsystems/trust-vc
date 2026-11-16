@@ -831,16 +831,14 @@ fn runtime_array_of_mut_refs_reassign() {
 
 fn runtime_slice_first_last_mut() {
     let mut v = vec![1u64, 2u64, 3u64];
-    let first = v
-        .as_mut_slice()
+    let first_slice = v.as_mut_slice();
+    let first = first_slice
         .first_mut()
         .expect("non-empty slice has first_mut");
     *first = 10u64;
 
-    let last = v
-        .as_mut_slice()
-        .last_mut()
-        .expect("non-empty slice has last_mut");
+    let last_slice = v.as_mut_slice();
+    let last = last_slice.last_mut().expect("non-empty slice has last_mut");
     *last = 30u64;
 
     assert_eq!(v, vec![10u64, 2u64, 30u64]);
@@ -849,14 +847,17 @@ fn runtime_slice_first_last_mut() {
 fn runtime_slice_empty_first_last_mut() {
     let mut v: Vec<u64> = vec![];
 
-    assert!(v.as_mut_slice().first_mut().is_none());
-    assert!(v.as_mut_slice().last_mut().is_none());
+    let first_slice = v.as_mut_slice();
+    assert!(first_slice.first_mut().is_none());
+    let last_slice = v.as_mut_slice();
+    assert!(last_slice.last_mut().is_none());
     assert!(v.is_empty());
 }
 
 fn runtime_slice_split_at_mut() {
     let mut v = vec![1u64, 2u64, 3u64];
-    let (left, right) = v.as_mut_slice().split_at_mut(2usize);
+    let slice = v.as_mut_slice();
+    let (left, right) = slice.split_at_mut(2usize);
 
     left[1usize] = 20u64;
     right[0usize] = 30u64;
@@ -866,7 +867,8 @@ fn runtime_slice_split_at_mut() {
 
 fn runtime_slice_split_at_mut_end() {
     let mut v = vec![1u64, 2u64, 3u64];
-    let (left, right) = v.as_mut_slice().split_at_mut(3usize);
+    let slice = v.as_mut_slice();
+    let (left, right) = slice.split_at_mut(3usize);
 
     left[1usize] = 20u64;
 

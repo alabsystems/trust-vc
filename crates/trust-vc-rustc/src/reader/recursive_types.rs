@@ -107,7 +107,7 @@ fn ty_founded(ty: &Ty, founded: &HashSet<AdtId>) -> bool {
     match ty {
         Ty::Bool | Ty::Int(_) | Ty::Unit | Ty::Param(_) => true,
         Ty::Tuple(elems) => elems.iter().all(|t| ty_founded(t, founded)),
-        Ty::Ref { inner, .. } => ty_founded(inner, founded),
+        Ty::Ref { inner, .. } | Ty::MutRef(inner) => ty_founded(inner, founded),
         Ty::Adt(id, args) => founded.contains(id) && args.iter().all(|t| ty_founded(t, founded)),
     }
 }

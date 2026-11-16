@@ -59,7 +59,7 @@ impl<'tcx> DeclarationModes<'tcx> {
         }
     }
 
-    pub(super) fn check(&self, def: LocalDefId) -> ModeCheck {
+    pub(super) fn check(&self, def: LocalDefId) -> ModeCheck<'tcx> {
         modes::check_with_context(self, def)
     }
 

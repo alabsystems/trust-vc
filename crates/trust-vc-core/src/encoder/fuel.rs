@@ -189,15 +189,17 @@ pub(super) fn encode_fuel_axioms(
     // `forall`, ask whether anything asserted in between mentions a term the
     // binder will bind. See `crate::encoder::binder_capture`.
     let capture_watermark = encoder.assertion_watermark();
-    let direct_term = crate::encoder::with_flag_unwind_safe!(
-        encoder.state.pending_universal_closure,
-        !var_terms.is_empty(),
-        {
-            crate::encoder::with_flag_unwind_safe!(encoder.state.in_assumption_context, true, {
-                encoder.resolve_condition_typed(&direct_axiom)
-            })
-        }
-    );
+    let direct_term = encoder.with_ground_template_scope(&var_terms, |encoder| {
+        crate::encoder::with_flag_unwind_safe!(
+            encoder.state.pending_universal_closure,
+            !var_terms.is_empty(),
+            {
+                crate::encoder::with_flag_unwind_safe!(encoder.state.in_assumption_context, true, {
+                    encoder.resolve_condition_typed(&direct_axiom)
+                })
+            }
+        )
+    });
     let direct_term = direct_term.map_err(|e| TrustVcError::Encoding {
         context: "fuel encoding: direct defining axiom",
         detail: format!("Failed to encode direct axiom: {}", e),
@@ -229,13 +231,14 @@ pub(super) fn encode_fuel_axioms(
 
     let trigger_str = fuel_trigger_string(func_name, &param_names);
 
-    let direct_trigger =
-        encoder
-            .encode_trigger_typed(&trigger_str)
-            .map_err(|e| TrustVcError::Encoding {
-                context: "fuel encoding: direct trigger",
-                detail: format!("Failed to encode direct trigger '{}': {}", trigger_str, e),
-            })?;
+    let direct_trigger = encoder
+        .with_ground_template_scope(&var_terms, |encoder| {
+            encoder.encode_trigger_typed(&trigger_str)
+        })
+        .map_err(|e| TrustVcError::Encoding {
+            context: "fuel encoding: direct trigger",
+            detail: format!("Failed to encode direct trigger '{}': {}", trigger_str, e),
+        })?;
     let direct_quantified = encoder
         .solver
         .try_forall_with_triggers(&var_terms, direct_term, &[&[direct_trigger]])

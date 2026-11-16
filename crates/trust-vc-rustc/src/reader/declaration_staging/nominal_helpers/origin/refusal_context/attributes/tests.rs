@@ -80,13 +80,17 @@ impl Callbacks for Inspect {
         );
         let tool = rows
             .iter()
-            .find(|row| row["detail"]["kind"] == "Unparsed")
+            .find(|row| row["detail"]["kind"] == "Tool")
             .unwrap();
         assert_eq!(
             tool["detail"]["path_observation"]["segments"],
             json!(["verifier", "accept_recursive_types"])
         );
-        assert!(tool["detail"]["native_attr_id"].is_u64());
+        assert!(tool["detail"]["native_attr_id"].is_null());
+        assert_eq!(
+            tool["detail"]["native_attr_id_state"],
+            "not retained for this native kind"
+        );
         assert_eq!(
             tool["detail"]["argument_observation"]["top_level_token_count"],
             1
@@ -106,13 +110,13 @@ impl Callbacks for Inspect {
         let original = raw.attrs.get(id.local_id);
         let attribute = original
             .iter()
-            .find(|attribute| matches!(attribute, Attribute::Unparsed(_)))
+            .find(|attribute| matches!(attribute, Attribute::Tool(_)))
             .unwrap();
         let copy = (*attribute).clone();
-        let (Attribute::Unparsed(a), Attribute::Unparsed(b)) = (attribute, &copy) else {
+        let (Attribute::Tool(a), Attribute::Tool(b)) = (attribute, &copy) else {
             unreachable!()
         };
-        assert_eq!(a.id.attr_id, b.id.attr_id);
+        assert_eq!(a.path.segments, b.path.segments);
         assert_eq!(a.span, b.span);
         assert!(!same_attribute(attribute, Some(&copy)));
         let other = named(tcx, "Other");

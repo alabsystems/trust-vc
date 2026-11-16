@@ -6,6 +6,9 @@
 
 use super::*;
 
+mod function_preflight;
+mod source_families;
+
 pub(super) struct ConsumeKeep<'a> {
     inputs: &'a Inputs,
     erase: Option<OwnedErase>,
@@ -39,6 +42,8 @@ pub(super) struct KeepInputs {
     pub(super) candidates: alignment::Candidates,
     pub(super) meanings: meaning::ScalarBindings,
     pub(super) spec_inputs: BTreeMap<NativeKey, spec_graph::OwnedInputs>,
+    pub(super) spec_definitions: BTreeMap<NativeKey, spec_graph::OwnedDefinitions>,
+    pub(super) source_families: BTreeMap<NativeKey, spec_graph::OwnedSourceFamily>,
     pub(super) spec_pairs: spec_graph::Pairs,
     pub(super) spec_view: spec_graph::View,
 }
@@ -124,6 +129,13 @@ impl<'a> ConsumeKeep<'a> {
             &prepared.spec_pairs,
             prepared.spec_inputs.values(),
         )?;
+        for graph in prepared.spec_definitions.values() {
+            graph.revalidate(self.inputs, &prepared.spec_pairs)?;
+        }
+        for family in prepared.source_families.values() {
+            family.revalidate(self.inputs, &prepared.spec_pairs)?;
+            family.validate_functions(&prepared.functions)?;
+        }
         prepared.report["retained_original_helper_closures"] =
             json!(prepared.nominal_helpers.len());
         Ok(prepared)
@@ -204,6 +216,7 @@ impl Callbacks for ConsumeKeep<'_> {
             let mut nominal_helpers = BTreeMap::new();
             let mut external_mapping_selections = BTreeMap::new();
             let mut spec_inputs = BTreeMap::new();
+            let mut spec_definitions = BTreeMap::new();
             let mut spec_rows = Vec::new();
             for declaration in &keep.declarations {
                 if !matches!(
@@ -258,10 +271,12 @@ impl Callbacks for ConsumeKeep<'_> {
                     })();
                     match binding {
                         Ok(selections) => {
-                            observed["selected_wf_builtin_requirements"] = json!(selections
-                                .iter()
-                                .map(builtins::Selection::observation)
-                                .collect::<Vec<_>>());
+                            observed["selected_wf_builtin_requirements"] = json!(
+                                selections
+                                    .iter()
+                                    .map(builtins::Selection::observation)
+                                    .collect::<Vec<_>>()
+                            );
                             nominal_wf.insert(declaration.key, owned);
                             wf_builtin_selections.insert(declaration.key, selections);
                         }
@@ -286,10 +301,12 @@ impl Callbacks for ConsumeKeep<'_> {
                         &common,
                     ) {
                         Ok(selections) => {
-                            observed["selected_external_type_mappings"] = json!(selections
-                                .iter()
-                                .map(fields::MappingSelection::observation)
-                                .collect::<Vec<_>>());
+                            observed["selected_external_type_mappings"] = json!(
+                                selections
+                                    .iter()
+                                    .map(fields::MappingSelection::observation)
+                                    .collect::<Vec<_>>()
+                            );
                             nominal_fields.insert(declaration.key, owned_fields);
                             external_mapping_selections.insert(declaration.key, selections);
                         }
@@ -349,7 +366,7 @@ impl Callbacks for ConsumeKeep<'_> {
                     if policy.owner() != candidate.keep {
                         return Err("native function policy belongs to a different owner".into());
                     }
-                    let headers = declaration_headers::check(tcx, owner);
+                    let headers = function_preflight::check(tcx, owner, &modes)?;
                     let correspondence =
                         factory::prepare_correspondence(&bytes, &compared, candidate)?;
                     let native =
@@ -381,9 +398,9 @@ impl Callbacks for ConsumeKeep<'_> {
                         "import_authorized": false}),
                 });
             }
-            // This new path captures nonempty original Spec dependency inputs
-            // without changing the old empty-header/signature-only factory.
-            // No result enters ClientImports or supplies a body definition.
+            // Pending dependency inputs do not grant equations. The separate
+            // finalizer checks supported complete semantic closures while the
+            // original Keep HIR and fresh builtin construction are still live.
             match spec_graph::Intrinsics::capture(tcx, self.inputs, &common) {
                 Ok(scope) => {
                     let mut work = spec_graph::Work::new();
@@ -404,7 +421,15 @@ impl Callbacks for ConsumeKeep<'_> {
                         let result = (|| {
                             let graph =
                                 spec_graph::capture(tcx, owner, &scope, &spec_pairs, &mut work)?;
-                            let observation = graph.observation()?;
+                            let mut observation = graph.observation()?;
+                            observation["display_path"] = json!(tcx.def_path_str(owner));
+                            observation["semantic_definition"] = match graph.finalize(&mut work) {
+                                Ok(definition) => {
+                                    spec_definitions.insert(key, definition);
+                                    json!({"state": "CheckedOriginalSpecDefinition", "native_owner_retained": true})
+                                }
+                                Err(reason) => json!({"state": "Unknown", "reason": reason}),
+                            };
                             spec_inputs.insert(key, graph.into_inputs()?);
                             Ok::<_, String>(observation)
                         })();
@@ -419,6 +444,48 @@ impl Callbacks for ConsumeKeep<'_> {
                 Err(reason) => spec_rows.push(json!({"state": "Unknown", "reason": reason,
                     "body_import_authorized": false})),
             }
+            // The semantic read must run while the successful transaction's
+            // exact context and maps are still borrowed. Nothing from a failed
+            // family is retained as a native signature or partial semantics.
+            let (nominal_helpers, closed_scope) = match helper_cohort {
+                Ok(cohort) => {
+                    #[cfg(test)]
+                    let cohort = cohort.with_transaction_probe(self.transaction_probe.take());
+                    let (helpers, scope) = cohort.finish_with_scope(nominal_helpers)?;
+                    (helpers, Some(scope))
+                }
+                Err(_) if nominal_helpers.is_empty() => (BTreeMap::new(), None),
+                Err(_) => return Err("helper results escaped an unavailable native scope".into()),
+            };
+            let source_families = if let Some(scope) = &closed_scope {
+                source_families::prepare(
+                    tcx,
+                    scope,
+                    capability::facts::NominalInputs {
+                        inputs: self.inputs,
+                        common: &common,
+                        keep: &keep,
+                        erase: &erase,
+                        candidates,
+                        policies: &nominal_policies,
+                        wf: &nominal_wf,
+                        fields: &nominal_fields,
+                        helpers: &nominal_helpers,
+                    },
+                    &meanings,
+                    &wf_builtin_selections,
+                    &owners,
+                    &modes,
+                    &bytes,
+                    &compared,
+                    &spec_pairs,
+                    &mut functions,
+                    &mut spec_rows,
+                )?
+            } else {
+                BTreeMap::new()
+            };
+            drop(closed_scope);
             let identities = function_identity_observer::complete(tcx)?;
             diagnostics(tcx)?;
             self.inputs.revalidate()?;
@@ -427,6 +494,7 @@ impl Callbacks for ConsumeKeep<'_> {
                 "metadata_loader_invocation": erase.loader_observation,
                 "keep_invocation": invocation.observation(),
                 "erase_metadata_sha256": erase.file.sha256,
+                "erase_rlib": erase.rlib.observation(),
                 "producer_executable_sha256": self.inputs.producer_sha256,
                 "compiler_driver_path": self.inputs.compiler_driver.path,
                 "compiler_driver_sha256": self.inputs.compiler_driver.sha256,
@@ -438,6 +506,8 @@ impl Callbacks for ConsumeKeep<'_> {
                     json!({"key": key.def_path_hash.to_string(), "reason": reason})).collect::<Vec<_>>(),
                 "declarations": rows, "nominal_policy_observations": nominal_rows,
                 "original_spec_dependency_inputs": spec_rows,
+                "checked_original_spec_definition_graphs": spec_definitions.len(),
+                "checked_original_source_families": source_families.len(),
                 "function_identity_observations": identities,
                 "foreign_private_fields_read": false,
                 "original_local_field_types_validated": {"successful_nominals": nominal_wf.len(),
@@ -449,15 +519,6 @@ impl Callbacks for ConsumeKeep<'_> {
                 "captured_native_meanings": meanings.observation(),
                 "import_authorized": false, "verified_functions": null,
                 "keep_body_ownership_checked": false});
-            let nominal_helpers = match helper_cohort {
-                Ok(cohort) => {
-                    #[cfg(test)]
-                    let cohort = cohort.with_transaction_probe(self.transaction_probe.take());
-                    cohort.finish(nominal_helpers)?
-                }
-                Err(_) if nominal_helpers.is_empty() => BTreeMap::new(),
-                Err(_) => return Err("helper results escaped an unavailable native scope".into()),
-            };
             let candidates = compared.into_candidates();
             Ok(KeepInputs {
                 report,
@@ -474,6 +535,8 @@ impl Callbacks for ConsumeKeep<'_> {
                 candidates,
                 meanings,
                 spec_inputs,
+                spec_definitions,
+                source_families,
                 spec_pairs,
                 spec_view,
             })

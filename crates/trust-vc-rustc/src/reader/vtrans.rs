@@ -117,7 +117,7 @@ impl<'tcx> Cx<'tcx> {
                         _ => problem("a `spec_fn` type whose parameters are not a tuple"),
                     };
                 }
-                self.bounds_problem(did, args, env)
+                self.bounds_problem(did, *args, env)
             }
             ty::Closure(_, args) => {
                 let sig = args.as_closure().sig().skip_binder();
@@ -227,13 +227,13 @@ impl<'tcx> Cx<'tcx> {
     pub(crate) fn verus_bounds_problem(
         &self,
         def_id: DefId,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         env: DefId,
     ) -> Result<Option<String>, Refusal> {
         self.bounds_problem(def_id, args, env).transpose()
     }
 
-    fn bounds_problem(&self, def_id: DefId, args: ty::GenericArgsRef<'tcx>, env: DefId) -> Problem {
+    fn bounds_problem(&self, def_id: DefId, args: ty::GenericArgs<'tcx>, env: DefId) -> Problem {
         let tcx = self.tcx;
         let mut work: Vec<ty::Clause<'tcx>> = tcx
             .clauses_of(def_id)
@@ -357,7 +357,7 @@ impl<'tcx> Cx<'tcx> {
     fn select_trait_item(
         &self,
         def_id: DefId,
-        args: ty::GenericArgsRef<'tcx>,
+        args: ty::GenericArgs<'tcx>,
         env: DefId,
     ) -> Result<Option<&'tcx ImplSource<'tcx, ()>>, Refusal> {
         let tcx = self.tcx;
@@ -469,7 +469,7 @@ impl<'tcx> Cx<'tcx> {
         let tcx = self.tcx;
         let problem = |what: &str, why: &str| Some(Ok(format!("{what} `{ty}`, {why},")));
         let types =
-            |args: ty::GenericArgsRef<'tcx>| args.types().find_map(|t| self.wf_problem(t, env));
+            |args: ty::GenericArgs<'tcx>| args.types().find_map(|t| self.wf_problem(t, env));
         match ty.kind() {
             ty::Bool
             | ty::Char
@@ -490,7 +490,7 @@ impl<'tcx> Cx<'tcx> {
                 if matches!(item, Some(VerusItem::Int | VerusItem::Nat)) {
                     return None;
                 }
-                if let Some(problem) = types(args) {
+                if let Some(problem) = types(*args) {
                     return Some(problem);
                 }
                 let count = args.types().count();

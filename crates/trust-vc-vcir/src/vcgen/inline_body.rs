@@ -34,7 +34,7 @@ pub(super) fn closed(arguments: &[Ty], work: &Cell<usize>, span: SpanId) -> R<bo
                 }
                 Ok(result)
             }
-            Ty::Ref { inner, .. } => visit(inner, work, span, depth + 1),
+            Ty::Ref { inner, .. } | Ty::MutRef(inner) => visit(inner, work, span, depth + 1),
             Ty::Bool | Ty::Int(_) | Ty::Unit => Ok(true),
         }
     }
@@ -89,6 +89,7 @@ pub(super) fn independent_instance(
         || ctx.group(origin.declaration).is_some()
         || !original.decreases.is_empty()
         || original.decreases_when.is_some()
+        || original.unwind.is_some()
         || original.decreases_by.is_some()
         || origin.type_args.len() != original.type_params.len()
         || declaration.params.len() != original.params.len()
@@ -184,6 +185,14 @@ pub(super) fn ty(
                 }
                 Ty::Adt(*id, result)
             }
+            Ty::MutRef(inner) => Ty::MutRef(Box::new(copy(
+                ctx,
+                inner,
+                arguments,
+                work,
+                span,
+                depth + 1,
+            )?)),
             Ty::Ref { mutable, inner } => Ty::Ref {
                 mutable: *mutable,
                 inner: Box::new(copy(ctx, inner, arguments, work, span, depth + 1)?),
@@ -337,6 +346,13 @@ pub(super) fn expression(
                 index: *index,
             },
             ExprKind::Borrow(value) => ExprKind::Borrow(child(value)?),
+            ExprKind::MutRefCurrent(value) => ExprKind::MutRefCurrent(child(value)?),
+            ExprKind::MutRefFuture(value) => ExprKind::MutRefFuture(child(value)?),
+            ExprKind::HasResolved(value) => ExprKind::HasResolved(child(value)?),
+            ExprKind::MutRefUpdate { reference, value } => ExprKind::MutRefUpdate {
+                reference: child(reference)?,
+                value: child(value)?,
+            },
             ExprKind::Quant {
                 kind,
                 vars,
@@ -359,7 +375,7 @@ pub(super) fn expression(
                 cond: child(cond)?,
                 result: child(result)?,
             },
-            ExprKind::ProofInSpec(_) => {
+            ExprKind::ProofInSpec(_) | ExprKind::ProofInSpecTail { .. } => {
                 return Err(refusal(
                     "inline-body",
                     "a closed inline body with embedded proof statements",
@@ -404,7 +420,7 @@ mod tests {
         );
         let work = Cell::new(200_000);
         let actual = Ty::Int(IntRange::U(128));
-        let copied = expression(&ctx, &source, &[actual.clone()], &work).unwrap();
+        let copied = expression(&ctx, &source, std::slice::from_ref(&actual), &work).unwrap();
         assert_eq!(copied.ty, actual);
         let ExprKind::Choose {
             vars,
@@ -426,7 +442,7 @@ mod tests {
             panic!("call retained")
         };
         assert_eq!(*callee, FnId(DefHash::new(0, 9)));
-        assert_eq!(type_args, &[actual.clone()]);
+        assert_eq!(type_args, std::slice::from_ref(&actual));
         assert_eq!(args[0].ty, actual);
         assert_eq!(source.ty, Ty::Param(0), "checked source remains unchanged");
     }

@@ -8,9 +8,16 @@ the owner can die before reporting its command; callers must retain UNKNOWN.
 """
 
 import os
+import sys
+
+# -I intentionally omits the script directory. Select only this maintained
+# sibling module and capture before allocating any owner report/private pipes.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import native_request_channel
+_CHANNEL = native_request_channel.capture() if __name__ == "__main__" else None
+
 import struct
 import subprocess
-import sys
 
 FRAME = struct.Struct("!cqi")
 
@@ -28,12 +35,19 @@ def main():
         raise RuntimeError("invalid session-owner invocation")
     if descriptor in passed or liveness in passed:
         raise RuntimeError("a private owner descriptor cannot be a command descriptor")
+    if _CHANNEL is not None:
+        received = int(os.environ[native_request_channel.ENV])
+        if passed.count(received) != 1 or received in (descriptor, liveness):
+            raise RuntimeError("native request channel is not the selected command descriptor")
+        passed = tuple(fd for fd in passed if fd != received)
+    environment, passed = native_request_channel.bind(_CHANNEL, os.environ, passed)
     # pass_fds made these inheritable for this exact owner's exec. Restore
     # CLOEXEC before creating the genuine command, and never pass them to it.
     os.set_inheritable(descriptor, False)
     os.set_inheritable(liveness, False)
     try:
-        command = subprocess.Popen(sys.argv[5:], close_fds=True, pass_fds=passed)
+        command = subprocess.Popen(sys.argv[5:], close_fds=True, pass_fds=passed,
+                                   env=environment)
     except OSError as error:
         report(descriptor, b"F", 0, error.errno)
         raise
@@ -53,4 +67,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        if _CHANNEL is not None:
+            _CHANNEL.close()

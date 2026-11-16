@@ -6,8 +6,10 @@
 
 use super::*;
 use crate::args;
-use crate::reader::FnStatus;
 use crate::shim::NormalInvocation;
+
+#[path = "tests/prepared_sdk.rs"]
+mod prepared_sdk;
 
 fn dedicated(name: &str) {
     let module = module_path!().split_once("::").unwrap().1;
@@ -34,6 +36,7 @@ fn dedicated(name: &str) {
 
 fn with_owner(name: &str, action: impl FnOnce(&StandaloneImported<'_>, &Path)) {
     dedicated(name);
+    crate::compiler_environment::CompilerEnvironment::require_absent_process().unwrap();
     let template = std::path::PathBuf::from(
         std::env::var_os("TRUST_VC_NORMAL_OPTIONS_REQUEST")
             .expect("fresh genuine @2 request template"),
@@ -134,121 +137,12 @@ fn request(
 const IMPORTED: &str =
     "proof fn imported_control<A>(s: vstd::set::Set<A>) { assert(s.len() as int >= 0); }";
 
-#[derive(Default)]
-struct ReadSummary {
-    external: bool,
-    outside: bool,
-    old_mut: bool,
-    new_mut: bool,
-    imported: usize,
-}
-struct ReadClient<'a> {
-    owner: &'a StandaloneImported<'a>,
-    source: &'a ClientSource,
-    plan: &'a macro_context::NormalClientPlan<'a>,
-    verifier: OwnedNormalVerifier<'a, 'a>,
-    summary: Option<ReadSummary>,
-}
-impl Callbacks for ReadClient<'_> {
-    fn after_expansion<'tcx>(&mut self, _: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
-        let preparation = self
-            .verifier
-            .after_expansion(tcx)
-            .expect("genuine normal HIR preparation");
-        let imports = self.owner.for_client(tcx, self.plan.verify()).unwrap();
-        let live = imports
-            .read_for_normal_verification(&preparation, self.source)
-            .unwrap();
-        self.summary = Some(live.with_read(|_, read| {
-            ReadSummary {
-                external: read.fns.iter().any(|f| {
-                    f.def_path.ends_with("outside") && matches!(f.status, FnStatus::External)
-                }),
-                outside: read
-                    .pending_item_refusals
-                    .iter()
-                    .any(|r| r.tag == "external-by-default"),
-                old_mut: read
-                    .errors
-                    .iter()
-                    .any(|e| e.message == crate::messages::MUT_REF_PARAM_SPEC_FN),
-                new_mut: read
-                    .fns
-                    .iter()
-                    .any(|f| matches!(&f.status, FnStatus::Refused(r) if r.tag == "new-mut-ref")),
-                imported: read
-                    .krate
-                    .fns
-                    .iter()
-                    .filter(|f| f.role == trust_vc_vcir::FnRole::Imported)
-                    .count(),
-            }
-        }));
-        Compilation::Stop
-    }
-}
-
-fn observe(
-    owner: &StandaloneImported<'_>,
-    source: &ClientSource,
-    root: &Path,
-    name: &str,
-    flags: &[&str],
-) -> ReadSummary {
-    let invocation = request(owner, source, &root.join(format!("{name}.rmeta")), flags);
-    let plan = macro_context::NormalClientPlan::from_invocation(owner, source, invocation).unwrap();
-    let mut callback = ReadClient {
-        owner,
-        source,
-        plan: &plan,
-        verifier: OwnedNormalVerifier::new(&plan),
-        summary: None,
-    };
-    let result = run_compiler(plan.verify(), &mut callback);
-    record_phase(
-        &owner.library().inputs,
-        name,
-        &result,
-        callback
-            .summary
-            .as_ref()
-            .map(|_| Ok::<_, String>(()))
-            .as_ref(),
-    )
-    .unwrap();
-    result.unwrap();
-    owner.check_retained_inputs().unwrap();
-    callback.summary.unwrap()
-}
+mod options;
 
 #[test]
 #[ignore = "requires a dedicated exact process and a fresh genuine @2 producer"]
 fn actual_owned_reader_uses_the_invocations_nondefault_options() {
-    with_owner(
-        "actual_owned_reader_uses_the_invocations_nondefault_options",
-        |owner, root| {
-            let outside = client_source(
-                root,
-                "outside",
-                &format!("fn outside() {{}}\nverus! {{ {IMPORTED} }}"),
-            );
-            let default = observe(owner, &outside, root, "DefaultRead", &[]);
-            let enabled = observe(
-                owner,
-                &outside,
-                root,
-                "NoExternalRead",
-                &["--no-external-by-default"],
-            );
-            assert!(default.external && !default.outside && default.imported > 0);
-            assert!(!enabled.external && enabled.outside && enabled.imported == default.imported);
-            let mutable = client_source(root, "mutable", &format!("verus! {{ {IMPORTED}\nspec fn reference_option(x: &mut u8) -> bool {{ true }} }}"));
-            let default = observe(owner, &mutable, root, "OldMutRead", &[]);
-            let enabled = observe(owner, &mutable, root, "NewMutRead", &["-V", "new-mut-ref"]);
-            assert!(default.old_mut && !default.new_mut);
-            assert!(enabled.new_mut && !enabled.old_mut && enabled.imported > 0);
-        },
-    );
+    options::nondefault_options();
 }
 
 struct ScopeClient<'a> {
@@ -489,6 +383,35 @@ fn actual_request_binding_and_lifetime_options_keep_the_normal_gates() {
             assert!(
                 macro_context::NormalClientPlan::from_invocation(owner, &source, wrong).is_err()
             );
+            let mut wrong_rlib = original.original().unwrap().clone();
+            let extern_arg = wrong_rlib
+                .rustc
+                .iter_mut()
+                .find(|s| s.starts_with("vstd="))
+                .unwrap();
+            *extern_arg = format!("vstd={}", root.join("unowned.rlib").display());
+            let wrong_rlib =
+                NormalInvocation::derive("owned-option-client".into(), wrong_rlib).unwrap();
+            assert!(
+                macro_context::NormalClientPlan::from_invocation(owner, &source, wrong_rlib)
+                    .is_err()
+            );
+            let mut duplicate_image = original.original().unwrap().clone();
+            duplicate_image.rustc.extend([
+                "--extern".into(),
+                format!(
+                    "duplicate_library={}",
+                    owner.library().prepared.erase.rlib.file().path.display(),
+                ),
+            ]);
+            let duplicate_image =
+                NormalInvocation::derive("owned-option-client".into(), duplicate_image).unwrap();
+            assert!(macro_context::NormalClientPlan::from_invocation(
+                owner,
+                &source,
+                duplicate_image
+            )
+            .is_err());
             let response = root.join("unretained.args");
             std::fs::write(
                 &response,
@@ -546,6 +469,15 @@ fn actual_request_binding_and_lifetime_options_keep_the_normal_gates() {
                 .all(|f| f["verdict"] != "verified"));
             assert_eq!(report["publication"], "NoSuccessfulPublication");
             assert_eq!(report["imported_verified_functions"], 0);
+            // The semantic --no-verify refusal must follow a genuine clean
+            // erase child, rather than succeeding because child startup failed.
+            assert_eq!(report["normal_verdict"]["erase_exit"], 0);
+            assert_eq!(report["normal_verdict"]["outcome"], "refused");
+            let functions = report["normal_verdict"]["functions"].as_array().unwrap();
+            assert_eq!(functions.len(), 2);
+            assert!(functions
+                .iter()
+                .all(|function| function["tag"] == "no-verify"));
             let tracked = client_source(root, "tracked", &format!("verus! {{ {IMPORTED}\nproof fn consume<A>(tracked a: A) {{}}\nproof fn check<A>(tracked a: A) {{ consume(a); }} }}"));
             let output = root.join("tracked-no-lifetime.rmeta");
             let plan = macro_context::NormalClientPlan::from_invocation(
@@ -567,6 +499,7 @@ fn actual_request_binding_and_lifetime_options_keep_the_normal_gates() {
                 .unwrap()
                 .iter()
                 .all(|f| f["verdict"] != "verified"));
+            prepared_sdk::check(owner, root);
         },
     );
 }

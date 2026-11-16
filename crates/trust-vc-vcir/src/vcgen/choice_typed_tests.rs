@@ -8,32 +8,9 @@ use super::super::type_encoding::TypeArgument;
 use super::*;
 use crate::{AdtDecl, AdtId, AdtKind, DefHash, VcCrate};
 
-fn owner() -> FnId {
-    FnId(DefHash::new(57, 1))
-}
-
-fn choice(ty: Ty) -> Expr {
-    let value = Expr::read(Place::local(LocalId(7)), ty.clone(), SpanId(0));
-    let predicate = Expr::new(
-        Ty::Bool,
-        SpanId(0),
-        ExprKind::Call {
-            callee: owner(),
-            type_args: vec![ty.clone()],
-            args: vec![value.clone()],
-        },
-    );
-    Expr::new(
-        ty.clone(),
-        SpanId(0),
-        ExprKind::Choose {
-            vars: vec![(LocalId(7), ty)],
-            triggers: vec![vec![predicate.clone()]],
-            cond: Box::new(predicate),
-            result: Box::new(value),
-        },
-    )
-}
+#[path = "choice_typed_tests/helpers.rs"]
+mod helpers;
+use helpers::{choice, owner};
 
 #[test]
 fn actual_closed_choice_translation_admits_boxed_predicate_without_definition_facts() {
@@ -94,7 +71,15 @@ fn admission_uses_the_posttranslation_vocabulary_not_an_earlier_recipe_snapshot(
     let reads = Reads::default();
     let tr = Tr::new(&ctx, &tables.sigs, &tables.functions, &reads);
     assert!(tr
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_ok());
 }
 
@@ -112,15 +97,15 @@ fn complete_condition_values_triggers_and_actual_hole_arguments_are_checked_toge
     let actual = Term::Int(3);
     let triggers = vec![vec![predicate.clone()]];
     assert!(tr
-        .check_choice_template(
-            &bound,
-            &holes,
-            &predicate,
-            &[value.clone()],
-            &triggers,
-            &[actual],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &bound,
+            holes: &holes,
+            condition: &predicate,
+            values: std::slice::from_ref(&value),
+            triggers: &triggers,
+            arguments: &[actual],
+            span: SpanId(0)
+        })
         .is_ok());
     let forged = Term::call(
         "same_surface_without_registered_signature",
@@ -128,48 +113,48 @@ fn complete_condition_values_triggers_and_actual_hole_arguments_are_checked_toge
         Sort::Bool,
     );
     assert!(tr
-        .check_choice_template(
-            &bound,
-            &holes,
-            &forged,
-            &[value.clone()],
-            &triggers,
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &bound,
+            holes: &holes,
+            condition: &forged,
+            values: std::slice::from_ref(&value),
+            triggers: &triggers,
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &bound,
-            &holes,
-            &predicate,
-            &[forged.clone()],
-            &triggers,
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &bound,
+            holes: &holes,
+            condition: &predicate,
+            values: std::slice::from_ref(&forged),
+            triggers: &triggers,
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &bound,
-            &holes,
-            &predicate,
-            &[value.clone()],
-            &[vec![forged.clone()]],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &bound,
+            holes: &holes,
+            condition: &predicate,
+            values: std::slice::from_ref(&value),
+            triggers: &[vec![forged.clone()]],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &bound,
-            &holes,
-            &predicate,
-            &[value],
-            &triggers,
-            &[forged],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &bound,
+            holes: &holes,
+            condition: &predicate,
+            values: &[value],
+            triggers: &triggers,
+            arguments: &[forged],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -198,30 +183,38 @@ fn closed_pairs_call_result_arity_and_shared_variable_sorts_refuse_counterfeits(
     ];
     for other in variants {
         assert!(tr
-            .check_choice_template(&[], &[], &other, &[], &[], &[], SpanId(0))
+            .check_choice_template(ChoiceTemplate {
+                leaves: &[],
+                holes: &[],
+                condition: &other,
+                values: &[],
+                triggers: &[],
+                arguments: &[],
+                span: SpanId(0)
+            })
             .is_err());
     }
     assert!(tr
-        .check_choice_template(
-            &[("qb".into(), LeafTy::Int(IntRange::Nat))],
-            &[("qb".into(), LeafTy::Bool)],
-            &predicate,
-            &[],
-            &[],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[("qb".into(), LeafTy::Int(IntRange::Nat))],
+            holes: &[("qb".into(), LeafTy::Bool)],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &[],
-            &[],
-            &predicate,
-            &[],
-            &[],
-            &[Term::var("qb", Sort::Bool)],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[Term::var("qb", Sort::Bool)],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -240,7 +233,15 @@ fn open_inline_environment_cannot_be_licensed_by_closed_looking_type_names() {
     };
     let tr = Tr::new(&ctx, &tables.sigs, &tables.functions, &reads);
     assert!(tr
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_ok());
     let forged = TypeArgument::new(
         Term::call("nil_lookalike", vec![], Sort::Decoration),
@@ -253,7 +254,15 @@ fn open_inline_environment_cannot_be_licensed_by_closed_looking_type_names() {
     };
     let tr = Tr::new(&ctx, &tables.sigs, &tables.functions, &reads);
     assert!(tr
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     let open = TypeArgument::new(
         Term::var("open_dec", Sort::Decoration),
@@ -266,7 +275,15 @@ fn open_inline_environment_cannot_be_licensed_by_closed_looking_type_names() {
     };
     let tr = Tr::new(&ctx, &tables.sigs, &tables.functions, &reads);
     assert!(tr
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -282,26 +299,26 @@ fn abstract_poly_domains_and_results_still_refuse() {
         "generic-choice"
     );
     assert!(tr
-        .check_choice_template(
-            &[("qb".into(), LeafTy::Poly(0))],
-            &[],
-            &Term::Bool(true),
-            &[],
-            &[],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[("qb".into(), LeafTy::Poly(0))],
+            holes: &[],
+            condition: &Term::Bool(true),
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &[],
-            &[],
-            &Term::Bool(true),
-            &[Term::var("abstract_result", Sort::Poly)],
-            &[],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &Term::Bool(true),
+            values: &[Term::var("abstract_result", Sort::Poly)],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -334,30 +351,38 @@ fn two_admitted_nominals_keep_distinct_sorts_in_values_triggers_and_holes() {
     let reads = Reads::default();
     let tr = Tr::new(&ctx, &tables.sigs, &tables.functions, &reads);
     assert!(tr
-        .check_choice_template(
-            &[("n0".into(), terms[0].1)],
-            &[],
-            &predicate,
-            &[terms[0].0.clone()],
-            &[vec![predicate.clone()]],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[("n0".into(), terms[0].1)],
+            holes: &[],
+            condition: &predicate,
+            values: &[terms[0].0.clone()],
+            triggers: &[vec![predicate.clone()]],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_ok());
     let cross = Term::eq(terms[0].0.clone(), terms[1].0.clone());
     assert!(tr
-        .check_choice_template(&[], &[], &cross, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &cross,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(tr
-        .check_choice_template(
-            &[("n0".into(), terms[0].1)],
-            &[("n0".into(), terms[1].1)],
-            &predicate,
-            &[],
-            &[],
-            &[],
-            SpanId(0)
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[("n0".into(), terms[0].1)],
+            holes: &[("n0".into(), terms[1].1)],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -372,7 +397,15 @@ fn repeated_choice_admission_spends_the_same_inline_grant_without_refill() {
     measured.inline_stack.push(owner());
     let before = measured.inline_work.get();
     assert!(measured
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_ok());
     let cost = before - measured.inline_work.get();
     assert!(cost > 0);
@@ -380,14 +413,38 @@ fn repeated_choice_admission_spends_the_same_inline_grant_without_refill() {
     repeated.inline_stack.push(owner());
     repeated.inline_work.set(cost + cost / 2);
     assert!(repeated
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_ok());
     assert!(repeated
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
     assert!(repeated.inline_work.get() <= cost / 2);
     assert!(repeated
-        .check_choice_template(&[], &[], &predicate, &[], &[], &[], SpanId(0))
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[],
+            condition: &predicate,
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0)
+        })
         .is_err());
 }
 
@@ -402,15 +459,15 @@ fn unfunded_large_hole_name_declines_before_copy_or_vocabulary_capture() {
     tr.inline_work.set(64);
     let functions = ctx.type_functions();
     let error = tr
-        .check_choice_template(
-            &[],
-            &[("h".repeat(4096), LeafTy::Bool)],
-            &Term::Bool(true),
-            &[],
-            &[],
-            &[],
-            SpanId(0),
-        )
+        .check_choice_template(ChoiceTemplate {
+            leaves: &[],
+            holes: &[("h".repeat(4096), LeafTy::Bool)],
+            condition: &Term::Bool(true),
+            values: &[],
+            triggers: &[],
+            arguments: &[],
+            span: SpanId(0),
+        })
         .unwrap_err();
     assert_eq!(error.detail, "typed choice template work exhausted");
     assert_eq!(

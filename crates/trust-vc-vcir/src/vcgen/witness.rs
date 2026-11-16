@@ -63,6 +63,11 @@ type Point<'t> = (Fun<'t>, Vec<i128>);
 /// `Search::fixed`).
 type Choices<'t> = HashMap<Point<'t>, (i128, bool)>;
 
+enum Repair<'t> {
+    Force(&'t Term, bool),
+    Equal { side: &'t Term, other: &'t Term },
+}
+
 /// The most evaluation steps one search takes.
 const SEARCH_STEPS: usize = 400_000;
 
@@ -158,6 +163,8 @@ struct Search<'p, 't> {
     pool: Vec<i128>,
     /// Defaults spread over a wide range instead of the pool.
     wide: bool,
+    /// A small initial interpretation, before the existing hashed defaults.
+    zero_defaults: bool,
     seed: u64,
     /// Values chosen at points, and whether a later choice may replace
     /// them: values chosen to satisfy the facts may be, values the search
@@ -338,6 +345,7 @@ impl<'p, 't> Search<'p, 't> {
             k: [0, 1],
             pool: Vec::new(),
             wide: false,
+            zero_defaults: false,
             seed: 0,
             fixed: HashMap::new(),
             soft: false,
@@ -449,6 +457,96 @@ impl<'p, 't> Search<'p, 't> {
     }
 
     fn run(&mut self) -> bool {
+        self.try_zero_defaults() || self.run_hashed()
+    }
+
+    fn try_zero_defaults(&mut self) -> bool {
+        // Large hashed defaults can trap guarded return bindings in repairs
+        // unrelated to the carrier. Try the simplest interpretation first.
+        // This candidate still needs all facts in both worlds and a genuine
+        // difference. Its work comes from the original cap: steps never reset.
+        let limit = self.limit;
+        self.limit = limit.min(SEARCH_STEPS / 40);
+        self.zero_defaults = true;
+        self.k = [0, 1];
+        let found = self.prepare_scalar_atoms()
+            && self.sens(self.p.node)
+            && self.satisfy_facts()
+            && self.differs(self.p.node);
+        self.limit = limit;
+        if found {
+            return true;
+        }
+        self.zero_defaults = false;
+        self.fixed.clear();
+        false
+    }
+
+    /// Build local choices from the query's elementary scalar premises.
+    /// Keep them soft until the whole selected set agrees, then protect
+    /// those choices while conditional bindings are repaired. This exports
+    /// no fact; the candidate still needs every original premise in both worlds.
+    fn prepare_scalar_atoms(&mut self) -> bool {
+        fn leaf(term: &Term) -> bool {
+            matches!(term, Term::Var { .. } | Term::Int(_) | Term::Bool(_))
+        }
+        fn atom(term: &Term) -> bool {
+            let inner = match term {
+                Term::Not(inner) => &**inner,
+                other => other,
+            };
+            match inner {
+                Term::Cmp(_, left, right) => leaf(left) && leaf(right),
+                Term::Var {
+                    sort: Sort::Bool, ..
+                }
+                | Term::Bool(_) => true,
+                _ => false,
+            }
+        }
+        let mut atoms = Vec::new();
+        for fact in &self.p.facts {
+            if self.exhausted() {
+                return false;
+            }
+            self.steps += 1;
+            if atom(fact) {
+                atoms.push(*fact);
+            }
+        }
+        let soft = self.soft;
+        self.soft = true;
+        let mut all = false;
+        for _ in 0..8 {
+            all = true;
+            for fact in &atoms {
+                if !self.holds(fact, true) {
+                    all = false;
+                    self.force(fact, true);
+                }
+            }
+            if all || self.exhausted() {
+                break;
+            }
+        }
+        let valid = all || atoms.iter().all(|fact| self.holds(fact, true));
+        self.soft = soft;
+        if !valid {
+            return false;
+        }
+        for ((function, _), (_, held)) in &mut self.fixed {
+            if self.steps >= self.limit {
+                return false;
+            }
+            self.steps += 1;
+            if matches!(function, Fun::Var(_)) {
+                *held = true;
+            }
+        }
+        true
+    }
+
+    fn run_hashed(&mut self) -> bool {
         let passes: &[(i128, bool)] = if self.aliased {
             &[(0, false), (1, false), (0, true), (1, true)]
         } else {
@@ -518,10 +616,47 @@ impl<'p, 't> Search<'p, 't> {
             _ => vec![(fact, true)],
         };
         let options = self.ordered(options);
-        let mut best: Option<(usize, Choices<'t>)> = None;
+        let mut repairs = Vec::new();
         for (part, want) in options {
+            if self.exhausted() {
+                return;
+            }
+            self.steps += 1;
+            if let (Term::Cmp(CmpOp::Eq, left, right), true) = (part, want) {
+                // Preserve the original right-side-first tie order, but
+                // score both assignments against the OTHER query facts.
+                // Repairing only the first side can merge two call arguments
+                // by changing an arithmetic point instead of its bound local.
+                repairs.push(Repair::Equal {
+                    side: right,
+                    other: left,
+                });
+                if self.exhausted() {
+                    return;
+                }
+                self.steps += 1;
+                repairs.push(Repair::Equal {
+                    side: left,
+                    other: right,
+                });
+            } else {
+                repairs.push(Repair::Force(part, want));
+            }
+        }
+        // Scoring chooses between alternatives. A sole candidate has the
+        // same choice whatever its broken-fact count, and the caller still
+        // validates every fact in both worlds before accepting a witness.
+        if let [repair] = repairs.as_slice() {
             let saved = self.fixed.clone();
-            if self.force(part, want) && self.holds(fact, true) {
+            if !(self.apply_repair(repair) && self.holds(fact, true)) {
+                self.fixed = saved;
+            }
+            return;
+        }
+        let mut best: Option<(usize, Choices<'t>)> = None;
+        for repair in repairs {
+            let saved = self.fixed.clone();
+            if self.apply_repair(&repair) && self.holds(fact, true) {
                 let broken = facts.iter().filter(|f| !self.holds(f, true)).count();
                 if best.as_ref().is_none_or(|(least, _)| broken < *least) {
                     best = Some((broken, self.fixed.clone()));
@@ -531,6 +666,23 @@ impl<'p, 't> Search<'p, 't> {
         }
         if let Some((_, fixed)) = best {
             self.fixed = fixed;
+        }
+    }
+
+    fn apply_repair(&mut self, repair: &Repair<'t>) -> bool {
+        match repair {
+            Repair::Force(term, want) => self.force(term, *want),
+            Repair::Equal { side, other } => {
+                if self.exhausted() {
+                    return false;
+                }
+                self.prefer_preserved(|search| {
+                    let Some((first, second)) = search.both(other) else {
+                        return false;
+                    };
+                    first == second && search.set(side, first)
+                })
+            }
         }
     }
 
@@ -554,6 +706,9 @@ impl<'p, 't> Search<'p, 't> {
                     return value;
                 }
             }
+        }
+        if self.zero_defaults {
+            return 0;
         }
         let h = mix(self.seed, point);
         if sort == Sort::Bool {
@@ -796,17 +951,22 @@ impl<'p, 't> Search<'p, 't> {
         if self.exhausted() {
             return false;
         }
+        self.prefer_preserved(|search| search.force_once(t, want))
+    }
+
+    /// Keep the same strict-first/soft fallback for every repair proposal.
+    fn prefer_preserved(&mut self, mut attempt: impl FnMut(&mut Self) -> bool) -> bool {
         if self.soft && !self.strict {
             let saved = self.fixed.clone();
             self.strict = true;
-            let done = self.force_once(t, want);
+            let done = attempt(self);
             self.strict = false;
             if done {
                 return true;
             }
             self.fixed = saved;
         }
-        self.force_once(t, want)
+        attempt(self)
     }
 
     fn force_once(&mut self, t: &'t Term, want: bool) -> bool {
@@ -1211,6 +1371,260 @@ impl<'p, 't> Search<'p, 't> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_premises_are_agreed_before_local_choices_are_protected() {
+        let x = Term::var("bounded", Sort::Int);
+        let member = Term::call("actual", Vec::new(), Sort::Int);
+        let node = Term::eq(member.clone(), Term::Int(0));
+        for reverse in [false, true] {
+            let mut facts = vec![
+                Term::le(Term::Int(1), x.clone()),
+                Term::le(Term::Int(2), x.clone()),
+                Term::le(x.clone(), Term::Int(4)),
+            ];
+            if reverse {
+                facts.reverse();
+            }
+            let problem = Problem {
+                node: &node,
+                members: vec![&member],
+                sort: Sort::Int,
+                facts: facts.iter().collect(),
+                exact: false,
+            };
+            let mut search = Search::new(&problem, SEARCH_STEPS);
+            search.zero_defaults = true;
+            assert!(search.prepare_scalar_atoms());
+            assert_eq!(search.both(&x), Some((2, 2)));
+            assert!(search.fixed[&(Fun::Var("bounded"), Vec::new())].1);
+            assert!(search.sens(&node) && search.satisfy_facts() && search.differs(&node));
+            let mut small = Search::new(&problem, 1);
+            small.zero_defaults = true;
+            assert!(!small.prepare_scalar_atoms());
+            assert_eq!(small.limit, 1);
+        }
+        let facts = [Term::le(Term::Int(2), x.clone()), Term::le(x, Term::Int(1))];
+        let problem = Problem {
+            node: &node,
+            members: vec![&member],
+            sort: Sort::Int,
+            facts: facts.iter().collect(),
+            exact: false,
+        };
+        let mut search = Search::new(&problem, SEARCH_STEPS);
+        search.zero_defaults = true;
+        assert!(!search.prepare_scalar_atoms());
+        let mut budget = SEARCH_STEPS;
+        assert!(!depends(&problem, &mut budget));
+    }
+
+    #[test]
+    fn a_named_binding_must_not_needlessly_merge_distinct_call_arguments() {
+        for aliases in [true, false] {
+            let x = Term::var("input", Sort::Int);
+            let y = Term::var("argument", Sort::Int);
+            let z = Term::var("other_argument", Sort::Int);
+            let member = Term::call("actual", vec![y.clone()], Sort::Int);
+            let other = Term::call("actual", vec![z.clone()], Sort::Int);
+            let node = Term::eq(member.clone(), Term::Int(0));
+            let rhs = if aliases {
+                z.clone()
+            } else {
+                Term::arith(ArithOp::Sub, x.clone(), Term::Int(1))
+            };
+            let facts = [
+                Term::eq(x, Term::Int(2)),
+                Term::eq(z, Term::Int(0)),
+                Term::eq(y, rhs),
+                Term::eq(other, Term::Int(0)),
+            ];
+            let problem = Problem {
+                node: &node,
+                members: vec![&member],
+                sort: Sort::Int,
+                facts: facts.iter().collect(),
+                exact: false,
+            };
+            let mut search = Search::new(&problem, SEARCH_STEPS);
+            search.k = [0, 1];
+            search
+                .fixed
+                .insert((Fun::Var("input"), Vec::new()), (2, true));
+            search
+                .fixed
+                .insert((Fun::Var("argument"), Vec::new()), (0, false));
+            search
+                .fixed
+                .insert((Fun::Var("other_argument"), Vec::new()), (0, true));
+            search
+                .fixed
+                .insert((Fun::Call("actual"), vec![0]), (0, true));
+            assert!(search.sens(&node));
+            let found = search.satisfy_facts() && search.differs(&node);
+            assert_eq!(
+                found, !aliases,
+                "aliases={aliases} choices={:?}",
+                search.fixed
+            );
+        }
+    }
+
+    #[test]
+    fn zero_aliases_fall_back_without_replenishing_the_search_budget() {
+        let left = Term::call("actual", vec![Term::var("left", Sort::Int)], Sort::Int);
+        let right = Term::call("actual", vec![Term::var("right", Sort::Int)], Sort::Int);
+        let node = Term::eq(left.clone(), right);
+        let problem = Problem {
+            node: &node,
+            members: vec![&left],
+            sort: Sort::Int,
+            facts: Vec::new(),
+            exact: false,
+        };
+        // Uniform zero arguments alias the two applications and leave no
+        // difference; the original hashed search can keep them distinct.
+        let mut prefix = Search::new(&problem, SEARCH_STEPS);
+        assert!(!prefix.try_zero_defaults());
+        assert!(!prefix.zero_defaults);
+        assert_eq!(prefix.limit, SEARCH_STEPS);
+        let mut baseline = Search::new(&problem, SEARCH_STEPS);
+        assert!(baseline.run_hashed());
+        let mut full = Search::new(&problem, SEARCH_STEPS);
+        assert!(full.run());
+        assert!(
+            !full.zero_defaults,
+            "the witness came from the hashed fallback"
+        );
+        assert_eq!(full.steps, prefix.steps + baseline.steps);
+        eprintln!(
+            "witness fallback steps: zero={} hashed={} total={}",
+            prefix.steps, baseline.steps, full.steps
+        );
+        // An unchanged caller grant that only just fits the original
+        // fallback cannot pay for both trials. Prefix work must stay spent.
+        let mut tight = Search::new(&problem, baseline.steps);
+        assert!(!tight.run());
+        assert_eq!(tight.limit, baseline.steps);
+        let mut zero = 0;
+        assert!(!depends(&problem, &mut zero));
+        assert_eq!(zero, 0);
+    }
+
+    #[test]
+    fn original_recursive_postcondition_has_a_constructive_two_world_witness() {
+        // Child nodes are the callee's ensures equalities. Analysis excludes
+        // each containing formula while checking whether that node depends
+        // on its SF application; all OTHER selected facts remain mandatory.
+        for (argument, result, expected) in [(0, 11, (0, 1)), (4, 5, (0, 1)), (7, 8, (1, 0))] {
+            let (facts, node) =
+                super::super::relevance::e18_completion_tests::witness_context(argument, result);
+            let member = Term::call(
+                "sf0",
+                vec![Term::var(format!("v{argument}"), Sort::Int)],
+                Sort::Int,
+            );
+            let alias_argument = if argument == 0 { 7 } else { 0 };
+            let alias = Term::call(
+                "sf0",
+                vec![Term::var(format!("v{alias_argument}"), Sort::Int)],
+                Sort::Int,
+            );
+            for include_alias in [false, true] {
+                let mut members = vec![&member];
+                if include_alias {
+                    members.push(&alias);
+                }
+                let problem = Problem {
+                    node: &node,
+                    members,
+                    sort: Sort::Int,
+                    facts: facts.iter().collect(),
+                    exact: false,
+                };
+                let mut search = Search::new(&problem, SEARCH_STEPS);
+                search.k = [0, 1];
+                for (name, value) in [
+                    ("v0", 2),
+                    ("v1", 0),
+                    ("v2", 0),
+                    ("v3", 0),
+                    ("v4", 0),
+                    ("v5", 1),
+                    ("v6", 0),
+                    ("v7", 1),
+                    ("v8", 0),
+                    ("v9", 1),
+                    ("v10", 1),
+                    ("v11", 1),
+                    ("sq0", 0),
+                ] {
+                    search
+                        .fixed
+                        .insert((Fun::Var(name), Vec::new()), (value, true));
+                }
+                search.fixed.insert((Fun::Call("sf0"), vec![0]), (1, true));
+                search.fixed.insert((Fun::Call("sf0"), vec![1]), (0, true));
+                search.fixed.insert((Fun::Call("sf0"), vec![2]), (0, true));
+                search
+                    .fixed
+                    .insert((Fun::Call("qa1"), Vec::new()), (1, true));
+                assert_eq!(search.class_points(0), search.class_points(1));
+                assert_eq!(search.both(&node), Some(expected));
+                assert_eq!(
+                    facts.iter().all(|fact| search.holds(fact, true)),
+                    !include_alias,
+                    "v{argument} alias={include_alias}"
+                );
+                assert_eq!(
+                    search.satisfy_facts() && search.differs(&node),
+                    !include_alias
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sole_repair_cannot_escape_validation_of_the_other_facts() {
+        let x = Term::var("other", Sort::Int);
+        let call = Term::call("actual", vec![Term::Int(0)], Sort::Int);
+        let node = Term::eq(call.clone(), x.clone());
+        let first = Term::le(x.clone(), Term::Int(0));
+        for (second, expected) in [
+            (Term::le(x.clone(), Term::Int(0)), true),
+            (Term::le(Term::Int(1), x.clone()), false),
+        ] {
+            let mut budget = SEARCH_STEPS;
+            assert_eq!(
+                depends(
+                    &Problem {
+                        node: &node,
+                        members: vec![&call],
+                        sort: Sort::Int,
+                        facts: vec![&first, &second],
+                        exact: false,
+                    },
+                    &mut budget
+                ),
+                expected
+            );
+        }
+        // No candidate succeeds for an empty disjunction. A failed sole
+        // candidate likewise cannot supply a witness for a false fact.
+        for impossible in [Term::Or(Vec::new()), Term::Bool(false)] {
+            let mut budget = SEARCH_STEPS;
+            assert!(!depends(
+                &Problem {
+                    node: &node,
+                    members: vec![&call],
+                    sort: Sort::Int,
+                    facts: vec![&impossible],
+                    exact: false,
+                },
+                &mut budget
+            ));
+        }
+    }
 
     fn s(n: i128) -> Term {
         Term::call("sf0", vec![Term::Int(n)], Sort::Int)

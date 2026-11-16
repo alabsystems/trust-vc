@@ -24,6 +24,7 @@ fn signature(n: u64, ty: Ty) -> FnDecl {
         name: name.into(),
         ty: ty.clone(),
         mode: Mode::Spec,
+        prophecy: crate::DeclProphecy::Default,
         mutable: false,
         kind,
         span: SpanId(0),
@@ -48,6 +49,7 @@ fn signature(n: u64, ty: Ty) -> FnDecl {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Spec(Expr::read(crate::Place::local(LocalId(1)), ty, SpanId(0))),
     }
@@ -66,10 +68,12 @@ fn source() -> VcCrate {
                 FieldDecl {
                     name: "value".into(),
                     ty: Ty::Param(0),
+                    mode: Mode::Exec,
                 },
                 FieldDecl {
                     name: "ready".into(),
                     ty: Ty::Bool,
+                    mode: Mode::Exec,
                 },
             ],
         }],
@@ -345,6 +349,7 @@ fn opaque_values_keep_their_scalar_bridge_and_cyclic_products_refuse() {
             fields: vec![FieldDecl {
                 name: "again".into(),
                 ty: bad.clone(),
+                mode: Mode::Exec,
             }],
         }],
     });

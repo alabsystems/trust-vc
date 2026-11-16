@@ -154,6 +154,7 @@ use trust_ir::{
 /// The lowered body: declarations plus the assumptions that relate them.
 #[derive(Debug)]
 pub(crate) struct BodyRelation {
+    pub(crate) cast_sites: Option<Vec<crate::native_scalar_cast::ScalarCastSite>>,
     /// Every variable the unit must declare, by its unit-level name.
     pub(crate) variables: BTreeMap<String, TrustSort>,
     /// `(id, predicate)` assumptions, in emission order.
@@ -440,6 +441,7 @@ pub(crate) fn lower_body(
     function: &Function,
     function_id: FuncId,
     types: TypeDecoder,
+    observe_cast_sites: bool,
 ) -> Result<BodyRelation, Decline> {
     // The weight blob table (trust-ir wire v70) holds the bytes a
     // `Constant::TensorBlob` names by digest. The lane has no tensor sort and
@@ -475,6 +477,7 @@ pub(crate) fn lower_body(
         incoming: BTreeMap::new(),
         values: BTreeMap::new(),
         relation: BodyRelation {
+            cast_sites: observe_cast_sites.then(Vec::new),
             variables: BTreeMap::new(),
             assumptions: Vec::new(),
             scope: Scope::new(),
@@ -1178,6 +1181,19 @@ impl<'a> Builder<'a> {
                     index,
                 )?;
                 self.define(block_id, target.0, value, "cast");
+                if self.relation.cast_sites.as_ref().is_some_and(|sites| sites.len() >= 4096) {
+                    self.relation.cast_sites = None;
+                }
+                if let Some(sites) = &mut self.relation.cast_sites {
+                    let (assumption_id, definition) = self.relation.assumptions.last()
+                        .expect("define records its own assumption");
+                    sites.push(crate::native_scalar_cast::ScalarCastSite {
+                        function: self.function_id.index(), block: block_id, instruction: index,
+                        opcode: *op, source_type: src_ty.clone(), destination_type: dst_ty.clone(),
+                        operand: operand.index(), result: results[0].index(),
+                        assumption_id: assumption_id.clone(), definition: definition.clone(),
+                    });
+                }
             }
             Inst::Select {
                 cond,
@@ -2849,7 +2865,7 @@ mod tests {
 
     fn lower(module: &Module) -> Result<BodyRelation, Decline> {
         let types = TypeDecoder::from_module(module);
-        lower_body(module, &module.functions[0], FuncId::new(0), types)
+        lower_body(module, &module.functions[0], FuncId::new(0), types, false)
     }
 
     #[test]

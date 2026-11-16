@@ -12,6 +12,7 @@ use super::query::Function;
 use super::term::{Sort, Term};
 
 mod bridges;
+mod mut_refs;
 mod products;
 mod sums;
 #[cfg(test)]
@@ -101,6 +102,7 @@ pub(crate) enum TypeRecipe {
     Struct(AdtId, Vec<TypeRecipe>),
     Enum(AdtId, Vec<TypeRecipe>),
     SharedRef(Box<TypeRecipe>),
+    MutRef(Box<TypeRecipe>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -132,7 +134,7 @@ impl TypeRecipe {
             | Self::Opaque(_, args)
             | Self::Struct(_, args)
             | Self::Enum(_, args) => args.iter().all(Self::closed),
-            Self::SharedRef(inner) => inner.closed(),
+            Self::SharedRef(inner) | Self::MutRef(inner) => inner.closed(),
             Self::Bool | Self::Int(_) | Self::Unit => true,
         }
     }
@@ -216,6 +218,7 @@ impl TypeRecipe {
                 mutable: false,
                 inner,
             } => Self::SharedRef(Box::new(Self::visit(inner, owner, adts, left)?)),
+            Ty::MutRef(inner) => Self::MutRef(Box::new(Self::visit(inner, owner, adts, left)?)),
             _ => return None,
         })
     }
@@ -233,6 +236,7 @@ pub(crate) struct Vocabulary {
     bridges: bridges::Bridges,
     products: products::Products,
     sums: sums::Sums,
+    mut_refs: mut_refs::MutRefs,
 }
 
 impl Vocabulary {
@@ -345,6 +349,12 @@ impl Vocabulary {
                     terms.extend(self.argument_in(arg, env, product)?.terms());
                 }
                 self.call(format!("ty_adt{index}"), terms, Sort::TypeId)
+            }
+            TypeRecipe::MutRef(inner) => {
+                let inner = self.argument_in(inner, env, product)?;
+                let identity = self.call("ty_mut_ref".into(), inner.terms().to_vec(), Sort::TypeId);
+                self.mut_refs.types.insert(identity.clone(), inner);
+                identity
             }
             TypeRecipe::SharedRef(inner) => {
                 let inner = self.argument_in(inner, env, product)?;

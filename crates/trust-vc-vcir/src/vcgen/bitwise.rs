@@ -106,7 +106,7 @@ mod tests {
             ],
             Sort::Int,
         );
-        let fact = range_fact("clip_i8_oob", &[raw.clone()]).unwrap();
+        let fact = range_fact("clip_i8_oob", std::slice::from_ref(&raw)).unwrap();
         let (low, high) = range_bounds(IntRange::I(8));
         assert_eq!(
             fact,

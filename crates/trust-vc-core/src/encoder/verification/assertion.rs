@@ -433,6 +433,8 @@ fn verify_main_attempt_with_retries(
     extra_variables: &[VariableDecl],
     cached_prune_plan: Option<&super::pruning::PrunePlan>,
 ) -> TrustVcResult<MainAttemptResult> {
+    #[cfg(test)]
+    let _phase_observer = super::phase_observer::span("phase", "main_attempt");
     let ctx = slices.ctx;
     let owned_prune_plan;
     let prune_plan = if let Some(plan) = cached_prune_plan {
@@ -494,6 +496,8 @@ fn verify_main_attempt_with_retries(
 
             // Step 1: Int-mode retry (only if allowed). Part of #2262.
             if allow_int_fallback {
+                #[cfg(test)]
+                super::phase_observer::retry("int_fallback");
                 recovered = AYEncoder::setup_from_prepared_with_extra_variables_and_prune_plan(
                     slices,
                     true,
@@ -535,6 +539,8 @@ fn verify_main_attempt_with_retries(
                     tracing::info!(assertion = %assertion.name,
                         "Timeout recovered via extended-timeout retry (forced)");
                 } else {
+                    #[cfg(test)]
+                    super::phase_observer::retry("extended_timeout");
                     recovered = AYEncoder::setup_from_prepared_with_extra_variables_and_prune_plan(
                         slices,
                         initial_int_mode,
@@ -626,6 +632,8 @@ pub(super) fn apply_collection_confirmation(
         });
     }
 
+    #[cfg(test)]
+    let _phase_observer = super::phase_observer::span("phase", "confirmation");
     let confirm_result = verify_main_attempt_with_retries(
         slices,
         assertion,
@@ -920,6 +928,8 @@ fn verify_single_assertion_typed_inner(
             .expr
             .may_emit_overflow_checks(arith_overflow_enabled)
     {
+        #[cfg(test)]
+        let _phase_observer = super::phase_observer::span("phase", "bounds_and_overflow");
         // OBLIGATION-LOCAL PRUNE (the collection-precondition / overflow lane).
         //
         // These predicates — `Seq::subrange(start, end) requires end <= len`,
@@ -951,6 +961,8 @@ fn verify_single_assertion_typed_inner(
             assertion_prune_plan.element_demand(),
             super::pruning::ElementDemand::Observed
         ) {
+            #[cfg(test)]
+            let _pruned_bounds = super::phase_observer::span("phase", "bounds_length_only");
             assertion_prune_plan.set_element_demand(super::pruning::ElementDemand::LengthOnly);
             let pruned_setup = AYEncoder::setup_overflow_from_prepared(
                 slices,
@@ -977,6 +989,15 @@ fn verify_single_assertion_typed_inner(
         }
 
         if pruned_overflow_outcome.is_none() {
+            #[cfg(test)]
+            if matches!(
+                assertion_prune_plan.element_demand(),
+                super::pruning::ElementDemand::Observed
+            ) {
+                super::phase_observer::retry("bounds_full_context");
+            }
+            #[cfg(test)]
+            let _full_bounds = super::phase_observer::span("phase", "bounds_full_context");
             let mut overflow_encoder = match AYEncoder::setup_overflow_from_prepared(
                 slices,
                 assertion,
@@ -1329,6 +1350,8 @@ fn maybe_retry_with_demand_inlining(
         "Attempting demand-inline retry (#2655)",
     );
 
+    #[cfg(test)]
+    super::phase_observer::retry("demand_inline");
     let encoder = AYEncoder::setup_from_prepared_with_inline_overrides_and_prune_plan(
         slices,
         use_int_for_measures,
@@ -1446,6 +1469,8 @@ fn maybe_retry_with_ematching_escalation(
     let mut recycled_encoder: Option<AYEncoder> = None;
 
     for &budget in EMATCHING_ESCALATION_BUDGETS {
+        #[cfg(test)]
+        super::phase_observer::retry("ematching_escalation");
         tracing::info!(
             assertion = %assertion.name,
             ematching_rounds = budget,

@@ -184,6 +184,7 @@ fn generic_formal_local(name: &str, ty: Ty, kind: crate::LocalKind) -> crate::Lo
         name: name.into(),
         ty,
         mode: crate::Mode::Spec,
+        prophecy: crate::DeclProphecy::Default,
         mutable: false,
         kind,
         span: SpanId(0),
@@ -255,6 +256,7 @@ fn generic_formal_source(actual: &Ty, allowed: bool, limit: i128) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Spec(read(1, Ty::Param(0))),
     });
@@ -280,6 +282,7 @@ fn generic_formal_source(actual: &Ty, allowed: bool, limit: i128) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Stmts(Block {
             stmts: vec![

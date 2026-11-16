@@ -15,6 +15,7 @@
 //!
 //! The VC generator only accepts a crate with no problems of either class.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::expr::{BinOp, CastKind, Expr, ExprKind, Lit, Place, Projection, UnOp};
@@ -24,6 +25,9 @@ use crate::item::{
 };
 use crate::stmt::{Block, ClauseAttrs, InvariantKind, Loop, Stmt, StmtKind};
 use crate::ty::{IntRange, Ty};
+
+mod unwind;
+mod value_modes;
 
 /// Which side a problem is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +49,66 @@ pub struct WfError {
     pub span: SpanId,
     /// What is wrong.
     pub message: String,
+}
+
+/// The exact mode distinction used by the Ghost-wrapper prophecy rule.
+/// Exec and Proof both forbid a prophetic tail; Spec permits it. This quotient
+/// preserves joins: the class of a join is Spec exactly when either arm is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhostTailModeClass {
+    /// A specification value.
+    Spec,
+    /// An executable or proof value.
+    NonSpec,
+}
+
+impl From<Mode> for GhostTailModeClass {
+    fn from(mode: Mode) -> Self {
+        if mode == Mode::Spec {
+            Self::Spec
+        } else {
+            Self::NonSpec
+        }
+    }
+}
+
+/// A raw Unit-tail mode class derived from the IR's actual value producers.
+///
+/// Rows are ordered by crate function order, then physical depth-first
+/// evaluation order: a GhostTail's prefix and tail precede its own row.
+/// They are diagnostics, not native source or ownership authority. `None`
+/// means an absent, contradictory, or unsupported value origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostTailModeObservation {
+    /// The function containing this physical occurrence.
+    pub function: FnId,
+    /// The proof block's source position, never a mode permission.
+    pub span: SpanId,
+    /// Checked raw value mode class, before Unit consumption.
+    pub class: Option<GhostTailModeClass>,
+}
+
+/// Derive raw proof-block tail modes even for prophecy-rejected crates.
+/// Native producers compare every row with their same-context HIR mode facts;
+/// a missing or unknown row never supplies a permissive Spec default.
+#[must_use]
+pub fn ghost_tail_modes(krate: &VcCrate) -> Vec<GhostTailModeObservation> {
+    crate::prophecy::ghost_tail_modes(krate)
+}
+
+/// Inspect the existing prophecy effect pass for one actual function, before
+/// public diagnostics suppress instance user errors already attributed to source.
+/// The declaration, body, instance origin, and diagnostic function ID are retained.
+///
+/// This is a partial diagnostic view, not full well-formedness or verification:
+/// it supplies no source, compiler, import, or ownership authority. An empty
+/// result does not establish that types, modes, or instance origins are valid.
+/// Returns `None` if the function ID is absent.
+#[must_use]
+pub fn function_prophecy_diagnostics(krate: &VcCrate, function: FnId) -> Option<Vec<WfError>> {
+    let fns: HashMap<_, _> = krate.fns.iter().map(|decl| (decl.id, decl)).collect();
+    let declaration = fns.get(&function).copied()?;
+    Some(crate::prophecy::check_function(&fns, declaration))
 }
 
 /// Verus's message for a second `proof_note` or `custom_err` attribute.
@@ -115,6 +179,7 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
     let index = Index {
         fns,
         adts,
+        validated_instance_origins: OnceCell::new(),
         recursive: krate
             .rec_groups
             .iter()
@@ -144,6 +209,7 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
     check_rec_groups(&index, krate, &mut errors);
     for decl in &krate.fns {
         let mark = errors.len();
+        let transport_locals = value_modes::transport_locals(&index, decl);
         let mut checker = FnChecker {
             index: &index,
             decl,
@@ -154,8 +220,16 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
             proof_in_spec: false,
             diagnostics,
             incomplete_binders: &mut incomplete_binders,
+            transport_locals: &transport_locals,
         };
         checker.check();
+        // Value modes are a separate obligation from type checking and the
+        // placement of runtime arithmetic checks. Do not add secondary mode
+        // errors to a structurally rejected source function.
+        if errors.len() == mark {
+            errors.extend(value_modes::check(&index, decl, &transport_locals));
+        }
+        errors.extend(crate::prophecy::check_function(&index.fns, decl));
         // The user errors of an instance are those of its generic function,
         // which reports them itself.
         if decl.role == FnRole::Instance {
@@ -179,6 +253,7 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
 struct Index<'a> {
     fns: HashMap<FnId, &'a FnDecl>,
     adts: HashMap<AdtId, &'a AdtDecl>,
+    validated_instance_origins: OnceCell<HashSet<FnId>>,
     recursive: HashSet<FnId>,
     architecture: crate::bitvector::Architecture,
 }
@@ -210,7 +285,7 @@ impl Index<'_> {
                 )),
                 Some(_) => args.iter().find_map(|arg| self.ty_problem(arg, n_params)),
             },
-            Ty::Ref { inner, .. } => self.ty_problem(inner, n_params),
+            Ty::Ref { inner, .. } | Ty::MutRef(inner) => self.ty_problem(inner, n_params),
             Ty::Param(n) => {
                 ((*n as usize) >= n_params).then(|| format!("type parameter {n} is not in scope"))
             }
@@ -332,6 +407,7 @@ struct FnChecker<'a, 'e> {
     proof_in_spec: bool,
     diagnostics: bool,
     incomplete_binders: &'e mut Vec<(FnId, SpanId)>,
+    transport_locals: &'e [bool],
 }
 
 impl FnChecker<'_, '_> {
@@ -399,13 +475,16 @@ impl FnChecker<'_, '_> {
                             actual.ty == formal.ty.subst(&origin.type_args)
                                 && actual.mode == formal.mode
                                 && actual.mutable == formal.mutable
+                                && actual.prophecy == formal.prophecy
                         }
                         _ => false,
                     },
                 );
         let result_matches = match (decl.local(decl.ret), original.local(original.ret)) {
             (Some(actual), Some(formal)) => {
-                actual.ty == formal.ty.subst(&origin.type_args) && actual.mode == formal.mode
+                actual.ty == formal.ty.subst(&origin.type_args)
+                    && actual.mode == formal.mode
+                    && actual.prophecy == formal.prophecy
             }
             _ => false,
         };
@@ -415,6 +494,12 @@ impl FnChecker<'_, '_> {
             || attrs != original.attrs
             || !parameters_match
             || !result_matches
+            || !crate::instance_semantics::unwind_matches(
+                &self.index.fns,
+                original,
+                decl,
+                &self.index.validated_instance_origins,
+            )
         {
             self.malformed(
                 decl.span,
@@ -554,6 +639,12 @@ impl FnChecker<'_, '_> {
             }
         }
         self.check_signature();
+        if let Some(problem) = decl.broadcast_problem() {
+            self.malformed(decl.span, problem);
+        }
+        for hint in decl.broadcast_hints() {
+            self.check_expr(hint, false);
+        }
 
         if decl.mode == Mode::Spec {
             for param in &decl.params {
@@ -576,6 +667,7 @@ impl FnChecker<'_, '_> {
             self.check_clause(clause, false);
         }
         self.check_termination_clauses();
+        self.check_unwind();
 
         let ret_ty = decl.ret_ty().cloned().unwrap_or(Ty::Unit);
         match (&decl.body, decl.mode) {
@@ -700,7 +792,12 @@ impl FnChecker<'_, '_> {
             | ExprKind::Choose { .. }
             | ExprKind::UntriggeredQuant { .. }
             | ExprKind::UntriggeredChoose { .. }
-            | ExprKind::ProofInSpec(_) => {
+            | ExprKind::ProofInSpec(_)
+            | ExprKind::ProofInSpecTail { .. }
+            | ExprKind::MutRefCurrent(_)
+            | ExprKind::MutRefFuture(_)
+            | ExprKind::MutRefUpdate { .. }
+            | ExprKind::HasResolved(_) => {
                 self.malformed(expression.span, "a ghost expression in a dual initializer")
             }
             _ => {}
@@ -866,6 +963,36 @@ impl FnChecker<'_, '_> {
                     self.check_bool(&clause.expr, false);
                 }
             }
+            StmtKind::BorrowMut { dest, place } => {
+                let source_mode = self.check_storage_access(place, stmt.span, cx, true);
+                let result_mode = source_mode.map(|mode| crate::place_mode::join(mode, cx.mode()));
+                let dest_decl = self.local(*dest).cloned();
+                if dest_decl.as_ref().is_none_or(|dest| {
+                    dest.mode == Mode::Spec
+                        || (result_mode.is_some() && Some(dest.mode) != result_mode)
+                        || !matches!(dest.kind, LocalKind::Let | LocalKind::Temp)
+                }) {
+                    self.malformed(stmt.span,"a mutable storage borrow requires an owned destination with the derived reference mode");
+                }
+                let source_ty = self.place_ty(place, stmt.span);
+                let dest_ty = self.local(*dest).map(|local| local.ty.clone());
+                if source_ty
+                    .as_ref()
+                    .map(|ty| Ty::MutRef(Box::new(ty.clone())))
+                    != dest_ty
+                {
+                    self.malformed(
+                        stmt.span,
+                        "a mutable-borrow destination has the wrong opaque reference type",
+                    );
+                }
+                if self.proof_in_spec {
+                    self.malformed(
+                        stmt.span,
+                        "mutable storage borrowing inside a pure spec expression",
+                    );
+                }
+            }
             StmtKind::Assume { expr, attrs } => {
                 self.check_attrs(attrs, stmt.span);
                 self.check_bool(expr, false);
@@ -884,7 +1011,11 @@ impl FnChecker<'_, '_> {
                 let ret_ty = self.decl.ret_ty().cloned().unwrap_or(Ty::Unit);
                 match value {
                     Some(value) => {
-                        self.check_expr(value, exec);
+                        let return_exec = self
+                            .decl
+                            .local(self.decl.ret)
+                            .is_some_and(|ret| ret.mode == Mode::Exec);
+                        self.check_expr(value, exec && return_exec);
                         if value.ty != ret_ty {
                             self.malformed(value.span, "returned value has the wrong type");
                         }
@@ -909,7 +1040,24 @@ impl FnChecker<'_, '_> {
                     None => self.malformed(stmt.span, "reveal or hide of an unknown function"),
                 }
             }
+            StmtKind::BroadcastUse { callee } => match self.index.fns.get(callee) {
+                Some(decl)
+                    if decl.attrs.broadcast_triggers.is_some()
+                        && decl.broadcast_problem().is_none() => {}
+                _ => self.malformed(
+                    stmt.span,
+                    "broadcast use of an unsupported or unknown local broadcast proof",
+                ),
+            },
             StmtKind::Ghost(block) => self.check_block(block, Context::Proof),
+            StmtKind::GhostTail { block, tail } => {
+                if cx != Context::Exec {
+                    self.malformed(stmt.span, "a proof block tail outside executable code");
+                }
+                self.check_block(block, Context::Proof);
+                self.check_expr(tail, false);
+                self.expect_ty(tail, &Ty::Unit, "proof block tail");
+            }
             StmtKind::Block(block) => self.check_block(block, cx),
             StmtKind::Loop(lp) => self.check_loop(lp, stmt.span, cx),
             StmtKind::Break { target, site } | StmtKind::Continue { target, site } => {
@@ -974,6 +1122,18 @@ impl FnChecker<'_, '_> {
     /// Check that `place` may be written from `cx`; returns the mode of its
     /// root local.
     fn check_assignable(&mut self, place: &Place, span: SpanId, cx: Context) -> Option<Mode> {
+        self.check_storage_access(place, span, cx, false)
+    }
+
+    /// Borrowing a place does not grant permission to mutate it from ghost
+    /// code. In particular a Proof reference can still point at Exec storage.
+    fn check_storage_access(
+        &mut self,
+        place: &Place,
+        span: SpanId,
+        cx: Context,
+        borrow: bool,
+    ) -> Option<Mode> {
         let Some(root) = self.local(place.local).cloned() else {
             self.malformed(
                 span,
@@ -1011,7 +1171,37 @@ impl FnChecker<'_, '_> {
                 }
             }
         }
-        if cx == Context::Proof && root.mode == Mode::Exec {
+        let authority = crate::place_mode::place_mode(self.decl, &self.index.adts, place)?;
+        if authority.through_spec_mut_ref {
+            self.report(
+                WfClass::User,
+                span,
+                "cannot mutate through a spec-mode mutable reference",
+            );
+            return None;
+        }
+        if borrow && authority.mode == Mode::Spec {
+            self.report(
+                WfClass::User,
+                span,
+                "cannot take mutable borrow of ghost-mode place",
+            );
+            return None;
+        }
+        // An ANF save does not read or borrow the Spec storage. The contextual
+        // value pass independently authenticates every producer and consumer.
+        let value_transport = !borrow
+            && place.projections.is_empty()
+            && root.mode == Mode::Spec
+            && self.transport_locals.get(place.local.index()) == Some(&true);
+        if cx == Context::Exec && !authority.exec_accessible && !value_transport {
+            self.report(
+                WfClass::User,
+                span,
+                "cannot access non-exec place in executable code",
+            );
+        }
+        if !borrow && cx == Context::Proof && authority.mode == Mode::Exec {
             self.report(
                 WfClass::User,
                 span,
@@ -1021,7 +1211,7 @@ impl FnChecker<'_, '_> {
                 ),
             );
         }
-        Some(root.mode)
+        Some(authority.mode)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1040,6 +1230,13 @@ impl FnChecker<'_, '_> {
             self.malformed(span, "call of an unknown function");
             return;
         };
+        if target.attrs.broadcast_triggers.is_some() && target.params.is_empty() {
+            self.report(
+                WfClass::User,
+                span,
+                "cannot call a broadcast_forall function with 0 arguments directly",
+            );
+        }
         match target.mode {
             Mode::Spec => self.malformed(span, "a spec function is called as a statement"),
             Mode::Proof => {
@@ -1102,7 +1299,8 @@ impl FnChecker<'_, '_> {
             );
         }
         for (arg, param) in args.iter().zip(&target.params) {
-            self.check_expr(arg, checks_allowed);
+            let param_mode = target.local(*param).map(|param| param.mode);
+            self.check_expr(arg, checks_allowed && param_mode == Some(Mode::Exec));
             if let Some(param_decl) = target.local(*param) {
                 if param_decl.ty.subst(type_args) != arg.ty {
                     self.malformed(
@@ -1123,7 +1321,9 @@ impl FnChecker<'_, '_> {
 
     fn project(&mut self, ty: &Ty, projection: Projection, span: SpanId) -> Option<Ty> {
         match (projection, ty) {
-            (Projection::Deref, Ty::Ref { inner, .. }) => Some((**inner).clone()),
+            (Projection::Deref, Ty::Ref { inner, .. } | Ty::MutRef(inner)) => {
+                Some((**inner).clone())
+            }
             (Projection::Field { variant, field }, Ty::Adt(id, args)) => {
                 let adt = self.index.adts.get(id).copied();
                 let found = adt.and_then(|adt| {
@@ -1329,8 +1529,17 @@ impl FnChecker<'_, '_> {
                 variant,
                 fields,
             } => {
-                for field in fields {
-                    self.check_expr(field, checks_allowed);
+                let declaration = self
+                    .index
+                    .adts
+                    .get(adt)
+                    .copied()
+                    .and_then(|adt| adt.variants.get(*variant as usize));
+                for (index, field) in fields.iter().enumerate() {
+                    let mode = declaration
+                        .and_then(|variant| variant.fields.get(index))
+                        .map(|field| field.mode);
+                    self.check_expr(field, checks_allowed && mode == Some(Mode::Exec));
                 }
                 let args = match &expr.ty {
                     Ty::Adt(id, args) if id == adt => args.clone(),
@@ -1442,7 +1651,31 @@ impl FnChecker<'_, '_> {
                 };
                 self.expect_ty(expr, &want, "borrow");
             }
-            ExprKind::ProofInSpec(block) => {
+            ExprKind::MutRefCurrent(reference) | ExprKind::MutRefFuture(reference) => {
+                self.check_expr(reference, checks_allowed);
+                match &reference.ty {
+                    Ty::MutRef(inner) => {
+                        self.expect_ty(expr, inner, "mutable-reference projection")
+                    }
+                    _ => {
+                        self.malformed(expr.span, "a mutable-reference projection of another type")
+                    }
+                }
+            }
+            ExprKind::MutRefUpdate { reference, value } => {
+                self.check_expr(reference, checks_allowed);
+                self.check_expr(value, checks_allowed);
+                match &reference.ty {
+                    Ty::MutRef(inner) => self.expect_ty(value, inner, "mutable-reference update"),
+                    _ => self.malformed(expr.span, "a mutable-reference update of another type"),
+                }
+                self.expect_ty(expr, &reference.ty, "mutable-reference update result");
+            }
+            ExprKind::HasResolved(value) => {
+                self.check_expr(value, checks_allowed);
+                self.expect_ty(expr, &Ty::Bool, "resolution predicate");
+            }
+            ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
                 if !self.proof_in_spec {
                     self.malformed(
                         expr.span,
@@ -1456,6 +1689,10 @@ impl FnChecker<'_, '_> {
                 self.expect_ty(expr, &Ty::Unit, "proof block");
                 self.proof_in_spec = false;
                 self.check_block(block, Context::Proof);
+                if let ExprKind::ProofInSpecTail { tail, .. } = &expr.kind {
+                    self.check_expr(tail, false);
+                    self.expect_ty(tail, &Ty::Unit, "proof block tail");
+                }
                 self.proof_in_spec = true;
             }
             ExprKind::Quant {
@@ -1707,7 +1944,9 @@ fn first_assignment(block: &Block) -> Option<SpanId> {
             else_block,
             ..
         } => first_assignment(then_block).or_else(|| first_assignment(else_block)),
-        StmtKind::Ghost(inner) | StmtKind::Block(inner) => first_assignment(inner),
+        StmtKind::Ghost(inner)
+        | StmtKind::Block(inner)
+        | StmtKind::GhostTail { block: inner, .. } => first_assignment(inner),
         StmtKind::Loop(lp) => lp
             .cond
             .as_ref()
@@ -1740,7 +1979,9 @@ fn returns(block: &Block) -> bool {
             else_block,
             ..
         } => returns(then_block) || returns(else_block),
-        StmtKind::Ghost(inner) | StmtKind::Block(inner) => returns(inner),
+        StmtKind::Ghost(inner)
+        | StmtKind::Block(inner)
+        | StmtKind::GhostTail { block: inner, .. } => returns(inner),
         StmtKind::Loop(lp) => {
             lp.cond.as_ref().is_some_and(|c| returns(&c.block)) || returns(&lp.body)
         }

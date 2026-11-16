@@ -71,7 +71,7 @@ fn row(
 ) -> Result<Value, &'static str> {
     budget.charge(1, 0)?;
     let detail = match attribute {
-        Attribute::Unparsed(item) => {
+        Attribute::Tool(item) | Attribute::DeriveHelper(item) => {
             let path = if item.path.segments.len() > PATH_SEGMENTS {
                 json!({"state": "Unknown", "reason": "attribute path exceeds the observation bound",
                     "count": item.path.segments.len(), "cap": PATH_SEGMENTS})
@@ -84,9 +84,14 @@ fn row(
                 json!({"state": "ObservedNativeAttributePath", "segments": parts,
                     "path_is_authority": false})
             };
-            json!({"kind": "Unparsed", "style": style(item.style),
-                "native_attr_id": item.id.attr_id.as_u32(),
-                "native_attr_id_scope": "this compiler session only; not pointer ownership",
+            let kind = if matches!(attribute, Attribute::Tool(_)) {
+                "Tool"
+            } else {
+                "DeriveHelper"
+            };
+            json!({"kind": kind, "style": style(item.style),
+                "native_attr_id": null,
+                "native_attr_id_state": "not retained for this native kind",
                 "native_span": span(tcx, item.span, budget)?,
                 "native_path_span": span(tcx, item.path.span, budget)?,
                 "path_observation": path, "argument_observation": argument_shape(&item.args, budget)?})

@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::shim::OwnedNormalVerifier;
+use crate::verdict::OutputSinks;
 use crate::verdict::{Outcome, Record};
 
 struct NormalClient<'plan, 'scope> {
@@ -16,13 +17,15 @@ struct NormalClient<'plan, 'scope> {
     plan: &'plan macro_context::NormalClientPlan<'scope>,
     verifier: OwnedNormalVerifier<'plan, 'scope>,
     imported: Option<usize>,
+    imported_spec_definitions: Option<usize>,
     native_ownership_roots: Option<usize>,
+    sequence_length_observation: Option<Value>,
     result: Option<Result<(), String>>,
 }
 
 impl Callbacks for NormalClient<'_, '_> {
     fn config(&mut self, config: &mut Config) {
-        crate::diagnostic_compat::configure(config);
+        self.verifier.configure(config);
     }
 
     fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
@@ -35,7 +38,35 @@ impl Callbacks for NormalClient<'_, '_> {
             let imports = self.owner.for_client(tcx, self.plan.verify())?;
             let live = imports.read_for_normal_verification(&preparation, self.source)?;
             self.imported = Some(live.imported_count());
+            self.imported_spec_definitions = Some(live.imported_spec_definition_count());
             self.native_ownership_roots = Some(live.native_ownership_roots());
+            self.sequence_length_observation = Some(live.with_read(|tcx, read| {
+                let definition = tcx
+                    .get_diagnostic_item(rustc_span::Symbol::intern("verus::vstd::seq::Seq::len"));
+                let id = definition.map(|definition| {
+                    let key = super::super::declaration_native::key(tcx, definition);
+                    trust_vc_vcir::FnId(trust_vc_vcir::DefHash::new(
+                        (key.def_path_hash >> 64) as u64,
+                        key.def_path_hash as u64,
+                    ))
+                });
+                let declaration = id.and_then(|id| read.krate.fn_decl(id));
+                json!({
+                    "state": "CurrentNativeReadObservationOnly",
+                    "native_definition": definition.map(|definition| format!("{definition:?}")),
+                    "live_owned_signature_present": declaration.is_some_and(|declaration|
+                        declaration.role == trust_vc_vcir::FnRole::Imported),
+                    "body_none": declaration.is_some_and(|declaration|
+                        matches!(declaration.body, trust_vc_vcir::Body::None)),
+                    "checked_definition_present": id.is_some_and(|id|
+                        read.spec_definitions.definitions().any(|definition| definition.id == id)),
+                    "native_library_rmeta": definition.and_then(|definition|
+                        tcx.used_crate_source(definition.krate).rmeta.clone()),
+                    "native_library_rlib": definition.and_then(|definition|
+                        tcx.used_crate_source(definition.krate).rlib.clone()),
+                    "permission_from_observation": false,
+                })
+            }));
             preparation.decide(&live)
         })());
         if let Some(Err(reason)) = &self.result {
@@ -71,13 +102,50 @@ fn verify_plan(
     plan: &macro_context::NormalClientPlan<'_>,
     output: std::path::PathBuf,
 ) -> Result<bool, String> {
+    verify_plan_with_outputs(
+        owner,
+        source,
+        phase,
+        plan,
+        output,
+        &OutputSinks::default(),
+        None,
+    )
+}
+
+pub(super) fn verify_plan_with_outputs(
+    owner: &StandaloneImported<'_>,
+    source: &ClientSource,
+    phase: &str,
+    plan: &macro_context::NormalClientPlan<'_>,
+    output: std::path::PathBuf,
+    outputs: &OutputSinks,
+    original_argv: Option<&[String]>,
+) -> Result<bool, String> {
+    plan.check_owner(owner, source)?;
+    if let Some(argv) = original_argv {
+        let (program, arguments) = argv.split_first().ok_or("missing original request argv")?;
+        let original = plan
+            .invocation()
+            .original()
+            .ok_or("the request has no original argument split")?;
+        if Some(program) != plan.verify().first()
+            || &crate::args::split(arguments).map_err(|error| error.to_string())? != original
+        {
+            return Err(
+                "the recorded original request differs from its actual invocation plan".into(),
+            );
+        }
+    }
     let mut callback = NormalClient {
         owner,
         source,
         plan,
-        verifier: OwnedNormalVerifier::new(plan),
+        verifier: OwnedNormalVerifier::new_with_outputs(plan, outputs.clone()),
         imported: None,
+        imported_spec_definitions: None,
         native_ownership_roots: None,
+        sequence_length_observation: None,
         result: None,
     };
     let compiler = run_compiler(plan.verify(), &mut callback);
@@ -88,10 +156,20 @@ fn verify_plan(
         &compiler,
         callback.result.as_ref(),
     )?;
-    owner.check_retained_inputs()?;
+    plan.check_owner(owner, source)?;
     source.file().read()?;
     let reached = callback.result.as_ref().is_some_and(Result::is_ok);
     let mut record: Record = callback.verifier.into_record(output);
+    if let Some(argv) = original_argv {
+        record.argv = argv.to_vec();
+    }
+    if let Some(original) = plan.invocation().original() {
+        record.verus_options = original
+            .verus
+            .iter()
+            .map(|option| (option.name.clone(), option.value.clone()))
+            .collect();
+    }
     let succeeded = compiler.is_ok()
         && reached
         && record.outcome == Some(Outcome::Checked)
@@ -113,8 +191,13 @@ fn verify_plan(
         },
         "normal_verdict": record.to_json(), "source_path": source.file().path,
         "imported_declarations": callback.imported, "imported_verified_functions": 0,
+        "imported_spec_definitions": callback.imported_spec_definitions,
+        "sequence_length_observation": callback.sequence_length_observation,
         "original_native_ownership_roots": callback.native_ownership_roots,
         "source_sha256": source.file().sha256,
+        "prepared_sdk_native_operand_layout": plan.prepared_sdk_root().map(|root|
+            json!({"state": "LiveOwnerBoundNativeOperandLayout", "directory": root,
+                "import_authorized": false})),
         "publication": if succeeded { "CompilerReturned0AndOwnedInputsRevalidated" } else { "NoSuccessfulPublication" },
         "ordinary_import_cli_enabled": false, "layout_or_broadcast_capability": false});
     let bytes = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
@@ -126,6 +209,10 @@ fn verify_plan(
         bytes,
     )
     .map_err(|e| e.to_string())?;
+    let problems = record.write_to(outputs);
+    for problem in problems {
+        eprintln!("warning: trust-vc: {problem}");
+    }
     Ok(succeeded)
 }
 

@@ -58,6 +58,7 @@ fn local(name: &str, ty: Ty, kind: LocalKind) -> LocalDecl {
         name: name.into(),
         ty,
         mode: Mode::Spec,
+        prophecy: crate::DeclProphecy::Default,
         mutable: false,
         kind,
         span: SpanId(0),
@@ -84,6 +85,7 @@ fn source(impossible: bool, hint_domain: bool) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Spec(read(1)),
     };
@@ -120,6 +122,7 @@ fn source(impossible: bool, hint_domain: bool) -> VcCrate {
         decreases: vec![],
         decreases_when: None,
         decreases_by: None,
+        unwind: None,
         attrs: FnAttrs::default(),
         body: Body::Stmts(Block {
             stmts: vec![

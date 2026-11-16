@@ -485,7 +485,12 @@ impl AYEncoder {
                     ),
                 ));
             }
+            #[cfg(test)]
+            let side_condition_phase =
+                super::phase_observer::span("solver_call", "assumption_side_condition_check_sat");
             let result = scope.try_check_sat();
+            #[cfg(test)]
+            drop(side_condition_phase);
             super::solve::note_solver_panic(&result, &mut self.state.solver_panic);
             let result = result.map_err(|e| {
                 encoding_error(

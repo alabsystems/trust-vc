@@ -33,6 +33,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import signal
 import shlex
 import subprocess
 import sys
@@ -444,6 +445,129 @@ HARNESS_PYTHON
         finally:
             os.close(read_fd)
             os.close(write_fd)
+
+    def lender_fixture(self):
+        lender = self.tmp / "lender with ' spaces"
+        # This fixture merely execs argv. It grants no GNU or CPU authority.
+        lender.write_text('#!/bin/bash\nexec "$@"\n')
+        lender.chmod(0o755)
+        return lender
+
+    def lending_args(self, lender):
+        return SimpleNamespace(frontend="trust-vc", execution_lender=lender,
+                               threads=1, parallel_bins=1, env=[])
+
+    def test_execution_lender_refuses_context_before_filtering_or_staging(self):
+        args = self.lending_args(self.lender_fixture())
+        fixed = {"BUILD_SLOT_HELD": "1", "BUILD_SLOT_CPU_PROTOCOL": "1"}
+        for extra in ({}, {"BUILD_SLOT_CPU_PROTOCOL": "2"}):
+            values = {} if not extra else dict(fixed, **extra)
+            with patch.dict(os.environ, values, clear=True):
+                with self.assertRaisesRegex(SystemExit, "fixed build-slot"):
+                    run_suite.execution_lender_inputs(args)
+        for key in run_suite.LENDER_ADVERTISEMENTS:
+            # Even an empty advertisement must not be erased by the allowlist.
+            with patch.dict(os.environ, dict(fixed, **{key: ""}), clear=True):
+                with self.assertRaisesRegex(SystemExit, "advertised custody"):
+                    run_suite.execution_lender_inputs(args)
+        with patch.dict(os.environ, fixed, clear=True):
+            for key in ("BUILD_SLOT_CPU_PROTOCOL", "CARGO_MAKEFLAGS", "CARGO_BUILD_JOBS",
+                        "TRUST_CPU_HANDOFF", "ATERM_SDK_LEASE_V3"):
+                args.env = [key + "=injected"]
+                with self.assertRaisesRegex(SystemExit, "admission context"):
+                    run_suite.execution_lender_inputs(args)
+            args.env = []
+            args.threads = 2
+            with self.assertRaisesRegex(SystemExit, "threads 1"):
+                run_suite.execution_lender_inputs(args)
+            args.threads, args.parallel_bins = 1, 2
+            with self.assertRaisesRegex(SystemExit, "parallel-bins 1"):
+                run_suite.execution_lender_inputs(args)
+            args.frontend = "verus"
+            with self.assertRaisesRegex(SystemExit, "trust-vc only"):
+                run_suite.execution_lender_inputs(args)
+
+    def test_execution_wrapper_preserves_argv_bytes_exit_and_signal_with_capture(self):
+        lender = self.lender_fixture()
+        body = self.tmp / "driver with ' spaces.py"
+        body.write_text('''import json, os, signal, sys
+print(json.dumps(sys.argv[2:]), flush=True)
+print("original stderr", file=sys.stderr, flush=True)
+if sys.argv[1].startswith("signal:"):
+    sig = int(sys.argv[1].partition(":")[2])
+    if sig not in (signal.SIGKILL, signal.SIGSTOP):
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, [sig])
+    os.kill(os.getpid(), sig)
+sys.exit(int(sys.argv[1]))
+''')
+        fixed = {"BUILD_SLOT_HELD": "1", "BUILD_SLOT_CPU_PROTOCOL": "1"}
+        payload = ["a b", "'literal\"", "$(not executed)", "semi;colon", "unicode-λ"]
+        for capture in (False, True):
+            wrapper = self.tmp / ("capture wrapper" if capture else "exec wrapper")
+            diags = self.tmp / "captured diagnostics" if capture else None
+            run_suite.stage_execution_wrapper(wrapper, Path(sys.executable), lender,
+                                              self.lib, diags)
+            for status in (0, 7, 139):
+                result = run([wrapper, "-I", "-S", body, status, *payload,
+                              "-o", self.tmp / "actual output" / "out"], env=fixed)
+                self.assertEqual(result.returncode, status, result)
+                self.assertEqual(json.loads(result.stdout), payload + ["-o", str(self.tmp / "actual output" / "out")])
+                self.assertEqual(result.stderr, "original stderr\n")
+            for sig in (signal.SIGTERM, signal.SIGUSR1, signal.SIGKILL):
+                result = run([wrapper, "-I", "-S", body, "signal:" + str(sig), *payload], env=fixed)
+                self.assertEqual(result.returncode, -sig, result)
+                self.assertEqual(result.stderr, "original stderr\n")
+            if capture:
+                files = list((diags / "actual output").glob("*.stderr"))
+                self.assertEqual(len(files), 3)
+                self.assertTrue(any(path.read_text().endswith("exit=139\n") for path in files))
+                def ignore_and_block():
+                    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+                    signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGUSR1])
+                inherited = subprocess.run(
+                    [str(wrapper), "-I", "-S", str(body), "signal:" + str(signal.SIGUSR1)],
+                    env=fixed, capture_output=True, timeout=30, preexec_fn=ignore_and_block)
+                self.assertEqual(inherited.returncode, -signal.SIGUSR1, inherited)
+            refused = run([wrapper, "-I", "-S", body, 0], env=dict(fixed, MAKEFLAGS=""))
+            self.assertEqual(refused.returncode, 75)
+            self.assertEqual(refused.stdout, "")
+
+    def test_execution_lender_stage_keeps_real_images_and_detects_tampering(self):
+        outputs = self.tmp / "native lending inputs"
+        outputs.mkdir()
+        for name in ("rust_verify", "verus", "cargo-verus"):
+            file = outputs / name
+            file.write_text("#!/bin/bash\nexit 0\n")
+            file.chmod(0o755)
+        builtins = outputs / "builtins"
+        builtins.mkdir()
+        for name in run_suite.BUILTIN_ARTIFACTS:
+            (builtins / name).write_text(name)
+        args = self.lending_args(self.lender_fixture())
+        args.capture_diagnostics = True
+        args.rust_verify, args.verus_driver = outputs / "rust_verify", outputs / "verus"
+        args.cargo_verus, args.builtins, args.dyld = outputs / "cargo-verus", builtins, self.lib
+        fixed = {"BUILD_SLOT_HELD": "1", "BUILD_SLOT_CPU_PROTOCOL": "1"}
+        with patch.dict(os.environ, fixed, clear=True):
+            args.execution_lender_inputs = run_suite.execution_lender_inputs(args)
+            args.native_cli_inputs = run_suite.native_cli_inputs(args, {"cargo": self.cargo})
+            target = self.tmp / "lending stage"
+            staged = run_suite.stage_target_verus(target, self.src, args, self.tmp)
+        for name in ("rust_verify", "verus"):
+            self.assertEqual((target / (name + ".real")).read_bytes(), (outputs / name).read_bytes())
+            self.assertIn(name, staged)
+            self.assertIn(name + ".execution.py", staged)
+        self.assertEqual((target / "cargo-verus").read_bytes(), args.cargo_verus.read_bytes())
+        self.assertEqual(args.native_cli_inputs["verus"]["staged_path"], str(target / "verus.real"))
+        run_suite.check_native_cli_inputs(args.native_cli_inputs)
+        pins = run_suite.native_runtime.snapshot_files(target / name for name in staged)
+        (target / "execution-lender").write_text("changed staged lender")
+        with self.assertRaisesRegex(RuntimeError, "input changed"):
+            run_suite.native_runtime.check_files(pins)
+        args.execution_lender.write_text("changed original lender")
+        with self.assertRaisesRegex(RuntimeError, "input changed"):
+            run_suite.native_runtime.check_files(args.execution_lender_inputs)
 
     def test_full_suite_requires_ignored_execution_before_writing(self):
         out = self.tmp / "out"

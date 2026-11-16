@@ -180,7 +180,7 @@ impl<'a> AstExpressionParser<'a> {
 
             if self.quantifier_depth == 0 {
                 if let Some(pool) = self.ground_pool.as_deref_mut() {
-                    pool.register_expr(name, Vec::new(), Vec::new());
+                    pool.register_expr_scoped(self.solver, name, Vec::new(), Vec::new(), result);
                 }
             }
 
@@ -422,7 +422,13 @@ impl<'a> AstExpressionParser<'a> {
 
         if self.quantifier_depth == 0 {
             if let Some(pool) = self.ground_pool.as_deref_mut() {
-                pool.register_expr(name, arg_terms.clone(), args.to_vec());
+                pool.register_expr_scoped(
+                    self.solver,
+                    name,
+                    arg_terms.clone(),
+                    args.to_vec(),
+                    result,
+                );
             }
         }
 

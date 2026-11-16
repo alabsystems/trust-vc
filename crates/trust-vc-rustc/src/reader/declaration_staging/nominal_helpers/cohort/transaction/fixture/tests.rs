@@ -120,6 +120,7 @@ fn run(case: Case, name: &str) {
                 );
             }
             drop(state);
+            crate::reader::declaration_staging::emitted_rlib::genuine_mutation_controls(library);
             library.write_observation().unwrap();
         }
         Case::Drop => {

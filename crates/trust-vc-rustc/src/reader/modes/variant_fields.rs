@@ -164,7 +164,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         let environment = ty::TypingEnv::post_analysis(self.tcx, self.body_owner);
         let field_type = self
             .tcx
-            .try_normalize_erasing_regions(environment, field.ty(self.tcx, arguments));
+            .try_normalize_erasing_regions(environment, field.ty(self.tcx, *arguments));
         let result_type = self.tcx.try_normalize_erasing_regions(
             environment,
             ty::Unnormalized::new(self.typeck.expr_ty(expression)),

@@ -103,7 +103,7 @@ impl<'tcx> Matcher<'tcx, '_> {
             ) => {
                 adt.did().krate == LOCAL_CRATE
                     && key(self.tcx, adt.did()) == *declaration
-                    && self.adt_args(adt.did(), args, arguments, depth)
+                    && self.adt_args(adt.did(), *args, arguments, depth)
             }
             (
                 ty::Adt(adt, args),
@@ -118,7 +118,7 @@ impl<'tcx> Matcher<'tcx, '_> {
                         == declaration.type_parameters as usize
                     && selected(self.tcx, adt.did().krate, self.dependencies).ok()
                         == Some(declaration.artifact_sha256)
-                    && self.adt_args(adt.did(), args, arguments, depth)
+                    && self.adt_args(adt.did(), *args, arguments, depth)
             }
             _ => false,
         }
@@ -127,7 +127,7 @@ impl<'tcx> Matcher<'tcx, '_> {
     fn adt_args(
         &self,
         def: DefId,
-        native: ty::GenericArgsRef<'tcx>,
+        native: ty::GenericArgs<'tcx>,
         arguments: &[DeclarationType],
         depth: usize,
     ) -> bool {

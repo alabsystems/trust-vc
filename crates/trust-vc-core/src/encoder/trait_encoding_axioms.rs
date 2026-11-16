@@ -140,11 +140,19 @@ impl AYEncoder {
         // general backstop can catch any helper that still hoists.
         // See `crate::encoder::binder_capture`.
         let capture_watermark = self.assertion_watermark();
-        let rhs = crate::encoder::with_flag_unwind_safe!(
-            self.state.pending_universal_closure,
-            !bound_vars.is_empty(),
-            { self.encode_trait_expr_with_bindings(&body_expr, &local_bindings, &local_types) }
-        )?;
+        let rhs = self.with_ground_template_scope(&bound_vars, |encoder| {
+            crate::encoder::with_flag_unwind_safe!(
+                encoder.state.pending_universal_closure,
+                !bound_vars.is_empty(),
+                {
+                    encoder.encode_trait_expr_with_bindings(
+                        &body_expr,
+                        &local_bindings,
+                        &local_types,
+                    )
+                }
+            )
+        })?;
 
         // Assert: ∀(self:T, params). {Trait__method(Box_T(self), ...)} lhs == rhs
         let eq = self
@@ -338,11 +346,19 @@ impl AYEncoder {
         // general backstop can catch any helper that still hoists.
         // See `crate::encoder::binder_capture`.
         let capture_watermark = self.assertion_watermark();
-        let body = crate::encoder::with_flag_unwind_safe!(
-            self.state.pending_universal_closure,
-            !bound_terms.is_empty(),
-            { self.encode_trait_expr_with_bindings(&axiom_expr, &local_bindings, &local_types) }
-        )?;
+        let body = self.with_ground_template_scope(&bound_terms, |encoder| {
+            crate::encoder::with_flag_unwind_safe!(
+                encoder.state.pending_universal_closure,
+                !bound_terms.is_empty(),
+                {
+                    encoder.encode_trait_expr_with_bindings(
+                        &axiom_expr,
+                        &local_bindings,
+                        &local_types,
+                    )
+                }
+            )
+        })?;
         if let Some(capture) = self.binder_capture_since(capture_watermark, &bound_terms) {
             let site = format!("trait-postcondition:{}::{}", decl.name, method.name);
             self.record_binder_capture(&site, &capture);
@@ -804,31 +820,39 @@ impl AYEncoder {
             // joined as terms, so neither binding list can reach the other's
             // clause.
             let capture_watermark = self.assertion_watermark();
-            let body = match crate::encoder::with_flag_unwind_safe!(
-                self.state.pending_universal_closure,
-                !bound_terms.is_empty(),
-                {
-                    self.encode_trait_expr_with_bindings(&ensured, &ensures_bindings, &local_types)
-                        .and_then(|ensured_term| match &required {
-                            None => Ok(ensured_term),
-                            Some(required) => {
-                                let required_term = self.encode_trait_expr_with_bindings(
-                                    required,
-                                    &requires_bindings,
-                                    &local_types,
-                                )?;
-                                self.solver
-                                    .try_implies(required_term, ensured_term)
-                                    .map_err(|err| {
-                                        trait_encoding_error(format!(
-                                            "Failed to guard impl ensures for '{}': {err}",
-                                            method.name
-                                        ))
-                                    })
-                            }
-                        })
-                }
-            ) {
+            let body = match self.with_ground_template_scope(&bound_terms, |encoder| {
+                crate::encoder::with_flag_unwind_safe!(
+                    encoder.state.pending_universal_closure,
+                    !bound_terms.is_empty(),
+                    {
+                        encoder
+                            .encode_trait_expr_with_bindings(
+                                &ensured,
+                                &ensures_bindings,
+                                &local_types,
+                            )
+                            .and_then(|ensured_term| match &required {
+                                None => Ok(ensured_term),
+                                Some(required) => {
+                                    let required_term = encoder.encode_trait_expr_with_bindings(
+                                        required,
+                                        &requires_bindings,
+                                        &local_types,
+                                    )?;
+                                    encoder
+                                        .solver
+                                        .try_implies(required_term, ensured_term)
+                                        .map_err(|err| {
+                                            trait_encoding_error(format!(
+                                                "Failed to guard impl ensures for '{}': {err}",
+                                                method.name
+                                            ))
+                                        })
+                                }
+                            })
+                    }
+                )
+            }) {
                 Ok(term) => term,
                 Err(_) => continue,
             };
@@ -1067,11 +1091,19 @@ impl AYEncoder {
             // See `crate::encoder::binder_capture` — encode-then-close, so the
             // pending closure must be announced and the hoist watermark taken.
             let capture_watermark = self.assertion_watermark();
-            let body = match crate::encoder::with_flag_unwind_safe!(
-                self.state.pending_universal_closure,
-                !bound_terms.is_empty(),
-                { self.encode_trait_expr_with_bindings(&ensured, &local_bindings, &local_types) }
-            ) {
+            let body = match self.with_ground_template_scope(&bound_terms, |encoder| {
+                crate::encoder::with_flag_unwind_safe!(
+                    encoder.state.pending_universal_closure,
+                    !bound_terms.is_empty(),
+                    {
+                        encoder.encode_trait_expr_with_bindings(
+                            &ensured,
+                            &local_bindings,
+                            &local_types,
+                        )
+                    }
+                )
+            }) {
                 Ok(term) => term,
                 Err(_) => continue,
             };

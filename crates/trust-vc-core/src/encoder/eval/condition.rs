@@ -125,11 +125,19 @@ impl AYEncoder {
         expr: &crate::ir::TrustVcExpr,
     ) -> TrustVcResult<Term> {
         #[cfg(test)]
+        let _phase_observer =
+            crate::encoder::verification::phase_observer::span("encode", "encode_condition");
+        #[cfg(test)]
         if super::super::verification::test_hooks::take_forced_encode_condition_panic() {
             panic!("forced encode_condition_typed panic");
         }
         // Inline spec functions have their body substituted at call sites
         // instead of using UF + body axiom (#2488); the result is validated.
+        let capture = self.state.scalar_cast_capture.clone();
+        let _active_capture = capture.as_ref().and_then(|sink| sink.begin());
+        let original_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(expr));
         let expr = self.prepare_root(expr)?;
 
         // Substitute assumed equalities and normalize arithmetic before encoding.
@@ -146,6 +154,9 @@ impl AYEncoder {
         } else {
             super::super::ir_encoder::normalize::normalize_int_expr(&expr)
         };
+        let prepared_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(&normalized));
         let mut ast_parser = AstExpressionParser::new(
             &mut self.solver,
             &self.variables,
@@ -153,6 +164,7 @@ impl AYEncoder {
             &self.var_types,
             &self.fn_ctx.functions,
         );
+        ast_parser.scalar_casts = capture.as_ref().map(|_| Vec::new());
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
@@ -232,6 +244,20 @@ impl AYEncoder {
                 .iter()
                 .map(|(k, v)| (*k, v.clone())),
         );
+        if let Ok(term) = &result {
+            let checks = ast_parser.take_overflow_checks();
+            let constants = ast_parser.take_const_fold_overflow_verdicts();
+            record_cast_condition(
+                capture,
+                &mut ast_parser,
+                crate::scalar_cast_capture::ScalarCastEncodingPhase::Condition,
+                original_root.unwrap_or_else(|| Err("capture disabled".into())),
+                prepared_root.unwrap_or_else(|| Err("capture disabled".into())),
+                *term,
+                &checks,
+                &constants,
+            );
+        }
         result
     }
 
@@ -245,6 +271,14 @@ impl AYEncoder {
         &mut self,
         expr: &crate::ir::TrustVcExpr,
     ) -> TrustVcResult<Term> {
+        #[cfg(test)]
+        let _phase_observer =
+            crate::encoder::verification::phase_observer::span("encode", "encode_refutation");
+        let capture = self.state.scalar_cast_capture.clone();
+        let _active_capture = capture.as_ref().and_then(|sink| sink.begin());
+        let original_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(expr));
         let expr = self.prepare_root(expr)?;
 
         let normalized = if !self.state.equality_assumptions.is_empty() {
@@ -255,6 +289,9 @@ impl AYEncoder {
         } else {
             super::super::ir_encoder::normalize::normalize_int_expr(&expr)
         };
+        let prepared_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(&normalized));
         let mut ast_parser = AstExpressionParser::new(
             &mut self.solver,
             &self.variables,
@@ -262,6 +299,7 @@ impl AYEncoder {
             &self.var_types,
             &self.fn_ctx.functions,
         );
+        ast_parser.scalar_casts = capture.as_ref().map(|_| Vec::new());
         ast_parser.function_return_types = Some(&self.fn_ctx.return_types);
         ast_parser.function_param_types = Some(&self.fn_ctx.param_types);
         ast_parser.function_type_params = Some(&self.fn_ctx.type_params);
@@ -329,6 +367,20 @@ impl AYEncoder {
                 .iter()
                 .map(|(k, v)| (*k, v.clone())),
         );
+        if let Ok(term) = &result {
+            let checks = ast_parser.take_overflow_checks();
+            let constants = ast_parser.take_const_fold_overflow_verdicts();
+            record_cast_condition(
+                capture,
+                &mut ast_parser,
+                crate::scalar_cast_capture::ScalarCastEncodingPhase::Refutation,
+                original_root.unwrap_or_else(|| Err("capture disabled".into())),
+                prepared_root.unwrap_or_else(|| Err("capture disabled".into())),
+                *term,
+                &checks,
+                &constants,
+            );
+        }
         result
     }
 
@@ -353,6 +405,9 @@ impl AYEncoder {
         expr: &crate::ir::TrustVcExpr,
         bindings: &[(&str, Term)],
     ) -> TrustVcResult<Term> {
+        if let Some(capture) = &self.state.scalar_cast_capture {
+            capture.refuse("cast binding does not cover an alternate local-binding encoder");
+        }
         self.validate_ir_typing(expr, None)?;
         let mut ast_parser = AstExpressionParser::new(
             &mut self.solver,
@@ -475,6 +530,11 @@ impl AYEncoder {
         Vec<super::super::parser_state::ConstFoldOverflowCheck>,
     )> {
         #[cfg(test)]
+        let _phase_observer = crate::encoder::verification::phase_observer::span(
+            "encode",
+            "encode_bounds_and_overflow",
+        );
+        #[cfg(test)]
         if super::super::verification::test_hooks::take_forced_encode_condition_panic() {
             panic!("forced encode_condition_typed panic");
         }
@@ -482,7 +542,15 @@ impl AYEncoder {
         // encoding too: an `#[trust_vc::inline]` function is not declared as a
         // backend UF, so an un-substituted `f(args)` would fail with
         // "Undefined function: f" (#2777).
+        let capture = self.state.scalar_cast_capture.clone();
+        let _active_capture = capture.as_ref().and_then(|sink| sink.begin());
+        let original_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(expr));
         let expr = self.prepare_root(expr)?;
+        let prepared_root = capture
+            .as_ref()
+            .map(|_| crate::scalar_cast_capture::typed_root(&expr));
         let expr: &crate::ir::TrustVcExpr = &expr;
 
         let overflow_behavior = if check_overflow {
@@ -498,6 +566,7 @@ impl AYEncoder {
             &self.fn_ctx.functions,
             overflow_behavior,
         );
+        ast_parser.scalar_casts = capture.as_ref().map(|_| Vec::new());
         // Override derived div0/bitshift with context-propagated behaviors.
         ast_parser.div0_behavior = self.state.div0_behavior;
         ast_parser.bitshift_behavior = self.state.bitshift_behavior;
@@ -576,6 +645,69 @@ impl AYEncoder {
         let term = result?;
         let overflow_checks = ast_parser.take_overflow_checks();
         let const_fold_overflow = ast_parser.take_const_fold_overflow_verdicts();
+        record_cast_condition(
+            capture,
+            &mut ast_parser,
+            crate::scalar_cast_capture::ScalarCastEncodingPhase::CheckedCondition,
+            original_root.unwrap_or_else(|| Err("capture disabled".into())),
+            prepared_root.unwrap_or_else(|| Err("capture disabled".into())),
+            term,
+            &overflow_checks,
+            &const_fold_overflow,
+        );
         Ok((term, overflow_checks, const_fold_overflow))
+    }
+}
+
+fn record_cast_condition(
+    capture: Option<crate::scalar_cast_capture::ScalarCastCapture>,
+    parser: &mut AstExpressionParser<'_>,
+    phase: crate::scalar_cast_capture::ScalarCastEncodingPhase,
+    original_root: Result<crate::ir::TrustVcExpr, String>,
+    prepared_root: Result<crate::ir::TrustVcExpr, String>,
+    term: Term,
+    overflow_checks: &[super::super::parser_state::OverflowCheck],
+    const_fold_overflow: &[super::super::parser_state::ConstFoldOverflowCheck],
+) {
+    if let Some(capture) = capture {
+        let observation = (|| {
+            if let Some(reason) = parser.scalar_cast_refusal.take() {
+                return Err(reason);
+            }
+            let result_term = crate::scalar_cast_capture::actual_term(parser.solver, term)?;
+            let domain_checks = overflow_checks
+                .iter()
+                .map(|(label, predicate)| {
+                    let predicate =
+                        crate::scalar_cast_capture::actual_term(parser.solver, *predicate)?;
+                    if predicate.sort != ay_dpll::api::Sort::Bool {
+                        return Err("cast domain predicate is not Bool".into());
+                    }
+                    Ok(crate::scalar_cast_capture::ScalarCastDomainCheck {
+                        label: label.to_string(),
+                        predicate: predicate.text,
+                        bindings: predicate.bindings,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(crate::scalar_cast_capture::ScalarCastCondition {
+                phase,
+                original_typed_root: original_root?,
+                prepared_typed_root: prepared_root?,
+                result_sort: result_term.sort,
+                result_bindings: result_term.bindings,
+                result_term: result_term.text,
+                casts: parser.scalar_casts.take().expect("capture enabled"),
+                domain_checks,
+                constant_overflow_verdicts: const_fold_overflow
+                    .iter()
+                    .map(|(label, value)| (label.to_string(), *value))
+                    .collect(),
+            })
+        })();
+        match observation {
+            Ok(row) => capture.record(row),
+            Err(reason) => capture.refuse(reason),
+        }
     }
 }

@@ -52,18 +52,18 @@ fn constructors_and_selector_views_retain_full_nominal_type_vectors() {
         .argument(&TypeRecipe::Int(crate::IntRange::U(8)), &TypeEnv::default())
         .unwrap();
     let a = v
-        .construct_sum(id(1), &[boolean.clone()], 0, vec![])
+        .construct_sum(id(1), std::slice::from_ref(&boolean), 0, vec![])
         .unwrap();
     let b = v
-        .construct_sum(id(1), &[integer.clone()], 0, vec![])
+        .construct_sum(id(1), std::slice::from_ref(&integer), 0, vec![])
         .unwrap();
     let other = v
-        .construct_sum(id(2), &[boolean.clone()], 0, vec![])
+        .construct_sum(id(2), std::slice::from_ref(&boolean), 0, vec![])
         .unwrap();
     assert_ne!(a, b);
     assert_ne!(a, other);
     let pa = v
-        .project_sum(id(1), &[boolean.clone()], 1, 0, a.clone())
+        .project_sum(id(1), std::slice::from_ref(&boolean), 1, 0, a.clone())
         .unwrap();
     let pb = v.project_sum(id(1), &[integer], 1, 0, a.clone()).unwrap();
     assert_ne!(pa, pb);

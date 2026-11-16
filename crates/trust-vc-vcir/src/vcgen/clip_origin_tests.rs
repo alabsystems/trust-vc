@@ -366,3 +366,69 @@ fn origin_tracking_and_a_later_body_read_share_the_original_exhausted_grant() {
         "no new grant may be minted after origin admission exhaustion"
     );
 }
+
+fn ordinary_uf() -> Term {
+    Term::call("origin_actual_uf", vec![n()], Sort::Int)
+}
+fn uf_items(hypotheses: &[(Term, Position)]) -> Vec<(Term, Term)> {
+    let defs = HashMap::new();
+    let requested = ranges();
+    let with_uf = |name: &str| {
+        if name == "origin_actual_uf" {
+            CallRole::Collect
+        } else {
+            role(name)
+        }
+    };
+    let mut analysis = Analysis::new(&with_uf, &defs, 200_000).with_clip_triggers(&requested);
+    let found = analysis
+        .seeds(hypotheses, &(Term::Bool(false), Position::default()))
+        .expect("unchanged source admission grant");
+    resolved(analysis, found)
+}
+fn evaluate_uf_gate(guard: &Term, gate: bool) -> Term {
+    let mut graph = EGraph::default();
+    graph.assert(&Term::eq(ordinary_uf(), Term::Int(7)));
+    graph.assert(&if gate { g() } else { g().not() });
+    Simp::with(&mut graph).go(guard)
+}
+
+#[test]
+fn a_still_present_canonical_clip_has_its_actual_in_range_uf_witness() {
+    let source = clipped(ordinary_uf());
+    let found = uf_items(&placed(vec![positive(source.clone())]));
+    let guard = condition(&found, &source).expect("the whole still-present canonical application");
+    assert_eq!(evaluate_uf_gate(guard, false), Term::Bool(true));
+}
+
+#[test]
+fn bare_discarded_and_collapsed_uf_images_never_invent_whole_clips() {
+    let raw = ordinary_uf();
+    no_clip(&uf_items(&placed(vec![positive(raw.clone())])));
+    no_clip(&uf_items(&placed(vec![
+        Term::Or(vec![Term::Bool(true), positive(clipped(raw.clone()))]),
+        positive(raw.clone()),
+        positive(oob(IntRange::U(8), raw.clone())),
+    ])));
+    // This extension only borrows a still-present ITE. A collapsed in-range
+    // UF image cannot use a discarded original clip as a candidate.
+    no_clip(&uf_items(&placed(vec![
+        Term::le(Term::Int(0), raw.clone()),
+        Term::le(raw.clone(), Term::Int(255)),
+        positive(clipped(raw)),
+    ])));
+}
+
+#[test]
+fn an_opposite_branch_bare_uf_cannot_erase_the_whole_clip_gate() {
+    let source = clipped(ordinary_uf());
+    let found = uf_items(&placed(vec![Term::Ite(
+        Box::new(g()),
+        Box::new(positive(source.clone())),
+        Box::new(positive(ordinary_uf())),
+        Sort::Bool,
+    )]));
+    let guard = condition(&found, &source).expect("the actual conditional source clip");
+    assert_eq!(evaluate_uf_gate(guard, true), Term::Bool(true));
+    assert_eq!(evaluate_uf_gate(guard, false), Term::Bool(false));
+}

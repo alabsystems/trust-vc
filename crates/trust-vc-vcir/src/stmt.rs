@@ -166,6 +166,15 @@ pub enum StmtKind {
         /// The value.
         value: Expr,
     },
+    /// Borrow one initialized storage place as a new opaque mutable reference.
+    /// The generator relates its current projection to the old storage value
+    /// and writes its future projection back to that same typed place.
+    BorrowMut {
+        /// An already declared, uninitialized local of type `MutRef(place_ty)`.
+        dest: LocalId,
+        /// The storage borrowed, including any typed parent projections.
+        place: Place,
+    },
     /// Call an exec or proof function. `site` is where the callee's
     /// preconditions are checked.
     Call {
@@ -235,6 +244,12 @@ pub enum StmtKind {
         /// Fuel for recursive functions; `None` means the default.
         fuel: Option<u32>,
     },
+    /// Enable the actual local broadcast proof's universal contract from this
+    /// source location. Its declaration supplies every binder and clause.
+    BroadcastUse {
+        /// Exact declaration identity, never a source-name lookup.
+        callee: FnId,
+    },
     /// `hide(f)`: stop using a spec function's definition from here on.
     Hide {
         /// The spec function.
@@ -243,6 +258,15 @@ pub enum StmtKind {
     /// A ghost block (`proof { .. }` in exec code): proof-mode statements
     /// that do not run.
     Ghost(Block),
+    /// A proof block in executable code whose original Unit-valued tail is
+    /// retained for raw value-mode and prophecy checks before Unit erasure.
+    /// There is no producer-supplied mode override.
+    GhostTail {
+        /// Proof statements preceding the actual tail expression.
+        block: Block,
+        /// The original tail, including any generated result temporary.
+        tail: Expr,
+    },
     /// A nested block.
     Block(Block),
     /// A loop; exec code only. The statement's span is the loop's header.

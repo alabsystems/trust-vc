@@ -12,7 +12,6 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_hir::def_id::DefId;
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::AttrId;
 use trust_vc_vcir::Mode;
 
 use super::super::{check, Recursion, RecursionOrigin};
@@ -113,11 +112,8 @@ pub fn NotNominal<A>(_value: A) {{}}
     );
 }
 
-fn attribute_id(attribute: &Attribute) -> Option<AttrId> {
-    match attribute {
-        Attribute::Unparsed(item) => Some(item.id.attr_id),
-        Attribute::Parsed(_) => None,
-    }
+fn attribute_observation(attribute: &Attribute) -> String {
+    format!("{attribute:?}")
 }
 
 fn permitted_count<'tcx>(directives: &CheckedDirectives<'_, 'tcx>, tcx: TyCtxt<'tcx>) -> usize {
@@ -143,11 +139,14 @@ fn preserves_remaining<'tcx>(
     let expected = original
         .iter()
         .filter(|attribute| !directives.permits(tcx, scope, attribute))
-        .map(attribute_id)
+        .map(attribute_observation)
         .collect::<Vec<_>>();
     let remaining = directives.remaining(tcx, scope).unwrap();
     assert_eq!(
-        remaining.iter().map(attribute_id).collect::<Vec<_>>(),
+        remaining
+            .iter()
+            .map(attribute_observation)
+            .collect::<Vec<_>>(),
         expected
     );
 }
@@ -280,13 +279,25 @@ fn inspect_boundaries(tcx: TyCtxt<'_>, owner: DefId) {
         .find(|attribute| directives.permits(tcx, owner, attribute))
         .unwrap();
     let cloned = (*original).clone();
-    let (Attribute::Unparsed(actual), Attribute::Unparsed(copy)) = (original, &cloned) else {
-        panic!("the actual recursion attribute is unparsed native syntax");
+    let (Attribute::Tool(actual), Attribute::Tool(copy)) = (original, &cloned) else {
+        panic!("the actual recursion attribute is native tool syntax");
     };
-    assert_eq!(actual.id.attr_id, copy.id.attr_id);
+    assert_eq!(actual.path.segments, copy.path.segments);
     assert_eq!(actual.span, copy.span);
     assert!(!std::ptr::eq(original, &cloned));
     assert!(!directives.permits(tcx, owner, &cloned));
+    let derive_helper = Attribute::DeriveHelper(actual.clone());
+    assert!(!directives.permits(tcx, owner, &derive_helper));
+    assert!(crate::reader::attrs::verus_attrs(std::slice::from_ref(&derive_helper)).is_empty());
+    let Attribute::DeriveHelper(mut bare_mode) = derive_helper else {
+        unreachable!()
+    };
+    bare_mode.path.segments = vec![rustc_span::Symbol::intern("spec")].into_boxed_slice();
+    assert!(matches!(
+        crate::reader::attrs::verus_parse(&[Attribute::DeriveHelper(bare_mode)]),
+        Err(crate::reader::attrs::AttrProblem::Error(_, message))
+            if message == crate::messages::attr::OLD_MODE_ATTRIBUTE
+    ));
     let other = named(tcx, "Other");
     assert!(!directives.permits(tcx, other, original));
     assert!(directives.remaining(tcx, other).is_none());

@@ -356,6 +356,8 @@ fn write_semantic_profile(out: &mut String, build_source_identity: &str) {
 /// context field cannot silently create another under-keyed cache entry.
 fn assert_cache_field_classification_is_exhaustive(ctx: &PreparedVerificationContext) {
     let PreparedVerificationContext {
+        // Observation is not a solver input; a cache hit cannot create captured terms.
+        scalar_cast_capture: _,
         obligations: _,
         variables: _,
         function_context: _,

@@ -1,9 +1,9 @@
 # Native TrustIr Bundle Fixtures
 
 `native_request_trust_bundle.json` is copied from TrustIr's conformance corpus at
-rev `bd313b4fbfae2c2826bade463e23224f1df9a61a`
+rev `ba039cfea77ae44eeaba0dc8e2946c27d5d97ddd`
 (`crates/trust-ir-conformance/tests/fixtures/native_request_trust_bundle.json`,
-bundle schema 8), the trust-ir rev this workspace pins. Re-copy it, never edit
+bundle schema 9), the trust-ir rev this workspace pins. Re-copy it, never edit
 it, in the same commit as a pin move: its digests are computed upstream.
 
 It pins direct TrustVc consumption of `trust_ir::NativeVerificationBundle` and its

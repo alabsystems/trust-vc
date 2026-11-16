@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ids::{LocalId, LoopId};
 use crate::item::{Body, FnDecl};
 use crate::stmt::{Block, Stmt, StmtKind};
+use crate::{Expr, ExprKind};
 
 /// Facts about one loop.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +61,13 @@ fn walk(
 ) {
     for stmt in live_prefix(block) {
         match &stmt.kind {
+            StmtKind::BorrowMut { dest, place } => {
+                for local in [*dest, place.local] {
+                    if params.contains(&local) {
+                        assigned_params.insert(local);
+                    }
+                }
+            }
             StmtKind::Assign { place, .. } => {
                 if params.contains(&place.local) {
                     assigned_params.insert(place.local);
@@ -87,6 +95,12 @@ fn walk(
             StmtKind::Ghost(inner) | StmtKind::Block(inner) => {
                 walk(inner, params, assigned_params, out);
             }
+            StmtKind::GhostTail { block, tail } => {
+                walk(block, params, assigned_params, out);
+                if !block_diverges(block) {
+                    walk_expression(tail, params, assigned_params, out);
+                }
+            }
             StmtKind::Loop(lp) => {
                 let mut modified = BTreeSet::new();
                 if let Some(cond) = &lp.cond {
@@ -111,6 +125,7 @@ fn walk(
             | StmtKind::AssertBitVector { .. }
             | StmtKind::Assume { .. }
             | StmtKind::Return { .. }
+            | StmtKind::BroadcastUse { .. }
             | StmtKind::Reveal { .. }
             | StmtKind::Hide { .. }
             | StmtKind::Break { .. }
@@ -124,6 +139,10 @@ fn walk(
 pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
     for stmt in live_prefix(block) {
         match &stmt.kind {
+            StmtKind::BorrowMut { dest, place } => {
+                out.insert(*dest);
+                out.insert(place.local);
+            }
             StmtKind::Assign { place, .. } => {
                 out.insert(place.local);
             }
@@ -141,6 +160,12 @@ pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
                 assigned(else_block, out);
             }
             StmtKind::Ghost(inner) | StmtKind::Block(inner) => assigned(inner, out),
+            StmtKind::GhostTail { block, tail } => {
+                assigned(block, out);
+                if !block_diverges(block) {
+                    assigned_expression(tail, out);
+                }
+            }
             StmtKind::Loop(lp) => {
                 if let Some(cond) = &lp.cond {
                     assigned(&cond.block, out);
@@ -153,6 +178,7 @@ pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
             | StmtKind::AssertBitVector { .. }
             | StmtKind::Assume { .. }
             | StmtKind::Return { .. }
+            | StmtKind::BroadcastUse { .. }
             | StmtKind::Reveal { .. }
             | StmtKind::Hide { .. }
             | StmtKind::Break { .. }
@@ -172,6 +198,11 @@ fn breaks(block: &Block, id: LoopId) -> bool {
             ..
         } => breaks(then_block, id) || breaks(else_block, id),
         StmtKind::Ghost(inner) | StmtKind::Block(inner) => breaks(inner, id),
+        StmtKind::GhostTail { block, tail } => {
+            let mut found = breaks(block, id);
+            expression_blocks(tail, &mut |inner| found |= breaks(inner, id));
+            found
+        }
         StmtKind::Loop(lp) => {
             lp.cond.as_ref().is_some_and(|cond| breaks(&cond.block, id)) || breaks(&lp.body, id)
         }
@@ -206,6 +237,7 @@ pub(crate) fn diverges(stmt: &Stmt) -> bool {
             ..
         } => block_diverges(then_block) && block_diverges(else_block),
         StmtKind::Ghost(inner) | StmtKind::Block(inner) => block_diverges(inner),
+        StmtKind::GhostTail { block, tail } => block_diverges(block) || expression_diverges(tail),
         StmtKind::Loop(lp) => lp.cond.is_none() && !breaks(&lp.body, lp.id),
         _ => false,
     }
@@ -213,4 +245,104 @@ pub(crate) fn diverges(stmt: &Stmt) -> bool {
 
 fn block_diverges(block: &Block) -> bool {
     block.stmts.iter().any(diverges)
+}
+
+fn walk_expression(
+    expression: &Expr,
+    params: &BTreeSet<LocalId>,
+    assigned_params: &mut BTreeSet<LocalId>,
+    out: &mut HashMap<LoopId, LoopInfo>,
+) {
+    match &expression.kind {
+        ExprKind::ProofInSpec(block) => walk(block, params, assigned_params, out),
+        ExprKind::ProofInSpecTail { block, tail } => {
+            walk(block, params, assigned_params, out);
+            if !block_diverges(block) {
+                walk_expression(tail, params, assigned_params, out);
+            }
+        }
+        ExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            walk_expression(cond, params, assigned_params, out);
+            if !expression_diverges(cond) {
+                let mut yes = assigned_params.clone();
+                walk_expression(then_expr, params, &mut yes, out);
+                walk_expression(else_expr, params, assigned_params, out);
+                assigned_params.extend(yes);
+            }
+        }
+        ExprKind::Let { value, body, .. } => {
+            walk_expression(value, params, assigned_params, out);
+            if !expression_diverges(value) {
+                walk_expression(body, params, assigned_params, out);
+            }
+        }
+        _ => expression.for_each_child(&mut |child| {
+            walk_expression(child, params, assigned_params, out);
+        }),
+    }
+}
+
+fn assigned_expression(expression: &Expr, out: &mut BTreeSet<LocalId>) {
+    match &expression.kind {
+        ExprKind::ProofInSpec(block) => assigned(block, out),
+        ExprKind::ProofInSpecTail { block, tail } => {
+            assigned(block, out);
+            if !block_diverges(block) {
+                assigned_expression(tail, out);
+            }
+        }
+        ExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            assigned_expression(cond, out);
+            if !expression_diverges(cond) {
+                assigned_expression(then_expr, out);
+                assigned_expression(else_expr, out);
+            }
+        }
+        ExprKind::Let { value, body, .. } => {
+            assigned_expression(value, out);
+            if !expression_diverges(value) {
+                assigned_expression(body, out);
+            }
+        }
+        _ => expression.for_each_child(&mut |child| assigned_expression(child, out)),
+    }
+}
+
+/// Statement payloads evaluated by a value expression, in source order.
+fn expression_blocks(expression: &Expr, visit: &mut impl FnMut(&Block)) {
+    if let ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } = &expression.kind
+    {
+        visit(block);
+    }
+    expression.for_each_child(&mut |child| expression_blocks(child, visit));
+}
+
+fn expression_diverges(expression: &Expr) -> bool {
+    match &expression.kind {
+        ExprKind::ProofInSpec(block) => block_diverges(block),
+        ExprKind::ProofInSpecTail { block, tail } => {
+            block_diverges(block) || expression_diverges(tail)
+        }
+        ExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expression_diverges(cond)
+                || (expression_diverges(then_expr) && expression_diverges(else_expr))
+        }
+        _ => {
+            let mut found = false;
+            expression.for_each_child(&mut |child| found |= expression_diverges(child));
+            found
+        }
+    }
 }

@@ -231,6 +231,7 @@ fn build_obligation(spec: ObligationSpec) -> ProofObligation {
 }
 
 fn run_once(case: &CaseSpec) -> VerifyResult {
+    let _phase_observer = crate::encoder::verification::phase_observer::span("phase", "run_once");
     match case.program {
         ProgramKind::Context => {
             let mut ctx = VerificationContext::new();
@@ -274,28 +275,48 @@ fn classify_outcome(result: &VerifyResult) -> LockedOutcome {
 }
 
 fn measure_case(case: &CaseSpec) -> Duration {
-    let sample_runs = if case.baseline_ms >= SLOW_CASE_THRESHOLD_MS {
-        1
-    } else {
-        FAST_SAMPLE_RUNS
-    };
-    let mut samples = [Duration::ZERO; FAST_SAMPLE_RUNS];
-
-    for sample in &mut samples[..sample_runs] {
-        let start = Instant::now();
-        let result = run_once(case);
-        let elapsed = start.elapsed();
-        let actual = classify_outcome(&result);
-        assert_eq!(
-            actual, case.expected,
-            "{} ({}) changed outcome: expected {:?}, got {:?} ({result:?})",
-            case.label, case.description, case.expected, actual
+    crate::encoder::verification::timeout::with_timing_solver_admission(|waited, admitted| {
+        eprintln!(
+            "[regression_corpus] {}: admission waited {:.1}ms, capacity_admitted={}",
+            case.label,
+            waited.as_secs_f64() * 1000.0,
+            admitted,
         );
-        *sample = elapsed;
-    }
+        let sample_runs = if case.baseline_ms >= SLOW_CASE_THRESHOLD_MS {
+            1
+        } else {
+            FAST_SAMPLE_RUNS
+        };
+        let mut samples = [Duration::ZERO; FAST_SAMPLE_RUNS];
+        let mut phase_reports = if case.label == "C31" {
+            Vec::with_capacity(sample_runs)
+        } else {
+            Vec::new()
+        };
 
-    samples[..sample_runs].sort_unstable();
-    samples[sample_runs / 2]
+        for sample in &mut samples[..sample_runs] {
+            let capture = crate::encoder::verification::phase_observer::begin(case.label == "C31");
+            let start = Instant::now();
+            let result = run_once(case);
+            let elapsed = start.elapsed();
+            if let Some(report) = capture.finish() {
+                phase_reports.push(report);
+            }
+            let actual = classify_outcome(&result);
+            assert_eq!(
+                actual, case.expected,
+                "{} ({}) changed outcome: expected {:?}, got {:?} ({result:?})",
+                case.label, case.description, case.expected, actual
+            );
+            *sample = elapsed;
+        }
+
+        samples[..sample_runs].sort_unstable();
+        for (sample, report) in phase_reports.iter().enumerate() {
+            report.emit(sample + 1);
+        }
+        samples[sample_runs / 2]
+    })
 }
 
 fn run_locked_case(label: &str) {

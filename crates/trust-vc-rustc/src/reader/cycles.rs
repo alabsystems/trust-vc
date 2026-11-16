@@ -141,7 +141,7 @@ pub(crate) fn find<'tcx>(
     cx: &Cx<'tcx>,
     krate: &VcCrate,
     defs: &HashMap<FnId, LocalDefId>,
-    instances: &HashMap<FnId, (LocalDefId, mty::GenericArgsRef<'tcx>)>,
+    instances: &HashMap<FnId, (LocalDefId, mty::GenericArgs<'tcx>)>,
     items: &[LocalDefId],
     order: &HashMap<LocalDefId, usize>,
 ) -> Cycles {
@@ -215,7 +215,7 @@ pub(crate) fn find<'tcx>(
     // Verus has copies only for the implementations it reads.
     let mut instance_copies: HashMap<FnId, (LocalDefId, LocalDefId)> = HashMap::new();
     for (id, (generic, args)) in instances {
-        match inheriting_impl(tcx, *generic, args) {
+        match inheriting_impl(tcx, *generic, *args) {
             Ok(Some(imp)) if items.contains(&imp) => {
                 instance_copies.insert(*id, (imp, *generic));
             }
@@ -250,12 +250,12 @@ pub(crate) fn find<'tcx>(
 
     for decl in &krate.fns {
         let me = node_of(decl.id);
-        let calls = callees(decl, (0, 0, 0));
+        let calls = callees(decl, (0, 0, 0, false));
         for callee in calls.keys() {
             add(me, node_of(*callee));
         }
         call_sites.insert(decl.id, calls);
-        let skip = inherited.get(&decl.id).copied().unwrap_or((0, 0, 0));
+        let skip = inherited.get(&decl.id).copied().unwrap_or((0, 0, 0, false));
         // The calls and implementations Verus's graph has as well. With a
         // bound on a concrete type in scope, Verus may dispatch a call to
         // another function, through the bound.
@@ -473,53 +473,57 @@ pub(crate) fn find<'tcx>(
         let mut unknown = false;
         let mut positions: Vec<(Node, u32, bool)> = Vec::new();
         let mut other_calls: Vec<Node> = Vec::new();
-        for_each_call(method_decl, (0, 0, 0), &mut |callee, tys, span, clause| {
-            let same_trait = defs.get(&callee).is_some_and(|def| {
-                instances.get(&callee).is_none() && tcx.local_parent(*def) == trait_id
-            });
-            if !same_trait {
-                match verus_node(callee) {
-                    Some(target) => {
-                        calls.insert(target);
-                        positions.push((target, span.0, clause));
+        for_each_call(
+            method_decl,
+            (0, 0, 0, false),
+            &mut |callee, tys, span, clause| {
+                let same_trait = defs.get(&callee).is_some_and(|def| {
+                    instances.get(&callee).is_none() && tcx.local_parent(*def) == trait_id
+                });
+                if !same_trait {
+                    match verus_node(callee) {
+                        Some(target) => {
+                            calls.insert(target);
+                            positions.push((target, span.0, clause));
+                        }
+                        None => unknown = true,
                     }
-                    None => unknown = true,
+                    return;
                 }
-                return;
-            }
-            let at_self = tys.len() >= trait_params
-                && tys[..trait_params]
-                    .iter()
-                    .enumerate()
-                    .all(|(i, t)| *t == Ty::Param(u32::try_from(i).unwrap_or(u32::MAX)));
-            if !at_self {
-                // Verus rejects the copy ("call from trait default method to
-                // same trait with different type arguments is not allowed")
-                // or stops earlier; the call dispatches through the
-                // declaration.
-                other_calls.push(Node::Fun(callee));
-                unknown = true;
-                return;
-            }
-            let callee_def = defs[&callee];
-            let implementing = tcx
-                .associated_items(imp)
-                .in_definition_order()
-                .find(|item| item.trait_item_def_id() == Some(callee_def.to_def_id()))
-                .and_then(|item| item.def_id.as_local());
-            let target = match implementing {
-                Some(own) => match fn_ids.get(&own) {
-                    Some(id) => Node::Fun(*id),
-                    None => {
-                        unknown = true;
-                        return;
-                    }
-                },
-                None => Node::Copy(imp, callee_def),
-            };
-            calls.insert(target);
-            positions.push((target, span.0, clause));
-        });
+                let at_self = tys.len() >= trait_params
+                    && tys[..trait_params]
+                        .iter()
+                        .enumerate()
+                        .all(|(i, t)| *t == Ty::Param(u32::try_from(i).unwrap_or(u32::MAX)));
+                if !at_self {
+                    // Verus rejects the copy ("call from trait default method to
+                    // same trait with different type arguments is not allowed")
+                    // or stops earlier; the call dispatches through the
+                    // declaration.
+                    other_calls.push(Node::Fun(callee));
+                    unknown = true;
+                    return;
+                }
+                let callee_def = defs[&callee];
+                let implementing = tcx
+                    .associated_items(imp)
+                    .in_definition_order()
+                    .find(|item| item.trait_item_def_id() == Some(callee_def.to_def_id()))
+                    .and_then(|item| item.def_id.as_local());
+                let target = match implementing {
+                    Some(own) => match fn_ids.get(&own) {
+                        Some(id) => Node::Fun(*id),
+                        None => {
+                            unknown = true;
+                            return;
+                        }
+                    },
+                    None => Node::Copy(imp, callee_def),
+                };
+                calls.insert(target);
+                positions.push((target, span.0, clause));
+            },
+        );
         for (target, at, in_clause) in positions {
             let first = call_pos.entry((node, target)).or_insert(at);
             *first = (*first).min(at);
@@ -837,6 +841,18 @@ pub(crate) fn find<'tcx>(
                 _ => None,
             })
             .collect();
+        if members.iter().any(|id| {
+            krate
+                .fn_decl(*id)
+                .is_some_and(|decl| decl.attrs.broadcast_triggers.is_some())
+        }) {
+            out.refusals.push(Refusal::new(
+                "broadcast-recursion",
+                "a cycle through a broadcast proof contract",
+                def_span,
+            ));
+            continue;
+        }
         // `context.rs`, `GlobalCtx::new`: a `decreases_by` function on a
         // cycle, reported for the first such function in Verus's order.
         let by_cycle = members.iter().copied().find(|id| {
@@ -861,7 +877,7 @@ pub(crate) fn find<'tcx>(
         // another function there.
         let through_instance = krate.fns.iter().any(|decl| {
             members.contains(&decl.id)
-                && callees(decl, (0, 0, 0)).keys().any(|callee| {
+                && callees(decl, (0, 0, 0, false)).keys().any(|callee| {
                     instances.contains_key(callee)
                         && matches!(verus_node(*callee), Some(Node::Fun(g)) if members.contains(&g))
                 })
@@ -1016,7 +1032,7 @@ pub(crate) fn find<'tcx>(
     // `inherit_default_bodies`). At a concrete type a bound is the fact an
     // implementation's `Trait-Impl-Axiom` states, which Verus emits after
     // the implementation's component (`commands.rs`, `handle_scc_component`).
-    let guarded: Vec<(FnId, LocalDefId, mty::GenericArgsRef<'_>, Option<_>)> = krate
+    let guarded: Vec<(FnId, LocalDefId, mty::GenericArgs<'_>, Option<_>)> = krate
         .fns
         .iter()
         .filter(|d| d.mode == Mode::Spec && matches!(d.body, Body::Spec(_) | Body::Constant(_)))
@@ -1046,7 +1062,7 @@ pub(crate) fn find<'tcx>(
         .collect();
     let mut guards: HashMap<FnId, Vec<(LocalDefId, bool)>> = HashMap::new();
     for (id, def, args, skip_self) in &guarded {
-        let needed = match bound_impls(tcx, def.to_def_id(), args, *skip_self, None) {
+        let needed = match bound_impls(tcx, def.to_def_id(), *args, *skip_self, None) {
             Ok(needed) => needed,
             Err(problem) => {
                 out.refusals.push(problem);
@@ -1069,7 +1085,7 @@ pub(crate) fn find<'tcx>(
     let never: HashMap<FnId, DefOrder> = guarded
         .iter()
         .filter_map(|(id, def, args, _)| {
-            unmet_bound(tcx, def.to_def_id(), args, None, loose).map(|order| (*id, order))
+            unmet_bound(tcx, def.to_def_id(), *args, None, loose).map(|order| (*id, order))
         })
         .collect();
     // The functions Verus checks with a bound on a concrete type assumed,
@@ -1631,7 +1647,7 @@ fn shortest_cycle_len(graph: &BTreeMap<Node, BTreeSet<Node>>, start: Node) -> Op
 /// The functions `decl` calls in its clauses and body, each with its first
 /// call in program order; `skip` leading `requires`, `ensures` and
 /// `recommends` clauses are left out.
-fn callees(decl: &FnDecl, skip: (usize, usize, usize)) -> BTreeMap<FnId, SpanId> {
+fn callees(decl: &FnDecl, skip: (usize, usize, usize, bool)) -> BTreeMap<FnId, SpanId> {
     let mut out = BTreeMap::new();
     for_each_call(decl, skip, &mut |callee, _, span, _| {
         out.entry(callee).or_insert(span);
@@ -1646,7 +1662,10 @@ type CallVisitor<'v> = dyn FnMut(FnId, &[Ty], SpanId, bool) + 'v;
 /// Every call in `decl`'s clauses and body, in program order, with its type
 /// arguments and whether it is in a clause; `skip` leading `requires`,
 /// `ensures` and `recommends` clauses are left out.
-fn for_each_call(decl: &FnDecl, skip: (usize, usize, usize), f: &mut CallVisitor<'_>) {
+fn for_each_call(decl: &FnDecl, skip: (usize, usize, usize, bool), f: &mut CallVisitor<'_>) {
+    for hint in decl.broadcast_hints() {
+        expr_calls(hint, &mut |callee, args, span| f(callee, args, span, true));
+    }
     for clause in decl
         .requires
         .iter()
@@ -1660,6 +1679,16 @@ fn for_each_call(decl: &FnDecl, skip: (usize, usize, usize), f: &mut CallVisitor
     }
     for measure in decl.decreases.iter().chain(&decl.decreases_when) {
         expr_calls(measure, &mut |callee, args, span| {
+            f(callee, args, span, true)
+        });
+    }
+    if let Some(condition) = decl
+        .unwind
+        .as_ref()
+        .and_then(trust_vc_vcir::UnwindSpec::condition)
+        .filter(|_| !skip.3)
+    {
+        expr_calls(condition, &mut |callee, args, span| {
             f(callee, args, span, true)
         });
     }
@@ -1677,6 +1706,7 @@ fn for_each_call(decl: &FnDecl, skip: (usize, usize, usize), f: &mut CallVisitor
 
 fn stmt_calls(stmt: &Stmt, f: &mut dyn FnMut(FnId, &[Ty], SpanId)) {
     match &stmt.kind {
+        StmtKind::BroadcastUse { callee } => f(*callee, &[], stmt.span),
         StmtKind::Let { init, .. } => {
             if let Some(init) = init {
                 expr_calls(init, f);
@@ -1739,7 +1769,14 @@ fn stmt_calls(stmt: &Stmt, f: &mut dyn FnMut(FnId, &[Ty], SpanId)) {
                 stmt_calls(s, f);
             }
         }
+        StmtKind::GhostTail { block, tail } => {
+            for statement in &block.stmts {
+                stmt_calls(statement, f);
+            }
+            expr_calls(tail, f);
+        }
         StmtKind::Reveal { .. }
+        | StmtKind::BorrowMut { .. }
         | StmtKind::Hide { .. }
         | StmtKind::Break { .. }
         | StmtKind::Continue { .. }
@@ -1752,7 +1789,7 @@ fn expr_calls(e: &Expr, f: &mut dyn FnMut(FnId, &[Ty], SpanId)) {
         ExprKind::Call {
             callee, type_args, ..
         } => f(*callee, type_args, e.span),
-        ExprKind::ProofInSpec(block) => {
+        ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
             for stmt in &block.stmts {
                 stmt_calls(stmt, f);
             }
@@ -1801,7 +1838,7 @@ fn normalized_trait_ref<'tcx>(
 pub(crate) fn bound_impls<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: rustc_hir::def_id::DefId,
-    args: mty::GenericArgsRef<'tcx>,
+    args: mty::GenericArgs<'tcx>,
     skip_self: Option<rustc_hir::def_id::DefId>,
     env: Option<rustc_hir::def_id::DefId>,
 ) -> Result<Vec<(LocalDefId, bool)>, Refusal> {
@@ -1916,7 +1953,7 @@ pub(crate) fn bound_impls<'tcx>(
 pub(crate) fn unmet_bound<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: rustc_hir::def_id::DefId,
-    args: mty::GenericArgsRef<'tcx>,
+    args: mty::GenericArgs<'tcx>,
     env: Option<rustc_hir::def_id::DefId>,
     loose: bool,
 ) -> Option<DefOrder> {
@@ -1993,7 +2030,7 @@ fn methods_of(tcx: TyCtxt<'_>, imp: LocalDefId) -> Vec<LocalDefId> {
 fn inheriting_impl<'tcx>(
     tcx: TyCtxt<'tcx>,
     method: LocalDefId,
-    args: mty::GenericArgsRef<'tcx>,
+    args: mty::GenericArgs<'tcx>,
 ) -> Result<Option<LocalDefId>, Refusal> {
     let Some(trait_id) = tcx.trait_of_assoc(method.to_def_id()) else {
         return Ok(None);

@@ -89,6 +89,48 @@ impl<'a> AstExpressionParser<'a> {
         }
         let inner_term = inner_term?;
 
+        let result = self.encode_cast_term(inner_term, from_ty, to_ty)?;
+        if self.scalar_casts.is_some() {
+            let observation = (|| {
+                let operand = crate::scalar_cast_capture::actual_term(self.solver, inner_term)?;
+                let result = crate::scalar_cast_capture::actual_term(self.solver, result)?;
+                Ok::<_, String>(crate::scalar_cast_capture::ScalarCastEmission {
+                    declared_source: declared_from_ty.clone(),
+                    effective_source: from_ty.clone(),
+                    destination: to_ty.clone(),
+                    operand_variable: match inner {
+                        TrustVcExpr::Var { name, .. } => Some(name.clone()),
+                        _ => None,
+                    },
+                    operand_term: operand.text,
+                    operand_sort: operand.sort,
+                    operand_bindings: operand.bindings,
+                    result_term: result.text,
+                    result_sort: result.sort,
+                    result_bindings: result.bindings,
+                })
+            })();
+            match observation {
+                Ok(row) => {
+                    let rows = self.scalar_casts.as_mut().expect("capture enabled");
+                    if rows.len() < 512 {
+                        rows.push(row);
+                    } else {
+                        self.scalar_cast_refusal = Some("too many cast emissions".into());
+                    }
+                }
+                Err(reason) => self.scalar_cast_refusal = Some(reason),
+            }
+        }
+        Ok(result)
+    }
+
+    fn encode_cast_term(
+        &mut self,
+        inner_term: Term,
+        from_ty: &TrustVcType,
+        to_ty: &TrustVcType,
+    ) -> TrustVcResult<Term> {
         if from_ty == to_ty {
             return Ok(inner_term);
         }

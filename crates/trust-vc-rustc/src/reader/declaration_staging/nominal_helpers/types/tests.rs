@@ -73,6 +73,7 @@ fn inline_controls(tcx: TyCtxt<'_>, ordered: DefId, work: &mut Work) {
         local,
         Mode::Spec,
         &filtered,
+        false,
         tcx.def_span(ordered)
     )
     .is_ok());

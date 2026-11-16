@@ -66,7 +66,17 @@ pub(crate) struct NormalReadScope<'run, 'plan, 'owner, 'tcx> {
 
 impl<'plan, 'owner> OwnedNormalVerifier<'plan, 'owner> {
     pub(crate) fn new(plan: &'plan NormalClientPlan<'owner>) -> Self {
-        let options = plan.invocation().options();
+        Self::new_with_outputs(plan, OutputSinks::default())
+    }
+
+    /// Output paths are request data, separate from the plan, source binding
+    /// and native owner. Constructing them grants no permission to verify.
+    pub(crate) fn new_with_outputs(
+        plan: &'plan NormalClientPlan<'owner>,
+        outputs: OutputSinks,
+    ) -> Self {
+        let mut options = plan.invocation().options();
+        options.compiler_environment = plan.compiler_environment().cloned();
         Self {
             identity: NormalRunIdentity {
                 plan: plan.identity(),
@@ -74,9 +84,13 @@ impl<'plan, 'owner> OwnedNormalVerifier<'plan, 'owner> {
                 source_operand: plan.source_operand().to_path_buf(),
                 read: options.read,
             },
-            run: VerifyRun::new(options),
+            run: VerifyRun::new(options, outputs),
             plan,
         }
+    }
+
+    pub(crate) fn configure(&mut self, config: &mut rustc_interface::interface::Config) {
+        self.run.config(config);
     }
 
     pub(crate) fn after_expansion<'run, 'tcx>(
@@ -117,7 +131,16 @@ impl<'plan, 'owner> OwnedNormalVerifier<'plan, 'owner> {
         })
     }
 
-    pub(crate) fn into_record(self, output: PathBuf) -> Record {
+    pub(crate) fn into_record(mut self, output: PathBuf) -> Record {
+        if self.run.opts.compiler_environment.is_some() {
+            if let Err(error) = CompilerEnvironment::require_absent_process() {
+                self.run.functions.clear();
+                self.run
+                    .crate_refusals
+                    .push(format!("request-environment: {error}"));
+                self.run.outcome = Some(Outcome::Refused);
+            }
+        }
         Record {
             argv: self.plan.verify().to_vec(),
             entry_file: Some(self.plan.source_file().path.clone()),
@@ -158,6 +181,24 @@ impl<'run, 'plan, 'owner, 'tcx> NormalReadScope<'run, 'plan, 'owner, 'tcx> {
         let result = live.with_read(|tcx, read| {
             live.check_retained_inputs(tcx)?;
             self.run.decide_with_owner(tcx, read, Some(live));
+            if let Some(environment) = &self.run.opts.compiler_environment {
+                let checked = environment
+                    .check_options(&tcx.sess.opts)
+                    .and_then(|()| check_environment_dependencies(environment, tcx.sess));
+                if let Err(error) = checked {
+                    self.run.functions.clear();
+                    self.run.refuse(
+                        tcx,
+                        rustc_span::DUMMY_SP,
+                        "request-environment",
+                        &error.to_string(),
+                    );
+                    self.run.outcome = Some(Outcome::Refused);
+                    self.run
+                        .record_functions(tcx, read, Verdict::Skipped, Some(TAG_CRATE_REFUSED));
+                    return Err(error.to_string());
+                }
+            }
             if let Err(reason) = live.check_retained_inputs(tcx) {
                 self.run.functions.clear();
                 self.run.refuse(

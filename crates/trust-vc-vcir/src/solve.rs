@@ -125,7 +125,6 @@ pub fn expr(term: &Term) -> TrustVcExpr {
 /// Returns an error for isolated BV or complete-architecture envelopes;
 /// [`check`] dispatches those through their respective native question types.
 /// A caller must not export their scalar sentinel as the actual question.
-#[must_use]
 pub fn to_core(query: &Query, label: &str) -> Result<core::Query, &'static str> {
     if query.bitvector.is_some() || query.architectures.is_some() {
         return Err(

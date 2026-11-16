@@ -12,7 +12,6 @@
 use rustc_attr_ir::Attribute;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::AttrId;
 
 use super::{attributes, CheckedPolicy};
 use attributes::Context;
@@ -23,8 +22,9 @@ const MAX_TOTAL_ATTRIBUTES: usize = 16_384;
 mod tests;
 
 struct Occurrence {
+    // The HIR representation has no AttrId. An occurrence is authenticated by
+    // its original owner slice, physical reference, and exact retained slot.
     index: usize,
-    id: AttrId,
 }
 
 struct Scope<'tcx> {
@@ -73,7 +73,7 @@ impl<'tcx> CheckedDirectives<'_, 'tcx> {
         if !self.current(tcx) {
             return false;
         }
-        let Attribute::Unparsed(item) = attribute else {
+        let Attribute::Tool(_) = attribute else {
             return false;
         };
         self.scopes
@@ -81,11 +81,10 @@ impl<'tcx> CheckedDirectives<'_, 'tcx> {
             .find(|entry| entry.definition == scope)
             .is_some_and(|entry| {
                 entry.recursion.iter().any(|occurrence| {
-                    occurrence.id == item.id.attr_id
-                        && entry
-                            .original
-                            .get(occurrence.index)
-                            .is_some_and(|actual| std::ptr::eq(actual, attribute))
+                    entry
+                        .original
+                        .get(occurrence.index)
+                        .is_some_and(|actual| std::ptr::eq(actual, attribute))
                 })
             })
     }
@@ -140,15 +139,10 @@ fn scope<'tcx>(
     for (index, attribute) in original.iter().enumerate() {
         let directives = attributes::read(std::slice::from_ref(attribute), context)?;
         if directives.has_recursion() {
-            let Attribute::Unparsed(item) = attribute else {
-                return Err(
-                    "a recursion directive is not an actual unparsed native attribute".into(),
-                );
+            let Attribute::Tool(_) = attribute else {
+                return Err("a recursion directive is not an actual native tool attribute".into());
             };
-            recursion.push(Occurrence {
-                index,
-                id: item.id.attr_id,
-            });
+            recursion.push(Occurrence { index });
         }
     }
     Ok(Scope {

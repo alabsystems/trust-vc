@@ -12,9 +12,12 @@ use std::path::Path;
 
 use super::macro_context::ClientSource;
 use super::*;
+mod coordinator;
 pub(super) mod footprint;
 mod normal;
+pub(super) mod prepared_sdk;
 mod verification;
+pub use coordinator::main as coordinator_main;
 pub use normal::main as normal_verification_main;
 pub use verification::main as verification_main;
 
@@ -62,7 +65,34 @@ impl<'library> StandaloneImported<'library> {
     pub(super) fn check_retained_inputs(&self) -> Result<(), String> {
         self.current()?;
         self.library().inputs.revalidate()?;
+        self.library().prepared.erase.revalidate_artifacts()?;
         self.images.revalidate()
+    }
+
+    /// Observe the actual old/copy macro-cache difference before admitting
+    /// coordinator requests. This fixed client has no crate-local `prelude`:
+    /// IsVstd expansion selects that missing module, while Imported expansion
+    /// selects the actual loaded vstd prelude. No verification runs here.
+    fn compare_macro_context(&self) -> Result<(), String> {
+        self.check_retained_inputs()?;
+        let path = self
+            .library()
+            .inputs
+            .output
+            .join("coordinator-macro-context.rs");
+        let text = "#![feature(sized_hierarchy)]\nuse vstd::prelude::*;\nverus! { proof fn cache_mode_discriminator() { assert(true); } }\n";
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(text.as_bytes())
+            .map_err(|error| error.to_string())?;
+        drop(file);
+        let source = ClientSource::read(&path)?;
+        macro_context::compare_imported_images(self.library(), &source, &self.images)?;
+        self.check_retained_inputs()
     }
 
     pub(super) fn common_files(&self) -> &BTreeMap<std::path::PathBuf, PinnedFile> {
@@ -97,6 +127,7 @@ impl<'library> StandaloneImported<'library> {
         diagnostics(tcx)?;
         let library = self.library();
         library.inputs.revalidate()?;
+        library.prepared.erase.revalidate_artifacts()?;
         let invocation = Invocation::capture_client(tcx, argv)?;
         if !invocation.same_target(&library.prepared.erase.invocation) {
             return Err("the actual client target/sysroot differs from its staged producer".into());

@@ -55,6 +55,7 @@ impl Fb {
                 name: "result".to_string(),
                 ty: ret_ty,
                 mode: ret_mode,
+                prophecy: trust_vc_vcir::DeclProphecy::Default,
                 mutable: false,
                 kind: LocalKind::Return,
                 span: SpanId(0),
@@ -67,6 +68,7 @@ impl Fb {
             decreases: Vec::new(),
             decreases_when: None,
             decreases_by: None,
+            unwind: None,
             attrs: FnAttrs::default(),
             body: Body::None,
         };
@@ -101,6 +103,7 @@ impl Fb {
             name: name.to_string(),
             ty,
             mode,
+            prophecy: trust_vc_vcir::DeclProphecy::Default,
             mutable,
             kind,
             span,
@@ -612,6 +615,7 @@ fn struct_constructor_and_field_are_well_formed() {
             fields: vec![FieldDecl {
                 name: "b".to_string(),
                 ty: Ty::Bool,
+                mode: Mode::Exec,
             }],
         }],
     };

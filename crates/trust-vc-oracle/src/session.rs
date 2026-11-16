@@ -481,11 +481,7 @@ impl OracleSession {
         }
 
         // Check for divergence (3+ rounds of decreasing scores)
-        if self.is_diverging() {
-            return false;
-        }
-
-        true
+        !self.is_diverging()
     }
 
     /// Attempt to use the retry budget for the current round.

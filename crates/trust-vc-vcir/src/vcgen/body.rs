@@ -67,6 +67,11 @@ use crate::ty::Ty;
 use super::expr::{type_terms, PendingCheck, PendingKind, Reads, RecEvent, Tr, R};
 use super::loops::{diverges, live_prefix, live_prefix_of, loop_infos, LoopInfo};
 use super::quant::instantiate;
+
+mod call_result;
+mod loan_state;
+mod loop_state;
+mod unwind;
 use super::query::{Check, CheckKind, Hypothesis, InvariantAt, Query, QueryGroup, Source, Symbol};
 use super::relevance::{instance_gate, Analysis, CallRole, Position};
 use super::spec::{inline, unfold, SpecDef, Tables, Unfoldable, NL_DIV, NL_MOD, NL_MUL};
@@ -77,6 +82,8 @@ use super::val::{refusal, Ctx, LeafTy, Shape, Val};
 const INLINE_BUDGET: usize = 200_000;
 
 mod independent;
+mod mut_refs;
+mod owned_values;
 
 /// The largest relevance condition written out in a fact; a larger one
 /// stays a symbol with its definition.
@@ -90,7 +97,7 @@ struct Fact {
 }
 
 /// The state of one path through the body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Path {
     /// Branch conditions that lead here.
     guard: Vec<Term>,
@@ -100,6 +107,10 @@ struct Path {
     env: HashMap<LocalId, Val>,
     /// False once the path has returned.
     live: bool,
+    moved: Vec<Place>,
+    loans: Vec<mut_refs::Loan>,
+    escaped_loans: Vec<Place>,
+    resolved: Vec<Term>,
 }
 
 /// Generation state for one function.
@@ -169,6 +180,11 @@ pub(crate) struct Gen<'a> {
     recommendation_work: std::rc::Rc<std::cell::Cell<usize>>,
     /// Derived index of actual fresh binder names; no inventory rescans.
     recommendation_symbols: HashMap<String, LeafTy>,
+    resolution: super::resolution::Plan,
+    classifier: super::resolution::Classifier<'a, 'a>,
+    reference_aliases: HashMap<Term, Term>,
+    /// These modes depend only on this immutable declaration and Ctx layouts.
+    ownership_modes: std::cell::RefCell<HashMap<Place, bool>>,
 }
 
 /// A loop around the current statement.
@@ -238,6 +254,10 @@ impl<'a> Gen<'a> {
             recommendations: false,
             recommendation_work: std::rc::Rc::new(std::cell::Cell::new(INLINE_BUDGET)),
             recommendation_symbols: HashMap::new(),
+            resolution: super::resolution::Plan::default(),
+            classifier: super::resolution::Classifier::new(ctx, decl),
+            reference_aliases: HashMap::new(),
+            ownership_modes: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -272,6 +292,7 @@ impl<'a> Gen<'a> {
             declared: Default::default(),
             env: HashMap::new(),
             live: true,
+            ..Path::default()
         };
         self.pending(&path, tr.checks)?;
         let signature = self.tables.sigs.get(&self.decl.id).ok_or_else(|| {
@@ -350,6 +371,7 @@ impl<'a> Gen<'a> {
                 ));
             }
         }
+        self.resolution = super::resolution::analyze(self.ctx, decl, block, &self.classifier)?;
         // Each type parameter stands for some type: an arbitrary term.
         self.types = self.fresh_types(decl)?;
         for param in &decl.params {
@@ -364,12 +386,14 @@ impl<'a> Gen<'a> {
             read: self.entry.clone(),
             old: self.entry.clone(),
             types: self.types.clone(),
+            ..Reads::default()
         };
         let mut path = Path {
             guard: Vec::new(),
             declared: self.entry.keys().copied().collect(),
             env: self.entry.clone(),
             live: true,
+            ..Path::default()
         };
         for clause in &decl.requires {
             // Verus rejects a precondition that reads through a `&mut`
@@ -391,6 +415,9 @@ impl<'a> Gen<'a> {
         if self.recommendations {
             for component in &decl.decreases {
                 self.recommendation_measure(&path, &reads, component)?;
+            }
+            if let Some(condition) = decl.unwind_spec().condition() {
+                self.recommendation_measure(&path, &reads, condition)?;
             }
         }
         self.block(&mut path, block)?;
@@ -537,6 +564,10 @@ impl<'a> Gen<'a> {
             (Val::Leaf(term), Shape::Leaf(_)) if term.is_atomic() => Ok(Val::Leaf(term)),
             (Val::Leaf(term), Shape::Leaf(leaf)) => {
                 let symbol = self.fresh_leaf_at(*leaf, display, &path.guard)?;
+                if symbol.sort() == Sort::Poly {
+                    let origin = self.reference_origin(&term)?;
+                    self.reference_aliases.insert(symbol.clone(), origin);
+                }
                 self.fact(&path.guard, Source::Binding, Term::eq(symbol.clone(), term));
                 Ok(Val::Leaf(symbol))
             }
@@ -1073,12 +1104,16 @@ impl<'a> Gen<'a> {
     }
 
     /// Reads of body code on `path`.
-    fn body_reads(&self, path: &Path) -> Reads {
-        Reads {
+    fn body_reads(&self, path: &Path) -> R<Reads> {
+        self.price_ownership_path(path, 1, self.decl.span)?;
+        Ok(Reads {
             read: path.env.clone(),
+            local_types: Reads::decl_types(self.decl),
+            moved: path.moved.clone(),
+            borrowed: self.active_borrows(path)?,
             old: self.entry.clone(),
             types: self.types.clone(),
-        }
+        })
     }
 
     /// Check outer requirements, prove only the explicit isolated question,
@@ -1109,7 +1144,7 @@ impl<'a> Gen<'a> {
                 span,
             ));
         }
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         for clause in requires {
             let goal = self.spec_term(path, &reads, &clause.expr)?;
             self.check(
@@ -1210,7 +1245,7 @@ impl<'a> Gen<'a> {
         {
             return Err(refusal("old-in-exec", "`old` in exec code", e.span));
         }
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         let mut tr = Tr::new(self.ctx, &self.tables.sigs, &self.tables.functions, &reads)
             .with_recommendations(self.recommendations)
             .with_recommendation_work(self.recommendation_work.clone());
@@ -1239,7 +1274,12 @@ impl<'a> Gen<'a> {
     /// dead path only the statements that lead to such a query are walked
     /// ([`needed_when_dead`]).
     fn block(&mut self, path: &mut Path, block: &'a Block) -> R<()> {
-        self.stmts(path, live_prefix(block))
+        self.stmts(path, live_prefix(block))?;
+        let span = block.stmts.last().map_or(self.decl.span, |stmt| stmt.span);
+        let points = self
+            .resolution
+            .block_points(block as *const Block as usize, span)?;
+        self.resolve_places(path, &points, span)
     }
 
     /// The statements `stmts`, as [`Self::block`] walks them.
@@ -1249,6 +1289,7 @@ impl<'a> Gen<'a> {
         for (index, stmt) in stmts.iter().enumerate() {
             let current = dead.as_ref().unwrap_or(&*path);
             if !current.live {
+                self.price_ownership_path(current, 1, stmt.span)?;
                 let mut next = current.clone();
                 next.live = true;
                 if !is_dead(&next.guard) {
@@ -1288,6 +1329,10 @@ impl<'a> Gen<'a> {
     }
 
     fn stmt(&mut self, path: &mut Path, stmt: &'a Stmt) -> R<()> {
+        let points = self
+            .resolution
+            .before_points(stmt as *const Stmt as usize, stmt.span)?;
+        self.resolve_places(path, &points, stmt.span)?;
         if !is_header(stmt) && !self.started {
             self.started = true;
             self.header_visible = Some(self.visible.clone());
@@ -1303,18 +1348,30 @@ impl<'a> Gen<'a> {
                 let value = match init {
                     Some(init) => {
                         let value = self.body_expr(path, init)?;
+                        if self
+                            .decl
+                            .local(*local)
+                            .is_some_and(|local| local.mode != Mode::Spec)
+                        {
+                            self.consume(path, init)?;
+                        }
                         self.name_value(path, value, &shape, &name)?
                     }
                     None => self.fresh(&shape, &name)?,
                 };
                 path.declared.insert(*local);
+                path.moved.retain(|moved| moved.local != *local);
                 path.env.insert(*local, value);
                 Ok(())
             }
             StmtKind::Assign { place, value } => {
-                let value = self.body_expr(path, value)?;
-                self.assign(path, place, value, stmt.span)
+                let translated = self.body_expr(path, value)?;
+                if self.kept_place(place, stmt.span)? {
+                    self.consume(path, value)?;
+                }
+                self.assign(path, place, translated, stmt.span)
             }
+            StmtKind::BorrowMut { dest, place } => self.borrow_mut(path, *dest, place, stmt.span),
             StmtKind::Call {
                 callee,
                 type_args,
@@ -1323,6 +1380,7 @@ impl<'a> Gen<'a> {
                 site,
             } => self.call(
                 path,
+                stmt as *const Stmt as usize,
                 stmt.span,
                 *callee,
                 type_args,
@@ -1331,7 +1389,7 @@ impl<'a> Gen<'a> {
                 *site,
             ),
             StmtKind::Assert { expr, site, attrs } => {
-                let reads = self.body_reads(path);
+                let reads = self.body_reads(path)?;
                 let goal = self.spec_term(path, &reads, expr)?;
                 self.check(
                     path,
@@ -1353,12 +1411,25 @@ impl<'a> Gen<'a> {
                 architecture,
                 site,
             } => {
+                // The shared SST live-prefix and independent-query index
+                // retain ordinary-dead events but discard a Maybe::Never
+                // suffix. Apply conversion syntax rules to exactly those
+                // events, after whole-source Reader/WF/effect admission.
+                // A source event receives its original one admission grant
+                // per generation width, shared across all sibling clauses.
+                // Revisited concrete occurrences still lower independently.
+                if !self.independent.was_emitted(stmt) {
+                    let mut work = 200_000usize;
+                    for clause in requires.iter().chain(ensures) {
+                        super::bitvector::admit_syntax(self.ctx, &clause.expr, &mut work)?;
+                    }
+                }
                 self.assert_bitvector(path, stmt.span, requires, ensures, *architecture, *site)?;
                 self.independent.emitted(stmt);
                 Ok(())
             }
             StmtKind::Assume { expr, .. } => {
-                let reads = self.body_reads(path);
+                let reads = self.body_reads(path)?;
                 let term = self.spec_term(path, &reads, expr)?;
                 self.fact(&path.guard, Source::Assume, term);
                 Ok(())
@@ -1375,6 +1446,7 @@ impl<'a> Gen<'a> {
                 } else {
                     self.body_bool(path, cond)?
                 };
+                self.price_ownership_path(path, 2, stmt.span)?;
                 let mut then_path = path.clone();
                 then_path.guard.push(c.clone());
                 let mut else_path = path.clone();
@@ -1412,9 +1484,35 @@ impl<'a> Gen<'a> {
                     }
                     (false, false) => {}
                 }
-                self.join(path, &c, then_path, else_path, stmt.span)
+                self.join(path, &c, then_path, else_path, stmt.span)?;
+                self.after_ownership_join(path, stmt as *const Stmt as usize, stmt.span)
             }
             StmtKind::Return { value, site } => self.ret(path, stmt.span, value.as_ref(), *site),
+            StmtKind::BroadcastUse { callee } => {
+                let declaration = self.ctx.fns.get(callee).copied().ok_or_else(|| {
+                    refusal(
+                        "broadcast-contract",
+                        "an unknown local broadcast proof",
+                        stmt.span,
+                    )
+                })?;
+                let reads = Reads {
+                    types: super::type_encoding::TypeEnv::new(*callee, Vec::new()),
+                    ..Reads::default()
+                };
+                let mut tr = Tr::new(self.ctx, &self.tables.sigs, &self.tables.functions, &reads);
+                let term = tr.broadcast_contract(declaration, stmt.span)?;
+                self.called_ok(&tr.called)?;
+                if !tr.checks.is_empty() {
+                    return Err(refusal(
+                        "broadcast-contract",
+                        "an execution effect in a broadcast specification",
+                        stmt.span,
+                    ));
+                }
+                self.fact(&path.guard, Source::CalleeEnsures, term);
+                Ok(())
+            }
             StmtKind::Reveal { callee, fuel } => {
                 if self
                     .ctx
@@ -1487,6 +1585,33 @@ impl<'a> Gen<'a> {
                 self.ghost_depth -= 1;
                 result
             }
+            StmtKind::GhostTail { block, tail } => {
+                self.ghost_depth += 1;
+                let result = (|| {
+                    self.block(path, block)?;
+                    if !block.stmts.iter().any(diverges) {
+                        let points = self
+                            .resolution
+                            .tail_points(stmt as *const Stmt as usize, tail.span)?;
+                        if path.live {
+                            self.resolve_places(path, &points, tail.span)?;
+                            self.body_expr(path, tail)?;
+                        } else {
+                            self.price_ownership_path(path, 1, tail.span)?;
+                            let mut dead = path.clone();
+                            dead.live = true;
+                            if !is_dead(&dead.guard) {
+                                dead.guard.push(Term::Bool(false));
+                            }
+                            self.resolve_places(&mut dead, &points, tail.span)?;
+                            self.body_expr(&dead, tail)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.ghost_depth -= 1;
+                result
+            }
             StmtKind::Block(block) => self.block(path, block),
             StmtKind::Loop(lp) => self.loop_stmt(path, lp, stmt.span),
             StmtKind::Break { target, site } => self.break_stmt(path, *target, *site, stmt.span),
@@ -1515,69 +1640,11 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// Store `value` into `place`.
-    fn assign(&mut self, path: &mut Path, place: &Place, value: Val, span: SpanId) -> R<()> {
-        if !path.declared.contains(&place.local) {
-            return Err(refusal(
-                "vcgen-internal",
-                "an assignment to a local not in scope",
-                span,
-            ));
-        }
-        let decl = self
-            .decl
-            .local(place.local)
-            .ok_or_else(|| refusal("vcgen-internal", "a missing local", span))?;
-        let mut shape = self.ctx.shape(&decl.ty, self.types.owner(), span)?;
-        let mut display = decl.name.clone();
-        if place.projections.is_empty() {
-            let value = self.name_value(path, value, &shape, &display)?;
-            path.env.insert(place.local, value);
-            return Ok(());
-        }
-        let root = path.env.get(&place.local).cloned().ok_or_else(|| {
-            refusal(
-                "generic-uninitialized",
-                "a projection into a declared local with no value",
-                span,
-            )
-        })?;
-        let mut indices = Vec::new();
-        for projection in &place.projections {
-            match projection {
-                Projection::Deref => {}
-                Projection::Field { variant: 0, field } | Projection::TupleField(field) => {
-                    indices.push(*field);
-                    display = format!("{display}.{field}");
-                    shape = match shape {
-                        Shape::Node(mut children) if (*field as usize) < children.len() => {
-                            children.swap_remove(*field as usize)
-                        }
-                        _ => {
-                            return Err(refusal(
-                                "vcgen-internal",
-                                "a projection out of range",
-                                span,
-                            ))
-                        }
-                    };
-                }
-                Projection::Field { .. } => {
-                    return Err(refusal("enum", "an assignment to an enum field", span));
-                }
-            }
-        }
-        let value = self.name_value(path, value, &shape, &display)?;
-        let updated = replace_at(&root, &indices, value)
-            .ok_or_else(|| refusal("vcgen-internal", "a projection out of range", span))?;
-        path.env.insert(place.local, updated);
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn call(
         &mut self,
         path: &mut Path,
+        statement: usize,
         span: SpanId,
         callee: FnId,
         type_args: &[Ty],
@@ -1634,7 +1701,7 @@ impl<'a> Gen<'a> {
         }
 
         // Arguments, left to right, with their exec checks.
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         let mut tr = Tr::new(self.ctx, &self.tables.sigs, &self.tables.functions, &reads)
             .with_recommendations(self.recommendations)
             .with_recommendation_work(self.recommendation_work.clone());
@@ -1663,6 +1730,7 @@ impl<'a> Gen<'a> {
             read: arg_vals.clone(),
             old: arg_vals.clone(),
             types: type_terms(self.ctx, callee, type_args, &self.types, span)?,
+            ..Reads::default()
         };
         // A recursive call terminates: checked before the call
         // (`recursion.rs`, `check_termination`), after its arguments' checks.
@@ -1701,6 +1769,8 @@ impl<'a> Gen<'a> {
             earlier.push((Source::CallRequires, goal));
         }
 
+        self.check_unwind_call(path, target, &callee_reads, (span, site), earlier)?;
+
         // The result and the postconditions.
         let ret_ty = target
             .ret_ty()
@@ -1728,10 +1798,24 @@ impl<'a> Gen<'a> {
         for term in clauses {
             self.fact_gated(&path.guard, Source::CalleeEnsures, term, gate.clone());
         }
+        for (argument, param) in args.iter().zip(&target.params) {
+            if target
+                .local(*param)
+                .is_some_and(|local| local.mode != Mode::Spec)
+            {
+                self.consume(path, argument)?;
+            }
+        }
         if let Some(dest) = dest {
             self.assign(path, dest, result, span)?;
+        } else {
+            self.drop_identity_result(path, target, &ret_ty, &result, span)?;
         }
-        Ok(())
+        // The CFG captured argument origins before the common move and
+        // finalized only its normal result edge. Rebind that same state to
+        // the actual result carriers; never recover an escape by subtracting
+        // a possibly shared borrowed footprint.
+        self.after_ownership_join(path, statement, span)
     }
 
     fn ret(&mut self, path: &mut Path, span: SpanId, value: Option<&Expr>, site: SiteId) -> R<()> {
@@ -1758,6 +1842,7 @@ impl<'a> Gen<'a> {
             read,
             old: self.entry.clone(),
             types: self.types.clone(),
+            ..Reads::default()
         };
         for (clause, ensures) in decl.ensures.iter().enumerate() {
             let goal = self.spec_term(path, &reads, &ensures.expr)?;
@@ -1769,6 +1854,12 @@ impl<'a> Gen<'a> {
                 CheckKind::Postcondition { exit: span, clause },
                 Vec::new(),
             )?;
+        }
+        if let Some(value) = value.filter(|_| {
+            decl.local(decl.ret)
+                .is_some_and(|local| local.mode != Mode::Spec)
+        }) {
+            self.consume(path, value)?;
         }
         path.live = false;
         Ok(())
@@ -1816,7 +1907,7 @@ impl<'a> Gen<'a> {
         let simple_while = !info.has_break && simple_invs && lp.cond.is_some() && lp.isolation;
 
         // The invariants hold on entry.
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         for index in &entry_invs {
             let inv = &lp.invariants[*index];
             let goal = self.spec_term(path, &reads, &inv.expr)?;
@@ -1880,8 +1971,11 @@ impl<'a> Gen<'a> {
 
         // After the loop: what it assigns is arbitrary, the exit invariants
         // hold, and a simple `while` has evaluated its condition to false.
-        self.havoc(path, &info, span)?;
-        let reads = self.body_reads(path);
+        self.isolated_loop_exit(path, lp, &info, span)?;
+        if !path.live {
+            return Ok(());
+        }
+        let reads = self.body_reads(path)?;
         for index in &exit_invs {
             let term = self.spec_term(path, &reads, &lp.invariants[*index].expr)?;
             self.fact(&path.guard, Source::LoopInvariant, term);
@@ -1916,19 +2010,7 @@ impl<'a> Gen<'a> {
         exit_invs: Vec<usize>,
         group: u32,
     ) -> R<()> {
-        let mut inner = Path {
-            guard: Vec::new(),
-            declared: path.declared.clone(),
-            env: HashMap::new(),
-            live: true,
-        };
-        let mut locals: Vec<LocalId> = path.env.keys().copied().collect();
-        locals.sort();
-        for local in locals {
-            let (shape, name) = self.local_shape(local, span)?;
-            let value = self.fresh(&shape, &name)?;
-            inner.env.insert(local, value);
-        }
+        let mut inner = self.isolated_loop_path(path, lp, span)?;
         let mut entry = HashMap::new();
         for param in &self.decl.params {
             let value =
@@ -1950,12 +2032,13 @@ impl<'a> Gen<'a> {
                 read: self.entry.clone(),
                 old: self.entry.clone(),
                 types: self.types.clone(),
+                ..Reads::default()
             };
             let decl = self.measure_decl()?;
             self.measure = self.entry_measure(decl, &entry_reads)?;
         }
 
-        let reads = self.body_reads(&inner);
+        let reads = self.body_reads(&inner)?;
         for index in &entry_invs {
             let term = self.spec_term(&inner, &reads, &lp.invariants[*index].expr)?;
             self.fact(&[], Source::LoopInvariant, term);
@@ -1987,10 +2070,12 @@ impl<'a> Gen<'a> {
         entry_invs: Vec<usize>,
         exit_invs: Vec<usize>,
     ) -> R<()> {
+        self.price_ownership_path(path, 2, span)?;
         let before = path.clone();
         let mut inner = path.clone();
         self.havoc(&mut inner, info, span)?;
-        let reads = self.body_reads(&inner);
+        self.joined_loop_ownership(&mut inner, lp, span)?;
+        let reads = self.body_reads(&inner)?;
         for index in &entry_invs {
             let term = self.spec_term(&inner, &reads, &lp.invariants[*index].expr)?;
             self.fact(&inner.guard, Source::LoopInvariant, term);
@@ -2011,7 +2096,7 @@ impl<'a> Gen<'a> {
         let frame = self.loops.pop();
         result?;
         let breaks = frame.map(|f| f.breaks).unwrap_or_default();
-        self.join_breaks(path, before, breaks, span)
+        self.join_breaks(path, before, breaks, lp, span)
     }
 
     /// One iteration from its start: the condition (as `if !cond { break }`
@@ -2030,6 +2115,7 @@ impl<'a> Gen<'a> {
             }
             let c = self.body_bool(inner, &cond.expr)?;
             if cond_breaks {
+                self.price_ownership_path(inner, 1, cond.expr.span)?;
                 let mut exit = inner.clone();
                 exit.guard.push(c.clone().not());
                 self.leave(&mut exit, lp.id, lp.sites.exit, cond.expr.span)?;
@@ -2046,7 +2132,7 @@ impl<'a> Gen<'a> {
     /// The measure's value at the start of an iteration, one named term per
     /// component.
     fn measure(&mut self, path: &Path, lp: &Loop) -> R<Vec<Term>> {
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         let mut out = Vec::new();
         for component in &lp.decreases {
             let mut tr = Tr::new(self.ctx, &self.tables.sigs, &self.tables.functions, &reads)
@@ -2151,6 +2237,7 @@ impl<'a> Gen<'a> {
             declared: BTreeSet::new(),
             env: HashMap::new(),
             live: true,
+            ..Path::default()
         };
         let mut out = Vec::new();
         for component in &decl.decreases {
@@ -2288,6 +2375,7 @@ impl<'a> Gen<'a> {
             read: values.clone(),
             old: values,
             types: self.types.clone(),
+            ..Reads::default()
         };
         let members: BTreeSet<FnId> = if self.recommendations {
             // No body expansion or fresh-value termination abstraction in the
@@ -2304,6 +2392,7 @@ impl<'a> Gen<'a> {
             declared: self.entry.keys().copied().collect(),
             env: self.entry.clone(),
             live: true,
+            ..Path::default()
         };
         if self.recommendations {
             // The source declaration owns nested checks in its authored
@@ -2446,6 +2535,7 @@ impl<'a> Gen<'a> {
                             declared: env.keys().copied().collect(),
                             env,
                             live: true,
+                            ..Path::default()
                         };
                         self.in_proof_in_spec = true;
                         let walked = self.stmts(&mut inner, &block.stmts);
@@ -2463,6 +2553,7 @@ impl<'a> Gen<'a> {
                     read: read.clone(),
                     old: read,
                     types: call.types,
+                    ..Reads::default()
                 };
                 let goal = self.decreases_goal(callee, &callee_reads, &measure)?;
                 let site = SiteId(self.next_spec_site);
@@ -2525,7 +2616,7 @@ impl<'a> Gen<'a> {
         if frame.lp.isolation {
             let lp = frame.lp;
             let exit_invs = frame.exit_invs.clone();
-            let reads = self.body_reads(path);
+            let reads = self.body_reads(path)?;
             for inv_index in exit_invs {
                 let inv = &lp.invariants[inv_index];
                 let goal = self.spec_term(path, &reads, &inv.expr)?;
@@ -2552,6 +2643,7 @@ impl<'a> Gen<'a> {
                     at,
                 ));
             }
+            self.price_ownership_path(path, 1, at)?;
             self.loops[index].breaks.push(path.clone());
         }
         path.live = false;
@@ -2586,7 +2678,7 @@ impl<'a> Gen<'a> {
             Some(at) => InvariantAt::Continue(at),
             None => InvariantAt::End,
         };
-        let reads = self.body_reads(path);
+        let reads = self.body_reads(path)?;
         for inv_index in entry_invs {
             let inv = &lp.invariants[inv_index];
             let goal = self.spec_term(path, &reads, &inv.expr)?;
@@ -2606,7 +2698,7 @@ impl<'a> Gen<'a> {
         if !lp.decreases.is_empty() {
             let mut now = Vec::new();
             for component in &lp.decreases {
-                let reads = self.body_reads(path);
+                let reads = self.body_reads(path)?;
                 let mut tr = Tr::new(self.ctx, &self.tables.sigs, &self.tables.functions, &reads)
                     .with_recommendations(self.recommendations)
                     .with_recommendation_work(self.recommendation_work.clone());
@@ -2674,6 +2766,7 @@ impl<'a> Gen<'a> {
         path: &mut Path,
         before: Path,
         breaks: Vec<Path>,
+        lp: &Loop,
         span: SpanId,
     ) -> R<()> {
         if breaks.is_empty() {
@@ -2725,13 +2818,19 @@ impl<'a> Gen<'a> {
             }
             env.insert(local, merged);
         }
+        self.resolution.charge(breaks.len(), span)?;
+        let ownership = self.joined_ownership(&breaks.iter().collect::<Vec<_>>(), span)?;
         *path = Path {
             guard,
             declared: before.declared,
             env,
             live: true,
+            moved: ownership.moved,
+            loans: ownership.loans,
+            escaped_loans: ownership.escaped,
+            resolved: ownership.resolved,
         };
-        Ok(())
+        self.after_loop_breaks(path, lp, span)
     }
 
     /// Merge the two paths out of an `if` into `path`.
@@ -2794,6 +2893,11 @@ impl<'a> Gen<'a> {
                 if then_cond != *cond || else_cond != cond.clone().not() {
                     path.guard.push(Term::or([then_cond, else_cond]));
                 }
+                let ownership = self.joined_ownership(&[&then_path, &else_path], span)?;
+                path.moved = ownership.moved;
+                path.loans = ownership.loans;
+                path.escaped_loans = ownership.escaped;
+                path.resolved = ownership.resolved;
                 path.env = env;
                 Ok(())
             }
@@ -2804,7 +2908,7 @@ impl<'a> Gen<'a> {
 /// The `proof { .. }` blocks of a spec expression, in the order [`Tr`]
 /// evaluates it.
 fn proof_blocks<'e>(e: &'e Expr, out: &mut Vec<&'e Block>) {
-    if let ExprKind::ProofInSpec(block) = &e.kind {
+    if let ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } = &e.kind {
         out.push(block);
     }
     e.for_each_child(&mut |child| proof_blocks(child, out));
@@ -2840,6 +2944,15 @@ fn holds(stmt: &Stmt, pred: &dyn Fn(&StmtKind) -> bool) -> bool {
             ..
         } => inner(then_block) || inner(else_block),
         StmtKind::Ghost(block) | StmtKind::Block(block) => inner(block),
+        StmtKind::GhostTail { block, tail } => {
+            inner(block)
+                || tail.any(&|e| match &e.kind {
+                    ExprKind::ProofInSpec(block) | ExprKind::ProofInSpecTail { block, .. } => {
+                        block.stmts.iter().any(|s| holds(s, pred))
+                    }
+                    _ => false,
+                })
+        }
         StmtKind::Loop(lp) => lp.cond.as_ref().is_some_and(|c| inner(&c.block)) || inner(&lp.body),
         _ => false,
     }
@@ -2860,18 +2973,6 @@ fn extension(prefix: &[Term], guard: &[Term], span: SpanId) -> R<Term> {
             "a branch path that does not extend the path before the if",
             span,
         )),
-    }
-}
-
-/// `root` with the value at the child path `indices` replaced.
-fn replace_at(root: &Val, indices: &[u32], value: Val) -> Option<Val> {
-    match indices.split_first() {
-        None => Some(value),
-        Some((first, rest)) => {
-            let child = root.child(*first)?;
-            let updated = replace_at(child, rest, value)?;
-            root.with_child(*first, updated)
-        }
     }
 }
 
@@ -2918,7 +3019,7 @@ fn contains_mut_ref(ty: &Ty) -> bool {
         Ty::Bool | Ty::Int(_) | Ty::Unit => false,
         Ty::Tuple(elems) | Ty::Adt(_, elems) => elems.iter().any(contains_mut_ref),
         Ty::Ref { mutable, inner } => *mutable || contains_mut_ref(inner),
-        Ty::Param(_) => false,
+        Ty::Param(_) | Ty::MutRef(_) => false,
     }
 }
 

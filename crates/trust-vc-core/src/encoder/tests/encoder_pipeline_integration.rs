@@ -256,7 +256,11 @@ fn child_rss_kib(pid: u32) -> Option<u64> {
 #[track_caller]
 fn run_bounded_in_child(test_name: &str, body: impl FnOnce()) {
     if std::env::var_os(BOUNDED_CHILD_ENV).is_some_and(|name| name == test_name) {
+        let query_diagnostic = install_fibonacci_query_diagnostic(test_name);
         body();
+        if query_diagnostic {
+            eprintln!("TVC_FIB_QUERY_DIAGNOSTIC body-returned");
+        }
         return;
     }
     let module = module_path!()
@@ -326,6 +330,50 @@ fn run_bounded_in_child(test_name: &str, body: impl FnOnce()) {
              KiB, {BOUNDED_CHILD_MAX_WALL:?})\n{stdout}\n{stderr}"
         ),
     }
+}
+
+/// Diagnostic-copy hook, active only in the existing fresh bounded child.
+/// This changes only the query-output directory; the original body and its
+/// parent-enforced memory/time ceilings remain the ones above.
+fn install_fibonacci_query_diagnostic(test_name: &str) -> bool {
+    let Some(directory) = std::env::var_os("TVC_FIB_QUERY_DIAGNOSTIC_DIR") else {
+        return false;
+    };
+    assert_eq!(
+        test_name, "test_pipeline_fuel_fibonacci_concrete_wrong_value_not_verified",
+        "the diagnostic output is admitted for exactly one original test"
+    );
+    let directory = std::path::PathBuf::from(directory);
+    assert!(
+        directory.is_absolute(),
+        "Root must bind an absolute output directory"
+    );
+    let metadata = std::fs::symlink_metadata(&directory).expect("Root-created output directory");
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert_eq!(
+        std::fs::canonicalize(&directory).expect("physical output directory"),
+        directory,
+        "Root must bind the canonical physical output path"
+    );
+    assert!(
+        std::fs::read_dir(&directory)
+            .expect("read the fresh output directory")
+            .next()
+            .is_none(),
+        "the diagnostic child requires fresh output"
+    );
+    let directory = directory
+        .to_str()
+        .expect("the diagnostic directory must be UTF-8")
+        .to_owned();
+    assert!(
+        ay_core::set_global_misc_cli_flags_with(|flags| {
+            flags.dump_query_dir = Some(directory);
+        }),
+        "the output-only flag must be installed before any AY flag capture"
+    );
+    eprintln!("TVC_FIB_QUERY_DIAGNOSTIC child-entered-before-body");
+    true
 }
 
 /// A context holding the spec function `name(n: i32) -> i32` and its body

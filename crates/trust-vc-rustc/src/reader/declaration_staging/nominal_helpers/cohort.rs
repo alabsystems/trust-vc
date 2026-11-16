@@ -63,6 +63,60 @@ pub(in crate::reader::declaration_staging) struct Cohort<'scope, 'tcx> {
     transaction_probe: Option<transaction::Probe>,
 }
 
+/// A successfully completed helper transaction in its still-live Keep
+/// context. The owned helper map alone cannot recreate this borrowed scope.
+pub(in crate::reader::declaration_staging) struct ClosedScope<'scope, 'tcx> {
+    tcx: TyCtxt<'tcx>,
+    inputs: &'scope Inputs,
+    metadata: &'scope Metadata,
+    intrinsic: DefId,
+    owned: Arc<OwnedCohort>,
+    owners: Vec<NativeKey>,
+}
+
+impl<'tcx> ClosedScope<'_, 'tcx> {
+    pub(in crate::reader::declaration_staging) fn current(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        inputs: &Inputs,
+        metadata: &Metadata,
+        helpers: &BTreeMap<NativeKey, OwnedHelpers>,
+    ) -> Result<(), String> {
+        diagnostics(tcx)?;
+        if !std::ptr::eq(*tcx, *self.tcx)
+            || !std::ptr::eq(inputs, self.inputs)
+            || !std::ptr::eq(metadata, self.metadata)
+            || std::env::var("VSTD_KIND").as_deref() != Ok("IsVstd")
+            || declaration_native::key(tcx, self.intrinsic) != self.owned.intrinsic
+            || tcx.get_diagnostic_item(Symbol::intern("verus::verus_builtin::get_variant_field"))
+                != Some(self.intrinsic)
+            || !helpers.keys().copied().eq(self.owners.iter().copied())
+            || helpers.iter().any(|(key, helper)| {
+                *key != helper.owner || !Arc::ptr_eq(&helper.cohort, &self.owned)
+            })
+        {
+            return Err(
+                "the closed helper scope, native context or exact helper map changed".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Full physical validation brackets a source read. Intermediate views
+    /// remain borrowed from this exact context and cannot become import facts.
+    pub(in crate::reader::declaration_staging) fn revalidate(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        inputs: &Inputs,
+        metadata: &Metadata,
+        helpers: &BTreeMap<NativeKey, OwnedHelpers>,
+    ) -> Result<(), String> {
+        self.current(tcx, inputs, metadata, helpers)?;
+        self.owned.revalidate(inputs, metadata)?;
+        self.current(tcx, inputs, metadata, helpers)
+    }
+}
+
 impl<'scope, 'tcx> Cohort<'scope, 'tcx> {
     pub(in crate::reader::declaration_staging) fn capture(
         tcx: TyCtxt<'tcx>,
@@ -242,6 +296,26 @@ impl<'scope, 'tcx> Cohort<'scope, 'tcx> {
                 )
             })
             .collect())
+    }
+
+    /// Retain live context identity only after the unchanged transaction
+    /// finalizer succeeds. A prior owned map or matching NativeKeys cannot
+    /// construct this scope or rebind it to another compiler context.
+    pub(in crate::reader::declaration_staging) fn finish_with_scope(
+        self,
+        pending: BTreeMap<NativeKey, PendingHelpers>,
+    ) -> Result<(BTreeMap<NativeKey, OwnedHelpers>, ClosedScope<'scope, 'tcx>), String> {
+        let closed = ClosedScope {
+            tcx: self.tcx,
+            inputs: self.inputs,
+            metadata: self.metadata,
+            intrinsic: self.intrinsic,
+            owned: Arc::clone(&self.owned),
+            owners: pending.keys().copied().collect(),
+        };
+        let helpers = self.finish(pending)?;
+        closed.current(closed.tcx, closed.inputs, closed.metadata, &helpers)?;
+        Ok((helpers, closed))
     }
 
     #[cfg(test)]

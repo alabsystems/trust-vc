@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+mod functions;
+
 use crate::expr::Expr;
 use crate::ids::{AdtId, FnId, LocalId, SpanId};
 use crate::stmt::{Block, ClauseAttrs};
@@ -49,6 +51,22 @@ pub enum LocalKind {
     Bound,
 }
 
+/// Prophecy classification requested at a local declaration. Parameters and
+/// quantifier binders always start non-prophetic; dependencies on their actual
+/// inputs are propagated at calls and through the enclosing expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DeclProphecy {
+    /// Infer once from the initializer and enclosing prophetic condition.
+    #[default]
+    Default,
+    /// Explicitly prophetic, even when initialized with a constant.
+    Prophetic,
+    /// Without an initializer, infer once at the first whole-local assignment.
+    /// Generated Spec [`LocalKind::Temp`] expression results additionally join
+    /// independently checked branch initializations and their guard's effect.
+    DelayedInfer,
+}
+
 /// A local variable of a function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDecl {
@@ -58,6 +76,8 @@ pub struct LocalDecl {
     pub ty: Ty,
     /// Its mode.
     pub mode: Mode,
+    /// Source prophecy marker; inference never changes this declaration.
+    pub prophecy: DeclProphecy,
     /// Declared `mut`.
     pub mutable: bool,
     /// What introduced it.
@@ -89,6 +109,13 @@ pub enum Rlimit {
 /// Function attributes and resolved compiler facts that change verification.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FnAttrs {
+    /// The producer requires Verus's scalar input fragment for retained
+    /// `by(bit_vector)` queries. This restriction grants no proof authority;
+    /// producers of richer typed IR may keep finite product inputs.
+    pub bitvector_scalar_inputs: bool,
+    /// `#[verifier::prophetic]`: every call result is prophecy-dependent,
+    /// including calls whose checked body is a constant.
+    pub prophetic: bool,
     /// A checked `#[verifier::inline]` spec body. Inlining substitutes its
     /// actual typed arguments; this flag grants no foreign body authority.
     pub inline: bool,
@@ -96,6 +123,10 @@ pub struct FnAttrs {
     pub opaque: bool,
     /// `#[verifier::external_body]`: the body is trusted, not verified.
     pub external_body: bool,
+    /// Checked outer trigger groups for this local broadcast proof. The actual
+    /// parameters and requires/ensures remain in this same declaration; hints
+    /// confer no imported body or independent axiom authority.
+    pub broadcast_triggers: Option<Vec<Vec<Expr>>>,
     /// `#[verifier::rlimit(..)]`.
     pub rlimit: Option<Rlimit>,
     /// `#[verifier::exec_allows_no_decreases_clause]` or
@@ -129,9 +160,12 @@ pub struct GenericInstance {
 impl FnAttrs {
     pub(crate) fn without_instance(&self) -> Self {
         Self {
+            bitvector_scalar_inputs: self.bitvector_scalar_inputs,
+            prophetic: self.prophetic,
             inline: self.inline,
             opaque: self.opaque,
             external_body: self.external_body,
+            broadcast_triggers: self.broadcast_triggers.clone(),
             rlimit: self.rlimit,
             exec_allows_no_decreases: self.exec_allows_no_decreases,
             is_decreases_by: self.is_decreases_by,
@@ -209,6 +243,28 @@ pub enum FnKind {
     Static,
 }
 
+/// A function's checked promise about unwinding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnwindSpec {
+    /// The function never unwinds.
+    NoUnwind,
+    /// The function never unwinds when this pure entry-state condition holds.
+    NoUnwindWhen(Expr),
+    /// The function may unwind.
+    MayUnwind,
+}
+
+impl UnwindSpec {
+    /// The conditional promise's expression, borrowed without substitution.
+    #[must_use]
+    pub fn condition(&self) -> Option<&Expr> {
+        match self {
+            Self::NoUnwindWhen(condition) => Some(condition),
+            Self::NoUnwind | Self::MayUnwind => None,
+        }
+    }
+}
+
 /// A function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnDecl {
@@ -241,6 +297,9 @@ pub struct FnDecl {
     pub ensures: Vec<Clause>,
     /// Recommendations (checked as warnings by Verus, not verified).
     pub recommends: Vec<Clause>,
+    /// An explicit unwind contract. Absent defaults to MayUnwind for Exec,
+    /// and NoUnwind for Spec/Proof; this is a promise checked in the body.
+    pub unwind: Option<UnwindSpec>,
     /// The `decreases` measure, lexicographic; empty when there is none.
     /// Each component is an integer spec expression over the parameters,
     /// read at entry. It matters for a function of a [`RecGroup`].
@@ -258,61 +317,6 @@ pub struct FnDecl {
     pub body: Body,
 }
 
-impl FnDecl {
-    /// The initial imported fragment carries only a specification signature.
-    /// Body visibility and resource metadata grant no definition or queries.
-    pub(crate) fn imported_problem(&self) -> Option<&'static str> {
-        if self.role != FnRole::Imported {
-            return None;
-        }
-        if self.mode != Mode::Spec || self.kind != FnKind::Function || self.body != Body::None {
-            return Some("an imported declaration requires an ordinary bodyless spec function");
-        }
-        if !self.requires.is_empty()
-            || !self.ensures.is_empty()
-            || !self.recommends.is_empty()
-            || !self.decreases.is_empty()
-            || self.decreases_when.is_some()
-            || self.decreases_by.is_some()
-        {
-            return Some("an imported declaration cannot carry contract or termination clauses");
-        }
-        if self.attrs.inline
-            || self.attrs.external_body
-            || self.attrs.exec_allows_no_decreases
-            || self.attrs.is_decreases_by
-            || self.attrs.is_trait_method_impl
-            || self.attrs.instance.is_some()
-        {
-            return Some("an imported declaration cannot carry body or instance authority");
-        }
-        if self.locals.len() != self.params.len() + 1
-            || self.locals.iter().any(|local| {
-                local.mode != Mode::Spec
-                    || local.mutable
-                    || !matches!(local.kind, LocalKind::Param | LocalKind::Return)
-            })
-        {
-            return Some(
-                "an imported signature requires only immutable spec parameters and result",
-            );
-        }
-        None
-    }
-
-    /// The declaration of `local`, if it exists.
-    #[must_use]
-    pub fn local(&self, local: LocalId) -> Option<&LocalDecl> {
-        self.locals.get(local.index())
-    }
-
-    /// The return type.
-    #[must_use]
-    pub fn ret_ty(&self) -> Option<&Ty> {
-        self.local(self.ret).map(|decl| &decl.ty)
-    }
-}
-
 /// One field of a struct or variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDecl {
@@ -320,6 +324,9 @@ pub struct FieldDecl {
     pub name: String,
     /// Its type.
     pub ty: Ty,
+    /// Declared storage mode. Spec fields are logical snapshots, not owned
+    /// executable or tracked components of the containing value.
+    pub mode: Mode,
 }
 
 /// One variant of an enum; a struct has exactly one.

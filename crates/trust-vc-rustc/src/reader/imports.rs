@@ -9,7 +9,9 @@
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
-use trust_vc_vcir::{AdtDecl, AdtId, FnDecl, FnId, Mode, SpanId, VcCrate};
+use trust_vc_vcir::{
+    AdtDecl, AdtId, AdtKind, Body, FnDecl, FnId, FnRole, Mode, SpanId, Ty, VcCrate,
+};
 
 use super::declaration_staging::ClientImports;
 use super::{modes, Cx, FnInfo};
@@ -26,6 +28,7 @@ struct Function {
     definition: DefId,
     declaration: FnDecl,
     modes: modes::CallModes,
+    source_recommendations: bool,
 }
 
 /// This view exists only for a nominal that passed the sealed original
@@ -66,6 +69,7 @@ pub(super) struct Registry<'tcx> {
     tcx: TyCtxt<'tcx>,
     nominals: Vec<Nominal>,
     functions: Vec<Function>,
+    spec_definitions: super::declaration_staging::ClientDefinitions,
     wf_requirements: Vec<super::declaration_wf::BuiltinRequirement>,
 }
 
@@ -91,13 +95,16 @@ impl<'tcx> Registry<'tcx> {
                 definition: function.definition(),
                 declaration: function.declaration(SpanId(0)),
                 modes: function.call_modes(),
+                source_recommendations: function.source_recommendations(),
             })
             .collect();
         let wf_requirements = imports.wf_requirements(tcx)?.to_vec();
+        let spec_definitions = imports.definition_packet(tcx)?;
         Ok(Self {
             tcx,
             nominals,
             functions,
+            spec_definitions,
             wf_requirements,
         })
     }
@@ -133,6 +140,106 @@ impl<'tcx> Registry<'tcx> {
             .iter()
             .find(|entry| entry.definition == definition)
             .map(|entry| (entry.declaration.id, entry.declaration.type_params.len()))
+    }
+
+    /// A diagnostic item is only a candidate. The existing owned packet must
+    /// supply this exact native definition and its entire pure signature.
+    /// No sequence equations or representation follow from this projection.
+    pub(super) fn seq_len(&self, tcx: TyCtxt<'tcx>, definition: DefId) -> bool {
+        if !self.current(tcx) || definition.is_local() {
+            return false;
+        }
+        let Some(entry) = self
+            .functions
+            .iter()
+            .find(|entry| entry.definition == definition)
+        else {
+            return false;
+        };
+        let declaration = &entry.declaration;
+        let ([parameter], Some(result)) = (
+            declaration.params.as_slice(),
+            declaration.locals.get(declaration.ret.index()),
+        ) else {
+            return false;
+        };
+        let Some(parameter) = declaration.locals.get(parameter.index()) else {
+            return false;
+        };
+        let Ty::Adt(nominal, arguments) = &parameter.ty else {
+            return false;
+        };
+        declaration.role == FnRole::Imported
+            && declaration.mode == Mode::Spec
+            && declaration.type_params.len() == 1
+            && parameter.mode == Mode::Spec
+            && arguments.as_slice() == [Ty::Param(0)]
+            && result.mode == Mode::Spec
+            && result.ty == Ty::nat()
+            && matches!(declaration.body, Body::None)
+            && entry.modes.mode == Mode::Spec
+            && entry.modes.ret == Mode::Spec
+            && !entry.modes.prophetic
+            && matches!(entry.modes.params.as_slice(), [parameter] if parameter.mode == Mode::Spec && !parameter.mutable_reference)
+            && self.nominals.iter().any(|entry| {
+                entry.declaration.id == *nominal
+                    && entry.declaration.kind == AdtKind::Opaque
+                    && entry.declaration.type_params.len() == 1
+            })
+    }
+
+    /// Require this exact current foreign member of the complete source
+    /// family, including its separate checked recommendation packet. It
+    /// remains bodyless; no sequence value or representation is supplied.
+    pub(super) fn seq_index(&self, tcx: TyCtxt<'tcx>, definition: DefId) -> bool {
+        if !self.current(tcx) || definition.is_local() {
+            return false;
+        }
+        let Some(entry) = self
+            .functions
+            .iter()
+            .find(|entry| entry.definition == definition)
+        else {
+            return false;
+        };
+        let declaration = &entry.declaration;
+        let ([receiver, index], Some(result)) = (
+            declaration.params.as_slice(),
+            declaration.local(declaration.ret),
+        ) else {
+            return false;
+        };
+        let (Some(receiver), Some(index)) =
+            (declaration.local(*receiver), declaration.local(*index))
+        else {
+            return false;
+        };
+        let Ty::Adt(nominal, arguments) = &receiver.ty else {
+            return false;
+        };
+        entry.source_recommendations
+            && self
+                .spec_definitions
+                .bodyless_recommendation_owner(declaration.id)
+            && declaration.role == FnRole::Imported
+            && declaration.mode == Mode::Spec
+            && declaration.type_params.len() == 1
+            && matches!(declaration.body, Body::None)
+            && receiver.mode == Mode::Spec
+            && arguments.as_slice() == [Ty::Param(0)]
+            && index.mode == Mode::Spec
+            && index.ty == Ty::int()
+            && result.mode == Mode::Spec
+            && result.ty == Ty::Param(0)
+            && entry.modes.mode == Mode::Spec
+            && entry.modes.ret == Mode::Spec
+            && !entry.modes.prophetic
+            && matches!(entry.modes.params.as_slice(), [receiver,index] if [receiver,index].iter().all(|parameter| parameter.mode == Mode::Spec && !parameter.mutable_reference))
+            && self.nominals.iter().any(|entry| {
+                entry.declaration.id == *nominal
+                    && entry.declaration.kind == AdtKind::Opaque
+                    && entry.declaration.type_params.len() == 1
+            })
     }
 
     pub(super) fn nominal(&self, tcx: TyCtxt<'tcx>, definition: DefId) -> Option<AdtId> {
@@ -207,6 +314,25 @@ impl<'tcx> Registry<'tcx> {
                 );
             }
         }
+        let definitions = self.spec_definitions.install(cx)?;
+        // Definition admission is part of the same all-or-nothing preflight.
+        // Validate against the complete prospective signature view before
+        // either native lookup index or the caller's crate is changed.
+        if !definitions.is_empty() {
+            let mut prospective = krate.clone();
+            prospective.adts.extend(
+                self.nominals
+                    .iter()
+                    .map(|nominal| nominal.declaration.clone()),
+            );
+            prospective.fns.extend(
+                self.functions
+                    .iter()
+                    .map(|function| function.declaration.clone()),
+            );
+            definitions.validate_for_crate(&prospective)
+                .map_err(|errors| format!("the checked Spec definitions differ from the prospective native signatures: {errors:?}"))?;
+        }
         for nominal in &self.nominals {
             let span = cx.span_id(cx.tcx.def_span(nominal.definition));
             let mut declaration = nominal.declaration.clone();
@@ -230,6 +356,7 @@ impl<'tcx> Registry<'tcx> {
             );
             krate.fns.push(declaration);
         }
+        cx.spec_definitions = definitions;
         Ok(())
     }
 }

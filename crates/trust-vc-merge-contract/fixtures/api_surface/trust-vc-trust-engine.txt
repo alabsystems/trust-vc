@@ -1907,6 +1907,7 @@ variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Refuted
 variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Rejected
 variant trust_vc_trust_engine::TrustVcNativeTrustIrExitClass::Unknown
 variant trust_vc_trust_engine::TrustVcNativeTrustIrInputKind::RustMir
+variant trust_vc_trust_engine::TrustVcNativeTrustIrInputKind::RustThir
 variant trust_vc_trust_engine::TrustVcNativeTrustIrInputKind::TrustIrModule
 variant trust_vc_trust_engine::TrustVcNativeTrustIrLoweringWitness::None
 variant trust_vc_trust_engine::TrustVcNativeTrustIrObligationKind::LoopInvariant
@@ -2048,6 +2049,7 @@ variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitC
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Rejected
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrExitClass::Unknown
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind::RustMir
+variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind::RustThir
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrInputKind::TrustIrModule
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrLoweringWitness::None
 variant trust_vc_trust_engine::native_trust_ir_bundle::TrustVcNativeTrustIrObligationKind::LoopInvariant

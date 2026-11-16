@@ -51,9 +51,12 @@ mod expr;
 mod ids;
 mod instance_semantics;
 mod item;
+pub(crate) mod place_mode;
 pub mod pretty;
+mod prophecy;
 #[cfg(feature = "solve")]
 pub mod solve;
+mod spec_definitions;
 mod stmt;
 pub mod triggers;
 mod ty;
@@ -66,9 +69,11 @@ pub use expr::{
 };
 pub use ids::{AdtId, DefHash, FnId, LocalId, LoopId, SiteId, SpanId};
 pub use item::{
-    AdtDecl, AdtKind, Body, Clause, ConstMode, DefOrder, FieldDecl, FnAttrs, FnDecl, FnKind,
-    FnRole, GenericInstance, LocalDecl, LocalKind, Mode, RecGroup, Rlimit, VariantDecl, VcCrate,
+    AdtDecl, AdtKind, Body, Clause, ConstMode, DeclProphecy, DefOrder, FieldDecl, FnAttrs, FnDecl,
+    FnKind, FnRole, GenericInstance, LocalDecl, LocalKind, Mode, RecGroup, Rlimit, UnwindSpec,
+    VariantDecl, VcCrate,
 };
+pub use spec_definitions::CheckedSpecDefinitions;
 pub use stmt::{
     Block, ClauseAttrs, InvariantKind, Loop, LoopCond, LoopInvariant, LoopSites, Stmt, StmtKind,
 };
@@ -77,4 +82,4 @@ pub use wf::{check_crate, check_crate_for_diagnostics, DiagnosticWf, WfClass, Wf
 
 /// Schema name of this format, as trust-ir's `ProofFormula.schema` would
 /// reference it.
-pub const SCHEMA: &str = "trust-vc.vcir@9";
+pub const SCHEMA: &str = "trust-vc.vcir@11";

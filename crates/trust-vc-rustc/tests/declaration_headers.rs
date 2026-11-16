@@ -161,7 +161,9 @@ fn header(name: &str, source: &str) -> Value {
     assert_eq!(header["header_authority"]["state"], "Unknown");
     assert_eq!(header["ordered_header_validation"]["state"], "Unknown");
     assert_eq!(header["owner"], row["definition"]);
-    header.clone()
+    let mut header = header.clone();
+    header["inline_observation"] = row["inline_recommendation_observation"].clone();
+    header
 }
 
 #[test]
@@ -325,4 +327,123 @@ pub closed spec fn test(x: bool) -> bool { requires(x) }
     );
     assert_eq!(report["state"], "ObservedNoHeaderReference");
     assert!(report["references"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn one_original_leading_recommendation_has_only_a_scoped_syntax_observation() {
+    let report = header(
+        "one_recommendation",
+        r#"verus_builtin_macros::verus! {
+pub uninterp spec fn test(x: bool) -> bool recommends x;
+}"#,
+    );
+    assert_eq!(report["state"], "ObservedHeaderReferences");
+    let fact = &report["single_leading_recommends_observation"];
+    assert_eq!(fact["state"], "ObservedSingleOriginalLeadingRecommends");
+    assert_eq!(fact["expression_semantics_checked"], false);
+    assert_eq!(fact["permission_from_observation"], false);
+}
+
+#[test]
+fn late_duplicate_reified_and_closure_recommendations_cannot_donate_the_fact() {
+    for (label, contents, expected) in [
+        (
+            "late_recommendation",
+            "let _ = true; builtin::recommends([x]); x",
+            "ObservedHeaderReferences",
+        ),
+        (
+            "duplicate_recommendation",
+            "builtin::recommends([x]); builtin::recommends([x]); x",
+            "ObservedHeaderReferences",
+        ),
+        (
+            "reified_recommendation",
+            "let _marker: fn(bool) = builtin::recommends::<bool>; x",
+            "ObservedHeaderReferences",
+        ),
+        (
+            "reified_array_recommendation",
+            "let _marker: fn([bool; 1]) = builtin::recommends::<[bool; 1]>; x",
+            "Unknown",
+        ),
+        (
+            "closure_recommendation",
+            "let _f = |y: bool| { builtin::recommends([y]); y }; x",
+            "ObservedHeaderReferences",
+        ),
+        (
+            "wrong_header",
+            "builtin::requires([x]); x",
+            "ObservedHeaderReferences",
+        ),
+    ] {
+        let source = format!("verus_builtin_macros::verus! {{ pub closed spec fn test(x: bool) -> bool {{ {contents} }} }}");
+        let report = header(label, &source);
+        assert_eq!(report["state"], expected, "{label}: {report}");
+        if label == "reified_array_recommendation" {
+            assert!(report["unknowns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| { reason.as_str().unwrap().contains("nested non-closure body") }));
+            assert!(report["references"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reference| { reference["kind"] == "Recommends" }));
+        }
+        assert!(
+            report["single_leading_recommends_observation"].is_null(),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn inline_inherent_recommendations_never_supply_an_empty_header_fact() {
+    let report = header(
+        "inline_inherent_recommendation",
+        r#"verus_builtin_macros::verus! {
+pub struct S {}
+impl S {
+    pub uninterp spec fn target(self, x: bool) -> bool recommends x;
+    #[verifier::inline]
+    pub open spec fn test(self, x: bool) -> bool recommends x { self.target(x) }
+}
+}"#,
+    );
+    assert_eq!(report["state"], "Unknown");
+    let inline = &report["inline_observation"];
+    assert_eq!(inline["state"], "ObservedHeaderReferences");
+    assert_eq!(
+        inline["single_leading_recommends_observation"]["state"],
+        "ObservedSingleOriginalLeadingRecommends"
+    );
+    assert_eq!(inline["header_authority"]["state"], "Unknown");
+    assert_eq!(
+        inline["single_leading_recommends_observation"]["permission_from_observation"],
+        false
+    );
+    for (label, source) in [
+        ("inline_empty", "verus_builtin_macros::verus! { #[verifier::inline] pub open spec fn test(x: bool) -> bool { x } }"),
+        ("inline_closed", "verus_builtin_macros::verus! { #[verifier::inline] pub closed spec fn test(x: bool) -> bool recommends x { x } }"),
+    ] {
+        let report = header(label, source);
+        assert_eq!(report["inline_observation"]["state"], "Unknown");
+        assert!(report["inline_observation"]["single_leading_recommends_observation"].is_null());
+    }
+}
+
+#[test]
+fn ordinary_recommends_spelling_has_no_ordered_builtin_fact() {
+    let report = header(
+        "ordinary_recommends",
+        r#"verus_builtin_macros::verus! {
+spec fn recommends(x: bool) -> bool { x }
+pub closed spec fn test(x: bool) -> bool { recommends(x); x }
+}"#,
+    );
+    assert_eq!(report["state"], "ObservedNoHeaderReference");
+    assert!(report["single_leading_recommends_observation"].is_null());
 }

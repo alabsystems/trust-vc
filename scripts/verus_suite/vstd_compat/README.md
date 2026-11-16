@@ -1,5 +1,18 @@
 # Pinned Verus library compatibility inputs
 
+`a40d57c-trust82bb867-allocator-clone.{json,patch}` records the same source
+adaptation for actual Trust `82bb867eddb94599f68194f701c766f2b6f5a02f`
+(installed build 20882). A fresh, complete A40 source export was checked against
+every Git blob. Its manifest SHA256 is
+`8feafeb5b8901043b90b8b51b7853f8a4832d44f2c596865b68badeea618046b`.
+The unmodified whole-module std+alloc build with this compiler again failed
+with exactly 26 E0277 errors requiring `AllocatorClone`. The current recipe
+binds the actual compiler, original file and patched file; it does not reuse
+the historical SDK manifest identity or authorize an imported contract.
+The complete patched std+alloc vstd then compiled successfully with current
+Trust as an ordinary macro-Erase-body Rust library. This establishes source
+compatibility, not verified proof bodies, a vstd export or imported authority.
+
 `a40d57c-trust29ebb-allocator-clone.patch` adapts the pinned Verus source
 `a40d57c73650cd3648b09386bfdb96ab5c270626` to the actual allocator parameter
 requirements of Trust `29ebb403de7a102850d6cb10a62d5cc3baf723ed`.
@@ -26,5 +39,5 @@ unmodified a40. Both Keep-body declaration analysis and ordinary macro Erase
 compilation must use the same source identity. An Erase declaration artifact
 proves no original body, contract or absence of headers; it cannot authorize
 imports or verified-function counts. Authenticated mode/header/identity receipts
-are a separate prerequisite. This patch is source preparation, not a claim that
-the compatibility view has compiled or passed tests.
+are a separate prerequisite. A recipe alone is source preparation and establishes
+neither a successful build nor passing verification tests.

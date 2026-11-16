@@ -157,6 +157,9 @@ pub enum Ty {
         /// The referenced type.
         inner: Box<Ty>,
     },
+    /// An opaque mutable-reference value under Verus new-mut-ref semantics.
+    /// Its identity is independent of its current and future projections.
+    MutRef(Box<Ty>),
     /// Type parameter `n` of the enclosing function
     /// ([`crate::FnDecl::type_params`]). Its values are opaque: they are
     /// compared with `==`, passed to functions and returned, and nothing
@@ -202,7 +205,7 @@ impl Ty {
     #[must_use]
     pub fn deref(&self) -> Option<&Self> {
         match self {
-            Self::Ref { inner, .. } => Some(inner),
+            Self::Ref { inner, .. } | Self::MutRef(inner) => Some(inner),
             _ => None,
         }
     }
@@ -218,6 +221,7 @@ impl Ty {
                 mutable: *mutable,
                 inner: Box::new(inner.subst(args)),
             },
+            Self::MutRef(inner) => Self::MutRef(Box::new(inner.subst(args))),
             Self::Adt(id, targs) => Self::Adt(*id, targs.iter().map(|t| t.subst(args)).collect()),
             Self::Bool | Self::Int(_) | Self::Unit => self.clone(),
         }
@@ -229,7 +233,7 @@ impl Ty {
         match self {
             Self::Param(_) => true,
             Self::Tuple(elems) => elems.iter().any(Self::has_param),
-            Self::Ref { inner, .. } => inner.has_param(),
+            Self::Ref { inner, .. } | Self::MutRef(inner) => inner.has_param(),
             Self::Adt(_, args) => args.iter().any(Self::has_param),
             Self::Bool | Self::Int(_) | Self::Unit => false,
         }

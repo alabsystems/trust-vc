@@ -58,6 +58,22 @@ pub(crate) struct Reads {
     /// applications at different type arguments are different
     /// applications, as Verus's type arguments make them.
     pub(crate) types: TypeEnv,
+    /// Exact source-local table when it differs from an imported signature.
+    pub(crate) local_types: HashMap<LocalId, Ty>,
+    /// Moved owned storage, used only for live body reads.
+    pub(crate) moved: Vec<Place>,
+    /// Storage whose current value remains under an active mutable borrow.
+    pub(crate) borrowed: Vec<Place>,
+}
+
+impl Reads {
+    pub(crate) fn decl_types(decl: &crate::FnDecl) -> HashMap<LocalId, Ty> {
+        decl.locals
+            .iter()
+            .enumerate()
+            .map(|(index, local)| (LocalId(index as u32), local.ty.clone()))
+            .collect()
+    }
 }
 
 /// The kind of an exec check found while translating.
@@ -137,6 +153,18 @@ pub(crate) struct RecCalls {
     pub(crate) proofs: usize,
 }
 
+/// Borrowed inputs to one complete translated choice-template admission.
+/// Constructing this view neither traverses nor copies the underlying terms.
+struct ChoiceTemplate<'a> {
+    leaves: &'a [(String, LeafTy)],
+    holes: &'a [(String, LeafTy)],
+    condition: &'a Term,
+    values: &'a [Term],
+    triggers: &'a [Vec<Term>],
+    arguments: &'a [Term],
+    span: SpanId,
+}
+
 /// One expression translation.
 pub(crate) struct Tr<'a> {
     ctx: &'a Ctx<'a>,
@@ -169,6 +197,70 @@ pub(crate) struct Tr<'a> {
 }
 
 impl<'a> Tr<'a> {
+    /// Translate the current declaration's actual universal contract. The
+    /// caller supplies no replacement axiom, parameter list, or type recipes.
+    pub(crate) fn broadcast_contract(
+        &mut self,
+        declaration: &crate::FnDecl,
+        span: SpanId,
+    ) -> R<Term> {
+        if let Some(problem) = declaration.broadcast_problem() {
+            return Err(refusal("broadcast-contract", problem, span));
+        }
+        let triggers = declaration
+            .attrs
+            .broadcast_triggers
+            .as_ref()
+            .ok_or_else(|| {
+                refusal(
+                    "broadcast-contract",
+                    "a declaration without broadcast trigger authority",
+                    span,
+                )
+            })?;
+        self.auxiliary_work = true;
+        for hint in triggers.iter().flatten() {
+            super::inline_work::expression(&self.inline_work, hint, span)?;
+        }
+        let clauses = |source: &[crate::Clause]| -> R<Expr> {
+            let mut body = Expr::bool_lit(true, span);
+            for clause in source {
+                super::inline_work::expression(&self.inline_work, &clause.expr, span)?;
+                super::inline_work::items(&self.inline_work, 2, span)?;
+                body = Expr::binary(crate::BinOp::And, body, clause.expr.clone(), Ty::Bool, span);
+            }
+            Ok(body)
+        };
+        let body = Expr::binary(
+            crate::BinOp::Implies,
+            clauses(&declaration.requires)?,
+            clauses(&declaration.ensures)?,
+            Ty::Bool,
+            span,
+        );
+        let mut vars = Vec::new();
+        for local in &declaration.params {
+            let source = declaration.local(*local).ok_or_else(|| {
+                refusal("broadcast-contract", "an unknown broadcast parameter", span)
+            })?;
+            super::inline_work::items(&self.inline_work, 1, span)?;
+            super::aux_work::type_recipe(&self.inline_work, &source.ty, span)?;
+            vars.push((*local, source.ty.clone()));
+        }
+        if vars.is_empty() {
+            return self.bool(&body);
+        }
+        self.quant(&body, QuantKind::Forall, &vars, triggers, &body)?
+            .into_leaf()
+            .ok_or_else(|| {
+                refusal(
+                    "broadcast-contract",
+                    "a non-Boolean broadcast contract",
+                    span,
+                )
+            })
+    }
+
     pub(crate) fn new(
         ctx: &'a Ctx<'a>,
         sigs: &'a HashMap<FnId, SpecSig>,
@@ -227,6 +319,7 @@ impl<'a> Tr<'a> {
         callee: FnId,
         reads: &Reads,
         specialized: Option<&[Ty]>,
+        parameter_locals: &[LocalId],
     ) -> R<()> {
         if !self.recommendations {
             return Ok(());
@@ -238,10 +331,58 @@ impl<'a> Tr<'a> {
                 call.span,
             )
         })?;
-        if declaration.recommends.is_empty() {
+        let checked = self.ctx.checked_spec_recommendations(callee);
+        let clauses = checked
+            .map(|checked| checked.clauses.as_slice())
+            .unwrap_or(&declaration.recommends);
+        if clauses.is_empty() {
             return Ok(());
         }
-        for (index, clause) in declaration.recommends.iter().enumerate() {
+        // The actual call's reads use the client's bodyless declaration. A
+        // separately retained definition owns a different coherent local
+        // table, so rebind the already adapted arguments by parameter order.
+        // Types and order were joined when the collection was admitted; local
+        // IDs and display names are deliberately not signature identities.
+        let checked_reads = checked
+            .map(|checked| {
+                if checked.params.len() != declaration.params.len()
+                    || parameter_locals.len() != declaration.params.len()
+                {
+                    return Err(refusal(
+                        "vcgen-internal",
+                        "a checked recommendation with a different parameter count",
+                        call.span,
+                    ));
+                }
+                let mut mapped = Reads {
+                    types: reads.types.clone(),
+                    ..Reads::default()
+                };
+                for (source, client) in checked.params.iter().zip(parameter_locals) {
+                    let value = reads.read.get(client).ok_or_else(|| {
+                        refusal(
+                            "vcgen-internal",
+                            "a missing checked recommendation argument",
+                            call.span,
+                        )
+                    })?;
+                    let old = reads.old.get(client).ok_or_else(|| {
+                        refusal(
+                            "vcgen-internal",
+                            "a missing checked recommendation entry argument",
+                            call.span,
+                        )
+                    })?;
+                    super::inline_work::value(&self.inline_work, value, 1, call.span)?;
+                    super::inline_work::value(&self.inline_work, old, 1, call.span)?;
+                    mapped.read.insert(*source, value.clone());
+                    mapped.old.insert(*source, old.clone());
+                }
+                Ok(mapped)
+            })
+            .transpose()?;
+        let reads = checked_reads.as_ref().unwrap_or(reads);
+        for (index, clause) in clauses.iter().enumerate() {
             let expression = specialized
                 .map(|types| {
                     super::inline_body::expression(self.ctx, &clause.expr, types, &self.inline_work)
@@ -357,6 +498,7 @@ impl<'a> Tr<'a> {
                 e.span,
             ),
             ExprKind::Read(place) => {
+                self.available(place, e.span)?;
                 let root = self
                     .bound
                     .iter()
@@ -374,7 +516,29 @@ impl<'a> Tr<'a> {
                 if self.auxiliary_work || !self.inline_stack.is_empty() {
                     super::inline_work::value(&self.inline_work, root, 2, e.span)?;
                 }
-                project(root, place, e.span)
+                if place.projections.is_empty() {
+                    return Ok(root.clone());
+                }
+                let ty = self
+                    .reads
+                    .local_types
+                    .get(&place.local)
+                    .or_else(|| {
+                        self.reads
+                            .types
+                            .owner()
+                            .and_then(|owner| self.ctx.fns.get(&owner))
+                            .and_then(|decl| decl.local(place.local))
+                            .map(|local| &local.ty)
+                    })
+                    .ok_or_else(|| {
+                        refusal(
+                            "mut-ref-type",
+                            "a projected read without its exact source-local type",
+                            e.span,
+                        )
+                    })?;
+                project(self.ctx, &self.reads.types, root, ty, place, e.span)
             }
             ExprKind::Old(place) => {
                 let root = self.reads.old.get(&place.local).ok_or_else(|| {
@@ -390,7 +554,29 @@ impl<'a> Tr<'a> {
                 if self.auxiliary_work || !self.inline_stack.is_empty() {
                     super::inline_work::value(&self.inline_work, root, 2, e.span)?;
                 }
-                project(root, place, e.span)
+                if place.projections.is_empty() {
+                    return Ok(root.clone());
+                }
+                let ty = self
+                    .reads
+                    .local_types
+                    .get(&place.local)
+                    .or_else(|| {
+                        self.reads
+                            .types
+                            .owner()
+                            .and_then(|owner| self.ctx.fns.get(&owner))
+                            .and_then(|decl| decl.local(place.local))
+                            .map(|local| &local.ty)
+                    })
+                    .ok_or_else(|| {
+                        refusal(
+                            "mut-ref-type",
+                            "a projected read without its exact source-local type",
+                            e.span,
+                        )
+                    })?;
+                project(self.ctx, &self.reads.types, root, ty, place, e.span)
             }
             ExprKind::Unary { op, arg, check } => self.unary(e, *op, arg, *check),
             ExprKind::Binary {
@@ -551,9 +737,37 @@ impl<'a> Tr<'a> {
             }
             // A shared reference is its referent.
             ExprKind::Borrow(inner) => self.expr(inner),
+            ExprKind::MutRefCurrent(reference) | ExprKind::MutRefFuture(reference) => {
+                let value = self.expr(reference)?;
+                if matches!(e.kind, ExprKind::MutRefCurrent(_)) {
+                    if let Some(mut place) = source_place(reference) {
+                        place.projections.push(Projection::Deref);
+                        self.available(&place, e.span)?;
+                    }
+                }
+                self.ctx.mut_ref_projection(
+                    &reference.ty,
+                    &self.reads.types,
+                    value,
+                    matches!(e.kind, ExprKind::MutRefFuture(_)),
+                    e.span,
+                )
+            }
+            ExprKind::MutRefUpdate { reference, value } => {
+                let before = self.expr(reference)?;
+                let value = self.expr(value)?;
+                self.ctx
+                    .mut_ref_update(&reference.ty, &self.reads.types, before, value, e.span)
+            }
+            ExprKind::HasResolved(value) => {
+                let translated = self.expr(value)?;
+                self.ctx
+                    .has_resolved(&value.ty, &self.reads.types, translated, e.span)
+                    .map(Val::Leaf)
+            }
             // Proof code does not change a spec value; a termination check
             // walks it where it stands.
-            ExprKind::ProofInSpec(_) => {
+            ExprKind::ProofInSpec(_) | ExprKind::ProofInSpecTail { .. } => {
                 if (self.auxiliary_work || !self.inline_stack.is_empty())
                     && self.rec_calls.is_some()
                 {
@@ -598,6 +812,38 @@ impl<'a> Tr<'a> {
                 e.span,
             )),
         }
+    }
+
+    fn available(&self, place: &Place, span: SpanId) -> R<()> {
+        if self
+            .reads
+            .moved
+            .iter()
+            .any(|moved| super::resolution::overlaps(moved, place))
+        {
+            return Err(refusal(
+                "mut-ref-moved",
+                "a read of moved owned reference storage",
+                span,
+            ));
+        }
+        if self.reads.borrowed.iter().any(|borrowed| {
+            if !super::resolution::overlaps(borrowed, place) {
+                return false;
+            }
+            // Reading a reference identity does not read through it.
+            !(borrowed.local == place.local
+                && borrowed.projections.starts_with(&place.projections)
+                && borrowed.projections[place.projections.len()..].first()
+                    == Some(&Projection::Deref))
+        }) {
+            return Err(refusal(
+                "mut-ref-borrowed",
+                "a current read of storage still mutably borrowed",
+                span,
+            ));
+        }
+        Ok(())
     }
 
     /// Refuse a recursive call inside a quantifier or choice of a body
@@ -1028,15 +1274,15 @@ impl<'a> Tr<'a> {
                 e.span,
             ));
         }
-        self.check_choice_template(
-            &leaves,
-            &hole_leaves,
-            &cond,
-            &value_terms,
-            &triggers,
-            &args,
-            e.span,
-        )?;
+        self.check_choice_template(ChoiceTemplate {
+            leaves: &leaves,
+            holes: &hole_leaves,
+            condition: &cond,
+            values: &value_terms,
+            triggers: &triggers,
+            arguments: &args,
+            span: e.span,
+        })?;
         let facts = leaves
             .iter()
             .map(|(name, leaf)| leaf.fact(&Term::var(name.clone(), leaf.sort())));
@@ -1131,16 +1377,16 @@ impl<'a> Tr<'a> {
     /// Admission only: no membership, witness, seed or definition is emitted.
     /// The complete translated choice, including real hole arguments, shares
     /// one variable-sort table and the existing inline grant with its caller.
-    fn check_choice_template(
-        &self,
-        leaves: &[(String, LeafTy)],
-        holes: &[(String, LeafTy)],
-        condition: &Term,
-        values: &[Term],
-        triggers: &[Vec<Term>],
-        arguments: &[Term],
-        span: SpanId,
-    ) -> R<()> {
+    fn check_choice_template(&self, template: ChoiceTemplate<'_>) -> R<()> {
+        let ChoiceTemplate {
+            leaves,
+            holes,
+            condition,
+            values,
+            triggers,
+            arguments,
+            span,
+        } = template;
         let shared = self.auxiliary_work || !self.inline_stack.is_empty();
         let work = self.inline_work.clone();
         let mut left = 200_000usize;
@@ -1170,7 +1416,7 @@ impl<'a> Tr<'a> {
             if !pay(name.len().saturating_add(1).saturating_mul(4)) {
                 return Err(exhausted());
             }
-            bound.push((name.clone(), leaf.clone()));
+            bound.push((name.clone(), *leaf));
         }
         if !pay(values
             .len()
@@ -1304,7 +1550,9 @@ impl<'a> Tr<'a> {
         }
         // A trait declaration's body is a default that may be overridden;
         // the pinned elaborator leaves that dispatch uninlined.
-        if declaration.attrs.inline && declaration.role != crate::FnRole::TraitDecl {
+        if (declaration.attrs.inline && declaration.role != crate::FnRole::TraitDecl)
+            || self.ctx.checked_inline_forwarder(callee).is_some()
+        {
             return self.inline_spec_call(e, callee, type_args, types, args);
         }
         if self.auxiliary_work || !self.inline_stack.is_empty() {
@@ -1404,7 +1652,7 @@ impl<'a> Tr<'a> {
             leaves.extend(terms);
         }
         if let Some(reads) = recommendation_reads {
-            self.recommendation_checks(e, callee, &reads, None)?;
+            self.recommendation_checks(e, callee, &reads, None, &declaration.params)?;
         }
         self.called.insert(callee);
         if self.auxiliary_work || !self.inline_stack.is_empty() {
@@ -1462,13 +1710,17 @@ impl<'a> Tr<'a> {
         types: TypeEnv,
         args: &[Expr],
     ) -> R<Val> {
-        let declaration = *self.ctx.fns.get(&callee).ok_or_else(|| {
-            refusal(
-                "inline-body",
-                "a missing original inline declaration",
-                expression.span,
-            )
-        })?;
+        let declaration = self
+            .ctx
+            .checked_inline_forwarder(callee)
+            .or_else(|| self.ctx.fns.get(&callee).copied())
+            .ok_or_else(|| {
+                refusal(
+                    "inline-body",
+                    "a missing original inline declaration",
+                    expression.span,
+                )
+            })?;
         let crate::Body::Spec(body) = &declaration.body else {
             return Err(refusal(
                 "inline-body",
@@ -1596,6 +1848,7 @@ impl<'a> Tr<'a> {
             callee,
             &reads,
             specialized.as_ref().map(|_| type_args),
+            &declaration.params,
         )?;
         let mut child = Tr::new(self.ctx, self.sigs, self.functions, &reads)
             .with_recommendations(self.recommendations);
@@ -1730,8 +1983,9 @@ impl<'a> Tr<'a> {
                     .zip(values.iter().cloned())
                     .collect(),
                 types: types.clone(),
+                ..Reads::default()
             };
-            self.recommendation_checks(e, callee, &reads, None)?;
+            self.recommendation_checks(e, callee, &reads, None, &declaration.params)?;
         }
         self.called.insert(callee);
         let index = self.rec_calls.as_ref().map_or(0, |rec| rec.found.len());
@@ -2061,22 +2315,91 @@ fn lowered_trigger_clip(e: &Expr, pointer_width: u32) -> R<Option<IntRange>> {
     }
 }
 
-/// Follow a place's projections from its root value. References are
-/// transparent.
-pub(crate) fn project(root: &Val, place: &Place, span: SpanId) -> R<Val> {
-    let mut val = root;
-    for projection in &place.projections {
-        val = match projection {
-            Projection::Deref => val,
-            Projection::Field { variant: 0, field } | Projection::TupleField(field) => val
-                .child(*field)
-                .ok_or_else(|| refusal("vcgen-internal", "a projection out of range", span))?,
-            Projection::Field { .. } => {
-                return Err(refusal("enum", "a field of an enum variant", span));
-            }
-        };
+fn source_place(expression: &Expr) -> Option<Place> {
+    match &expression.kind {
+        ExprKind::Read(place) => Some(place.clone()),
+        ExprKind::TupleField { base, index } => {
+            let mut place = source_place(base)?;
+            place.projections.push(Projection::TupleField(*index));
+            Some(place)
+        }
+        ExprKind::Field {
+            base,
+            variant,
+            field,
+        } => {
+            let mut place = source_place(base)?;
+            place.projections.push(Projection::Field {
+                variant: *variant,
+                field: *field,
+            });
+            Some(place)
+        }
+        _ => None,
     }
-    Ok(val.clone())
+}
+
+/// Follow typed projections. Legacy/shared references are transparent;
+/// opaque new-mode references project only their current referent.
+pub(crate) fn project(
+    ctx: &Ctx<'_>,
+    env: &TypeEnv,
+    root: &Val,
+    root_ty: &Ty,
+    place: &Place,
+    span: SpanId,
+) -> R<Val> {
+    let mut value = root.clone();
+    let mut ty = root_ty.clone();
+    for projection in &place.projections {
+        match (projection, &ty) {
+            (Projection::Deref, Ty::MutRef(inner)) => {
+                value = ctx.mut_ref_projection(&ty, env, value, false, span)?;
+                ty = (**inner).clone();
+            }
+            (Projection::Deref, Ty::Ref { inner, .. }) => ty = (**inner).clone(),
+            (Projection::TupleField(index), Ty::Tuple(fields)) => {
+                value = value.child(*index).cloned().ok_or_else(|| {
+                    refusal("vcgen-internal", "a tuple projection out of range", span)
+                })?;
+                ty = fields.get(*index as usize).cloned().ok_or_else(|| {
+                    refusal(
+                        "vcgen-internal",
+                        "a tuple type projection out of range",
+                        span,
+                    )
+                })?;
+            }
+            (Projection::Field { variant: 0, field }, Ty::Adt(id, args)) => {
+                let declaration = ctx
+                    .adts
+                    .get(id)
+                    .filter(|decl| decl.kind == AdtKind::Struct)
+                    .ok_or_else(|| refusal("enum", "a projected non-struct field", span))?;
+                let field_ty = declaration.variants[0]
+                    .fields
+                    .get(*field as usize)
+                    .ok_or_else(|| {
+                        refusal("vcgen-internal", "a struct projection out of range", span)
+                    })?
+                    .ty
+                    .subst(args);
+                value = value
+                    .child(*field)
+                    .cloned()
+                    .ok_or_else(|| refusal("vcgen-internal", "a field value out of range", span))?;
+                ty = field_ty;
+            }
+            _ => {
+                return Err(refusal(
+                    "mut-ref-type",
+                    "a projection inconsistent with its source-local type",
+                    span,
+                ))
+            }
+        }
+    }
+    Ok(value)
 }
 
 /// The machine integer type of a checked operation.
