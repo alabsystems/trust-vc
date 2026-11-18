@@ -58,7 +58,7 @@ fn fixed_nonowned(index: &Index<'_>, ty: &Ty) -> bool {
                         return false;
                     }
                 }
-                Ty::Ref { .. } | Ty::MutRef(_) => return false,
+                Ty::Ref { .. } | Ty::MutRef(_) | Ty::Projection(..) => return false,
                 Ty::Tuple(fields) => {
                     pending.extend(
                         fields

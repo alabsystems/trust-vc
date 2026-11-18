@@ -35,6 +35,7 @@ fn declaration(owner: u64, parameters: usize) -> FnDecl {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals,
         params: (1..=parameters as u32).map(LocalId).collect(),
@@ -255,7 +256,7 @@ fn current_native_signature_join_is_rechecked_at_every_consumption() {
     let definitions =
         CheckedSpecDefinitions::from_crate(&semantic_source(), &[id(1), id(2), id(3)]).unwrap();
     let base = client(Expr::bool_lit(true, span()));
-    let mutations: [fn(&mut VcCrate); 5] = [
+    let mutations: [fn(&mut VcCrate); 6] = [
         |client| {
             client.fns[0].locals[0].ty = Ty::nat();
         },
@@ -271,13 +272,16 @@ fn current_native_signature_join_is_rechecked_at_every_consumption() {
         |client| {
             client.architecture = bitvector::Architecture::Exactly(32);
         },
+        |client| {
+            client.fns[0].copy_premises = vec![Ty::Bool];
+        },
     ];
     for mutate in mutations {
         let mut client = base.clone();
         mutate(&mut client);
         assert!(definitions.validate_for_crate(&client).is_err());
         assert!(vcgen::generate_with_spec_definitions(&client, &definitions).fns.iter().all(|(_, value)| matches!(value, FnVcs::Refused(problem) if problem.tag == "imported-definition")));
-        assert!(vcgen::Recommendations::new_with_spec_definitions(&client, &definitions).is_err());
+        assert!(vcgen::GenerationSession::with_spec_definitions(&client, &definitions).is_err());
     }
 }
 
@@ -309,9 +313,9 @@ fn signature_matching_preserves_parameter_order_across_different_local_tables() 
 }
 
 fn recommendation_query(client: &VcCrate, definitions: &CheckedSpecDefinitions) -> vcgen::Query {
-    let checks = vcgen::Recommendations::new_with_spec_definitions(client, definitions)
+    let checks = vcgen::GenerationSession::with_spec_definitions(client, definitions)
         .expect("checked diagnostic definition view")
-        .function(id(99))
+        .recommendations(id(99))
         .expect("caller recommendation queries");
     assert_eq!(checks.len(), 1, "{checks:?}");
     assert!(matches!(&checks[0].kind,
@@ -341,9 +345,9 @@ fn parameter_recommendation(first: i128, second: i128, expected: bool) {
     assert_eq!(diagnostic.goal, Term::Bool(expected), "{diagnostic:?}");
     assert_eq!(query(&client, &definitions).goal, Term::Bool(true));
     assert_eq!(client, before);
-    assert!(vcgen::Recommendations::new(&client)
+    assert!(vcgen::GenerationSession::new(&client)
         .unwrap()
-        .function(id(99))
+        .recommendations(id(99))
         .unwrap()
         .is_empty());
 }
@@ -553,7 +557,7 @@ fn bodyless_recommendation_owners_and_dependencies_require_current_signatures() 
         let mut client = base.clone();
         mutate(&mut client);
         assert!(checked.validate_for_crate(&client).is_err());
-        assert!(vcgen::Recommendations::new_with_spec_definitions(&client, &checked).is_err());
+        assert!(vcgen::GenerationSession::with_spec_definitions(&client, &checked).is_err());
     }
     assert!(
         CheckedSpecDefinitions::from_crate_with_bodyless_recommendations(
@@ -768,9 +772,9 @@ fn forwarded_recommendations_keep_each_source_local_table_and_never_assume_false
     for (index, expected) in [(2, true), (-2, false)] {
         let client = forwarding_client(index, Some(false));
         let before = client.clone();
-        let checks = vcgen::Recommendations::new_with_spec_definitions(&client, &checked)
+        let checks = vcgen::GenerationSession::with_spec_definitions(&client, &checked)
             .unwrap()
-            .function(id(99))
+            .recommendations(id(99))
             .unwrap();
         // The goal calls the wrapper and the target separately. The wrapper
         // also calls its target: retain all three actual call obligations.
@@ -826,7 +830,7 @@ fn forwarder_selection_and_current_signature_changes_cannot_reuse_the_body() {
         let mut client = forwarding_client(2, Some(true));
         mutate(&mut client);
         assert!(checked.validate_for_crate(&client).is_err());
-        assert!(vcgen::Recommendations::new_with_spec_definitions(&client, &checked).is_err());
+        assert!(vcgen::GenerationSession::with_spec_definitions(&client, &checked).is_err());
     }
     assert!(CheckedSpecDefinitions::from_crate_with_forwarders(
         &source,
@@ -1092,11 +1096,10 @@ mod actual_solver {
             for correct in [false, true] {
                 let client = forwarding_client(index, Some(correct));
                 verdict(&forwarding_query(&client, &checked), correct);
-                for diagnostic in
-                    vcgen::Recommendations::new_with_spec_definitions(&client, &checked)
-                        .unwrap()
-                        .function(id(99))
-                        .unwrap()
+                for diagnostic in vcgen::GenerationSession::with_spec_definitions(&client, &checked)
+                    .unwrap()
+                    .recommendations(id(99))
+                    .unwrap()
                 {
                     verdict(&diagnostic.query, expected_recommendation);
                 }

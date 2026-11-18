@@ -100,7 +100,9 @@ impl Builder<'_, '_> {
                     let mut value = node.next.iter().all(|next| before[*next][column]);
                     for event in node.events.iter().rev() {
                         match event {
-                            Event::Move(target) | Event::Mutate(target)
+                            Event::Move(target)
+                            | Event::ValueMove(target)
+                            | Event::Mutate(target)
                                 if overlaps(target, place) =>
                             {
                                 value = false

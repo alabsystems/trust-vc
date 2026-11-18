@@ -452,3 +452,14 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 #[path = "declaration_staging/tests.rs"]
 mod tests;
+
+/// Ordinary worker input identity/checking only; this creates no staging owner.
+pub(crate) fn ordinary_file_digest(path: &Path) -> Result<alignment::Digest, String> {
+    inputs::digest(path)
+}
+pub(crate) fn check_ordinary_native_options(
+    expected: &rustc_session::config::Options,
+    actual: &rustc_session::config::Options,
+) -> Result<(), String> {
+    invocation::check_ordinary_options(expected, actual)
+}

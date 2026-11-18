@@ -81,7 +81,7 @@ fn enum_type_recipes_cannot_reinterpret_another_function_binder() {
         &crate::Ty::Adt(actual, vec![crate::Ty::Param(0)]),
         Some(a),
         &declared,
-    )
+            &|_| None)
     .unwrap();
     let argument = TypeArgument::named("d".into(), "t".into());
     let mut vocabulary = Vocabulary::default();
@@ -91,4 +91,35 @@ fn enum_type_recipes_cannot_reinterpret_another_function_binder() {
     assert!(vocabulary
         .argument(&recipe, &TypeEnv::new(b, vec![argument]))
         .is_none());
+}
+
+#[test]
+fn associated_sum_fields_require_registered_members_full_binders_and_same_work() {
+    use std::cell::Cell;
+    let member = crate::ProjectionId(DefHash::new(740, 1));
+    let family = ProductFamily::Enum(id(3));
+    let field = TypeRecipe::Projection(member, vec![TypeRecipe::ProductParameter { owner: family, index: 0 }]);
+    let mut vocabulary = Vocabulary::default();
+    let work = Cell::new(100_000);
+    assert!(vocabulary.register_sum_with_work(id(3), 1, vec![vec![], vec![field.clone()]], &work, crate::SpanId(0)).unwrap().is_none());
+    vocabulary.register_projection_declaration(member, 1).unwrap();
+    let wrong = TypeRecipe::Projection(member, vec![TypeRecipe::ProductParameter { owner: ProductFamily::Enum(id(4)), index: 0 }]);
+    assert!(vocabulary.register_sum_with_work(id(3), 1, vec![vec![], vec![wrong]], &work, crate::SpanId(0)).unwrap().is_none());
+    assert!(vocabulary.register_sum(id(3), 1, vec![vec![], vec![field.clone()]]).is_none());
+    vocabulary.register_sum_with_work(id(3), 1, vec![vec![], vec![field]], &work, crate::SpanId(0)).unwrap().unwrap();
+    let argument = vocabulary.argument(&TypeRecipe::Bool, &TypeEnv::default()).unwrap();
+    assert!(vocabulary.construct_sum(id(3), &[argument.clone()], 0, vec![]).is_none());
+    let value = vocabulary.construct_sum_with_work(id(3), &[argument.clone()], 0, vec![], &work, crate::SpanId(0)).unwrap().unwrap();
+    // A selector from the inactive variant stays a total, unspecified view.
+    // Its presence must never supply an unconditional active-variant fact.
+    let selected = vocabulary.project_sum_with_work(id(3), &[argument.clone()], 1, 0, value.clone(), &work, crate::SpanId(0)).unwrap().unwrap();
+    let test = vocabulary.test_sum_with_work(id(3), &[argument.clone()], 1, value.clone(), &work, crate::SpanId(0)).unwrap().unwrap();
+    let facts = vocabulary.bridge_axioms(&[&selected, &test], &mut 100_000).unwrap();
+    assert!(!facts.contains(&test));
+    assert!(!facts.contains(&Term::Bool(false)));
+    assert!(facts.iter().any(|fact| matches!(fact, Term::Implies(_, _))));
+    assert!(vocabulary.bridge_axioms(&[&selected], &mut 0).is_none());
+    work.set(0);
+    assert!(vocabulary.project_sum_with_work(id(3), &[argument], 1, 0, value, &work, crate::SpanId(0)).is_err());
+    assert_eq!(work.get(), 0);
 }

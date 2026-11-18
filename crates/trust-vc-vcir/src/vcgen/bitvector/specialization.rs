@@ -235,7 +235,7 @@ impl Observe<'_, '_, '_> {
             return self.error(e, "effective source type copy depth exhausted");
         }
         match ty {
-            Ty::Tuple(children) | Ty::Adt(_, children) => {
+            Ty::Tuple(children) | Ty::Adt(_, children) | Ty::Projection(_, children) => {
                 for child in children {
                     self.precharge_type_copy(e, child, depth + 1)?;
                 }

@@ -58,6 +58,7 @@ impl Fb {
                 mode,
                 role: FnRole::Item,
                 kind: Default::default(),
+                copy_premises: Vec::new(),
                 type_params: Vec::new(),
                 locals: vec![LocalDecl {
                     name: "result".to_string(),
@@ -2203,3 +2204,9 @@ fn quantifier_binders_and_triggers_are_well_formed() {
         );
     }
 }
+
+#[path = "vcgen_basic/checked_initializers.rs"]
+mod checked_initializers;
+
+#[path = "vcgen_basic/if_spec.rs"]
+mod if_spec;

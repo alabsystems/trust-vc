@@ -59,14 +59,18 @@ use crate::messages::{self, Phase};
 use crate::verus_items::{BuiltinArith, ChainOp, OrdOp, SpecArith, SpecBitwise, VerusItem};
 use crate::vtyp::spec_eq_compatible;
 
+mod assignment_values;
 mod binding_modes;
 mod bitvector;
 mod constructors;
+mod copy_premises;
 mod enum_casts;
 mod header_binding_scope;
+mod matches;
 mod patterns;
 mod primitive_eq;
 mod quant;
+mod reference_values;
 mod returns;
 mod seq;
 mod spec_bindings;
@@ -79,6 +83,10 @@ mod variant_fields;
 pub(crate) enum FnProblem {
     /// Something the reader does not handle.
     Refused(Refusal),
+    /// A current native constant occurrence cannot be lowered without its
+    /// canonical completed modes. This remains a denial; only the same
+    /// function's actual mode error can take precedence over this reason.
+    MissingConstantModes(Refusal),
     /// A Verus error from the VIR-building phase; Verus reads no further.
     Rejected(UserError),
 }
@@ -296,7 +304,10 @@ pub(crate) fn read_fn(cx: &Cx<'_>, def_id: LocalDefId, mode_rejected: bool) -> F
     // refusal, which may stand for code Verus reads without complaint.
     let finding = attr_walk::first_problem(cx, def_id);
     let with_finding = |result: R<FnDecl>| match (&finding, result) {
-        (Some(finding), Ok(_) | Err(FnProblem::Refused(_))) => Err(attr_problem(&finding.problem)),
+        (
+            Some(finding),
+            Ok(_) | Err(FnProblem::Refused(_) | FnProblem::MissingConstantModes(_)),
+        ) => Err(attr_problem(&finding.problem)),
         (_, result) => result,
     };
     let mut reader = match FnReader::new(cx, def_id, mode_rejected) {
@@ -312,7 +323,15 @@ pub(crate) fn read_fn(cx: &Cx<'_>, def_id: LocalDefId, mode_rejected: bool) -> F
         }
     };
     reader.attr_finding.clone_from(&finding);
-    let result = with_finding(reader.read());
+    let result = with_finding(reader.read()).and_then(|declaration| {
+        if cx.legacy_functions.contains(&def_id) && !mode_rejected {
+            reader.checked_legacy_context()?;
+            if !cx.native_ownership.borrow().contains_key(&def_id) {
+                return refuse("legacy-erasure", "legacy source requires a complete native erasure/ownership producer; this body is outside the primitive Copy original-MIR lane", cx.tcx.def_span(def_id));
+            }
+        }
+        Ok(declaration)
+    });
     if result.is_ok() && !mode_rejected {
         cx.ghost_tail_occurrences
             .borrow_mut()
@@ -410,6 +429,7 @@ fn abstract_constant(cx: &Cx<'_>, def: LocalDefId) -> R<FnDecl> {
         role: FnRole::TraitDecl,
         kind: FnKind::Constant(ConstMode::Dual),
         type_params: parameters,
+        copy_premises: Vec::new(),
         locals: vec![LocalDecl {
             name: "result".into(),
             ty: result,
@@ -585,6 +605,9 @@ struct LoopHeader {
     len: usize,
 }
 
+#[path = "body/constant_values.rs"]
+mod constant_values;
+
 impl<'a, 'tcx> FnReader<'a, 'tcx> {
     fn new(cx: &'a Cx<'tcx>, def_id: LocalDefId, mode_rejected: bool) -> R<Self> {
         Self::build(cx, def_id, None, mode_rejected)
@@ -754,13 +777,43 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     /// `t`, from the type-check results, at [`Self::subst`].
     fn at(&self, t: ty::Ty<'tcx>) -> ty::Ty<'tcx> {
         let Some(args) = self.subst else {
+            if !self.mode_rejected && !self.inheriting
+                && t.walk().any(|part| part.as_type().is_some_and(|ty| matches!(ty.kind(), ty::Alias(..))))
+                && self.checked_modes.as_ref().is_some_and(|checked|
+                    super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked))
+            {
+                let uses = super::projection_types::observe_instance(self.cx, self.def_id,
+                    self.body_def, self.typeck, self.checked_modes.as_ref(), t);
+                self.record_impl_uses(uses.into_iter().map(|implementation| (implementation, true)).collect());
+                // The actual occurrence owner's environment, including its
+                // original predicates, governs open as well as closed aliases.
+                let env = ty::TypingEnv::non_body_analysis(self.tcx, self.body_def.to_def_id());
+                if let Ok(normalized) = self.tcx.try_normalize_erasing_regions(env, ty::Unnormalized::new(t)) {
+                    if self.checked_modes.as_ref().is_some_and(|checked|
+                        super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked)) {
+                        return normalized;
+                    }
+                }
+            }
             return t;
         };
         let tcx = self.tcx;
         let env = ty::TypingEnv::fully_monomorphized();
         let bound = ty::EarlyBinder::bind(tcx, t);
+        if !self.mode_rejected && !self.inheriting {
+            let uses = super::projection_types::observe_instance(self.cx, self.def_id,
+                self.body_def, self.typeck, self.checked_modes.as_ref(),
+                bound.instantiate(tcx, args).skip_normalization());
+            self.record_impl_uses(uses.into_iter().map(|implementation| (implementation, true)).collect());
+        }
         match tcx.try_normalize_erasing_regions(env, bound.instantiate(tcx, args)) {
-            Ok(t) => t,
+            Ok(normalized) => {
+                let original = bound.instantiate(tcx, args).skip_normalization();
+                if original.walk().any(|part| part.as_type().is_some_and(|ty| matches!(ty.kind(), ty::Alias(..))))
+                    && !self.checked_modes.as_ref().is_some_and(|checked|
+                        super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked))
+                { tcx.erase_and_anonymize_regions(original) } else { normalized }
+            }
             Err(_) => {
                 tcx.erase_and_anonymize_regions(bound.instantiate(tcx, args).skip_normalization())
             }
@@ -769,17 +822,31 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
 
     /// Generic arguments from the type-check results, at [`Self::subst`].
     fn at_args(&self, args: ty::GenericArgs<'tcx>) -> ty::GenericArgs<'tcx> {
-        let Some(subst) = self.subst else {
-            return args;
-        };
         let tcx = self.tcx;
-        let env = ty::TypingEnv::fully_monomorphized();
         let bound = ty::EarlyBinder::bind(tcx, args);
-        match tcx.try_normalize_erasing_regions(env, bound.instantiate(tcx, subst)) {
-            Ok(args) => args,
-            Err(_) => {
-                tcx.erase_and_anonymize_regions(bound.instantiate(tcx, subst).skip_normalization())
+        let instantiated = self.subst.map_or(args, |subst| bound.instantiate(tcx, subst).skip_normalization());
+        let current = !self.mode_rejected && !self.inheriting
+            && self.checked_modes.as_ref().is_some_and(|checked|
+                super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked));
+        if current {
+            for native in instantiated.iter().filter_map(|argument| argument.as_type()) {
+                let uses = super::projection_types::observe_instance(self.cx, self.def_id,
+                    self.body_def, self.typeck, self.checked_modes.as_ref(), native);
+                self.record_impl_uses(uses.into_iter().map(|implementation| (implementation, true)).collect());
             }
+        }
+        let env = if self.subst.is_some() { ty::TypingEnv::fully_monomorphized() }
+            else if current { ty::TypingEnv::non_body_analysis(tcx, self.body_def.to_def_id()) }
+            else { return args; };
+        match tcx.try_normalize_erasing_regions(env, ty::Unnormalized::new(instantiated)) {
+            Ok(normalized) => {
+                if instantiated.iter().filter_map(|argument| argument.as_type()).any(|ty|
+                    ty.walk().any(|part| part.as_type().is_some_and(|ty| matches!(ty.kind(), ty::Alias(..)))))
+                    && !self.checked_modes.as_ref().is_some_and(|checked|
+                        super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked))
+                { tcx.erase_and_anonymize_regions(instantiated) } else { normalized }
+            }
+            Err(_) => tcx.erase_and_anonymize_regions(instantiated),
         }
     }
 
@@ -798,6 +865,22 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     /// The VcIR type of `t` (already at [`Self::subst`]), with the
     /// function's own type parameters.
     fn vc_ty(&self, t: ty::Ty<'tcx>) -> R<Option<Ty>> {
+        if !self.mode_rejected && !self.inheriting {
+            let used = super::projection_types::observe_fields(self.cx, self.def_id, self.body_def,
+                self.typeck, self.checked_modes.as_ref(), t, &self.cx.projection_type_work).map_err(FnProblem::Refused)?;
+            self.record_impl_uses(used.into_iter().map(|implementation| (implementation, true)).collect());
+        }
+        if t.walk().any(|part| part.as_type().is_some_and(|ty| matches!(ty.kind(), ty::Alias(..))))
+            && !self.checked_modes.as_ref().is_some_and(|checked|
+                super::projection_types::current(self.cx, self.def_id, self.body_def, self.typeck, checked))
+        {
+            return refuse("projection-context", "associated types need the current native body and completed modes", self.tcx.def_span(self.def_id));
+        }
+        if t.walk().any(|part| part.as_type().is_some_and(|ty|
+            matches!(ty.kind(), ty::Alias(..)) && !ty.has_param()))
+        {
+            return refuse("projection-normalization", "a closed associated type has no actual canonical native normalization", self.tcx.def_span(self.def_id));
+        }
         let Some(vc) = self.cx.vc_ty_with(t, &|param: ty::ParamTy| {
             self.param_index.get(&param.index).copied()
         }) else {
@@ -941,24 +1024,17 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     if matches!(prev.kind, ExprKind::Lit(_)) {
                         continue;
                     }
-                    let t = self.temp_with_mode(
-                        prev.ty.clone(),
-                        self.operand_mode(prev, ctx),
-                        source.span,
-                    );
+                    let mode = self.legacy_saved_value_mode(source, prev, ctx)?;
+                    let t = self.temp_with_mode(prev.ty.clone(), mode, source.span);
                     if self.locals[t.index()].mode == Mode::Spec {
                         // This saves an expression for its later consumer;
                         // it is not an authored Unit declaration, whose mode
                         // check deliberately clears a Unit prophecy effect.
                         self.locals[t.index()].prophecy = DeclProphecy::DelayedInfer;
                     }
-                    saves.push(Stmt::new(
-                        self.sp(source.span),
-                        StmtKind::Let {
-                            local: t,
-                            init: Some(prev.clone()),
-                        },
-                    ));
+                    let declaration =
+                        self.legacy_value_declaration(t, prev.clone(), source, ctx, None)?;
+                    saves.push(Stmt::new(self.sp(source.span), declaration));
                     *prev = self.read_local(t, source.span);
                 }
                 out.splice(mark..mark, saves);
@@ -1083,6 +1159,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if tcx.def_kind(def_id) == DefKind::AssocConst {
             return self.read_native_constant();
         }
+        if matches!(
+            self.cx.constants.kind(def_id),
+            FnKind::Constant(ConstMode::Exec) | FnKind::Static
+        ) && !self.mode_rejected
+        {
+            self.checked_initializer()?;
+        }
+
         let body_hir = tcx.local_def_id_to_hir_id(self.body_def);
         let sig = self.typeck.liberated_fn_sigs()[body_hir];
         self.verus_item_rules(sig.safety().is_unsafe(), span)?;
@@ -1191,9 +1275,16 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 // A function the mode checker rejected is only read for
                 // errors of earlier phases, which a parameter's mode does
                 // not change.
-                let native_tracked = attr == VerusAttr::Mode(Mode::Proof)
-                    && self.cx.native_ownership.borrow().contains_key(&self.def_id)
-                    && elaborated.is_some_and(|p| p.declared.mode == Mode::Proof);
+                let native_tracked = self.cx.native_ownership.borrow().contains_key(&self.def_id)
+                    && elaborated.is_some_and(|p| attr == VerusAttr::Mode(p.declared.mode));
+                if !native_tracked
+                    && !self.mode_rejected
+                    && self.cx.legacy_functions.contains(&self.def_id)
+                    && matches!(attr, VerusAttr::Mode(_))
+                {
+                    self.checked_legacy_context()?;
+                    return refuse("legacy-erasure", "a legacy parameter requires native erasure/ownership outside the primitive Copy original-MIR lane", param.span);
+                }
                 if !(native_tracked || self.mode_rejected && matches!(attr, VerusAttr::Mode(_))) {
                     let attr_span = if matches!(attr, VerusAttr::Mode(_)) {
                         elaborated.map_or(attr_span, |p| p.declared.declaration_span(attr_span))
@@ -1407,10 +1498,17 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         // Verus down another path (an encoded `const` skips them all), so
         // they are only checked without one.
         if item_attrs.unsupported.is_empty() {
-            if self.cx.constants.real(def_id).is_some() {
+            if matches!(
+                self.cx.constants.kind(def_id),
+                FnKind::Constant(_) | FnKind::Static
+            ) {
+                let executable = matches!(
+                    self.cx.constants.kind(def_id),
+                    FnKind::Constant(ConstMode::Exec) | FnKind::Static
+                );
                 let error = if !requires.is_empty() || !recommends.is_empty() {
                     Some("consts cannot have requires/recommends")
-                } else if !ensures.is_empty() {
+                } else if !executable && !ensures.is_empty() {
                     Some("const cannot have `ensures` unless it is `exec const`")
                 } else {
                     None
@@ -1507,6 +1605,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 span,
             ));
         }
+        let copy_premises = self.native_copy_premises()?;
         Ok(FnDecl {
             id: self
                 .cx
@@ -1520,6 +1619,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             role: self.role,
             kind: self.cx.constants.kind(def_id),
             type_params: std::mem::take(&mut self.type_params),
+            copy_premises,
             locals: std::mem::take(&mut self.locals),
             params: std::mem::take(&mut self.params),
             ret: self.ret,
@@ -2897,6 +2997,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if let Some(problem) = self.pending.take() {
             return Err(FnProblem::Refused(problem));
         }
+        let copy_premises = self.native_copy_premises()?;
         Ok(FnDecl {
             id: self.own_id,
             name: self.cx.friendly_fn_path(self.def_id.to_def_id()),
@@ -2905,6 +3006,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             role: self.role,
             kind: FnKind::Constant(ConstMode::Dual),
             type_params: std::mem::take(&mut self.type_params),
+            copy_premises,
             locals: std::mem::take(&mut self.locals),
             params: Vec::new(),
             ret: self.ret,
@@ -3143,7 +3245,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 declared_mode.get_or_insert(*mode);
             }
             match attr {
-                VerusAttr::Mode(_) if native_mode == Some(Mode::Proof) => {}
+                VerusAttr::Mode(mode) if native_mode == Some(mode) => {}
                 VerusAttr::Mode(Mode::Spec) => {}
                 VerusAttr::Prophetic | VerusAttr::LetMarker(_) => {}
                 // A function the mode checker rejected is only read for
@@ -3162,7 +3264,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             self.mode
         });
         let prophecy = attrs::local_prophecy(local_attrs, original_mode);
-        let ctx = if declared_mode == Some(Mode::Spec) && ctx == Ctx::Exec {
+        let ctx = if declared_mode == Some(Mode::Spec)
+            && ctx == Ctx::Exec
+            && !self.cx.legacy_functions.contains(&self.def_id)
+        {
             Ctx::Proof
         } else {
             ctx
@@ -3226,10 +3331,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 );
                 self.locals[id.index()].prophecy = prophecy;
                 self.local_ids.insert(pat_hir, id);
-                out.push(Stmt::new(
-                    self.sp(local.span),
-                    StmtKind::Let { local: id, init },
-                ));
+                let statement = match (local.init, init) {
+                    (Some(source), Some(value)) => {
+                        self.legacy_value_declaration(id, value, source, ctx, Some(local_mode))?
+                    }
+                    (_, init) => StmtKind::Let { local: id, init },
+                };
+                out.push(Stmt::new(self.sp(local.span), statement));
                 Ok(())
             }
             PatKind::Tuple(..) | PatKind::Struct(..) | PatKind::TupleStruct(..) => {
@@ -3242,16 +3350,16 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 // the pattern's names. Every binding reads a projection of
                 // this saved value, including nested patterns and `..`.
                 let value = match local.init {
-                    Some(init) => {
-                        let init = self.expr(init, ctx, out)?;
-                        let saved = self.temp(init.ty.clone(), ctx, local.span);
-                        out.push(Stmt::new(
-                            self.sp(local.span),
-                            StmtKind::Let {
-                                local: saved,
-                                init: Some(init),
-                            },
-                        ));
+                    Some(source) => {
+                        let init = self.expr(source, ctx, out)?;
+                        let mode = self.legacy_saved_value_mode(source, &init, ctx)?;
+                        let saved = self.temp_with_mode(init.ty.clone(), mode, local.span);
+                        if mode == Mode::Spec && ctx == Ctx::Exec {
+                            self.locals[saved.index()].prophecy = DeclProphecy::DelayedInfer;
+                        }
+                        let declaration =
+                            self.legacy_value_declaration(saved, init, source, ctx, None)?;
+                        out.push(Stmt::new(self.sp(local.span), declaration));
                         Some(self.read_local(saved, local.span))
                     }
                     None => None,
@@ -3925,10 +4033,12 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let place = self.place(lhs)?;
         self.check_assign_target(&place, e.span, ctx)?;
         let value = self.expr(rhs, ctx, out)?;
-        out.push(Stmt::new(
-            self.sp(e.span),
-            StmtKind::Assign { place, value },
-        ));
+        let assignment = if self.legacy_spec_assignment(e, lhs, rhs, &place, &value, ctx)? {
+            StmtKind::AssignSpec { place, value }
+        } else {
+            StmtKind::Assign { place, value }
+        };
+        out.push(Stmt::new(self.sp(e.span), assignment));
         Ok(())
     }
 
@@ -4215,6 +4325,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 ));
                 Ok(())
             }
+            hir::ExprKind::Match(scrutinee, arms, source) => self
+                .ordinary_match_value(e, scrutinee, arms, source, ctx, out)
+                .map(|_| ()),
             _ => refuse(
                 "diverging-expr",
                 format!(
@@ -4272,6 +4385,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                         self.sp(e.span),
                         ExprKind::MutRefCurrent(Box::new(value)),
                     ),
+                    Ty::Ref {
+                        mutable: false,
+                        inner,
+                    } => self.shared_reference_value(value, *inner, ctx, e.span)?,
                     Ty::Ref { inner, .. } => self.builtin_reference_value(value, *inner, e.span)?,
                     _ => {
                         return refuse(
@@ -4305,6 +4422,25 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let value = self.expr(e, Ctx::Spec, &mut out)?;
         if !out.is_empty() && !self.mode_rejected {
             return refuse("effect-in-spec", "spec code with an effect", e.span);
+        }
+        Ok(value)
+    }
+
+    /// Logical checking does not turn legacy source syntax into ghost syntax.
+    /// A40's Assert/Assume operand keeps the caller BodyCtxt.in_ghost. Headers
+    /// and genuine ghost blocks still call `spec` with their explicit context.
+    fn logical_in_syntax(&mut self, e: &'tcx hir::Expr<'tcx>, ctx: Ctx) -> R<Expr> {
+        if !self.cx.legacy_functions.contains(&self.def_id) {
+            return self.spec(e);
+        }
+        let mut effects = Vec::new();
+        let value = self.expr(e, ctx, &mut effects)?;
+        if !effects.is_empty() && !self.mode_rejected {
+            return refuse(
+                "effect-in-spec",
+                "a logical legacy operand with an effect",
+                e.span,
+            );
         }
         Ok(value)
     }
@@ -4366,6 +4502,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 hir::ExprKind::Call(..) | hir::ExprKind::MethodCall(..)
             )
         {
+            if self.mode_rejected {
+                // A current registered const-fn occurrence can surface the
+                // existing typed missing-Modes denial. Only the original
+                // actual mode error may then take precedence. No call is
+                // lowered: None/Some both retain the refusal below, and
+                // other native selection/availability errors remain hard.
+                let _ = self.checked_constant_use(e)?;
+            }
             return refuse(
                 "constant-initializer",
                 "a function call in a dual constant initializer",
@@ -4378,7 +4522,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         match e.kind {
             hir::ExprKind::DropTemps(inner) => self.expr(inner, ctx, out),
             hir::ExprKind::Lit(lit) => self.literal(e, &lit.node, false),
-            hir::ExprKind::Path(ref qpath) => self.path_expr(e, qpath),
+            hir::ExprKind::Path(ref qpath) => self.path_expr(e, qpath, ctx, out),
             hir::ExprKind::Unary(op, arg) => self.unary(e, op, arg, ctx, out),
             hir::ExprKind::Binary(op, lhs, rhs) => self.binary(e, op.node, lhs, rhs, ctx, out),
             hir::ExprKind::Call(func, args) => self.call(e, func, args, ctx, out, false),
@@ -4432,6 +4576,9 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 }
                 self.if_expr(e, cond, then_expr, else_expr, ctx, out)
             }
+            hir::ExprKind::Match(scrutinee, arms, source) => {
+                self.ordinary_match_value(e, scrutinee, arms, source, ctx, out)
+            }
             hir::ExprKind::Struct(qpath, fields, tail) => {
                 self.struct_expr(e, qpath, fields, tail, ctx, out)
             }
@@ -4470,7 +4617,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 let to = self.expr_ty(e)?;
                 self.scalar_cast(inner, value, to, ctx, span)
             }
-            hir::ExprKind::Assign(..) | hir::ExprKind::AssignOp(..) | hir::ExprKind::Loop(..) => {
+            hir::ExprKind::Assign(lhs, _, _) | hir::ExprKind::AssignOp(_, lhs, _) => {
+                self.assignment_value(e, lhs, ctx, out)
+            }
+            hir::ExprKind::Loop(..) => {
                 self.stmt_expr(e, ctx, out)?;
                 Ok(self.unit(span))
             }
@@ -4552,7 +4702,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         }
     }
 
-    fn path_expr(&mut self, e: &'tcx hir::Expr<'tcx>, qpath: &'tcx QPath<'tcx>) -> R<Expr> {
+    fn path_expr(
+        &mut self,
+        e: &'tcx hir::Expr<'tcx>,
+        qpath: &'tcx QPath<'tcx>,
+        ctx: Ctx,
+        out: &mut Vec<Stmt>,
+    ) -> R<Expr> {
         match self.typeck.qpath_res(qpath, e.hir_id) {
             Res::Def(DefKind::AssocConst, definition)
                 if super::architecture::integer_constant(self.tcx, definition).is_some() =>
@@ -4570,6 +4726,50 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     self.sp(e.span),
                     ExprKind::IntegerConstant(value),
                 ))
+            }
+            Res::Def(DefKind::Const | DefKind::AssocConst | DefKind::Static { .. }, def)
+                if def.as_local().is_some_and(|local| {
+                    matches!(
+                        self.cx.constants.value_kind(local),
+                        Some(FnKind::Constant(ConstMode::Exec) | FnKind::Static)
+                    )
+                }) =>
+            {
+                let selected = self.checked_constant_use(e)?.ok_or_else(|| {
+                    FnProblem::Refused(Refusal::new(
+                        "constant-use",
+                        "the value lacks its native read selection",
+                        e.span,
+                    ))
+                })?;
+                if selected.original != def {
+                    return refuse("constant-use", "the value read changed definition", e.span);
+                }
+                // Only the exact original declaration's postcondition names
+                // its checked result. This creates neither a read nor a global
+                // hypothesis while proving that same initializer.
+                if self.area == Area::Ensures && selected.declaration == self.def_id {
+                    let value = self.read_local(self.ret, e.span);
+                    if value.ty != self.expr_ty(e)? {
+                        return refuse(
+                            "constant-use",
+                            "the initializer postcondition result changed type",
+                            e.span,
+                        );
+                    }
+                    return Ok(value);
+                }
+                if ctx != Ctx::Exec && !self.mode_rejected {
+                    return refuse(
+                        "constant-use",
+                        "an executable value read in ghost code",
+                        e.span,
+                    );
+                }
+                self.check_function_access(def, e.span);
+                let target =
+                    self.call_target(selected.declaration.to_def_id(), selected.arguments, e.span)?;
+                self.emit_value_call(e, target, out)
             }
             Res::Def(DefKind::Const | DefKind::AssocConst, def)
                 if def
@@ -4727,6 +4927,11 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                             ExprKind::MutRefCurrent(Box::new(reference)),
                         ));
                     }
+                }
+                if matches!(self.expr_rty_adj(arg).kind(), ty::Ref(_, _, m) if !m.is_mut()) {
+                    let value = self.expr_adjusted(arg, ctx, out)?;
+                    let result = self.expr_ty(e)?;
+                    return self.shared_reference_value(value, result, ctx, span);
                 }
                 let place = self.place(e)?;
                 let ty = self.expr_ty(e)?;
@@ -5027,13 +5232,14 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         out: &mut Vec<Stmt>,
     ) -> R<Expr> {
         let span = e.span;
+        let spec_condition = self.legacy_spec_condition(cond, ctx)?;
         let cond = self.expr(cond, ctx, out)?;
         let ty = self.expr_ty(e)?;
         let mut then_out = Vec::new();
-        let tv = self.expr(then_expr, ctx, &mut then_out)?;
+        let tv = self.expr_adjusted(then_expr, ctx, &mut then_out)?;
         let mut else_out = Vec::new();
         let ev = match else_expr {
-            Some(else_expr) => self.expr(else_expr, ctx, &mut else_out)?,
+            Some(else_expr) => self.expr_adjusted(else_expr, ctx, &mut else_out)?,
             None => self.unit(span),
         };
         let sid = self.sp(span);
@@ -5056,7 +5262,8 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         // Branches with effects use a value temporary, including Unit:
         // control and arm effects must reach a value consumer.
         let result = {
-            let t = self.temp(ty.clone(), ctx, span);
+            let mode = self.legacy_result_mode(e, &ty, ctx)?;
+            let t = self.temp_with_mode(ty.clone(), mode, span);
             if self.locals[t.index()].mode == Mode::Spec {
                 // This generated expression result is initialized by both
                 // arms. The flow checker joins their effects and the guard.
@@ -5069,6 +5276,16 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                     init: None,
                 },
             ));
+            let (tv, ev) = if mode == Mode::Spec {
+                let tv = self.legacy_branch_value(then_expr, tv, ctx, &mut then_out)?;
+                let ev = match else_expr {
+                    Some(source) => self.legacy_branch_value(source, ev, ctx, &mut else_out)?,
+                    None => ev,
+                };
+                (tv, ev)
+            } else {
+                (tv, ev)
+            };
             then_out.push(Stmt::new(
                 sid,
                 StmtKind::Assign {
@@ -5085,14 +5302,22 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             ));
             Some(t)
         };
-        out.push(Stmt::new(
-            sid,
+        let then_block = Block::new(then_out);
+        let else_block = Block::new(else_out);
+        let conditional = if spec_condition {
+            StmtKind::IfSpec {
+                cond,
+                then_block,
+                else_block,
+            }
+        } else {
             StmtKind::If {
                 cond,
-                then_block: Block::new(then_out),
-                else_block: Block::new(else_out),
-            },
-        ));
+                then_block,
+                else_block,
+            }
+        };
+        out.push(Stmt::new(sid, conditional));
         Ok(match result {
             Some(t) => self.read_local(t, span),
             None => self.unit(span),
@@ -5349,7 +5574,209 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         if let Some(problem) = self.enum_diagnostic_call(def_id, span) {
             return Err(problem);
         }
+        let constant = self.checked_constant_use(e)?;
+        let autospec = if ctx != Ctx::Exec {
+            self.cx
+                .autospec
+                .call(self.cx, self.body_def, self.typeck, e)
+                .map_err(FnProblem::Refused)?
+        } else {
+            None
+        };
+        if autospec
+            .as_ref()
+            .is_some_and(|call| !call.matches_constant(constant.as_ref()))
+        {
+            return refuse(
+                "constant-use",
+                "the native constant and autospec selections do not share one source",
+                span,
+            );
+        }
+        let (def_id, generic_args) = if let Some(call) = autospec {
+            let refuse = |reason| FnProblem::Refused(Refusal::new("autospec-modes", reason, span));
+            let facts = self
+                .checked_modes
+                .clone()
+                .ok_or_else(|| refuse("redirection lacks the completed original mode walk"))?;
+            let canonical = || {
+                self.cx
+                    .checked_modes
+                    .borrow()
+                    .get(&self.def_id)
+                    .is_some_and(|actual| std::rc::Rc::ptr_eq(actual, &facts))
+            };
+            if call.original != def_id
+                || call.original_args != generic_args
+                || !canonical()
+                || !facts
+                    .autospec_calls
+                    .get(&e.hir_id)
+                    .is_some_and(|observed| observed.same_selection(&call))
+            {
+                return Err(refuse(
+                    "redirection differs from this body's canonical native call selection",
+                ));
+            }
+            facts
+                .availability
+                .checked(self.tcx, self.def_id, self.body_def)
+                .map_err(|_| {
+                    refuse("redirection lacks the original checked argument availability")
+                })?;
+            // Keep the original executable declaration's access, native type
+            // arguments, WF/bounds and selected implementation dependencies.
+            // The specification target receives its own ordinary checks below.
+            self.check_function_access(def_id, span);
+            let original_args = self.at_args(generic_args);
+            super::autospec::check_call_arguments(
+                self.cx,
+                def_id,
+                original_args,
+                self.body_def,
+                span,
+            )
+            .map_err(FnProblem::Refused)?;
+            let uses = super::cycles::bound_impls(
+                self.tcx,
+                def_id,
+                original_args,
+                self.tcx.trait_of_assoc(def_id),
+                Some(self.def_id.to_def_id()),
+            )
+            .map_err(FnProblem::Refused)?;
+            self.record_impl_uses(uses);
+            if call.declaration.to_def_id() != def_id {
+                // A const function's native erased callee and its checked
+                // logical declaration must both retain ordinary access,
+                // argument WF/bounds and implementation dependencies.
+                let declaration = call.declaration.to_def_id();
+                self.check_function_access(declaration, span);
+                super::autospec::check_call_arguments(
+                    self.cx,
+                    declaration,
+                    original_args,
+                    self.body_def,
+                    span,
+                )
+                .map_err(FnProblem::Refused)?;
+                let uses = super::cycles::bound_impls(
+                    self.tcx,
+                    declaration,
+                    original_args,
+                    self.tcx.trait_of_assoc(declaration),
+                    Some(self.def_id.to_def_id()),
+                )
+                .map_err(FnProblem::Refused)?;
+                self.record_impl_uses(uses);
+            }
+            let current = self
+                .cx
+                .autospec
+                .call(self.cx, self.body_def, self.typeck, e)
+                .map_err(FnProblem::Refused)?;
+            if !current
+                .as_ref()
+                .is_some_and(|actual| actual.same_selection(&call))
+                || !self
+                    .cx
+                    .checked_modes
+                    .borrow()
+                    .get(&self.def_id)
+                    .is_some_and(|actual| std::rc::Rc::ptr_eq(actual, &facts))
+            {
+                return Err(refuse(
+                    "native validation revoked the original redirection or mode packet",
+                ));
+            }
+            facts
+                .availability
+                .checked(self.tcx, self.def_id, self.body_def)
+                .map_err(|_| {
+                    refuse("native validation revoked the original argument availability")
+                })?;
+            (call.target.to_def_id(), call.args)
+        } else {
+            if self
+                .checked_modes
+                .as_ref()
+                .is_some_and(|facts| facts.autospec_calls.contains_key(&e.hir_id))
+            {
+                return refuse(
+                    "autospec-modes",
+                    "a completed ghost redirection reached another native context",
+                    span,
+                );
+            }
+            match constant {
+                Some(call)
+                    if call.kind == FnKind::ConstFunction
+                        && call.original == def_id
+                        && call.arguments == generic_args =>
+                {
+                    (call.declaration.to_def_id(), call.arguments)
+                }
+                Some(_) => {
+                    return refuse(
+                        "constant-use",
+                        "a const function call changed its native role or arguments",
+                        span,
+                    )
+                }
+                None => (def_id, generic_args),
+            }
+        };
+        let selected = self
+            .cx
+            .derived_clones
+            .call(self.cx, self.body_def, self.typeck, e)
+            .map_err(FnProblem::Refused)?;
+        let (def_id, generic_args) = if let Some(call) = selected {
+            let refuse =
+                |reason| FnProblem::Refused(Refusal::new("derived-clone-modes", reason, span));
+            let facts = self
+                .checked_modes
+                .as_ref()
+                .ok_or_else(|| refuse("the derived call lacks a completed original mode walk"))?;
+            if call.original != def_id
+                || call.original_args != generic_args
+                || !self
+                    .cx
+                    .checked_modes
+                    .borrow()
+                    .get(&self.def_id)
+                    .is_some_and(|canonical| std::rc::Rc::ptr_eq(canonical, facts))
+                || !facts
+                    .derived_clone_calls
+                    .get(&e.hir_id)
+                    .is_some_and(|observed| observed.same_selection(&call))
+            {
+                return Err(refuse(
+                    "the derived call is not this body's canonical native selection",
+                ));
+            }
+            facts
+                .availability
+                .checked(self.tcx, self.def_id, self.body_def)
+                .map_err(|_| {
+                    refuse("the derived call's original availability facts are unavailable")
+                })?;
+            self.check_function_access(def_id, span);
+            (call.method.to_def_id(), call.args)
+        } else {
+            (def_id, generic_args)
+        };
         if !self.cx.fns.contains_key(&def_id) {
+            if let Some(problem) = super::autospec::ignored_external_call(
+                self.cx,
+                self.def_id,
+                self.body_def,
+                self.typeck,
+                e,
+                def_id,
+            ) {
+                return Err(FnProblem::Rejected(problem));
+            }
             return refuse(
                 "external-call",
                 format!(
@@ -5364,7 +5791,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         let target = self.call_target(def_id, generic_args, span)?;
         match target.mode {
             Mode::Spec => {
-                if ctx == Ctx::Exec && !self.mode_rejected {
+                if ctx == Ctx::Exec
+                    && !self.mode_rejected
+                    && !self.cx.legacy_functions.contains(&self.def_id)
+                {
                     return refuse(
                         "spec-call-in-exec",
                         "a spec function called from exec code",
@@ -5396,11 +5826,13 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
                 let dest = if discard {
                     None
                 } else {
-                    // A used Unit expression still transports its raw
-                    // prophecy effect. This compiler-only ghost slot is not
-                    // an authored declaration or the callee's return mode;
-                    // the eventual source consumer performs Unit clearing.
-                    let transport_mode = if ty == Ty::Unit {
+                    // Preserve the exact Proof result of the native-owned
+                    // all-Proof call fragment, including its implicit Unit.
+                    // Other used Unit values still transport raw prophecy;
+                    // their eventual source consumer performs Unit clearing.
+                    let transport_mode = if ty == Ty::Unit
+                        && !self.native_proof_unit_transport(def_id, &target, args.len(), span)
+                    {
                         Mode::Spec
                     } else {
                         target.ret_mode.unwrap_or(ctx.local_mode())
@@ -5553,6 +5985,38 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
     /// The shared declaration mode of a resolved call's result.
     fn call_result_mode(&self, def_id: DefId, span: Span) -> Option<Mode> {
         super::modes::call_return_mode(self.cx, def_id, span)
+    }
+
+    /// Transport mode only: this does not establish native ownership or prove
+    /// a callee. Its original body and ordinary borrow/erase checks still run.
+    fn native_proof_unit_transport(
+        &self,
+        callee: DefId,
+        target: &Target,
+        arity: usize,
+        span: Span,
+    ) -> bool {
+        if target.mode != Mode::Proof
+            || target.ret_mode != Some(Mode::Proof)
+            || self.tcx.def_kind(callee) != DefKind::Fn
+            || !self.cx.native_ownership.borrow().contains_key(&self.def_id)
+        {
+            return false;
+        }
+        let super::modes::SignatureModeResult::Known(signature) =
+            super::modes::signature_modes(self.cx, callee, span)
+        else {
+            return false;
+        };
+        signature.def_id == callee
+            && callee.as_local() == Some(signature.body_owner)
+            && signature.mode == Mode::Proof
+            && signature.ret.mode == Mode::Proof
+            && !signature.prophetic
+            && signature.params.len() == arity
+            && signature.params.iter().all(|parameter| {
+                parameter.declared.mode == Mode::Proof && !parameter.mutable_reference
+            })
     }
 
     fn enum_diagnostic_call(&self, def_id: DefId, span: Span) -> Option<FnProblem> {
@@ -6043,7 +6507,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             )),
             (VerusItem::Assert, [arg]) => {
                 let attrs = self.clause_attrs(arg.hir_id)?;
-                let expr = self.spec(arg)?;
+                let expr = self.logical_in_syntax(arg, ctx)?;
                 let site = self.site();
                 // Verus reports a failed assertion at the argument as
                 // written (a block keeps its braces); the marker call's own
@@ -6073,7 +6537,7 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
             }
             (VerusItem::Assume, [arg]) => {
                 let attrs = self.clause_attrs(arg.hir_id)?;
-                let expr = self.spec(arg)?;
+                let expr = self.logical_in_syntax(arg, ctx)?;
                 out.push(Stmt::new(self.sp(span), StmtKind::Assume { expr, attrs }));
                 Ok(self.unit(span))
             }
@@ -6273,7 +6737,10 @@ impl<'a, 'tcx> FnReader<'a, 'tcx> {
         span: Span,
         out: &mut Vec<Stmt>,
     ) -> R<()> {
-        if ctx == Ctx::Exec && !self.mode_rejected {
+        if ctx == Ctx::Exec
+            && !self.mode_rejected
+            && !self.cx.legacy_functions.contains(&self.def_id)
+        {
             return refuse("assert-by", "assert .. by in exec code", span);
         }
         let attrs = self.clause_attrs(cond.hir_id)?;
@@ -7021,7 +7488,7 @@ fn bool_bitwise_error(op: BinOpKind, lhs: Span) -> UserError {
 /// which is counted whatever it borrows.
 fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
     stmts.iter().any(|stmt| match &stmt.kind {
-        StmtKind::Assign { place, .. } => place.local == root,
+        StmtKind::Assign { place, .. } | StmtKind::AssignSpec { place, .. } => place.local == root,
         StmtKind::BorrowMut { dest, place } => *dest == root || place.local == root,
         StmtKind::Call { args, dest, .. } => {
             dest.as_ref().is_some_and(|dest| dest.local == root)
@@ -7030,6 +7497,11 @@ fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
                     .any(|arg| matches!(arg.ty, Ty::Ref { mutable: true, .. } | Ty::MutRef(_)))
         }
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..
@@ -7045,6 +7517,7 @@ fn may_write_local(stmts: &[Stmt], root: LocalId) -> bool {
                 || may_write_local(&lp.body.stmts, root)
         }
         StmtKind::Let { .. }
+        | StmtKind::LetChecked { .. }
         | StmtKind::Assert { .. }
         | StmtKind::AssertBitVector { .. }
         | StmtKind::Assume { .. }

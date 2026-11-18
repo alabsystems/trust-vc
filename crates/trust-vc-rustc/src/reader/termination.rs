@@ -319,6 +319,11 @@ fn visit<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
                 then_block,
                 else_block,
                 ..
+            }
+            | StmtKind::IfSpec {
+                then_block,
+                else_block,
+                ..
             } => {
                 visit(then_block, f);
                 visit(else_block, f);
@@ -341,7 +346,8 @@ fn visit<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
 fn stmt_exprs(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match &stmt.kind {
         StmtKind::Let { init, .. } => init.iter().for_each(f),
-        StmtKind::Assign { value, .. } => f(value),
+        StmtKind::LetChecked { init, .. } => f(init),
+        StmtKind::Assign { value, .. } | StmtKind::AssignSpec { value, .. } => f(value),
         StmtKind::Call { args, .. } => args.iter().for_each(f),
         StmtKind::Assert { expr, .. } | StmtKind::Assume { expr, .. } => f(expr),
         StmtKind::AssertBitVector {
@@ -351,7 +357,7 @@ fn stmt_exprs(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
                 f(&clause.expr);
             }
         }
-        StmtKind::If { cond, .. } => f(cond),
+        StmtKind::If { cond, .. } | StmtKind::IfSpec { cond, .. } => f(cond),
         StmtKind::Return { value, .. } => value.iter().for_each(f),
         StmtKind::GhostTail { tail, .. } => f(tail),
         StmtKind::Loop(lp) => {

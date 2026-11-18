@@ -22,6 +22,8 @@ use super::modes::{
 use super::Cx;
 
 pub(crate) mod ghost_only;
+pub(super) mod legacy;
+pub(super) mod shadow;
 
 #[cfg(test)]
 #[path = "ownership/tests/local_allocation.rs"]

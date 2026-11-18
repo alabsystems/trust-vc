@@ -92,6 +92,7 @@ impl<'tcx> Cx<'tcx> {
                 inner: Box::new(self.vc_ty_with(*inner, param)?),
             }),
             ty::Param(p) => param(*p).map(VcTy::Param),
+            ty::Alias(..) => super::projection_types::lower(self, ty, param),
             _ => None,
         }
     }

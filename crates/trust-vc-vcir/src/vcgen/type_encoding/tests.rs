@@ -33,6 +33,112 @@ fn type_arguments_reject_crossed_sorts() {
     assert!(TypeArgument::new(Term::Int(0), Term::Int(1)).is_none());
 }
 
+fn projection(number: u64, arguments: Vec<Ty>, owner: Option<FnId>) -> Option<TypeRecipe> {
+    let id = ProjectionId(DefHash::new(710, number));
+    TypeRecipe::registered(
+        &Ty::Projection(id, arguments), owner, &|_| None,
+        &|candidate| (candidate == id).then_some(1),
+    )
+}
+
+#[test]
+fn associated_constructors_require_declared_identity_arity_and_binder_scope() {
+    let owner = FnId(DefHash::new(1, 1));
+    assert!(projection(1, vec![Ty::Param(0)], Some(owner)).is_some());
+    assert!(projection(1, vec![Ty::Param(0)], None).is_none());
+    assert!(projection(1, vec![], Some(owner)).is_none());
+    assert!(projection(1, vec![Ty::Bool, Ty::Bool], Some(owner)).is_none());
+    assert!(TypeRecipe::registered(
+        &Ty::Projection(ProjectionId(DefHash::new(710, 2)), vec![Ty::Bool]),
+        Some(owner), &|_| None, &|_| None,
+    ).is_none());
+    let mut vocabulary = Vocabulary::default();
+    let recipe = projection(1, vec![Ty::Param(0)], Some(owner)).unwrap();
+    let work = std::cell::Cell::new(1_000);
+    assert!(vocabulary.argument_with_work(&recipe, &environment(2, "other"), &work, crate::SpanId(0)).unwrap().is_none());
+}
+
+#[test]
+fn associated_type_arguments_keep_two_sorts_and_each_actual_declaration_and_argument() {
+    let owner = Some(FnId(DefHash::new(1, 1)));
+    let mut vocabulary = Vocabulary::default();
+    let work = std::cell::Cell::new(10_000);
+    let first = projection(1, vec![Ty::Param(0)], owner).unwrap();
+    let second = projection(2, vec![Ty::Param(0)], owner).unwrap();
+    let a = vocabulary.argument_with_work(&first, &environment(1, "a"), &work, crate::SpanId(0)).unwrap().unwrap();
+    let repeated = vocabulary.argument_with_work(&first, &environment(1, "a"), &work, crate::SpanId(0)).unwrap().unwrap();
+    let other_self = vocabulary.argument_with_work(&first, &environment(1, "b"), &work, crate::SpanId(0)).unwrap().unwrap();
+    let other_declaration = vocabulary.argument_with_work(&second, &environment(1, "a"), &work, crate::SpanId(0)).unwrap().unwrap();
+    assert_eq!(a, repeated);
+    assert_ne!(a, other_self);
+    assert_ne!(a, other_declaration);
+    assert_eq!(a.decoration.sort(), Sort::Decoration);
+    assert_eq!(a.identity.sort(), Sort::TypeId);
+    // Type constructors declare no equality, value membership or ownership
+    // axiom. They are simply distinct typed applications in this vocabulary.
+    assert!(vocabulary.closed_arguments().is_empty());
+}
+
+#[test]
+fn projected_terms_and_forwarded_arguments_spend_the_same_caller_work_cell() {
+    let owner = FnId(DefHash::new(1, 1));
+    let recipe = projection(1, vec![Ty::Param(0)], Some(owner)).unwrap();
+    let mut vocabulary = Vocabulary::default();
+    let env = environment(1, "a");
+    assert!(vocabulary.argument(&recipe, &env).is_none());
+    let work = std::cell::Cell::new(10_000);
+    let before = work.get();
+    let argument = vocabulary.argument_with_work(&recipe, &env, &work, crate::SpanId(0)).unwrap().unwrap();
+    assert!(work.get() < before);
+    let forwarded = TypeEnv::new(owner, vec![argument]);
+    assert!(vocabulary.argument(&parameter(1, 0), &forwarded).is_none());
+    let available = work.get();
+    let _ = vocabulary.argument_with_work(&parameter(1, 0), &forwarded, &work, crate::SpanId(0)).unwrap().unwrap();
+    assert!(work.get() < available);
+    // Exhaust the very same cell. No re-created translator or vocabulary may
+    // convert a failed debit into an unmetered projected type argument.
+    work.set(0);
+    assert!(vocabulary.argument_with_work(&parameter(1, 0), &forwarded, &work, crate::SpanId(0)).is_err());
+    assert_eq!(work.get(), 0);
+    assert!(vocabulary.closed_arguments().is_empty());
+}
+
+#[test]
+fn repeated_projection_terms_cannot_expand_past_the_existing_work_budget() {
+    let mut ty = Ty::Param(0);
+    let id = ProjectionId(DefHash::new(710, 1));
+    for _ in 0..20 { ty = Ty::Projection(id, vec![ty]); }
+    let recipe = TypeRecipe::registered(
+        &ty, Some(FnId(DefHash::new(1, 1))), &|_| None, &|candidate| (candidate == id).then_some(1),
+    ).unwrap();
+    let mut vocabulary = Vocabulary::default();
+    let work = std::cell::Cell::new(10_000);
+    assert!(vocabulary.argument_with_work(&recipe, &environment(1, "a"), &work, crate::SpanId(0)).is_err());
+    let remaining = work.get();
+    assert!(vocabulary.argument_with_work(&recipe, &environment(1, "a"), &work, crate::SpanId(0)).is_err());
+    assert!(work.get() <= remaining);
+    assert!(vocabulary.closed_arguments().is_empty());
+}
+
+#[test]
+fn projected_environments_share_immutable_arguments_and_cannot_replace_their_ledger() {
+    let owner = FnId(DefHash::new(1, 1));
+    let mut vocabulary = Vocabulary::default();
+    let work = std::rc::Rc::new(std::cell::Cell::new(10_000));
+    let recipe = projection(1, vec![Ty::Param(0)], Some(owner)).unwrap();
+    let argument = vocabulary.argument_with_work(&recipe, &environment(1, "a"), &work, crate::SpanId(0)).unwrap().unwrap();
+    let env = vocabulary.environment(owner, vec![argument], &work);
+    let copied = env.clone();
+    assert!(std::rc::Rc::ptr_eq(&env.arguments, &copied.arguments));
+    assert!(std::rc::Rc::ptr_eq(env.projection_work().unwrap(), &work));
+    assert!(std::rc::Rc::ptr_eq(copied.projection_work().unwrap(), &work));
+    work.set(0);
+    let substitute = std::cell::Cell::new(10_000);
+    assert!(vocabulary.argument_with_work(&parameter(1, 0), &copied, &substitute, crate::SpanId(0)).is_err());
+    assert_eq!(substitute.get(), 10_000);
+    assert_eq!(work.get(), 0);
+}
+
 #[test]
 fn equal_parameter_numbers_do_not_supply_another_binders_identity() {
     let mut vocabulary = Vocabulary::default();
@@ -59,17 +165,22 @@ fn opaque_recipes_require_registered_identity_and_exact_arity() {
     let second = AdtId(DefHash::new(2, 2));
     let arity = |id| (id == first).then_some(RecipeAdt::Opaque(1));
     let admitted = Ty::Adt(first, vec![Ty::Param(0)]);
-    assert!(TypeRecipe::registered(&admitted, Some(FnId(DefHash::new(1, 1))), &arity).is_some());
-    assert!(TypeRecipe::registered(&admitted, None, &arity).is_none());
+    assert!(TypeRecipe::registered(&admitted, Some(FnId(DefHash::new(1, 1))), &arity,
+            &|_| None).is_some());
+    assert!(TypeRecipe::registered(&admitted, None, &arity,
+            &|_| None).is_none());
     assert!(TypeRecipe::registered(
         &Ty::Adt(second, vec![Ty::Param(0)]),
         Some(FnId(DefHash::new(1, 1))),
         &arity
-    )
+    ,
+            &|_| None)
     .is_none());
-    assert!(TypeRecipe::registered(&Ty::Adt(first, vec![]), None, &arity).is_none());
+    assert!(TypeRecipe::registered(&Ty::Adt(first, vec![]), None, &arity,
+            &|_| None).is_none());
     assert!(
-        TypeRecipe::registered(&Ty::Adt(first, vec![Ty::Bool, Ty::Bool]), None, &arity).is_none()
+        TypeRecipe::registered(&Ty::Adt(first, vec![Ty::Bool, Ty::Bool]), None, &arity,
+            &|_| None).is_none()
     );
 }
 
@@ -82,7 +193,8 @@ fn nested_type_recipes_have_a_fixed_work_bound() {
             inner: Box::new(ty),
         };
     }
-    assert!(TypeRecipe::registered(&ty, None, &|_| None).is_none());
+    assert!(TypeRecipe::registered(&ty, None, &|_| None,
+            &|_| None).is_none());
     assert!(TypeRecipe::registered(
         &Ty::Ref {
             mutable: true,
@@ -90,7 +202,8 @@ fn nested_type_recipes_have_a_fixed_work_bound() {
         },
         None,
         &|_| None
-    )
+    ,
+            &|_| None)
     .is_none());
 }
 
@@ -232,4 +345,30 @@ fn boxed_nat_membership_keeps_its_native_range_guard() {
         .iter()
         .all(|function| function.name != "as_type"));
     assert!(vocabulary.bridge_axioms(&[&boxed], &mut 0).is_none());
+}
+
+#[test]
+fn closed_projection_terms_reduce_both_sorts_only_at_the_exact_domain() {
+    let mut vocabulary = Vocabulary::default();
+    let id = ProjectionId(crate::DefHash::new(400, 1));
+    let other = ProjectionId(crate::DefHash::new(400, 2));
+    let env = TypeEnv::default();
+    let input = vocabulary.argument(&TypeRecipe::Bool, &env).unwrap();
+    let output = vocabulary.argument(&TypeRecipe::Int(IntRange::U(16)), &env).unwrap();
+    let work = std::cell::Cell::new(100_000);
+    vocabulary.register_projection_definition(id, &[input], &output, &work, crate::SpanId(0)).unwrap();
+    let raw = vocabulary.argument_with_work(&TypeRecipe::Projection(id, vec![TypeRecipe::Bool]), &env, &work, crate::SpanId(0)).unwrap().unwrap();
+    assert_ne!(raw, output);
+    let mut remaining = 100_000;
+    assert_eq!(vocabulary.canonical_argument(raw.clone(), &mut remaining), Some(output));
+    let cost = 100_000 - remaining;
+    let mut one_short = cost - 1;
+    assert!(vocabulary.canonical_argument(raw, &mut one_short).is_none());
+    let wrong_domain = vocabulary.argument_with_work(&TypeRecipe::Projection(id, vec![TypeRecipe::Int(IntRange::U(8))]), &env, &work, crate::SpanId(0)).unwrap().unwrap();
+    let wrong_member = vocabulary.argument_with_work(&TypeRecipe::Projection(other, vec![TypeRecipe::Bool]), &env, &work, crate::SpanId(0)).unwrap().unwrap();
+    assert_eq!(vocabulary.canonical_argument(wrong_domain.clone(), &mut 100_000), Some(wrong_domain));
+    assert_eq!(vocabulary.canonical_argument(wrong_member.clone(), &mut 100_000), Some(wrong_member));
+    // Reductions interpret private constructors. They add no equality axiom
+    // or blanket membership for arbitrary values.
+    assert!(vocabulary.bridge_axioms(&[], &mut 100_000).unwrap().is_empty());
 }

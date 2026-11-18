@@ -30,6 +30,7 @@ fn function(value: u64, mode: Mode, ty: Ty, return_mode: Mode) -> FnDecl {
         mode,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![local(ty, return_mode, LocalKind::Return)],
         params: vec![],

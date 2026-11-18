@@ -257,6 +257,11 @@ name = "enum_casts"
 path = "tests/enum_casts.rs"
 required-features = ["rustc"]
 
+[[test]]
+name = "associated_types"
+path = "tests/associated_types.rs"
+required-features = ["rustc"]
+
 # Actual optional recommends diagnostics after a genuine proof failure.
 [[test]]
 name = "recommends"
@@ -301,4 +306,34 @@ required-features = ["rustc"]
 [[test]]
 name = "primitive_spec_equality"
 path = "tests/primitive_spec_equality.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "native_matches"
+path = "tests/native_matches.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "clone_calls"
+path = "tests/clone_calls.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "autospec_calls"
+path = "tests/autospec_calls.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "copy_origins"
+path = "tests/copy_origins.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "autospec_rejections"
+path = "tests/autospec_rejections.rs"
+required-features = ["rustc"]
+
+[[test]]
+name = "legacy_modes"
+path = "tests/legacy_modes.rs"
 required-features = ["rustc"]

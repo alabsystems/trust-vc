@@ -70,6 +70,22 @@ pub(crate) fn configure_child(
         .get()
         .ok_or("native builtin construction requires captured process-entry transport")?;
     command.arg(FLAG).arg(script).arg(output).arg(source);
+    configure_transport(command, original);
+    Ok(())
+}
+
+/// Preserve only the native transport captured at this process's first entry.
+/// No builder-role argument, data endpoint, arbitrary descriptor or resource
+/// credit is added. The real native child must independently capture custody.
+pub(crate) fn configure_ordinary_child(command: &mut Command) -> Result<(), String> {
+    let original = FORWARDING
+        .get()
+        .ok_or("native child requires captured process-entry transport")?;
+    configure_transport(command, original);
+    Ok(())
+}
+
+fn configure_transport(command: &mut Command, original: &Forwarding) {
     for (name, value) in &original.0 {
         match value {
             Some(value) => {
@@ -80,7 +96,6 @@ pub(crate) fn configure_child(
             }
         }
     }
-    Ok(())
 }
 
 pub(super) type Request = Result<[PathBuf; 3], &'static str>;

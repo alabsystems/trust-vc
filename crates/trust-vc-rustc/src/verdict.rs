@@ -97,6 +97,38 @@ impl OutputSinks {
         directory.join("trust-vc-verdict.jsonl")
     }
 
+    // Output transport only. The ordinary coordinator calls this only from
+    // its private actual-child/erase completion; no record data grants authority.
+    pub(crate) fn write_record_data(
+        &self,
+        output_file: Option<&Path>,
+        name: Option<&str>,
+        line: &str,
+    ) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut targets = Vec::new();
+        if let Some(directory) = output_file.and_then(Path::parent) {
+            targets.push(self.local_verdict_path(directory));
+        }
+        if let (Some(directory), Some(name)) = (&self.verdict_dir, name) {
+            if let Err(error) = std::fs::create_dir_all(directory) {
+                problems.push(format!("{}: {error}", directory.display()));
+            }
+            targets.push(directory.join(format!("{name}.jsonl")));
+        }
+        for target in targets {
+            if let Err(error) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&target)
+                .and_then(|mut file| file.write_all(line.as_bytes()))
+            {
+                problems.push(format!("{}: {error}", target.display()));
+            }
+        }
+        problems
+    }
+
     /// Write only the requested debug output. Failure loses the dump and does
     /// not change a verification result.
     pub(crate) fn write_vcir(&self, text: &str) -> std::io::Result<()> {
@@ -341,32 +373,12 @@ impl Record {
     /// the runner treats a harness pass without a record as a false pass, so a
     /// lost record can only lower the score.
     pub fn write_to(&self, outputs: &OutputSinks) -> Vec<String> {
-        // One write call per record: tests run concurrently and two of them
-        // can share a file (examples with the same file stem), and an
-        // O_APPEND write of the whole line keeps lines from interleaving.
         let line = format!("{}\n", self.to_json());
-        let mut problems = Vec::new();
-        let mut targets = Vec::new();
-        if let Some(dir) = self.output_file.as_ref().and_then(|p| p.parent()) {
-            targets.push(outputs.local_verdict_path(dir));
-        }
-        if let (Some(dir), Some(name)) = (&outputs.verdict_dir, self.test_dir_name()) {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                problems.push(format!("{}: {e}", dir.display()));
-            }
-            targets.push(dir.join(format!("{name}.jsonl")));
-        }
-        for t in targets {
-            let res = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&t)
-                .and_then(|mut f| f.write_all(line.as_bytes()));
-            if let Err(e) = res {
-                problems.push(format!("{}: {e}", t.display()));
-            }
-        }
-        problems
+        outputs.write_record_data(
+            self.output_file.as_deref(),
+            self.test_dir_name().as_deref(),
+            &line,
+        )
     }
 }
 

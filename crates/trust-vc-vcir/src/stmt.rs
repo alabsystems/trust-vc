@@ -159,11 +159,34 @@ pub enum StmtKind {
         /// Its initial value.
         init: Option<Expr>,
     },
+    /// Evaluate an initializer with body-code checks, then bind its value to
+    /// Spec storage. Check placement is separate from the value's mode and
+    /// prophecy: neither is promoted to Exec by this statement.
+    ///
+    /// This form requires Exec statement context and an initialized Spec
+    /// local of kind `Let` or `Temp`. Every existing expression/type/site,
+    /// value-mode, prophecy and ownership check still applies. In particular
+    /// it supplies no ownership or erasure permission.
+    LetChecked {
+        /// The Spec local declared.
+        local: LocalId,
+        /// Its required initial value, evaluated exactly once.
+        init: Expr,
+    },
     /// Write a value to a place.
     Assign {
         /// The place written.
         place: Place,
         /// The value.
+        value: Expr,
+    },
+    /// Evaluate the RHS with physical Exec checks, then assign to mutable
+    /// Spec storage using logical Proof rules. The raw RHS mode and prophecy
+    /// are unchanged; this supplies no storage, borrow or source permission.
+    AssignSpec {
+        /// The exact Spec destination.
+        place: Place,
+        /// Its value, evaluated exactly once before the store.
         value: Expr,
     },
     /// Borrow one initialized storage place as a new opaque mutable reference.
@@ -176,7 +199,9 @@ pub enum StmtKind {
         place: Place,
     },
     /// Call an exec or proof function. `site` is where the callee's
-    /// preconditions are checked.
+    /// preconditions are checked. For a checked FnKind::Static, only a
+    /// parameter-free monomorphic read is permitted: the result is stable
+    /// global storage, not a fresh initializer execution or owned result.
     Call {
         /// The callee.
         callee: FnId,
@@ -222,6 +247,18 @@ pub enum StmtKind {
     /// `if cond { then_block } else { else_block }`.
     If {
         /// The condition.
+        cond: Expr,
+        /// Taken when the condition holds.
+        then_block: Block,
+        /// Taken otherwise.
+        else_block: Block,
+    },
+    /// A Spec-controlled conditional in physical Exec code. The condition
+    /// is observed in Spec mode, and both branches use logical Proof rules
+    /// while retaining physical body-code check placement. This is not an
+    /// executable-value, storage, ownership or source-language permission.
+    IfSpec {
+        /// The condition, evaluated exactly once.
         cond: Expr,
         /// Taken when the condition holds.
         then_block: Block,

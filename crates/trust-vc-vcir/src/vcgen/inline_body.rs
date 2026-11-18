@@ -27,7 +27,7 @@ pub(super) fn closed(arguments: &[Ty], work: &Cell<usize>, span: SpanId) -> R<bo
         }
         match value {
             Ty::Param(_) => Ok(false),
-            Ty::Tuple(children) | Ty::Adt(_, children) => {
+            Ty::Tuple(children) | Ty::Adt(_, children) | Ty::Projection(_, children) => {
                 let mut result = true;
                 for child in children {
                     result &= visit(child, work, span, depth + 1)?;
@@ -185,6 +185,17 @@ pub(super) fn ty(
                 }
                 Ty::Adt(*id, result)
             }
+            Ty::Projection(id, children) => {
+                if ctx.recipe_projection(*id) != Some(children.len()) {
+                    return Err(refusal("inline-body", "an unknown associated-type declaration or arity", span));
+                }
+                pay(work, children.len(), span)?;
+                let mut result = Vec::with_capacity(children.len());
+                for child in children {
+                    result.push(copy(ctx, child, arguments, work, span, depth + 1)?);
+                }
+                Ty::Projection(*id, result)
+            }
             Ty::MutRef(inner) => Ty::MutRef(Box::new(copy(
                 ctx,
                 inner,
@@ -200,7 +211,8 @@ pub(super) fn ty(
             Ty::Bool | Ty::Int(_) | Ty::Unit => source.clone(),
         })
     }
-    copy(ctx, source, Some(arguments), work, span, 0)
+    let ty = copy(ctx, source, Some(arguments), work, span, 0)?;
+    ctx.normalize_type(&ty, work, span)
 }
 
 pub(super) fn expression(

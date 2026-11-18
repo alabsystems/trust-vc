@@ -6,6 +6,9 @@ use trust_vc_vcir::solve::{self, Limits, Verdict};
 use trust_vc_vcir::vcgen::{self, FnVcs};
 use trust_vc_vcir::*;
 
+#[path = "finite_sums/conditional_resolution.rs"]
+mod conditional_resolution;
+
 fn adt(n: u64) -> AdtId {
     AdtId(DefHash::new(73, n))
 }
@@ -116,6 +119,7 @@ fn source(goal: Expr, params: Vec<Ty>, type_params: usize) -> VcCrate {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: (0..type_params).map(|i| format!("T{i}")).collect(),
         locals,
         params: (1..=params.len()).map(|i| LocalId(i as u32)).collect(),

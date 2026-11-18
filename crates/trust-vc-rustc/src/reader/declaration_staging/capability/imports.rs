@@ -115,6 +115,7 @@ impl ImportedFunction {
             role: FnRole::Imported,
             kind: FnKind::Function,
             type_params: parameter_names(&self.parameters),
+            copy_premises: Vec::new(),
             locals,
             params: (0..ret.0).map(LocalId).collect(),
             ret,

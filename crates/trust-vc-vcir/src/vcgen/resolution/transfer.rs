@@ -50,6 +50,7 @@ impl Builder<'_, '_> {
         };
         let destinations = match action {
             Action::Assign(place, _)
+            | Action::StaticRead(Some(place))
             | Action::Result {
                 dest: Some(place), ..
             } => {
@@ -97,8 +98,25 @@ impl Builder<'_, '_> {
             }
         }
         for event in &self.nodes[index].events {
-            if let Event::Move(place) = event {
-                self.moved(state, place, refs)?;
+            match event {
+                Event::Move(place) => self.moved(state, place, refs)?,
+                Event::ValueMove(place) => {
+                    // Spec may still observe the old logical value. Only
+                    // concrete carrier moves enter `state.moved`, which is
+                    // later copied to the generator's reference read mask.
+                    self.charge(
+                        state
+                            .initialized
+                            .len()
+                            .saturating_mul(1 + place.projections.len()),
+                    )?;
+                    state.initialized.retain(|old| {
+                        !(covers(old, place)
+                            || (old.local == place.local
+                                && old.projections.starts_with(&place.projections)))
+                    });
+                }
+                _ => {}
             }
         }
         match action {
@@ -114,7 +132,7 @@ impl Builder<'_, '_> {
                 let represented = init.is_some()
                     || !self
                         .ctx
-                        .shape(&declaration.ty, Some(self.decl.id), self.decl.span)?
+                        .shape_with_work(&declaration.ty, Some(self.decl.id), self.decl.span, self.work.remaining())?
                         .has_poly();
                 if represented && !state.represented.contains(local) {
                     state.represented.push(*local);
@@ -122,6 +140,7 @@ impl Builder<'_, '_> {
                 self.write(state, &Place::local(*local), init.is_some(), universe)?;
             }
             Action::Assign(place, _)
+            | Action::StaticRead(Some(place))
             | Action::Result {
                 dest: Some(place), ..
             } => {

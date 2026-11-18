@@ -60,6 +60,7 @@ pub(super) fn function(number: u64, mode: Mode, ty: Ty, result_mode: Mode) -> Fn
         mode,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![LocalDecl {
             name: "result".into(),

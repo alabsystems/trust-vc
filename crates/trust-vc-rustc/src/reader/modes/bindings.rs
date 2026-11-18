@@ -112,8 +112,35 @@ impl<'tcx> BindingFacts<'tcx> {
         definition: LocalDefId,
         owner: LocalDefId,
     ) -> Result<&Self, String> {
+        self.checked_using(tcx, definition, owner, |_| Ok(()))
+    }
+
+    pub(crate) fn checked_with_work(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        definition: LocalDefId,
+        owner: LocalDefId,
+        remaining: &mut usize,
+    ) -> Result<&Self, String> {
+        self.checked_using(tcx, definition, owner, |amount| {
+            *remaining = remaining
+                .checked_sub(amount)
+                .ok_or("binding validation exceeds the caller's shared work bound")?;
+            Ok(())
+        })
+    }
+
+    fn checked_using(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        definition: LocalDefId,
+        owner: LocalDefId,
+        mut charge: impl FnMut(usize) -> Result<(), String>,
+    ) -> Result<&Self, String> {
+        charge(1)?;
         self.current(tcx, definition, owner)?;
         for (id, binding) in &self.bindings {
+            charge(1)?;
             if self.original(binding.pattern)? != *id {
                 return Err("a checked binding changed its original HIR identity".into());
             }
@@ -145,5 +172,11 @@ impl<'tcx> BindingFacts<'tcx> {
             return Err("the binding mode names another pattern allocation".into());
         }
         Ok(observation.mode)
+    }
+
+    /// Source observations only. Consumers must first rejoin `checked` to
+    /// their current native body; this iterator grants no ownership facts.
+    pub(crate) fn observations(&self) -> impl Iterator<Item = (&'tcx hir::Pat<'tcx>, Mode)> + '_ {
+        self.bindings.values().map(|row| (row.pattern, row.mode))
     }
 }

@@ -28,11 +28,16 @@ fn run() -> io::Result<u8> {
             .into_iter()
             .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value))),
     )?;
+    let argv = std::env::args_os().collect::<Vec<_>>();
+    let macro_package_name = std::env::var_os("CARGO_PKG_NAME");
+    let cargo = CargoContext::capture(&argv, macro_package_name.as_deref());
     let request = Request {
-        argv: std::env::args_os().collect(),
+        argv,
         cwd: std::env::current_dir()?.canonicalize()?,
         outputs,
         verusdoc: std::env::var_os("VERUSDOC"),
+        cargo,
+        macro_package_name,
     };
     let response = client.submit(&request, Duration::from_secs(30))?;
     response.copy_to(&mut io::stdout().lock(), &mut io::stderr().lock())

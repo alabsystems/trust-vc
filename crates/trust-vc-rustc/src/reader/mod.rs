@@ -34,8 +34,10 @@
 //! ([`Refusal`]); nothing is dropped or approximated.
 
 mod architecture;
+mod associated_types;
 mod attr_walk;
 pub mod attrs;
+mod autospec;
 mod body;
 mod constants;
 mod cycles;
@@ -58,9 +60,11 @@ mod function_identity_projection;
 mod function_identity_resolution;
 mod ghost_tail_agreement;
 mod imports;
+mod legacy;
 mod local_variant_fields;
 mod modes;
 mod ownership;
+mod projection_types;
 mod recursive_types;
 mod termination;
 mod ty;
@@ -200,6 +204,9 @@ pub struct CrateRead {
     pub explicit_returns: HashSet<SpanId>,
     /// One entry per function.
     pub fns: Vec<FnRecord>,
+    /// Bounded diagnostic data for refused constant uses. These observations
+    /// never participate in declaration, mode, ownership or VC admission.
+    constant_mode_observations: Vec<String>,
     /// Refusals of items that are not functions.
     pub item_refusals: Vec<Refusal>,
     /// Refusals that only verification needs: the functions were read
@@ -231,6 +238,10 @@ pub struct CrateRead {
 }
 
 impl CrateRead {
+    pub(crate) fn constant_mode_observations(&self) -> &[String] {
+        &self.constant_mode_observations
+    }
+
     /// The rustc span of a VcIR span id.
     #[must_use]
     pub fn span(&self, id: SpanId) -> Option<Span> {
@@ -366,13 +377,21 @@ pub(crate) struct Cx<'tcx> {
     /// Source-selected complete word-size contexts, never the host ABI.
     architecture: trust_vc_vcir::bitvector::Architecture,
     /// Real Rust constants and their checked local verification proxies.
-    constants: constants::Registry,
+    constants: constants::Registry<'tcx>,
     /// Every `verus::` diagnostic item in the crate graph, by definition.
     items: HashMap<DefId, VerusItem>,
     /// Verus functions of this crate.
     pub fns: HashMap<DefId, FnInfo>,
+    legacy_functions: HashSet<LocalDefId>,
     /// Structs of this crate that VcIR represents.
     adts: HashMap<DefId, AdtId>,
+    /// Type constructors registered only from current original local trait
+    /// members. This contains no value definitions or native capabilities.
+    projections: RefCell<HashMap<DefId, trust_vc_vcir::ProjectionDecl>>,
+    projection_impls: RefCell<HashMap<DefId, trust_vc_vcir::ProjectionImpl>>,
+    /// One traversal ledger for the earlier raw dependency graph and every
+    /// subsequent instantiated-field observation. No body/instance refill.
+    projection_type_work: std::cell::Cell<usize>,
     /// Original opaque source identities installed by a borrowed, current
     /// Keep capability. Membership only denies representation operations.
     source_opaque_nominals: HashSet<DefId>,
@@ -383,6 +402,7 @@ pub(crate) struct Cx<'tcx> {
     local_variant_fields: Option<local_variant_fields::Local<'tcx>>,
     enum_diagnostics: HashSet<DefId>,
     derived_clones: derived_clones::Registry,
+    autospec: autospec::Registry<'tcx>,
     /// The span table.
     spans: RefCell<Vec<Span>>,
     /// See [`CrateRead::explicit_returns`].
@@ -575,17 +595,41 @@ pub fn builtin_loaded(tcx: TyCtxt<'_>) -> bool {
 /// the items nested inside an `external_body` function are ignored, while
 /// the function itself is not.
 fn is_external(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
+    is_external_using(tcx, def_id, None).expect("unmetered attributes have no work failure")
+}
+
+fn is_external_with_work(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    remaining: &mut usize,
+) -> Result<bool, String> {
+    is_external_using(tcx, def_id, Some(remaining))
+}
+
+fn is_external_using(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    mut remaining: Option<&mut usize>,
+) -> Result<bool, String> {
     let mut current = Some(def_id);
     while let Some(id) = current {
+        if let Some(work) = remaining.as_deref_mut() {
+            *work = work
+                .checked_sub(1)
+                .ok_or("external-attribute ancestry exceeds the caller's shared work bound")?;
+        }
         let hir_id = tcx.local_def_id_to_hir_id(id);
-        let attrs = attrs::item_attrs(tcx.hir_attrs(hir_id));
+        let attrs = match remaining.as_deref_mut() {
+            Some(work) => attrs::item_attrs_with_work(tcx.hir_attrs(hir_id), work)?,
+            None => attrs::item_attrs(tcx.hir_attrs(hir_id)),
+        };
         let body_fn = matches!(tcx.def_kind(id), DefKind::Fn | DefKind::AssocFn);
         if attrs.external || (id != def_id && body_fn && attrs.external_body) {
-            return true;
+            return Ok(true);
         }
         current = tcx.opt_local_parent(id);
     }
-    false
+    Ok(false)
 }
 
 /// Is `def_id` an item nested in a body (a function's, a closure's, a
@@ -692,7 +736,11 @@ fn read_with_context<'tcx>(
         constants: constants::Registry::collect(tcx),
         items,
         fns: HashMap::new(),
+        legacy_functions: HashSet::new(),
         adts: HashMap::new(),
+        projections: RefCell::new(HashMap::new()),
+        projection_impls: RefCell::new(HashMap::new()),
+        projection_type_work: std::cell::Cell::new(cycles::type_dependency_work()),
         source_opaque_nominals: HashSet::new(),
         imports,
         spec_definitions: trust_vc_vcir::CheckedSpecDefinitions::default(),
@@ -703,6 +751,7 @@ fn read_with_context<'tcx>(
         } else {
             derived_clones::Registry::default()
         },
+        autospec: autospec::Registry::default(),
         spans: RefCell::new(Vec::new()),
         explicit_returns: RefCell::new(HashSet::new()),
         native_ownership: RefCell::new(HashMap::new()),
@@ -724,6 +773,7 @@ fn read_with_context<'tcx>(
     krate.architecture = cx.architecture;
 
     let mut fns = Vec::new();
+    let mut constant_mode_observations = Vec::new();
     let mut item_refusals = global_refusals;
     let mut pending_item_refusals = Vec::new();
     let mut structs = Vec::new();
@@ -742,6 +792,10 @@ fn read_with_context<'tcx>(
     // The traits and trait implementations the reader reads.
     let mut read_items = Vec::new();
     let mut pending_enum_diagnostics = Vec::new();
+    // Duplicate diagnostic requests, not semantic admission. The canonical
+    // proxy must be registered and visited by the whole declaration validator
+    // below even when its requested target is invalid.
+    let mut deferred_const_autospec = Vec::new();
 
     if let Some(nominals) = spec.and_then(|scope| scope.source_nominals) {
         if let Err(reason) = nominals.install(&mut cx, &mut krate) {
@@ -817,16 +871,45 @@ fn read_with_context<'tcx>(
         // `#[verifier::external]` on an item or on anything around it (a
         // module, an impl) excludes it (`rust_verify/src/external.rs`).
         let external = is_external(tcx, def_id);
-        // Under `--no-external-by-default` Verus reads items outside
-        // `verus!` too. The reader reads their functions only for the errors
-        // Verus reports while building VIR; they are refused otherwise.
+        // Legacy free functions have a separate checked language context.
+        // Other outside owners retain their current refusal boundaries.
         let loose = opts.no_external_by_default;
         let native_constant = kind == DefKind::AssocConst && cx.constants.mode(def_id).is_some();
         let derived_source = cx.derived_clones.source(def_id);
         let outside = !item_attrs.verus_macro && !native_constant && derived_source.is_none();
-        let verus =
-            (item_attrs.verus_macro || native_constant || derived_source.is_some() || loose)
-                && !external;
+        let legacy = outside
+            && legacy::eligible(tcx, def_id, loose)
+            && cx.constants.real(def_id).is_none()
+            && cx.constants.proxy(def_id).is_none();
+        let verus = (item_attrs.verus_macro
+            || native_constant
+            || derived_source.is_some()
+            || loose
+            || legacy)
+            && !external;
+        let autospec_allow_conflict = matches!(kind, DefKind::Fn | DefKind::AssocFn)
+            && item_attrs.autospec.is_some()
+            && item_attrs
+                .unsupported
+                .iter()
+                .any(|(name, _)| name == "verifier::allow_in_spec");
+        if verus && autospec_allow_conflict {
+            let mut problem = UserError::new(
+                Phase::RustToVir,
+                span,
+                "a function cannot be marked both 'when_used_as_spec' and 'allow_in_spec'",
+            );
+            problem.function = Some(def_id);
+            errors.push(problem);
+        }
+        if verus && item_attrs.autospec.is_some() && !matches!(kind, DefKind::Fn | DefKind::AssocFn)
+        {
+            item_refusals.push(Refusal::new(
+                "autospec",
+                "when_used_as_spec on a non-function needs a separate native declaration mapping",
+                span,
+            ));
+        }
         if verus && item_attrs.broadcast_forall && !matches!(kind, DefKind::Fn | DefKind::AssocFn) {
             item_refusals.push(Refusal::new(
                 "broadcast-contract",
@@ -846,12 +929,11 @@ fn read_with_context<'tcx>(
             ));
             continue;
         }
-        // Verus also reads items outside `verus!` that carry Verus
-        // attributes (`verify`, `external_body`, a mode, ...); the reader
-        // only reads what `verus!` produced, so those are refused. The loop
+        // Supported legacy free functions retain the ordinary item gates.
+        // Outside owners without that classification remain refused. The loop
         // settings only matter to the functions inside such an item, which
         // read them there (`attrs::loop_settings`).
-        if outside && !item_attrs.reveal_fn {
+        if outside && !legacy && !item_attrs.reveal_fn {
             if let Some((attr, attr_span)) = own_attrs.iter().find(|(attr, _)| {
                 !matches!(attr, VerusAttr::External) && !attrs::is_loop_setting(attr)
             }) {
@@ -965,7 +1047,8 @@ fn read_with_context<'tcx>(
         // An item marked external that also asks for something else
         // (`external_fn_specification`, ...) is an error Verus reports.
         if item_attrs.external {
-            if let Some((attr, attr_span)) = own_attrs.iter().find(|(attr, _)| {
+            let ignored_autospec = autospec::external_directive_ignored(&cx, def_id);
+            if let Some((attr, attr_span)) = own_attrs.iter().find(|(attr, attr_span)| {
                 !matches!(
                     attr,
                     VerusAttr::External
@@ -973,6 +1056,11 @@ fn read_with_context<'tcx>(
                         | VerusAttr::Mode(_)
                         | VerusAttr::Visibility { .. }
                 ) && !(enum_diagnostic && matches!(attr, VerusAttr::GetFieldManyVariants))
+                    && !(ignored_autospec && matches!(attr, VerusAttr::WhenUsedAsSpec(_)))
+                    && cx
+                        .constants
+                        .copied_autospec_owner(tcx, def_id, attr, *attr_span)
+                        .is_none()
             }) {
                 item_refusals.push(Refusal::new(
                     "attribute",
@@ -980,6 +1068,14 @@ fn read_with_context<'tcx>(
                     *attr_span,
                 ));
                 continue;
+            }
+            for (attr, attr_span) in &own_attrs {
+                if let Some(proxy) = cx
+                    .constants
+                    .copied_autospec_owner(tcx, def_id, attr, *attr_span)
+                {
+                    deferred_const_autospec.push((def_id, proxy, attr.clone(), *attr_span));
+                }
             }
         }
         // A derived trait impl carries no `verus!` marker of its own;
@@ -1049,7 +1145,10 @@ fn read_with_context<'tcx>(
                     fns.push(record(FnStatus::External));
                     continue;
                 }
-                if outside {
+                if legacy {
+                    cx.legacy_functions.insert(def_id);
+                }
+                if outside && !legacy {
                     pending_item_refusals.push(Refusal::new(
                         "external-by-default",
                         format!(
@@ -1059,8 +1158,12 @@ fn read_with_context<'tcx>(
                     ));
                     outside_fns.insert(def_id);
                 }
-                let mode = if cx.constants.mode(def_id).is_some() {
-                    Mode::Spec
+                let mode = if let Some(constant) = cx.constants.mode(def_id) {
+                    if constant == trust_vc_vcir::ConstMode::Exec {
+                        Mode::Exec
+                    } else {
+                        Mode::Spec
+                    }
                 } else {
                     item_attrs.mode.unwrap_or(Mode::Exec)
                 };
@@ -1126,7 +1229,9 @@ fn read_with_context<'tcx>(
             _ => {}
         }
         for (name, attr_span) in item_attrs.unsupported {
-            if verus {
+            // The known contradictory pair above is a Verus error. Retain
+            // all other unsupported directives as ordinary refusals.
+            if verus && !(autospec_allow_conflict && name == "verifier::allow_in_spec") {
                 item_refusals.push(Refusal::new("attribute", name, attr_span));
             }
         }
@@ -1238,11 +1343,18 @@ fn read_with_context<'tcx>(
         .iter()
         .filter_map(|owner| cx.adt_id(owner.to_def_id()))
         .collect::<HashSet<_>>();
-    if let Some(owner) = recursive_types::first_unfounded(&cx, &original_ground) {
-        if let Some(id) = cx.adt_id(owner.to_def_id()) {
-            unfounded_ids.insert(id);
-        }
-    }
+    let early_datatype_problem =
+        match recursive_types::first_unfounded(&cx, &original_ground, &in_verus_order, &read_items)
+        {
+            Ok(Some(owner)) => {
+                if let Some(id) = cx.adt_id(owner.to_def_id()) {
+                    unfounded_ids.insert(id);
+                }
+                None
+            }
+            Ok(None) => None,
+            Err(problem) => Some(problem),
+        };
     let unfounded = recursive_types::first_unfounded_in(&cx, &in_verus_order, &unfounded_ids);
     match local_variant_fields::Local::capture(tcx, &lowered) {
         Ok(scope) => cx.local_variant_fields = scope,
@@ -1283,16 +1395,56 @@ fn read_with_context<'tcx>(
         }
     }
 
+    // Validate every redirection, including unused functions, before the
+    // first mode walk can consume a call's selected logical declaration.
+    let (autospec, autospec_errors, autospec_refusals) =
+        autospec::Registry::collect(&cx, spec.is_none());
+    // collect has completed its immutable traversal of EVERY local cx.fns
+    // member with an autospec request. Registration plus the same request
+    // therefore proves the canonical validator ran, including its error and
+    // refusal paths. A successful redirection Pair is deliberately NOT needed.
+    for (real, proxy, attr, attr_span) in deferred_const_autospec {
+        if !cx.fns.contains_key(&proxy.to_def_id())
+            || cx.declaration_attrs(proxy).autospec.is_none()
+            || cx
+                .constants
+                .copied_autospec_owner(tcx, real, &attr, attr_span)
+                != Some(proxy)
+        {
+            item_refusals.push(Refusal::new(
+                "attribute",
+                format!("{attr:?} on an external item"),
+                attr_span,
+            ));
+        }
+    }
+    cx.autospec = autospec;
+    errors.extend(autospec_errors);
+    item_refusals.extend(autospec_refusals);
+
     // Functions.
     let mut verify_refusals = Vec::new();
     // The trait method declarations with a default body, before a mode
     // error takes a body away.
     let mut default_bodies: HashSet<FnId> = HashSet::new();
     let mut ghost_ownership = HashMap::new();
+    let mut legacy_work = 200_000usize;
+    let mut retained_work = 262_144usize;
     let mut ghost_work = ownership::ghost_only::Work::new();
     for record in &mut fns {
         if !matches!(record.status, FnStatus::Rejected) {
             continue;
+        }
+        if let Some(rejection) = cx.autospec.rejected_source(&cx, record.def_id) {
+            if rejection.function == Some(record.def_id) && rejection.phase == Phase::RustToVir {
+                // A40 stops this exact invalid declaration before reading
+                // its body. Leave it rejected, with no body/mode/ownership
+                // packet. Emit in the ordinary function-reading order so
+                // earlier items keep their errors. Every unrelated owner
+                // and refusal is still read.
+                errors.push(rejection.clone());
+                continue;
+            }
         }
         let owned = |mut error: UserError| {
             error.function = Some(record.def_id);
@@ -1307,8 +1459,8 @@ fn read_with_context<'tcx>(
         // error is still read, for the errors of the phase that builds VIR,
         // and is never verified. The mode checker's error is the function's
         // only error of that phase: it is the first one Verus meets.
-        // The mode rules of code outside `verus!` differ (no ghost
-        // blocks); the reader does not check them there.
+        // Unsupported outside owners remain unknown; registered legacy free
+        // functions use their current native language observation.
         let mode_check = if outside_fns.contains(&record.def_id) {
             modes::ModeCheck::Unknown(Refusal::new(
                 modes::TAG_MODES_UNKNOWN,
@@ -1318,6 +1470,13 @@ fn read_with_context<'tcx>(
         } else {
             modes::check_fn(&cx, record.def_id)
         };
+        if cx.legacy_functions.contains(&record.def_id) {
+            if let modes::ModeCheck::Unknown(refusal) = &mode_check {
+                // The missing native walk remains an explicit denial even
+                // when body lowering also lacks the legacy producer.
+                verify_refusals.push(refusal.clone());
+            }
+        }
         let mode_error = match &mode_check {
             modes::ModeCheck::Error(error) => Some(error.clone()),
             _ => None,
@@ -1337,7 +1496,16 @@ fn read_with_context<'tcx>(
                 {
                     ghost_ownership.insert(record.def_id, ghost);
                 }
-                if let Some(ownership) = ownership::classify(&cx, record.def_id, checked) {
+                if let Some(ownership) = if cx.legacy_functions.contains(&record.def_id) {
+                    let retained = cx.checked_modes.borrow().get(&record.def_id).cloned();
+                    retained.as_deref().and_then(|canonical| {
+                        ownership::legacy::classify(&cx, record.def_id, canonical, &mut legacy_work)
+                    })
+                } else {
+                    ownership::classify(&cx, record.def_id, checked).or_else(|| {
+                        ownership::shadow::retained_values(&cx, record.def_id, &mut retained_work)
+                    })
+                } {
                     cx.native_ownership
                         .borrow_mut()
                         .insert(record.def_id, ownership);
@@ -1345,6 +1513,33 @@ fn read_with_context<'tcx>(
             }
         }
         let mut outcome = body::read_fn(&cx, record.def_id, mode_error.is_some());
+        if constant_mode_observations.len() < 16
+            && matches!(&outcome.result, Err(body::FnProblem::Refused(r) | body::FnProblem::MissingConstantModes(r)) if r.tag == "constant-use")
+        {
+            // Preserve the actual completed check's outcome before either
+            // branch below consumes it. A missing canonical Clean Rc remains
+            // a hard refusal; the dump grants no replacement mode facts.
+            let bounded = |text: &str| text.chars().take(2048).collect::<String>();
+            let state = match &mode_check {
+                modes::ModeCheck::Clean(_) => "Clean; constant use still refused".to_owned(),
+                modes::ModeCheck::Error(error) => {
+                    format!("Error phase={:?}: {}", error.phase, bounded(&error.message))
+                }
+                modes::ModeCheck::Unknown(refusal) => {
+                    format!("Unknown tag={}: {}", refusal.tag, bounded(&refusal.detail))
+                }
+            };
+            let owner = modes::ModeContext::body_owner(&cx, record.def_id);
+            let body_hir = owner
+                .and_then(|owner| tcx.hir_maybe_body_owned_by(owner))
+                .map(|body| body.value.hir_id.local_id.as_usize());
+            constant_mode_observations.push(format!(
+                "constant-use owner-local={} body-owner-local={:?} body-hir-local={:?} original-mode-walk={state}",
+                record.def_id.local_def_index.as_u32(),
+                owner.map(|owner| owner.local_def_index.as_u32()),
+                body_hir,
+            ));
+        }
         if outside_fns.contains(&record.def_id) {
             outcome.errors.retain(|e| e.phase == Phase::RustToVir);
         }
@@ -1375,6 +1570,13 @@ fn read_with_context<'tcx>(
                     FnStatus::Rejected
                 }
                 Err(body::FnProblem::Refused(refusal)) => FnStatus::Refused(refusal),
+                Err(body::FnProblem::MissingConstantModes(refusal)) => {
+                    // No declaration or facts were produced. Preserve this
+                    // denial if the original actual Modes error were ever
+                    // lost; while it remains, that error rejects the crate.
+                    verify_refusals.push(refusal);
+                    FnStatus::Rejected
+                }
                 Err(body::FnProblem::Rejected(error)) => {
                     errors.push(owned(error));
                     FnStatus::Rejected
@@ -1404,7 +1606,9 @@ fn read_with_context<'tcx>(
                     None => FnStatus::Read(id),
                 }
             }
-            Err(body::FnProblem::Refused(refusal)) => FnStatus::Refused(refusal),
+            Err(
+                body::FnProblem::Refused(refusal) | body::FnProblem::MissingConstantModes(refusal),
+            ) => FnStatus::Refused(refusal),
             Err(body::FnProblem::Rejected(error)) => {
                 errors.push(owned(error));
                 FnStatus::Rejected
@@ -1429,7 +1633,9 @@ fn read_with_context<'tcx>(
         }
         match body::read_instance(&cx, def_id, args, id) {
             Ok(decl) => krate.fns.push(decl),
-            Err(body::FnProblem::Refused(refusal)) => verify_refusals.push(refusal),
+            Err(
+                body::FnProblem::Refused(refusal) | body::FnProblem::MissingConstantModes(refusal),
+            ) => verify_refusals.push(refusal),
             Err(body::FnProblem::Rejected(error)) => verify_refusals.push(Refusal::new(
                 "instance",
                 format!(
@@ -1441,6 +1647,13 @@ fn read_with_context<'tcx>(
             )),
         }
     }
+
+    krate.projections = cx.projections.borrow().values().cloned().collect();
+    krate.projections.sort_by_key(|declaration| declaration.id);
+    krate.projection_impls = cx.projection_impls.borrow().values().cloned().collect();
+    krate
+        .projection_impls
+        .sort_by_key(|implementation| implementation.id);
 
     // `vir/src/well_formed.rs`, `check_function`, on Verus's copy of a
     // default method for an implementation that inherits it
@@ -1498,7 +1711,7 @@ fn read_with_context<'tcx>(
         .filter_map(|(def_id, info)| def_id.as_local().map(|local| (info.id, local)))
         .collect();
     let order = verus_fn_order(tcx, &fns);
-    let cycles = cycles::find(
+    let mut cycles = cycles::find(
         &cx,
         &krate,
         &fn_defs,
@@ -1506,6 +1719,32 @@ fn read_with_context<'tcx>(
         &read_items,
         &order,
     );
+    // The graph is genuinely rebuilt at its later ordinary check too. Keep
+    // every distinct failure, reporting an identical earlier diagnostic once;
+    // this never substitutes a saved success flag for that later check.
+    match early_datatype_problem {
+        Some(recursive_types::DatatypeProblem::Cycle(error)) => {
+            if !cycles.errors.iter().any(|late| {
+                late.phase == error.phase
+                    && late.span == error.span
+                    && late.message == error.message
+                    && late.primary_label == error.primary_label
+                    && late.labels == error.labels
+                    && late.help == error.help
+                    && late.function == error.function
+            }) {
+                cycles.errors.push(error);
+            }
+        }
+        Some(recursive_types::DatatypeProblem::Refused(reason)) => {
+            if !cycles.refusals.iter().any(|late| {
+                late.tag == reason.tag && late.detail == reason.detail && late.span == reason.span
+            }) {
+                cycles.refusals.push(reason);
+            }
+        }
+        None => {}
+    }
     verify_refusals.extend(cycles.refusals);
     errors.extend(cycles.errors);
     krate.def_order = cycles.def_order;
@@ -1575,6 +1814,7 @@ fn read_with_context<'tcx>(
         spans,
         explicit_returns,
         fns,
+        constant_mode_observations,
         item_refusals,
         pending_item_refusals,
         verify_refusals,
@@ -1757,8 +1997,10 @@ pub(crate) fn sig_span(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Span {
 
 /// Why the reader does not read the trait `def_id`, if it does not. It
 /// reads a trait whose only generic parameter is `Self`, whose items are
-/// methods, and whose supertraits are `Sized` and traits of this crate that
-/// `verus!` produced.
+/// methods, and whose supertraits are sizedness, the native Copy language
+/// item, and traits of this crate that `verus!` produced. Copy remains a Rust
+/// typing requirement: this does not register it as a verifier trait or grant
+/// a body, equation or ownership permission.
 fn trait_problem(tcx: TyCtxt<'_>, def_id: LocalDefId, loose: bool) -> Option<Refusal> {
     let span = tcx.def_span(def_id);
     let refuse = |detail: String| Some(Refusal::new("trait", detail, span));
@@ -1773,15 +2015,19 @@ fn trait_problem(tcx: TyCtxt<'_>, def_id: LocalDefId, loose: bool) -> Option<Ref
     if tcx.trait_def(def_id).safety.is_unsafe() {
         return refuse("an unsafe trait".to_string());
     }
+    if let Some(problem) = associated_types::trait_problem(tcx, def_id) {
+        return Some(problem);
+    }
     // Bounds on `Self` (supertraits) and on the trait's type parameters:
-    // positive bounds by `Sized` and its relatives and by traits the reader
-    // reads.
+    // positive bounds by sizedness, the native Copy language item, and by
+    // traits the reader reads.
     let bound_ok = |clause: mty::Clause<'_>| match clause.kind().skip_binder() {
         mty::ClauseKind::Trait(t) => {
             matches!(t.self_ty().kind(), mty::Param(_))
                 && t.polarity == mty::ClausePolarity::Positive
                 && (t.def_id() == def_id.to_def_id()
                     || is_sizedness_trait(tcx, t.def_id())
+                    || Some(t.def_id()) == tcx.lang_items().copy_trait()
                     || is_verus_trait(tcx, t.def_id(), loose))
         }
         _ => false,
@@ -1810,9 +2056,7 @@ fn trait_problem(tcx: TyCtxt<'_>, def_id: LocalDefId, loose: bool) -> Option<Ref
                     ));
                 }
             }
-            mty::AssocKind::Type { .. } => {
-                return refuse(format!("the associated type {}", assoc_type_name(item)))
-            }
+            mty::AssocKind::Type { .. } => {}
             mty::AssocKind::Const { .. } => {}
         }
     }
@@ -1883,7 +2127,8 @@ fn dropped_supertrait_bound(tcx: TyCtxt<'_>, def_id: LocalDefId, loose: bool) ->
                 _ => true,
             });
     // The bounds Verus has: its own traits' bounds and their supertraits,
-    // which are again its own traits or sizedness ([`trait_problem`]).
+    // which are again its own traits, sizedness, or native Copy
+    // ([`trait_problem`]). The latter supplies Rust typing, not verifier facts.
     let kept: HashSet<mty::Clause<'_>> =
         mty::elaborate::elaborate(tcx, kept.into_iter().map(|(clause, _)| clause))
             .map(|clause| tcx.erase_and_anonymize_regions(clause))
@@ -1905,16 +2150,6 @@ fn dropped_supertrait_bound(tcx: TyCtxt<'_>, def_id: LocalDefId, loose: bool) ->
         }
     }
     None
-}
-
-/// An associated type's name, as `` `T` ``, or what the compiler made it
-/// for: the hidden type of an `async fn` or of a method returning `impl
-/// Trait`, which has no name.
-fn assoc_type_name(item: &mty::AssocItem) -> String {
-    match item.opt_name() {
-        Some(name) if !item.is_impl_trait_in_trait() => format!("`{name}`"),
-        _ => "of an `async fn` or of a method returning `impl Trait`".to_string(),
-    }
 }
 
 /// `Sized`, `MetaSized` or `PointeeSized`.
@@ -2057,6 +2292,9 @@ pub(crate) fn trait_impl_problem(
     if tcx.impl_polarity(def_id) != mty::ImplPolarity::Positive {
         return refuse("trait-impl", "a negative trait implementation".to_string());
     }
+    if let Some(problem) = associated_types::impl_problem(tcx, def_id, loose) {
+        return Some(problem);
+    }
     if tcx
         .generics_of(def_id)
         .own_params
@@ -2080,18 +2318,6 @@ pub(crate) fn trait_impl_problem(
         })
     {
         return refuse("generics", format!("a trait implementation bound `{pred}`"));
-    }
-    for item in tcx.associated_items(def_id).in_definition_order() {
-        match item.kind {
-            mty::AssocKind::Fn { .. } => {}
-            mty::AssocKind::Type { .. } => {
-                return refuse(
-                    "trait-impl",
-                    format!("the associated type {}", assoc_type_name(item)),
-                )
-            }
-            mty::AssocKind::Const { .. } => {}
-        }
     }
     None
 }

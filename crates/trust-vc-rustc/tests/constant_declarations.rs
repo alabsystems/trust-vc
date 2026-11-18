@@ -145,15 +145,85 @@ proof fn test() { assert(VALUE == 3); }
 }
 
 #[test]
-fn executable_constants_require_initializer_and_read_semantics() {
+fn executable_constants_keep_their_exec_read_mode() {
     for (suffix, declaration) in [("exec", "exec const VALUE: u64 = 3;")] {
         let run = common::run(
             &format!("constant_unrepresented_{suffix}"),
             &format!("verus! {{ {declaration} proof fn test() {{ assert(VALUE == 3); }} }}"),
             &[],
         );
-        assert_eq!(run.outcome(), "refused", "{run:?}");
+        assert_eq!(run.outcome(), "verus-rejected", "{run:?}");
+        assert!(
+            run.errors()
+                .iter()
+                .any(|error| error.message == "cannot read const with mode exec"),
+            "{run:?}"
+        );
     }
+}
+
+#[test]
+fn constant_mode_rejection_preserves_earlier_errors_and_other_refusals() {
+    for (name, source, message) in [
+        (
+            "constant_mode_rust_to_vir_first",
+            "verus! { exec const VALUE: u64 = 3; proof fn test() { assert(VALUE == 3); no_method_body() } }",
+            "no statements are allowed before no_method_body()",
+        ),
+        (
+            "constant_mode_well_formed_first",
+            "verus! { exec const VALUE: u64 = 3; proof fn main() { assert(VALUE == 3); } }",
+            "`main` function should be #[verifier::exec]",
+        ),
+    ] {
+        let run = common::run(name, source, &[]);
+        assert_eq!(run.exit, 1, "{run:?}");
+        assert_eq!(run.outcome(), "verus-rejected", "{run:?}");
+        assert_eq!(run.errors().len(), 1, "{run:?}");
+        assert_eq!(run.errors()[0].message, message, "{run:?}");
+        assert!(
+            run.record["functions"].as_array().unwrap().iter().all(|row| {
+                row["verdict"] != "verified"
+                    && row["sites_proved"].is_null()
+                    && row["sites_failed"].is_null()
+            }),
+            "{run:?}"
+        );
+    }
+    let run = common::run(
+        "constant_mode_unknown_external_stays_refused",
+        "verus! { exec const VALUE: u64 = 3; proof fn test() { let _ = core::mem::size_of::<u8>(); assert(VALUE == 3); } }",
+        &[],
+    );
+    assert_eq!(run.exit, 1, "{run:?}");
+    assert_eq!(run.outcome(), "refused", "{run:?}");
+    assert_eq!(run.errors().len(), 1, "{run:?}");
+    assert!(
+        run.errors()[0]
+            .message
+            .starts_with("trust-vc refused: external-call: "),
+        "{run:?}"
+    );
+    assert!(
+        run.errors()[0]
+            .message
+            .ends_with(" is not a Verus function of this crate"),
+        "{run:?}"
+    );
+    let functions = run.record["functions"].as_array().unwrap();
+    let test: Vec<_> = functions
+        .iter()
+        .filter(|row| row["def_path"] == "test")
+        .collect();
+    assert_eq!(test.len(), 1, "{run:?}");
+    assert_eq!(test[0]["verdict"], "refused", "{run:?}");
+    assert_eq!(test[0]["tag"], "external-call", "{run:?}");
+    assert!(
+        functions.iter().all(|row| row["verdict"] != "verified"
+            && row["sites_proved"].is_null()
+            && row["sites_failed"].is_null()),
+        "{run:?}"
+    );
 }
 
 #[test]
@@ -249,4 +319,381 @@ fn associated_constant_instances_preserve_native_generic_substitution() {
         assert!(run.raw.is_empty(), "{run:?}");
         assert_eq!(run.record["erase_exit"], 0, "{run:?}");
     }
+}
+
+fn executable_value_pair(label: &str, source: &str, claim: &str, twin: &str) {
+    assert_eq!(source.matches(claim).count(), 1);
+    for (suffix, source, outcome) in [
+        ("true", source.to_owned(), "checked"),
+        ("false", source.replace(claim, twin), "verification-failed"),
+    ] {
+        let run = common::run(&format!("exec_value_{label}_{suffix}"), &source, &[]);
+        assert_eq!(run.outcome(), outcome, "{run:?}");
+        assert!(run.raw.is_empty(), "{run:?}");
+        let functions = run.record["functions"]
+            .as_array()
+            .expect("actual function records");
+        assert!(functions.len() >= 2, "{run:?}");
+        if outcome == "checked" {
+            assert!(
+                functions
+                    .iter()
+                    .all(|function| function["verdict"] == "verified"),
+                "{run:?}"
+            );
+        } else {
+            assert_eq!(run.errors().len(), 1, "{run:?}");
+            assert_eq!(run.errors()[0].message, "assertion failed");
+        }
+    }
+}
+
+// Only the two fixtures with a genuine const-fn pair use this expectation.
+// Its erased native function is external; the verification proxy, initializer
+// and consumer must each have the exact independently checked result below.
+fn const_function_value_pair(
+    label: &str,
+    source: &str,
+    claim: &str,
+    twin: &str,
+    function: &str,
+    constant_kind: &str,
+    constant_sites: u64,
+) {
+    assert_eq!(source.matches(claim).count(), 1);
+    let line = |prefix: &str| {
+        let lines: Vec<_> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with(prefix))
+            .map(|(index, _)| common::PRELUDE.lines().count() + index + 1)
+            .collect();
+        assert_eq!(lines.len(), 1);
+        lines[0]
+    };
+    let function_line = line(&format!("const fn {function}"));
+    let constant_line = line(if constant_kind == "Const" {
+        "exec const VALUE:"
+    } else {
+        assert_eq!(
+            constant_kind,
+            "Static { safety: Safe, mutability: Not, nested: false }"
+        );
+        "exec static VALUE:"
+    });
+    let consumer_line = line("fn test()");
+    for (suffix, source, outcome) in [
+        ("true", source.to_owned(), "checked"),
+        ("false", source.replace(claim, twin), "verification-failed"),
+    ] {
+        let run = common::run(&format!("exec_value_{label}_{suffix}"), &source, &[]);
+        assert_eq!(run.outcome(), outcome, "{run:?}");
+        assert_eq!(run.exit, if suffix == "true" { 0 } else { 1 }, "{run:?}");
+        assert_eq!(run.record["erase_exit"], 0, "{run:?}");
+        assert_eq!(run.record["refused"], false, "{run:?}");
+        assert!(run.record["crate_refusals"].as_array().unwrap().is_empty());
+        assert!(run.raw.is_empty(), "{run:?}");
+        let functions = run.record["functions"].as_array().unwrap();
+        assert_eq!(functions.len(), 4, "{run:?}");
+        for (name, kind, line, verdict, proved, failed) in [
+            (function, "Fn", function_line, "verified", 1, 0),
+            (
+                "VALUE",
+                constant_kind,
+                constant_line,
+                "verified",
+                constant_sites,
+                0,
+            ),
+            (
+                "test",
+                "Fn",
+                consumer_line,
+                if suffix == "true" {
+                    "verified"
+                } else {
+                    "failed"
+                },
+                if suffix == "true" { 1 } else { 0 },
+                if suffix == "true" { 0 } else { 1 },
+            ),
+        ] {
+            let rows: Vec<_> = functions
+                .iter()
+                .filter(|row| row["def_path"] == name && row["verdict"] == verdict)
+                .collect();
+            assert_eq!(rows.len(), 1, "{run:?}");
+            let row = rows[0];
+            assert_eq!(row["kind"], kind, "{run:?}");
+            assert_eq!(row["file"], run.record["entry_file"], "{run:?}");
+            assert_eq!(row["lines"], serde_json::json!([line, line]), "{run:?}");
+            assert!(row["tag"].is_null(), "{run:?}");
+            assert_eq!(row["sites_proved"], proved, "{run:?}");
+            assert_eq!(row["sites_failed"], failed, "{run:?}");
+        }
+        let counterpart: Vec<_> = functions
+            .iter()
+            .filter(|row| row["def_path"] == function && row["verdict"] == "external")
+            .collect();
+        assert_eq!(counterpart.len(), 1, "{run:?}");
+        let counterpart = counterpart[0];
+        assert_eq!(counterpart["kind"], "Fn", "{run:?}");
+        assert_eq!(counterpart["file"], run.record["entry_file"], "{run:?}");
+        assert_eq!(
+            counterpart["lines"],
+            serde_json::json!([function_line, function_line]),
+            "{run:?}"
+        );
+        for field in ["tag", "sites_proved", "sites_failed"] {
+            assert!(counterpart[field].is_null(), "{run:?}");
+        }
+        if suffix == "true" {
+            assert!(run.errors().is_empty(), "{run:?}");
+        } else {
+            assert_eq!(run.errors().len(), 1, "{run:?}");
+            assert_eq!(run.errors()[0].message, "assertion failed");
+        }
+    }
+}
+
+#[test]
+fn executable_constant_const_function_and_checked_self_postcondition_compose() {
+    const_function_value_pair(
+        "const_fn",
+        r#"verus! {
+const fn one() -> (ret: u64) ensures ret == 1 { 1 }
+exec const VALUE: u64 ensures VALUE == 2 { 1 + one() }
+fn test() { let value = VALUE; assert(value == 2); }
+}"#,
+        "value == 2",
+        "value == 3",
+        "one",
+        "Const",
+        2,
+    );
+}
+
+#[test]
+fn static_contract_type_facts_and_stable_shared_reads_compose() {
+    executable_value_pair(
+        "static",
+        r#"verus! {
+exec static VALUE: u64 ensures 2 <= VALUE && VALUE <= 4 { 3 }
+fn test() {
+    let first = &VALUE;
+    let second = &VALUE;
+    assert(first == second);
+    let copy = VALUE;
+    assert(copy <= 4);
+}
+}"#,
+        "copy <= 4",
+        "copy < 2",
+    );
+    executable_value_pair(
+        "static_types",
+        r#"verus! {
+exec static VALUE: u8 = 3;
+fn test() { let value = VALUE; assert(value <= 255); }
+}"#,
+        "value <= 255",
+        "value > 255",
+    );
+}
+
+#[test]
+fn executable_reads_export_no_initializer_equation_or_cross_read_freshness() {
+    for (label, declaration) in [
+        ("exec_fresh", "exec const VALUE: u64 ensures true { 3 }"),
+        (
+            "static_opaque_value",
+            "exec static VALUE: u64 ensures true { 3 }",
+        ),
+    ] {
+        let source = format!(
+            "verus! {{ {declaration} fn test() {{ let value = VALUE; assert(value == 3); }} }}"
+        );
+        let run = common::run(label, &source, &[]);
+        assert_eq!(run.outcome(), "verification-failed", "{run:?}");
+        assert_eq!(run.errors().len(), 1, "{run:?}");
+    }
+    let run = common::run(
+        "exec_const_reads_are_fresh",
+        r#"verus! {
+exec const VALUE: u64 ensures true { 3 }
+fn test() { let first = VALUE; let second = VALUE; assert(first == second); }
+}"#,
+        &[],
+    );
+    assert_eq!(run.outcome(), "verification-failed", "{run:?}");
+    assert_eq!(run.errors().len(), 1, "{run:?}");
+}
+
+#[test]
+fn executable_initializers_verify_their_actual_return_and_proof_effects() {
+    let run = common::run(
+        "exec_const_wrong_return",
+        r#"verus! {
+exec const VALUE: u64 ensures VALUE == 2 { 3 }
+}"#,
+        &[],
+    );
+    assert_eq!(run.outcome(), "verification-failed", "{run:?}");
+    assert_eq!(run.errors().len(), 1, "{run:?}");
+    for kind in ["const", "static"] {
+        let source = format!(
+            "verus! {{ exec {kind} VALUE: u64 ensures VALUE == 3 {{ assert(false); 3 }} }}"
+        );
+        let run = common::run(&format!("exec_{kind}_proof_effect"), &source, &[]);
+        assert_eq!(run.outcome(), "verification-failed", "{run:?}");
+        assert!(
+            run.errors()
+                .iter()
+                .any(|error| error.message == "assertion failed"),
+            "{run:?}"
+        );
+    }
+}
+
+#[test]
+fn native_const_legality_and_ghost_read_legality_stay_hard() {
+    let run = common::run(
+        "const_fn_native_legality",
+        "verus! { fn non_const() {} const fn invalid() { non_const() } }",
+        &[],
+    );
+    assert_eq!(run.outcome(), "erase-rejected", "{run:?}");
+    assert_eq!(run.exit, 1, "{run:?}");
+    assert_eq!(run.record["erase_exit"], 1, "{run:?}");
+    assert_eq!(run.errors().len(), 1, "{run:?}");
+    assert_eq!(run.errors()[0].code.as_deref(), Some("E0015"), "{run:?}");
+    assert_eq!(
+        run.errors()[0].message,
+        "cannot call non-const function `non_const` in constant functions",
+        "{run:?}"
+    );
+    assert!(
+        run.record["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| {
+                row["verdict"] != "verified"
+                    && row["sites_proved"].is_null()
+                    && row["sites_failed"].is_null()
+            }),
+        "{run:?}"
+    );
+    let run = common::run(
+        "dual_cannot_call_const_fn",
+        "verus! { const fn one() -> u64 { 1 } const VALUE: u64 = one(); }",
+        &[],
+    );
+    assert_eq!(run.outcome(), "verus-rejected", "{run:?}");
+    assert!(
+        run.errors()
+            .iter()
+            .any(|error| error.message.contains("with mode exec")),
+        "{run:?}"
+    );
+    for kind in ["const", "static"] {
+        let source = format!(
+            "verus! {{ exec {kind} VALUE: u64 = 3; proof fn test() {{ let value = VALUE; }} }}"
+        );
+        let run = common::run(&format!("exec_{kind}_ghost_read"), &source, &[]);
+        assert_eq!(run.outcome(), "verus-rejected", "{run:?}");
+        assert!(
+            run.errors()
+                .iter()
+                .any(|error| error.message == format!("cannot read {kind} with mode exec")),
+            "{run:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unowned_native_const_function_does_not_license_a_dual_initializer() {
+    let run = common::run(
+        "dual_native_const_fn_is_not_an_owned_declaration",
+        "const fn one() -> u64 { 1 } verus! { const VALUE: u64 = one(); }",
+        &[],
+    );
+    assert_eq!(run.exit, 1, "{run:?}");
+    assert_eq!(run.outcome(), "refused", "{run:?}");
+    assert!(run.record["erase_exit"].is_null(), "{run:?}");
+    assert_eq!(run.errors().len(), 1, "{run:?}");
+    assert_eq!(
+        run.errors()[0].message,
+        "trust-vc refused: constant-initializer: a function call in a dual constant initializer",
+        "{run:?}"
+    );
+    let functions = run.record["functions"].as_array().unwrap();
+    assert_eq!(functions.len(), 2, "{run:?}");
+    for (name, verdict, tag) in [
+        ("one", "external", serde_json::Value::Null),
+        (
+            "VALUE",
+            "refused",
+            serde_json::json!("constant-initializer"),
+        ),
+    ] {
+        let rows: Vec<_> = functions
+            .iter()
+            .filter(|row| row["def_path"] == name)
+            .collect();
+        assert_eq!(rows.len(), 1, "{run:?}");
+        let row = rows[0];
+        assert_eq!(row["verdict"], verdict, "{run:?}");
+        assert_eq!(row["tag"], tag, "{run:?}");
+        assert!(row["sites_proved"].is_null(), "{run:?}");
+        assert!(row["sites_failed"].is_null(), "{run:?}");
+    }
+}
+
+#[test]
+fn native_generic_const_instance_keeps_static_contract_and_false_consumer() {
+    const_function_value_pair(
+        "generic_const_instance",
+        r#"verus! {
+const fn identity<T: Copy>(x: T) -> (ret: T) ensures ret == x { x }
+exec static VALUE: u8 ensures VALUE == 3 { identity::<u8>(3) }
+fn test() { let value = VALUE; assert(value == 3); }
+}"#,
+        "value == 3",
+        "value == 4",
+        "identity",
+        "Static { safety: Safe, mutability: Not, nested: false }",
+        1,
+    );
+    let run = common::run(
+        "static_generic_const_bad_body",
+        r#"verus! {
+const fn identity<T: Copy>(x: T) -> (ret: T) ensures ret != x { x }
+exec static VALUE: u8 ensures VALUE == 3 { identity::<u8>(3) }
+}"#,
+        &[],
+    );
+    assert_eq!(run.outcome(), "verification-failed", "{run:?}");
+    assert!(
+        run.errors()
+            .iter()
+            .any(|error| error.message == "postcondition not satisfied"),
+        "{run:?}"
+    );
+}
+
+#[test]
+fn static_initializer_does_not_invent_a_native_copy_bound() {
+    let run = common::run(
+        "static_generic_const_missing_copy",
+        r#"verus! {
+struct NotCopy { value: u8 }
+const fn identity<T: Copy>(x: T) -> (ret: T) ensures ret == x { x }
+exec static VALUE: u8 ensures VALUE == 3 {
+    let value = identity::<NotCopy>(NotCopy { value: 3 }); value.value
+}
+}"#,
+        &[],
+    );
+    assert_eq!(run.outcome(), "front-end-rejected", "{run:?}");
 }

@@ -42,6 +42,45 @@ struct Nominal<'facts, 'tcx> {
     originals: Vec<Original<'tcx>>,
 }
 
+/// Rejection only: these current native and retained policy shapes cannot
+/// pass the existing capture below. No successful result is retained, and
+/// this check neither reads files nor constructs a source-reader capability.
+fn unsupported_shape(
+    tcx: TyCtxt<'_>,
+    owner: Option<LocalDefId>,
+    key: NativeKey,
+    policy: Option<&declaration_policy::OwnedPolicy>,
+) -> Option<&'static str> {
+    let Some(owner) = owner else {
+        return Some("the source opaque carrier has no original local owner");
+    };
+    if declaration_native::key(tcx, owner.to_def_id()) != key
+        || tcx.def_kind(owner) != DefKind::Struct
+        || !tcx.visibility(owner).is_public()
+    {
+        return Some("the original source opaque owner, binder or native policy is unsupported");
+    }
+    let Some(policy) = policy else {
+        return Some("the native nominal policy is Unknown");
+    };
+    let Some(nominal) = policy.nominal() else {
+        return Some("the abstract nominal carrier lacks an actual Sized declaration");
+    };
+    if !nominal.known_sized() {
+        return Some("the abstract nominal carrier lacks an actual Sized declaration");
+    }
+    if policy.owner() != key
+        || nominal.mode() != trust_vc_vcir::Mode::Exec
+        || !nominal.external_body()
+        || policy.parameters().len() != 1
+        || policy.parameters()[0].index != 0
+        || policy.parameters()[0].has_default
+    {
+        return Some("the original source opaque owner, binder or native policy is unsupported");
+    }
+    None
+}
+
 /// The only constructor requires a successful transaction's borrowed native
 /// scope. Neither an OwnedHelpers map nor copied keys can recreate this value.
 pub(in crate::reader) struct SourceNominals<'facts, 'tcx> {
@@ -69,6 +108,18 @@ impl<'facts, 'tcx> SourceNominals<'facts, 'tcx> {
         owners: &BTreeMap<NativeKey, LocalDefId>,
         key: NativeKey,
     ) -> Result<Self, String> {
+        // Reject only definitely unsupported shapes under the same live
+        // context/map/Arc join. Every remaining candidate still executes the
+        // original full physical validation, native joins and final checks.
+        scope.current(tcx, facts.inputs, facts.common, facts.helpers)?;
+        if let Some(reason) = unsupported_shape(
+            tcx,
+            owners.get(&key).copied(),
+            key,
+            facts.policies.get(&key),
+        ) {
+            return Err(reason.into());
+        }
         scope.revalidate(tcx, facts.inputs, facts.common, facts.helpers)?;
         facts.erase.file.read()?;
         facts.erase.target_metadata.revalidate()?;
@@ -269,3 +320,6 @@ impl<'facts, 'tcx> SourceNominals<'facts, 'tcx> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -43,8 +43,13 @@ pub(super) fn check(cx: &Cx<'_>, krate: &VcCrate) -> Result<(), Refusal> {
                 )
             })?;
         if ir.class != Some(trust_vc_vcir::wf::GhostTailModeClass::from(mode)) {
-            return Err(failure(
-                "the raw IR ghost-tail mode differs from its original native expression",
+            return Err(Refusal::new(
+                "ghost-tail-modes",
+                format!(
+                    "the raw IR ghost-tail mode differs from its original native expression: native={mode:?}, raw={:?}, function={:?}, span={:?}",
+                    ir.class, native.function, native.span,
+                ),
+                cx.span_of(native.span).unwrap_or(rustc_span::DUMMY_SP),
             ));
         }
     }

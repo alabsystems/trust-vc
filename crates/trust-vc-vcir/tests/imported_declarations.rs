@@ -36,6 +36,7 @@ fn imported(number: u64, result: Ty) -> FnDecl {
         mode: Mode::Spec,
         role: FnRole::Imported,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         locals: vec![
             local(result, LocalKind::Return),
@@ -98,6 +99,7 @@ fn source(goal: Expr) -> VcCrate {
     krate.adts.push(AdtDecl {
         id: AdtId(DefHash::new(10, 1)),
         name: "Abstract".into(),
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         kind: AdtKind::Opaque,
         variants: vec![],

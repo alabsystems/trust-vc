@@ -47,6 +47,7 @@ fn proof(ty: Ty, mut statements: Vec<Stmt>) -> FnDecl {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             LocalDecl {

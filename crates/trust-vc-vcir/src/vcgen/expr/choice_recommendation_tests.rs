@@ -72,6 +72,7 @@ fn source(impossible: bool, hint_domain: bool) -> VcCrate {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             local("result", Ty::int(), LocalKind::Return),
@@ -108,6 +109,7 @@ fn source(impossible: bool, hint_domain: bool) -> VcCrate {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             local("result", Ty::Unit, LocalKind::Return),
@@ -221,9 +223,9 @@ fn actual_choice_hint_and_ground_witness_emit_a_negative_exists_instance() {
 fn source_ground_witness_proves_choice_existence_and_impossible_twin_refutes() {
     for impossible in [false, true] {
         let krate = source(impossible, false);
-        let checks = crate::vcgen::Recommendations::new(&krate)
+        let checks = crate::vcgen::GenerationSession::new(&krate)
             .unwrap()
-            .function(id(3))
+            .recommendations(id(3))
             .unwrap();
         assert_eq!(checks.len(), 1);
         assert!(matches!(
@@ -249,9 +251,9 @@ fn source_ground_witness_proves_choice_existence_and_impossible_twin_refutes() {
 #[test]
 fn choice_hint_only_domains_are_not_auxiliary_recommendation_obligations() {
     let krate = source(false, true);
-    let checks = crate::vcgen::Recommendations::new(&krate)
+    let checks = crate::vcgen::GenerationSession::new(&krate)
         .unwrap()
-        .function(id(3))
+        .recommendations(id(3))
         .unwrap();
     assert_eq!(checks.len(), 1);
     assert!(

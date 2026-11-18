@@ -18,6 +18,7 @@ pub(super) fn function(number: u64, result: Ty) -> FnDecl {
         mode: Mode::Exec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![LocalDecl {
             name: "result".into(),

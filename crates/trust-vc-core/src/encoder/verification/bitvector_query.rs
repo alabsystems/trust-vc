@@ -34,6 +34,7 @@ impl Builder<'_> {
     fn term(&mut self, term: &Term) -> Result<AyTerm, String> {
         match term {
             Term::Shared(term) => self.term(term),
+            Term::Euclidean(operation) => self.term(operation.expanded()),
             Term::Bool(value) => Ok(self.encoder.solver.bool_const(*value)),
             Term::Bits { value, width } => {
                 let magnitude = BigInt::from(value.magnitude);
@@ -199,6 +200,10 @@ pub(super) fn build(
     cores: bool,
 ) -> Result<(AYEncoder, HashMap<String, String>), String> {
     query.validate().map_err(str::to_owned)?;
+    // A failed/unsupported bounded rewrite retains the original admitted
+    // question. Native AY still establishes every resulting verdict.
+    let rewritten = trust_vc_bitvector::congruence::simplify(query);
+    let query = rewritten.as_ref().unwrap_or(query);
     let budget = effective_conflict_budget(limits.conflicts.map(ConflictBudget::Bounded));
     let mut encoder =
         AYEncoder::with_logic(ay_dpll::api::Logic::All).with_limits(limits.wall_ms, budget, 512);

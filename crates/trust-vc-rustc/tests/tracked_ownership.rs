@@ -5,6 +5,8 @@
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
 mod common;
+#[path = "tracked_ownership/enums.rs"]
+mod enums;
 
 fn checked(name: &str, source: &str) {
     let run = common::run(name, source, &[]);
@@ -22,7 +24,7 @@ fn moved(name: &str, source: &str) {
     let errors = run.errors();
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert_eq!(errors[0].code.as_deref(), Some("E0382"));
-    assert!(errors[0].message.contains("use of moved value"));
+    assert!(errors[0].message.contains("moved value"));
     assert!(run.record["functions"]
         .as_array()
         .unwrap()
@@ -237,4 +239,80 @@ proof fn check<A>(tracked a: A) { consume(a); consume(a); }
 }"#,
     );
     assert_refused(common::run_raw("owned_injected_mir", &source, &[]));
+}
+
+#[test]
+fn original_record_construction_and_partial_moves_reach_native_borrowck() {
+    pair(
+        "owned_original_record_fields",
+        r#"verus! {
+struct Pair<A> { left: A, right: A }
+proof fn consume<A>(tracked a: A) {}
+proof fn check<A>(tracked a: A, tracked b: A) {
+    let tracked pair = Pair { right: b, left: a };
+    consume(pair.left);
+    consume(pair.right);
+}
+}"#,
+        "    consume(pair.right);",
+        "    consume(pair.left);",
+    );
+}
+
+#[test]
+fn original_tuple_struct_constructor_and_nested_fields_retain_moves() {
+    pair(
+        "owned_original_nested_fields",
+        r#"verus! {
+struct Pair<A>(A, A);
+struct Outer<A> { pair: Pair<A> }
+proof fn consume<A>(tracked a: A) {}
+proof fn check<A>(tracked a: A, tracked b: A) {
+    let tracked outer = Outer { pair: Pair(a, b) };
+    consume(outer.pair.0);
+    consume(outer.pair.1);
+}
+}"#,
+        "    consume(outer.pair.1);",
+        "    consume(outer.pair.0);",
+    );
+}
+
+#[test]
+fn original_partial_move_cannot_be_followed_by_a_whole_struct_move() {
+    pair(
+        "owned_original_partial_then_whole",
+        r#"verus! {
+struct Pair<A> { left: A, right: A }
+proof fn consume<A>(tracked a: A) {}
+proof fn check<A>(tracked pair: Pair<A>) {
+    consume(pair.left);
+    consume(pair.right);
+}
+}"#,
+        "    consume(pair.right);",
+        "    consume(pair);",
+    );
+}
+
+#[test]
+fn identity_struct_slice_cannot_erase_a_field_or_skip_the_native_check() {
+    refused(
+        "owned_original_erased_field",
+        r#"verus! {
+struct Pair<A> { left: A, ghost right: A }
+proof fn consume<A>(tracked a: A) {}
+proof fn check<A>(tracked pair: Pair<A>) { consume(pair.left); }
+}"#,
+        &[],
+    );
+    refused(
+        "owned_original_field_no_lifetime",
+        r#"verus! {
+struct Pair<A> { left: A, right: A }
+proof fn consume<A>(tracked a: A) {}
+proof fn check<A>(tracked pair: Pair<A>) { consume(pair.left); consume(pair.left); }
+}"#,
+        &["--no-lifetime"],
+    );
 }

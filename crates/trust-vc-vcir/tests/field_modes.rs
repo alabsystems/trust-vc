@@ -201,7 +201,7 @@ fn field_metadata_survives_pretty_rendering() {
     let krate = field_read(Mode::Spec, Mode::Spec);
     clean(&krate);
     assert!(pretty::crate_to_string(&krate).contains("spec selected:"));
-    assert_eq!(SCHEMA, "trust-vc.vcir@11");
+    assert_eq!(SCHEMA, "trust-vc.vcir@16");
 }
 
 #[test]

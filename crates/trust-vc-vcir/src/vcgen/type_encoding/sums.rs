@@ -46,6 +46,39 @@ impl Vocabulary {
         arity: usize,
         variants: Vec<Vec<TypeRecipe>>,
     ) -> Option<()> {
+        self.register_sum_inner(id, arity, variants, false)
+    }
+
+    pub(crate) fn register_sum_with_work(
+        &mut self, id: crate::AdtId, arity: usize, variants: Vec<Vec<TypeRecipe>>,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<()>> {
+        super::super::inline_work::items(work, 1 + variants.len(), span)?;
+        for fields in &variants {
+            super::super::inline_work::items(work, fields.len(), span)?;
+            let mut pending: Vec<_> = fields.iter().collect();
+            while let Some(recipe) = pending.pop() {
+                super::super::inline_work::items(work, 1, span)?;
+                match recipe {
+                    TypeRecipe::Tuple(args) | TypeRecipe::Opaque(_, args) | TypeRecipe::Struct(_, args)
+                    | TypeRecipe::Enum(_, args) | TypeRecipe::Projection(_, args) => {
+                        super::super::inline_work::items(work, args.len(), span)?;
+                        pending.extend(args);
+                    }
+                    TypeRecipe::SharedRef(inner) | TypeRecipe::MutRef(inner) => {
+                        super::super::inline_work::items(work, 1, span)?;
+                        pending.push(inner);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(self.register_sum_inner(id, arity, variants, true))
+    }
+
+    fn register_sum_inner(
+        &mut self, id: crate::AdtId, arity: usize, variants: Vec<Vec<TypeRecipe>>, projected: bool,
+    ) -> Option<()> {
         if arity > 64 || variants.is_empty() || variants.len() > 64 {
             return None;
         }
@@ -54,7 +87,8 @@ impl Vocabulary {
         for fields in &variants {
             left = left.checked_sub(1)?;
             for field in fields {
-                super::products::field_recipe(field, family, arity, &mut left)?;
+                super::products::field_recipe_with_projections(field, family, arity, &mut left,
+                    &|id| projected.then(|| self.projection_arities.get(&id).copied()).flatten())?;
             }
         }
         if let Some(index) = self.sums.families.get(&id) {
@@ -144,7 +178,37 @@ impl Vocabulary {
         variant: u32,
         fields: Vec<Term>,
     ) -> Option<Term> {
+        self.construct_sum_inner(id, args, variant, fields, false)
+    }
+
+    pub(crate) fn construct_sum_with_work(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        fields: Vec<Term>,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<Term>> {
+        super::super::inline_work::items(work, 1 + fields.len(), span)?;
+        for argument in args { for term in argument.terms_ref() {
+            super::super::inline_work::term(work, term, 1, span)?;
+        } }
+        Ok(self.construct_sum_inner(id, args, variant, fields, true))
+    }
+
+    fn construct_sum_inner(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        fields: Vec<Term>,
+        projected: bool,
+    ) -> Option<Term> {
         let schema = self.sums.schemas.get(*self.sums.families.get(&id)?)?;
+        if !projected && (schema.variants.iter().flatten().any(TypeRecipe::has_projection)
+            || args.iter().any(|arg| arg.terms_ref().iter().any(|term| Self::has_projection_term(term, &self.projection_symbols)))) {
+            return None;
+        }
         let variant = variant as usize;
         if args.len() != schema.arity
             || fields.len() != schema.variants.get(variant)?.len()
@@ -167,7 +231,38 @@ impl Vocabulary {
         variant: u32,
         value: Term,
     ) -> Option<Term> {
+        self.test_sum_inner(id, args, variant, value, false)
+    }
+
+    pub(crate) fn test_sum_with_work(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        value: Term,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<Term>> {
+        super::super::inline_work::items(work, 1, span)?;
+        for argument in args { for term in argument.terms_ref() {
+            super::super::inline_work::term(work, term, 1, span)?;
+        } }
+        super::super::inline_work::term(work, &value, 1, span)?;
+        Ok(self.test_sum_inner(id, args, variant, value, true))
+    }
+
+    fn test_sum_inner(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        value: Term,
+        projected: bool,
+    ) -> Option<Term> {
         let schema = self.sums.schemas.get(*self.sums.families.get(&id)?)?;
+        if !projected && (schema.variants.iter().flatten().any(TypeRecipe::has_projection)
+            || args.iter().any(|arg| arg.terms_ref().iter().any(|term| Self::has_projection_term(term, &self.projection_symbols)))) {
+            return None;
+        }
         if args.len() != schema.arity || value.sort() != Sort::Poly {
             return None;
         }
@@ -187,7 +282,40 @@ impl Vocabulary {
         field: u32,
         value: Term,
     ) -> Option<Term> {
+        self.project_sum_inner(id, args, variant, field, value, false)
+    }
+
+    pub(crate) fn project_sum_with_work(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        field: u32,
+        value: Term,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<Term>> {
+        super::super::inline_work::items(work, 1, span)?;
+        for argument in args { for term in argument.terms_ref() {
+            super::super::inline_work::term(work, term, 1, span)?;
+        } }
+        super::super::inline_work::term(work, &value, 1, span)?;
+        Ok(self.project_sum_inner(id, args, variant, field, value, true))
+    }
+
+    fn project_sum_inner(
+        &mut self,
+        id: crate::AdtId,
+        args: &[TypeArgument],
+        variant: u32,
+        field: u32,
+        value: Term,
+        projected: bool,
+    ) -> Option<Term> {
         let schema = self.sums.schemas.get(*self.sums.families.get(&id)?)?;
+        if !projected && (schema.variants.iter().flatten().any(TypeRecipe::has_projection)
+            || args.iter().any(|arg| arg.terms_ref().iter().any(|term| Self::has_projection_term(term, &self.projection_symbols)))) {
+            return None;
+        }
         if args.len() != schema.arity || value.sort() != Sort::Poly {
             return None;
         }
@@ -256,8 +384,10 @@ impl Vocabulary {
             let mut field_types = Vec::new();
             let matching = Term::and([member.clone(), tags[variant].clone()]);
             for (field, recipe) in fields.iter().enumerate() {
-                let ty =
-                    self.argument_in(recipe, &TypeEnv::default(), Some((schema.family, &args)))?;
+                let empty = HashMap::new();
+                let argument = self.argument_in(recipe, &TypeEnv::default(), Some((schema.family, &args)),
+                    &mut |term, copies| (0..copies).all(|_| super::super::substitution::price(term, &empty, budget).is_some()))?;
+                let ty = self.canonical_argument(argument, budget)?;
                 let raw_value = self.call(
                     schema.raw[variant][field].clone(),
                     types.iter().cloned().chain([value.clone()]).collect(),

@@ -114,7 +114,7 @@ impl Gen<'_> {
                 .local(owner.local)
                 .ok_or_else(|| refusal("loop-state", "a loan owner has no declaration", span))?;
             let reference =
-                super::super::expr::project(self.ctx, &self.types, root, &local.ty, &owner, span)?;
+                super::super::expr::project(self.ctx, &self.types, root, &local.ty, &owner, span, Some(&self.static_work))?;
             let Val::Leaf(reference) = reference else {
                 return Err(refusal(
                     "loop-state",

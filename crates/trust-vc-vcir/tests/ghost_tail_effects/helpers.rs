@@ -27,6 +27,7 @@ pub(super) fn function(n: u64, mode: Mode, ty: Ty, result_mode: Mode) -> FnDecl 
         mode,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![local(ty, result_mode, LocalKind::Return)],
         params: vec![],

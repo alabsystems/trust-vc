@@ -74,12 +74,15 @@ impl<'tcx> AvailabilityFacts<'tcx> {
         }
     }
 
-    pub(crate) fn checked(
+    /// Constant-scope current native allocation join. Completed table/index
+    /// validation remains in checked(); indexed consumers use this only after
+    /// the canonical whole-body producer has validated those immutable rows.
+    pub(crate) fn in_context(
         &self,
         tcx: TyCtxt<'tcx>,
         definition: LocalDefId,
         owner: LocalDefId,
-    ) -> Result<&Self, String> {
+    ) -> Result<(), String> {
         if !std::ptr::eq(*tcx, *self.tcx)
             || definition != self.definition
             || owner != self.owner
@@ -103,25 +106,72 @@ impl<'tcx> AvailabilityFacts<'tcx> {
         {
             return Err("availability modes do not belong to the original body allocation".into());
         }
+        Ok(())
+    }
+
+    pub(crate) fn checked(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        definition: LocalDefId,
+        owner: LocalDefId,
+    ) -> Result<&Self, String> {
+        self.checked_using(tcx, definition, owner, |_| Ok(()))
+    }
+
+    pub(crate) fn checked_with_work(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        definition: LocalDefId,
+        owner: LocalDefId,
+        remaining: &mut usize,
+    ) -> Result<&Self, String> {
+        self.checked_using(tcx, definition, owner, |amount| {
+            *remaining = remaining
+                .checked_sub(amount)
+                .ok_or("availability validation exceeds the caller's shared work bound")?;
+            Ok(())
+        })
+    }
+
+    fn checked_using(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        definition: LocalDefId,
+        owner: LocalDefId,
+        mut charge: impl FnMut(usize) -> Result<(), String>,
+    ) -> Result<&Self, String> {
+        charge(1)?;
+        self.in_context(tcx, definition, owner)?;
+        let body = self
+            .body
+            .ok_or("availability modes have no original body")?;
+        // index::validate visits each physical row once. Price that exact
+        // traversal before entering it; the native joins below stay intact.
+        charge(self.uses.len())?;
         index::validate(&self.uses, &self.use_positions, |row| {
             (row.place, row.access)
         })?;
+        charge(self.arguments.len())?;
         index::validate(&self.arguments, &self.argument_positions, |row| {
             (row.call, row.position)
         })?;
+        charge(self.operations.len())?;
         index::validate(&self.operations, &self.operation_positions, |row| {
             row.expression
         })?;
+        charge(self.adjustments.len())?;
         index::validate(&self.adjustments, &self.adjustment_positions, |row| {
             row.expression
         })?;
         for (id, expected) in &self.nodes {
+            charge(1)?;
             if !matches!(tcx.hir_node(*id), hir::Node::Expr(actual) if std::ptr::eq(actual, *expected))
             {
                 return Err("an availability expression changed original HIR allocation".into());
             }
         }
         for usage in &self.uses {
+            charge(1)?;
             if !matches!(tcx.hir_node(usage.binding), hir::Node::Pat(_))
                 || usage.binding.owner != body.id().hir_id.owner
                 || !self.nodes.contains_key(&usage.place)
@@ -132,12 +182,15 @@ impl<'tcx> AvailabilityFacts<'tcx> {
             self.use_for(self.source(usage.place)?, usage.access)?;
         }
         for argument in &self.arguments {
+            charge(1)?;
             self.argument_for(self.source(argument.call)?, argument.position)?;
         }
         for operation in &self.operations {
+            charge(1)?;
             self.operation_for(self.source(operation.expression)?)?;
         }
         for adjustment in &self.adjustments {
+            charge(1)?;
             self.adjustment_for(self.source(adjustment.expression)?)?;
         }
         Ok(self)

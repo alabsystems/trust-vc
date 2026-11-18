@@ -40,6 +40,7 @@ fn function(n: u64, mode: Mode, result: Ty) -> FnDecl {
         mode,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![local(
             result,
@@ -299,3 +300,9 @@ fn only_spec_functions_and_ghost_declarations_can_be_marked_prophetic() {
 fn checked_imported_definition_cannot_change_the_signature_prophecy_effect() {
     declarations::checked_imported_definition_cannot_change_the_signature_prophecy_effect();
 }
+
+#[path = "prophecy_flow/checked_initializers.rs"]
+mod checked_initializers;
+
+#[path = "prophecy_flow/if_spec.rs"]
+mod if_spec;

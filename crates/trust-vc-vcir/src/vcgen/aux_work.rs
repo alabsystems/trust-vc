@@ -38,7 +38,7 @@ fn ty(work: &Cell<usize>, source: &Ty, span: SpanId, depth: usize) -> R<()> {
         ));
     }
     match source {
-        Ty::Tuple(children) | Ty::Adt(_, children) => {
+        Ty::Tuple(children) | Ty::Adt(_, children) | Ty::Projection(_, children) => {
             for child in children {
                 ty(work, child, span, depth + 1)?;
             }
@@ -202,6 +202,9 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
                 expression_at(work, value, span, depth + 1)?;
             }
         }
+        StmtKind::LetChecked { init, .. } => {
+            expression_at(work, init, span, depth + 1)?;
+        }
         StmtKind::BorrowMut {
             dest,
             place: target,
@@ -211,6 +214,10 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
             place(work, target, span)?;
         }
         StmtKind::Assign {
+            place: target,
+            value,
+        }
+        | StmtKind::AssignSpec {
             place: target,
             value,
         } => {
@@ -247,6 +254,11 @@ fn stmt(work: &Cell<usize>, source: &Stmt, span: SpanId, depth: usize) -> R<()> 
             }
         }
         StmtKind::If {
+            cond,
+            then_block,
+            else_block,
+        }
+        | StmtKind::IfSpec {
             cond,
             then_block,
             else_block,

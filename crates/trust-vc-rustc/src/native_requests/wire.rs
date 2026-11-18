@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-const VERSION: &[u8] = b"TVCARGV3";
+const VERSION: &[u8] = b"TVCARGV4";
 
 pub(super) fn write_blob(to: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     let size = u32::try_from(bytes.len()).map_err(|_| invalid("oversize frame"))?;
@@ -36,7 +36,11 @@ fn append(to: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
 }
 
 pub(super) fn encode_request(request: &Request) -> io::Result<Vec<u8>> {
-    if request.argv.is_empty() || request.argv.len() > MAX_ARGUMENTS || !request.cwd.is_absolute() {
+    if request.argv.is_empty()
+        || request.argv.len() > MAX_ARGUMENTS
+        || request.cargo.values.len() > MAX_ARGUMENTS
+        || !request.cwd.is_absolute()
+    {
         return Err(invalid("invalid native argv or cwd"));
     }
     let mut bytes = VERSION.to_vec();
@@ -54,6 +58,18 @@ pub(super) fn encode_request(request: &Request) -> io::Result<Vec<u8>> {
     bytes.push(u8::from(request.verusdoc.is_some()));
     if let Some(value) = &request.verusdoc {
         append(&mut bytes, value.as_bytes())?;
+    }
+    bytes.push(u8::from(request.macro_package_name.is_some()));
+    if let Some(value) = &request.macro_package_name {
+        append(&mut bytes, value.as_bytes())?;
+    }
+    bytes.extend_from_slice(&(request.cargo.values.len() as u32).to_be_bytes());
+    for (key, value) in &request.cargo.values {
+        append(&mut bytes, key.as_bytes())?;
+        bytes.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            append(&mut bytes, value.as_bytes())?;
+        }
     }
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(invalid("oversize native request"));
@@ -111,6 +127,30 @@ pub(super) fn decode_request(mut bytes: &[u8]) -> io::Result<Request> {
         1 => Some(field(&mut bytes)?),
         _ => return Err(invalid("unknown macro documentation context")),
     };
+    let macro_package_name = match take(&mut bytes, 1)?[0] {
+        0 => None,
+        1 => Some(field(&mut bytes)?),
+        _ => return Err(invalid("unknown macro package context")),
+    };
+    let count = u32::from_be_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
+    if count > MAX_ARGUMENTS {
+        return Err(invalid("oversize Cargo environment"));
+    }
+    let mut values = std::collections::BTreeMap::new();
+    for _ in 0..count {
+        let key = field(&mut bytes)?
+            .into_string()
+            .map_err(|_| invalid("non-Unicode Cargo environment key"))?;
+        let value = match take(&mut bytes, 1)?[0] {
+            0 => None,
+            1 => Some(field(&mut bytes)?),
+            _ => return Err(invalid("unknown Cargo value presence")),
+        };
+        if values.insert(key, value).is_some() {
+            return Err(invalid("duplicate Cargo environment key"));
+        }
+    }
+    let cargo = CargoContext { values };
     if !bytes.is_empty() {
         return Err(invalid("trailing native request fields"));
     }
@@ -119,5 +159,7 @@ pub(super) fn decode_request(mut bytes: &[u8]) -> io::Result<Request> {
         cwd,
         outputs,
         verusdoc,
+        cargo,
+        macro_package_name,
     })
 }

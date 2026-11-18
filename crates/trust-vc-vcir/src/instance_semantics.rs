@@ -11,18 +11,29 @@ use crate::{Body, Clause, Expr, ExprKind, FnDecl, FnId, FnRole, Mode, Ty};
 
 type Functions<'a> = HashMap<FnId, &'a FnDecl>;
 
+mod exec_contracts;
 mod types;
+pub(crate) use exec_contracts::matches as exec_contract_matches;
 mod unwind;
 use types::{canonical_call, type_work};
 pub(crate) use unwind::matches as unwind_matches;
 const MATCH_WORK: usize = 16_384;
 
+pub(crate) fn price_type(ty: &Ty, work: &mut usize) -> Option<()> {
+    types::type_work(ty, work, 0).then_some(())
+}
+
 /// Local structural substitution plus closure over all instance-call edges.
 /// Cycles survive only when every member has a matching substituted body.
 pub(crate) fn validated_origins(functions: &Functions<'_>) -> HashSet<FnId> {
+    validated_origins_with_definitions(functions, None)
+}
+
+pub(crate) fn validated_origins_with_definitions<'a>(functions: &Functions<'a>, definitions: Option<&crate::projection_types::Definitions<'a>>) -> HashSet<FnId> {
     let mut candidates = HashMap::new();
     for declaration in functions.values() {
-        if let Some(dependencies) = candidate(functions, declaration) {
+        let mut work = MATCH_WORK;
+        if let Some(dependencies) = candidate_with_definitions(functions, declaration, definitions, &mut work) {
             candidates.insert(declaration.id, dependencies);
         }
     }
@@ -47,6 +58,23 @@ pub(crate) fn validated_origins(functions: &Functions<'_>) -> HashSet<FnId> {
     candidates.into_keys().collect()
 }
 fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnId>> {
+    let mut budget = MATCH_WORK;
+    candidate_budgeted(functions, instance, &mut budget)
+}
+
+fn candidate_budgeted(
+    functions: &Functions<'_>,
+    instance: &FnDecl,
+    budget: &mut usize,
+) -> Option<HashSet<FnId>> {
+    candidate_with_definitions(functions, instance, None, budget)
+}
+
+fn candidate_with_definitions<'a>(
+    functions: &Functions<'a>, instance: &FnDecl,
+    definitions: Option<&crate::projection_types::Definitions<'a>>,
+    budget: &mut usize,
+) -> Option<HashSet<FnId>> {
     let origin = instance.attrs.instance.as_ref()?;
     let original = functions.get(&origin.declaration)?;
     if instance.role != FnRole::Instance
@@ -72,19 +100,28 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
     }
     let matcher = Matcher {
         functions,
+        definitions,
         arguments: &origin.type_args,
         checked_initializer: matches!(original.body, Body::Constant(_)),
         depth: Cell::new(0),
         parameters: None,
     };
-    let mut budget = MATCH_WORK;
     let mut dependencies = HashSet::new();
+    if original.copy_premises.len() != instance.copy_premises.len()
+        || original
+            .copy_premises
+            .iter()
+            .zip(&instance.copy_premises)
+            .any(|(formal, actual)| !matcher.ty(formal, actual, budget))
+    {
+        return None;
+    }
     for (formal, actual) in original.locals.iter().zip(&instance.locals) {
         if formal.kind != actual.kind
             || formal.mode != actual.mode
             || formal.mutable != actual.mutable
             || formal.prophecy != actual.prophecy
-            || !matcher.ty(&formal.ty, &actual.ty, &mut budget)
+            || !matcher.ty(&formal.ty, &actual.ty, budget)
         {
             return None;
         }
@@ -94,14 +131,14 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
         (&original.ensures, &instance.ensures),
         (&original.recommends, &instance.recommends),
     ] {
-        if !matcher.clauses(formal, actual, &mut budget, &mut dependencies) {
+        if !matcher.clauses(formal, actual, budget, &mut dependencies) {
             return None;
         }
     }
     if !matcher.exprs(
         &original.decreases,
         &instance.decreases,
-        &mut budget,
+        budget,
         &mut dependencies,
     ) || original.decreases_by != instance.decreases_by
     {
@@ -109,14 +146,14 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
     }
     match (&original.decreases_when, &instance.decreases_when) {
         (None, None) => {}
-        (Some(formal), Some(actual))
-            if matcher.expr(formal, actual, &mut budget, &mut dependencies) => {}
+        (Some(formal), Some(actual)) if matcher.expr(formal, actual, budget, &mut dependencies) => {
+        }
         _ => return None,
     }
     if !matcher.unwind(
         &original.unwind,
         &instance.unwind,
-        &mut budget,
+        budget,
         &mut dependencies,
     ) {
         return None;
@@ -125,7 +162,7 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
         (Body::None, Body::None) => {}
         (Body::Spec(formal), Body::Spec(actual))
         | (Body::Constant(formal), Body::Constant(actual))
-            if matcher.expr(formal, actual, &mut budget, &mut dependencies) => {}
+            if matcher.expr(formal, actual, budget, &mut dependencies) => {}
         _ => return None,
     }
     Some(dependencies)
@@ -133,6 +170,7 @@ fn candidate(functions: &Functions<'_>, instance: &FnDecl) -> Option<HashSet<FnI
 
 struct Matcher<'a, 'b> {
     functions: &'a Functions<'b>,
+    definitions: Option<&'a crate::projection_types::Definitions<'b>>,
     arguments: &'a [Ty],
     checked_initializer: bool,
     depth: Cell<u32>,
@@ -389,7 +427,9 @@ impl Matcher<'_, '_> {
         if !type_work(formal, budget, 0) || !type_work(actual, budget, 0) {
             return false;
         }
-        types::substituted(formal, self.arguments, actual)
+        if let Some(definitions) = self.definitions.filter(|definitions| !definitions.is_empty()) {
+            definitions.equal_substitution(formal, Some(self.arguments), actual, budget) == Some(true)
+        } else { types::substituted(formal, self.arguments, actual) }
     }
 
     fn clauses(

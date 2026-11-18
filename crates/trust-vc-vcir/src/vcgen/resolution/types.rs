@@ -44,7 +44,9 @@ impl Builder<'_, '_> {
         }
         let size = remaining - self.work.remaining().get();
         self.charge(size.saturating_mul(size))?;
-        Ok(ty.subst(args))
+        if ty.has_projection() || args.iter().any(Ty::has_projection) {
+            self.ctx.substitute_type(ty, args, self.work.remaining(), self.decl.span)
+        } else { Ok(ty.subst(args)) }
     }
     pub(super) fn typed_place(&self, place: &Place) -> R<Option<Ty>> {
         self.charge(1 + place.projections.len())?;
@@ -69,7 +71,9 @@ impl Builder<'_, '_> {
             return Ok(None);
         };
         self.work.ty(&local.ty, self.decl.span, 0)?;
-        let mut ty = local.ty.clone();
+        let mut ty = if local.ty.has_projection() {
+            self.ctx.normalize_type(&local.ty, self.work.remaining(), self.decl.span)?
+        } else { local.ty.clone() };
         for projection in &place.projections {
             self.charge(1)?;
             ty = match (projection, ty) {

@@ -68,7 +68,7 @@ fn walk(
                     }
                 }
             }
-            StmtKind::Assign { place, .. } => {
+            StmtKind::Assign { place, .. } | StmtKind::AssignSpec { place, .. } => {
                 if params.contains(&place.local) {
                     assigned_params.insert(place.local);
                 }
@@ -83,6 +83,11 @@ fn walk(
             // Each branch starts from what was assigned before the `if`;
             // after it, what either assigned.
             StmtKind::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | StmtKind::IfSpec {
                 then_block,
                 else_block,
                 ..
@@ -120,6 +125,7 @@ fn walk(
                 out.insert(lp.id, info);
             }
             StmtKind::Let { .. }
+            | StmtKind::LetChecked { .. }
             | StmtKind::Call { dest: None, .. }
             | StmtKind::Assert { .. }
             | StmtKind::AssertBitVector { .. }
@@ -143,7 +149,7 @@ pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
                 out.insert(*dest);
                 out.insert(place.local);
             }
-            StmtKind::Assign { place, .. } => {
+            StmtKind::Assign { place, .. } | StmtKind::AssignSpec { place, .. } => {
                 out.insert(place.local);
             }
             StmtKind::Call {
@@ -152,6 +158,11 @@ pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
                 out.insert(dest.local);
             }
             StmtKind::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | StmtKind::IfSpec {
                 then_block,
                 else_block,
                 ..
@@ -173,6 +184,7 @@ pub(crate) fn assigned(block: &Block, out: &mut BTreeSet<LocalId>) {
                 assigned(&lp.body, out);
             }
             StmtKind::Let { .. }
+            | StmtKind::LetChecked { .. }
             | StmtKind::Call { dest: None, .. }
             | StmtKind::Assert { .. }
             | StmtKind::AssertBitVector { .. }
@@ -193,6 +205,11 @@ fn breaks(block: &Block, id: LoopId) -> bool {
     block.stmts.iter().any(|stmt| match &stmt.kind {
         StmtKind::Break { target, .. } => *target == id,
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..
@@ -232,6 +249,11 @@ pub(crate) fn diverges(stmt: &Stmt) -> bool {
     match &stmt.kind {
         StmtKind::Return { .. } | StmtKind::Unreachable => true,
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..

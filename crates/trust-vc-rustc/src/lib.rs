@@ -68,6 +68,8 @@ extern crate rustc_span;
 #[cfg(feature = "rustc")]
 mod cargo_native;
 #[cfg(feature = "rustc")]
+mod child_process;
+#[cfg(feature = "rustc")]
 pub(crate) mod compiler_environment;
 #[cfg(feature = "rustc")]
 pub mod declaration_observe;
@@ -81,6 +83,11 @@ pub mod native_entry;
 pub(crate) mod native_requests;
 #[cfg(feature = "rustc")]
 pub(crate) mod output_environment;
+#[cfg(feature = "rustc")]
+mod retained_bytes;
+#[cfg(feature = "rustc")]
+#[path = "reader/declaration_staging/standalone_client/coordinator/capture.rs"]
+pub(crate) mod stdio_capture;
 #[cfg(all(feature = "rustc", any(target_os = "linux", target_os = "macos")))]
 pub use native_requests::forwarding_main as native_request_forwarding_main;
 #[cfg(feature = "rustc")]

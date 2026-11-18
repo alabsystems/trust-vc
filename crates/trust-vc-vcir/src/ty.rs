@@ -165,6 +165,10 @@ pub enum Ty {
     /// compared with `==`, passed to functions and returned, and nothing
     /// else is known about them.
     Param(u32),
+    /// An associated type applied to its trait arguments, including `Self`
+    /// first. This is a distinct type constructor, not another type-parameter
+    /// index or a datatype layout. It supplies no Copy or ownership fact.
+    Projection(crate::ProjectionId, Vec<Ty>),
 }
 
 impl Ty {
@@ -223,6 +227,9 @@ impl Ty {
             },
             Self::MutRef(inner) => Self::MutRef(Box::new(inner.subst(args))),
             Self::Adt(id, targs) => Self::Adt(*id, targs.iter().map(|t| t.subst(args)).collect()),
+            Self::Projection(id, targs) => {
+                Self::Projection(*id, targs.iter().map(|t| t.subst(args)).collect())
+            }
             Self::Bool | Self::Int(_) | Self::Unit => self.clone(),
         }
     }
@@ -234,8 +241,20 @@ impl Ty {
             Self::Param(_) => true,
             Self::Tuple(elems) => elems.iter().any(Self::has_param),
             Self::Ref { inner, .. } | Self::MutRef(inner) => inner.has_param(),
-            Self::Adt(_, args) => args.iter().any(Self::has_param),
+            Self::Adt(_, args) | Self::Projection(_, args) => args.iter().any(Self::has_param),
             Self::Bool | Self::Int(_) | Self::Unit => false,
+        }
+    }
+
+    /// Whether this finite type syntax contains an associated constructor.
+    /// This structural query supplies no normalization or layout authority.
+    #[must_use]
+    pub fn has_projection(&self) -> bool {
+        match self {
+            Self::Projection(..) => true,
+            Self::Adt(_, args) | Self::Tuple(args) => args.iter().any(Self::has_projection),
+            Self::Ref { inner, .. } | Self::MutRef(inner) => inner.has_projection(),
+            _ => false,
         }
     }
 }

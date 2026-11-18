@@ -83,14 +83,105 @@ impl Gen<'_> {
             let Some(local) = self.decl.local(place.local) else {
                 continue;
             };
-            let Some(ty) = resolution::place_ty(self.ctx, self.decl, place) else {
-                continue;
+            let abstract_target = self.resolution.value_target(place, span)?;
+            let ty = if abstract_target.is_some() {
+                self.resolution
+                    .value_place_type(self.ctx, self.decl, place, span)?
+            } else {
+                let Some(ty) = resolution::place_ty(self.ctx, self.decl, place, self.resolution.remaining().unwrap_or(&self.static_work), span)? else {
+                    continue;
+                };
+                ty
             };
+            if let Some(target) = abstract_target {
+                if target.place() != place || target.ty() != &ty || !matches!(ty, Ty::Param(_) | Ty::Projection(..)) {
+                    return Err(refusal(
+                        "resolution-type",
+                        "abstract resolution target changed type",
+                        span,
+                    ));
+                }
+                if let Some(work) = self.resolution.remaining() {
+                    // Each projection copies the source value and performs
+                    // native-type substitution. Spend the original ledger
+                    // before constructing the guard/value terms.
+                    let copies =
+                        (target.guards().len() + 1).saturating_mul(1 + place.projections.len());
+                    super::super::inline_work::value(work, root, copies, span)?;
+                    for _ in 0..=target.guards().len() {
+                        super::super::call_identity::price_layout(self.ctx, &local.ty, work, span)?;
+                    }
+                }
+                let mut guards = Vec::new();
+                for guard in target.guards() {
+                    let prefix_ty = self.resolution.value_place_type(
+                        self.ctx,
+                        self.decl,
+                        guard.prefix(),
+                        span,
+                    )?;
+                    if !matches!(&prefix_ty, Ty::Adt(id, _) if *id == guard.datatype()) {
+                        return Err(refusal(
+                            "resolution-type",
+                            "resolution guard changed datatype",
+                            span,
+                        ));
+                    }
+                    let prefix = super::super::expr::project(
+                        self.ctx,
+                        &self.types,
+                        root,
+                        &local.ty,
+                        guard.prefix(),
+                        span,
+                        self.resolution.remaining(),
+                    )?;
+                    let Val::Leaf(condition) = self.ctx.test_enum(
+                        &prefix_ty,
+                        &self.types,
+                        guard.variant(),
+                        prefix,
+                        span,
+                    )?
+                    else {
+                        return Err(refusal(
+                            "resolution-type",
+                            "a variant guard has no scalar predicate",
+                            span,
+                        ));
+                    };
+                    guards.push(condition);
+                }
+                let value = super::super::expr::project(
+                    self.ctx,
+                    &self.types,
+                    root,
+                    &local.ty,
+                    place,
+                    span,
+                    self.resolution.remaining(),
+                )?;
+                let work = self.resolution.remaining().ok_or_else(||
+                    refusal("resolution-state", "an abstract resolution fact lost its caller work", span))?;
+                let fact = self.ctx.has_resolved_with_work(&ty, &self.types, value, span, work)?;
+                self.resolution.charge(path.guard.len(), span)?;
+                for condition in &path.guard {
+                    self.price_ownership_term(condition, span)?;
+                }
+                self.fact(
+                    &path.guard,
+                    Source::Axiom,
+                    Term::implies(Term::and(guards), fact),
+                );
+                // An abstract HasResolved fact is not a concrete reference
+                // identity and must neither release loans nor enter this cache.
+                continue;
+            }
             if !matches!(ty, Ty::MutRef(_)) {
                 continue;
             }
             let value =
-                super::super::expr::project(self.ctx, &self.types, root, &local.ty, place, span)?;
+                super::super::expr::project(self.ctx, &self.types, root, &local.ty, place, span, Some(&self.static_work))?;
             let Val::Leaf(reference) = &value else {
                 return Err(refusal(
                     "resolution-type",
@@ -103,7 +194,7 @@ impl Gen<'_> {
             }
             let fact = self
                 .ctx
-                .has_resolved(&ty, &self.types, value.clone(), span)?;
+                .has_resolved_with_work(&ty, &self.types, value.clone(), span, &self.static_work)?;
             self.fact(&path.guard, Source::Axiom, fact);
             path.resolved.push(reference.clone());
         }
@@ -125,9 +216,9 @@ impl Gen<'_> {
             (Projection::Deref, Ty::MutRef(inner)) => {
                 let current =
                     self.ctx
-                        .mut_ref_projection(ty, &self.types, old.clone(), false, span)?;
+                        .mut_ref_projection_with_work(ty, &self.types, old.clone(), false, span, Some(&self.static_work))?;
                 let updated = self.writeback(inner, current, rest, value, span)?;
-                self.ctx.mut_ref_update(ty, &self.types, old, updated, span)
+                self.ctx.mut_ref_update_with_work(ty, &self.types, old, updated, span, Some(&self.static_work))
             }
             (Projection::Deref, Ty::Ref { inner, .. }) => {
                 self.writeback(inner, old, rest, value, span)
@@ -190,9 +281,9 @@ impl Gen<'_> {
             .decl
             .local(place.local)
             .ok_or_else(|| refusal("vcgen-internal", "missing assigned local", span))?;
-        let ty = resolution::place_ty(self.ctx, self.decl, place)
+        let ty = resolution::place_ty(self.ctx, self.decl, place, self.resolution.remaining().unwrap_or(&self.static_work), span)?
             .ok_or_else(|| refusal("mut-ref-type", "invalid assigned place type", span))?;
-        let shape = self.ctx.shape(&ty, self.types.owner(), span)?;
+        let shape = self.ctx.shape_with_work(&ty, self.types.owner(), span, &self.static_work)?;
         let value = self.name_value(path, value, &shape, &local.name)?;
         if place.projections.is_empty() {
             path.env.insert(place.local, value);
@@ -237,7 +328,7 @@ impl Gen<'_> {
                 )
             })?;
             let updated = self.writeback(&local.ty, old, &place.projections, value, span)?;
-            let root_shape = self.ctx.shape(&local.ty, self.types.owner(), span)?;
+            let root_shape = self.ctx.shape_with_work(&local.ty, self.types.owner(), span, &self.static_work)?;
             let updated = self.name_value(path, updated, &root_shape, &local.name)?;
             path.env.insert(place.local, updated);
         }
@@ -276,25 +367,27 @@ impl Gen<'_> {
             )
         })?;
         let before =
-            super::super::expr::project(self.ctx, &self.types, root, &source.ty, place, span)?;
-        let ty = resolution::place_ty(self.ctx, self.decl, place)
+            super::super::expr::project(self.ctx, &self.types, root, &source.ty, place, span, Some(&self.static_work))?;
+        let ty = resolution::place_ty(self.ctx, self.decl, place, self.resolution.remaining().unwrap_or(&self.static_work), span)?
             .ok_or_else(|| refusal("mut-ref-type", "invalid borrowed projection", span))?;
         let reference_ty = Ty::MutRef(Box::new(ty));
-        let shape = self.ctx.shape(&reference_ty, self.types.owner(), span)?;
+        let shape = self.ctx.shape_with_work(&reference_ty, self.types.owner(), span, &self.static_work)?;
         let reference = self.fresh_at(&shape, "mutable_borrow", &path.guard)?;
-        let current = self.ctx.mut_ref_projection(
+        let current = self.ctx.mut_ref_projection_with_work(
             &reference_ty,
             &self.types,
             reference.clone(),
             false,
             span,
+            Some(&self.static_work),
         )?;
-        let future = self.ctx.mut_ref_projection(
+        let future = self.ctx.mut_ref_projection_with_work(
             &reference_ty,
             &self.types,
             reference.clone(),
             true,
             span,
+            Some(&self.static_work),
         )?;
         let initial = current
             .equal(&before)
@@ -333,7 +426,7 @@ impl Gen<'_> {
                 .ok_or_else(|| refusal("mut-ref-type", "borrowed prefix type missing", span))?
                 .ty;
             let prefix_value =
-                super::super::expr::project(self.ctx, &self.types, root, root_ty, &prefix, span)?;
+                super::super::expr::project(self.ctx, &self.types, root, root_ty, &prefix, span, Some(&self.static_work))?;
             if let Val::Leaf(prefix_reference) = prefix_value {
                 let origin = self.reference_origin(&prefix_reference)?;
                 for loan in &path.loans {
@@ -359,3 +452,6 @@ impl Gen<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod conditional_tests;

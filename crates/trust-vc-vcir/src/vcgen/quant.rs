@@ -719,6 +719,9 @@ fn matches(
 /// What instantiation adds to a query.
 #[derive(Debug, Default)]
 pub(crate) struct Instances {
+    /// A required type-schema expansion exhausted the real analysis work.
+    /// It cannot be reported as an ordinary empty set of optional instances.
+    pub(crate) typing_exhausted: bool,
     /// Facts, in written form (spec functions not inlined), each with its
     /// place in Verus's query.
     pub(crate) facts: Vec<(Term, Position)>,
@@ -809,6 +812,7 @@ pub(crate) fn instantiate(
         return out;
     };
     let Ok(seeds) = analysis.seeds(hypotheses, goal) else {
+        out.typing_exhausted = analysis.typing_exhausted();
         return out;
     };
     let mut pool: Vec<Item> = seeds.into_items();
@@ -1091,6 +1095,9 @@ pub(crate) fn instantiate(
     }
 
     let (terms, gates): (Vec<Term>, Vec<Option<Term>>) = facts.into_iter().unzip();
+    if analysis.typing_exhausted() {
+        return Instances { typing_exhausted: true, ..Instances::default() };
+    }
     let resolved = analysis.namer.resolve_each(terms, RELEVANCE_TERM_CAP);
     out.symbols.extend(resolved.symbols);
     out.definitions = resolved.definitions;

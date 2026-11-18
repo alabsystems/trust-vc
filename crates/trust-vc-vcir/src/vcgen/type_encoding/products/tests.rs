@@ -27,6 +27,48 @@ fn register(vocabulary: &mut Vocabulary, family: ProductFamily) {
 }
 
 #[test]
+fn associated_product_fields_require_the_registered_member_and_original_work() {
+    let mut vocabulary = Vocabulary::default();
+    let owner = family(91);
+    let member = crate::ProjectionId(DefHash::new(400, 91));
+    let recipe = TypeRecipe::Projection(member, vec![parameter(owner, 0)]);
+    let work = std::cell::Cell::new(100_000);
+    assert!(vocabulary.register_product(owner, 1, vec![recipe.clone()]).is_none());
+    assert!(vocabulary.register_product_with_work(owner, 1, vec![recipe.clone()], &work, crate::SpanId(0)).unwrap().is_none());
+    vocabulary.register_projection_declaration(member, 1).unwrap();
+    assert!(vocabulary.register_product_with_work(owner, 1, vec![recipe], &work, crate::SpanId(0)).unwrap().is_some());
+    let actual = argument(&mut vocabulary, TypeRecipe::Bool);
+    assert!(vocabulary.pack_product(owner, &[actual.clone()], vec![p("value")]).is_none());
+    let value = vocabulary.pack_product_with_work(owner, &[actual.clone()], vec![p("value")], &work, crate::SpanId(0)).unwrap().unwrap();
+    assert!(vocabulary.project_product(owner, &[actual.clone()], value.clone()).is_none());
+    assert_eq!(vocabulary.project_product_with_work(owner, &[actual.clone()], value.clone(), &work, crate::SpanId(0)).unwrap().unwrap().len(), 1);
+    work.set(0);
+    assert!(vocabulary.project_product_with_work(owner, &[actual], value, &work, crate::SpanId(0)).is_err());
+    assert_eq!(work.get(), 0);
+}
+
+#[test]
+fn associated_product_laws_keep_membership_guards_and_query_exhaustion() {
+    let mut vocabulary = Vocabulary::default();
+    let owner = family(92);
+    let member = crate::ProjectionId(DefHash::new(400, 92));
+    vocabulary.register_projection_declaration(member, 1).unwrap();
+    let work = std::cell::Cell::new(100_000);
+    vocabulary.register_product_with_work(owner, 1,
+        vec![TypeRecipe::Projection(member, vec![parameter(owner, 0)])], &work, crate::SpanId(0)).unwrap().unwrap();
+    let ty = argument(&mut vocabulary, TypeRecipe::Bool);
+    let packed = vocabulary.pack_product_with_work(owner, &[ty], vec![p("x")], &work, crate::SpanId(0)).unwrap().unwrap();
+    let mut query_work = 100_000;
+    let facts = vocabulary.bridge_axioms(&[&packed], &mut query_work).unwrap();
+    assert!(!facts.is_empty());
+    assert!(facts.iter().any(|fact| matches!(fact, Term::Implies(_, _))));
+    assert!(!facts.contains(&Term::Bool(false)));
+    let mut exhausted = 0;
+    assert!(vocabulary.bridge_axioms(&[&packed], &mut exhausted).is_none());
+    assert_eq!(exhausted, 0);
+}
+
+#[test]
 fn unary_tuple_product_keeps_unit_and_nested_type_identities_distinct() {
     let mut vocabulary = Vocabulary::default();
     let family = ProductFamily::Tuple(1);
@@ -70,7 +112,8 @@ fn unary_tuple_product_keeps_unit_and_nested_type_identities_distinct() {
     assert!(vocabulary
         .register_product(ProductFamily::Tuple(0), 0, vec![])
         .is_none());
-    assert!(TypeRecipe::registered(&Ty::Tuple(vec![]), None, &|_| None).is_none());
+    assert!(TypeRecipe::registered(&Ty::Tuple(vec![]), None, &|_| None,
+            &|_| None).is_none());
 }
 
 #[test]
@@ -81,11 +124,15 @@ fn product_recipes_require_registered_nominals_and_exact_arity() {
     let registered = |actual| (actual == id).then_some(RecipeAdt::Struct(1));
     let ty = Ty::Adt(id, vec![Ty::Int(IntRange::Int)]);
     assert!(
-        matches!(TypeRecipe::registered(&ty, None, &registered), Some(TypeRecipe::Struct(actual, _)) if actual == id)
+        matches!(TypeRecipe::registered(&ty, None, &registered,
+            &|_| None), Some(TypeRecipe::Struct(actual, _)) if actual == id)
     );
-    assert!(TypeRecipe::registered(&Ty::Adt(id, vec![]), None, &registered).is_none());
-    assert!(TypeRecipe::registered(&ty, None, &|_| None).is_none());
-    assert!(TypeRecipe::registered(&Ty::Adt(id, vec![Ty::Param(0)]), None, &registered).is_none());
+    assert!(TypeRecipe::registered(&Ty::Adt(id, vec![]), None, &registered,
+            &|_| None).is_none());
+    assert!(TypeRecipe::registered(&ty, None, &|_| None,
+            &|_| None).is_none());
+    assert!(TypeRecipe::registered(&Ty::Adt(id, vec![Ty::Param(0)]), None, &registered,
+            &|_| None).is_none());
     assert!(TypeRecipe::registered(
         &Ty::Ref {
             mutable: true,
@@ -93,7 +140,8 @@ fn product_recipes_require_registered_nominals_and_exact_arity() {
         },
         None,
         &registered
-    )
+    ,
+            &|_| None)
     .is_none());
 }
 

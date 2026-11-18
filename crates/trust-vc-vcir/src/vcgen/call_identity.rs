@@ -225,7 +225,7 @@ fn derive_declaration(
     }
     // Reuse the existing signature/layout admission, not a new copy-depth cap.
     price_layout(ctx, &result.ty, work, span)?;
-    ctx.shape(&result.ty, Some(target.id), span)?;
+    ctx.shape_with_work(&result.ty, Some(target.id), span, work)?;
     if owned_slots(ctx, &result.ty, work, span)?.is_empty() {
         return Ok(IdentitySummary::default());
     }
@@ -234,7 +234,7 @@ fn derive_declaration(
     for (index, id) in target.params.iter().enumerate() {
         if let Some(local) = target.local(*id).filter(|local| local.mode != Mode::Spec) {
             price_layout(ctx, &local.ty, work, span)?;
-            ctx.shape(&local.ty, Some(target.id), span)?;
+            ctx.shape_with_work(&local.ty, Some(target.id), span, work)?;
             parameters.insert(*id, index);
         }
     }

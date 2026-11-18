@@ -1,5 +1,8 @@
 //! Actual native isolated BV questions; no surrounding solver hypotheses.
 
+mod euclidean_congruence;
+mod mul_congruence;
+
 use super::{check_bitvector, Limits, Verdict};
 use trust_vc_bitvector::integer::{Arithmetic, Comparison, Integer};
 use trust_vc_bitvector::{IntLit, Op, Query, Sort, Term};

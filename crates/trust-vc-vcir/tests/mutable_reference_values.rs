@@ -76,6 +76,7 @@ fn function(result: Ty) -> FnDecl {
         mode: Mode::Exec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![local(result, Mode::Exec, LocalKind::Return)],
         params: vec![],

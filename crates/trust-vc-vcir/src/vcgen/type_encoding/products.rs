@@ -38,9 +38,21 @@ pub(super) fn field_recipe(
     arity: usize,
     left: &mut usize,
 ) -> Option<()> {
+    field_recipe_with_projections(recipe, owner, arity, left, &|_| None)
+}
+
+pub(super) fn field_recipe_with_projections(
+    recipe: &TypeRecipe, owner: ProductFamily, arity: usize, left: &mut usize,
+    projection: &impl Fn(crate::ProjectionId) -> Option<usize>,
+) -> Option<()> {
     *left = left.checked_sub(1)?;
     match recipe {
         TypeRecipe::Parameter { .. } => None,
+        TypeRecipe::Projection(id, args) => {
+            if args.is_empty() || projection(*id) != Some(args.len()) { return None; }
+            for argument in args { field_recipe_with_projections(argument, owner, arity, left, projection)?; }
+            Some(())
+        }
         TypeRecipe::ProductParameter {
             owner: actual,
             index,
@@ -53,12 +65,12 @@ pub(super) fn field_recipe(
                 return None;
             }
             for arg in args {
-                field_recipe(arg, owner, arity, left)?;
+                field_recipe_with_projections(arg, owner, arity, left, projection)?;
             }
             Some(())
         }
         TypeRecipe::SharedRef(inner) | TypeRecipe::MutRef(inner) => {
-            field_recipe(inner, owner, arity, left)
+            field_recipe_with_projections(inner, owner, arity, left, projection)
         }
         TypeRecipe::Int(range) => super::super::val::supported_range(*range)
             .is_ok()
@@ -106,6 +118,36 @@ impl Vocabulary {
         arity: usize,
         fields: Vec<TypeRecipe>,
     ) -> Option<()> {
+        self.register_product_inner(family, arity, fields, false)
+    }
+
+    pub(crate) fn register_product_with_work(
+        &mut self, family: ProductFamily, arity: usize, fields: Vec<TypeRecipe>,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<()>> {
+        super::super::inline_work::items(work, 1 + fields.len(), span)?;
+        let mut pending: Vec<_> = fields.iter().collect();
+        while let Some(recipe) = pending.pop() {
+            super::super::inline_work::items(work, 1, span)?;
+            match recipe {
+                TypeRecipe::Tuple(args) | TypeRecipe::Opaque(_, args) | TypeRecipe::Struct(_, args)
+                | TypeRecipe::Enum(_, args) | TypeRecipe::Projection(_, args) => {
+                    super::super::inline_work::items(work, args.len(), span)?;
+                    pending.extend(args);
+                }
+                TypeRecipe::SharedRef(inner) | TypeRecipe::MutRef(inner) => {
+                    super::super::inline_work::items(work, 1, span)?;
+                    pending.push(inner);
+                }
+                _ => {}
+            }
+        }
+        Ok(self.register_product_inner(family, arity, fields, true))
+    }
+
+    fn register_product_inner(
+        &mut self, family: ProductFamily, arity: usize, fields: Vec<TypeRecipe>, projected: bool,
+    ) -> Option<()> {
         if arity > 64 || fields.len() > 64 {
             return None;
         }
@@ -130,7 +172,8 @@ impl Vocabulary {
         }
         let mut left = 64;
         for field in &fields {
-            field_recipe(field, family, arity, &mut left)?;
+            field_recipe_with_projections(field, family, arity, &mut left,
+                &|id| projected.then(|| self.projection_arities.get(&id).copied()).flatten())?;
         }
         if let Some(index) = self.products.families.get(&family) {
             let schema = &self.products.schemas[*index];
@@ -203,6 +246,28 @@ impl Vocabulary {
         args: &[TypeArgument],
         fields: Vec<Term>,
     ) -> Option<Term> {
+        let symbols = self.projection_symbols.clone();
+        self.pack_product_priced(family, args, fields, false, &mut |term, _| !Self::has_projection_term(term, &symbols))
+    }
+
+    pub(crate) fn pack_product_with_work(
+        &mut self, family: ProductFamily, args: &[TypeArgument], fields: Vec<Term>,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<Term>> {
+        super::super::inline_work::items(work, 1 + fields.len(), span)?;
+        let mut failure = None;
+        let result = self.pack_product_priced(family, args, fields, true, &mut |term, copies| {
+            match super::super::inline_work::term(work, term, copies, span) {
+                Ok(()) => true, Err(error) => { failure = Some(error); false }
+            }
+        });
+        match failure { Some(error) => Err(error), None => Ok(result) }
+    }
+
+    fn pack_product_priced(
+        &mut self, family: ProductFamily, args: &[TypeArgument], fields: Vec<Term>,
+        projected: bool, price: &mut dyn FnMut(&Term, usize) -> bool,
+    ) -> Option<Term> {
         let schema = self
             .products
             .schemas
@@ -213,6 +278,8 @@ impl Vocabulary {
         {
             return None;
         }
+        if !projected && schema.fields.iter().any(TypeRecipe::has_projection) { return None; }
+        for argument in args { for term in argument.terms_ref() { if !price(term, 1) { return None; } } }
         let name = schema.pack.clone();
         let terms = prefix(args).into_iter().chain(fields).collect();
         Some(self.call(name, terms, Sort::Poly))
@@ -224,6 +291,28 @@ impl Vocabulary {
         args: &[TypeArgument],
         value: Term,
     ) -> Option<Vec<Term>> {
+        let symbols = self.projection_symbols.clone();
+        self.project_product_priced(family, args, value, false, &mut |term, _| !Self::has_projection_term(term, &symbols))
+    }
+
+    pub(crate) fn project_product_with_work(
+        &mut self, family: ProductFamily, args: &[TypeArgument], value: Term,
+        work: &std::cell::Cell<usize>, span: crate::SpanId,
+    ) -> super::super::expr::R<Option<Vec<Term>>> {
+        super::super::inline_work::items(work, 1 + args.len(), span)?;
+        let mut failure = None;
+        let result = self.project_product_priced(family, args, value, true, &mut |term, copies| {
+            match super::super::inline_work::term(work, term, copies, span) {
+                Ok(()) => true, Err(error) => { failure = Some(error); false }
+            }
+        });
+        match failure { Some(error) => Err(error), None => Ok(result) }
+    }
+
+    fn project_product_priced(
+        &mut self, family: ProductFamily, args: &[TypeArgument], value: Term,
+        projected: bool, price: &mut dyn FnMut(&Term, usize) -> bool,
+    ) -> Option<Vec<Term>> {
         let schema = self
             .products
             .schemas
@@ -231,6 +320,9 @@ impl Vocabulary {
         if args.len() != schema.arity || value.sort() != Sort::Poly {
             return None;
         }
+        if !projected && schema.fields.iter().any(TypeRecipe::has_projection) { return None; }
+        for argument in args { for term in argument.terms_ref() { if !price(term, schema.projections.len()) { return None; } } }
+        if !price(&value, schema.projections.len()) { return None; }
         let names = schema.projections.clone();
         Some(
             names
@@ -268,20 +360,22 @@ impl Vocabulary {
         );
         let mut field_types = Vec::new();
         for field in &schema.fields {
-            field_types.push(self.argument_in(
-                field,
-                &TypeEnv::default(),
-                Some((schema.family, &args)),
-            )?);
+            let empty = HashMap::new();
+            let argument = self.argument_in(field, &TypeEnv::default(), Some((schema.family, &args)),
+                &mut |term, copies| (0..copies).all(|_| super::super::substitution::price(term, &empty, budget).is_some()))?;
+            field_types.push(self.canonical_argument(argument, budget)?);
         }
-        let projections = self.project_product(schema.family, &args, value.clone())?;
+        let empty = HashMap::new();
+        let projections = self.project_product_priced(schema.family, &args, value.clone(), true,
+            &mut |term, copies| (0..copies).all(|_| super::super::substitution::price(term, &empty, budget).is_some()))?;
         let member = self.membership(value.clone(), identity.clone())?;
         let mut facts = Vec::new();
         for (field, ty) in projections.iter().zip(&field_types) {
             let field_member = self.membership(field.clone(), ty.identity().clone())?;
             facts.push(Term::implies(member.clone(), field_member));
         }
-        let restored = self.pack_product(schema.family, &args, projections.clone())?;
+        let restored = self.pack_product_priced(schema.family, &args, projections.clone(), true,
+            &mut |term, copies| (0..copies).all(|_| super::super::substitution::price(term, &empty, budget).is_some()))?;
         facts.push(Term::implies(member, Term::eq(restored, value.clone())));
         if let Some(fields) = packed_fields {
             if fields.len() != field_types.len()

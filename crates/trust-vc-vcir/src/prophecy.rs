@@ -378,12 +378,19 @@ impl<'a> Checker<'a> {
                     }
                     self.declare(*local, value, outer, span);
                 }
+                StmtKind::LetChecked { local, init } => {
+                    let value = self.expr(init, outer);
+                    if let Some(old) = self.locals.get(local.index()).copied() {
+                        saved.push((*local, old));
+                    }
+                    self.declare(*local, Some(value), outer, span);
+                }
                 StmtKind::BorrowMut { dest, place } => {
                     let prophetic = self.classification(place.local, span);
                     self.forbid_control(outer, span, "mutable borrow");
                     self.assign(&Place::local(*dest), prophetic, outer, span);
                 }
-                StmtKind::Assign { place, value } => {
+                StmtKind::Assign { place, value } | StmtKind::AssignSpec { place, value } => {
                     let raw = self.expr(value, outer);
                     let taint = if value.ty == Ty::Unit && !self.raw_result_temp(place.local) {
                         false
@@ -411,6 +418,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 StmtKind::If {
+                    cond,
+                    then_block,
+                    else_block,
+                }
+                | StmtKind::IfSpec {
                     cond,
                     then_block,
                     else_block,

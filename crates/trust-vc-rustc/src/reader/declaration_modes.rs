@@ -8,7 +8,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Author: Andrew Yates <andrewyates.name@gmail.com>
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -24,13 +24,20 @@ use crate::verus_items::VerusItem;
 pub(super) struct DeclarationModes<'tcx> {
     tcx: TyCtxt<'tcx>,
     functions: HashMap<DefId, Mode>,
+    legacy: HashSet<LocalDefId>,
     items: HashMap<DefId, VerusItem>,
-    constants: constants::Registry,
+    constants: constants::Registry<'tcx>,
 }
 
 impl<'tcx> DeclarationModes<'tcx> {
     pub(super) fn new(tcx: TyCtxt<'tcx>) -> Self {
+        Self::with_legacy_policy(tcx, false)
+    }
+
+    /// An explicit declaration policy, never a default Exec/ownership fact.
+    pub(super) fn with_legacy_policy(tcx: TyCtxt<'tcx>, no_external_by_default: bool) -> Self {
         let constants = constants::Registry::collect(tcx);
+        let mut legacy = HashSet::new();
         let mut functions = HashMap::new();
         for owner in tcx.hir_crate_items(()).owners() {
             let def = owner.def_id;
@@ -40,11 +47,21 @@ impl<'tcx> DeclarationModes<'tcx> {
                 continue;
             }
             let attrs = constants.item_attrs(tcx, def);
-            if attrs.verus_macro || constants.mode(def).is_some() {
+            let is_legacy = super::legacy::eligible(tcx, def, no_external_by_default)
+                && constants.real(def).is_none()
+                && constants.proxy(def).is_none();
+            if is_legacy {
+                legacy.insert(def);
+            }
+            if attrs.verus_macro || constants.mode(def).is_some() || is_legacy {
                 functions.insert(
                     def.to_def_id(),
-                    if constants.mode(def).is_some() {
-                        Mode::Spec
+                    if let Some(constant) = constants.mode(def) {
+                        if constant == trust_vc_vcir::ConstMode::Exec {
+                            Mode::Exec
+                        } else {
+                            Mode::Spec
+                        }
                     } else {
                         attrs.mode.unwrap_or(Mode::Exec)
                     },
@@ -54,6 +71,7 @@ impl<'tcx> DeclarationModes<'tcx> {
         Self {
             tcx,
             functions,
+            legacy,
             items: super::verus_item_table(tcx),
             constants,
         }
@@ -105,6 +123,10 @@ impl<'tcx> ModeContext<'tcx> for DeclarationModes<'tcx> {
         self.tcx
     }
 
+    fn legacy_function(&self, definition: LocalDefId) -> bool {
+        self.legacy.contains(&definition)
+    }
+
     fn function_mode(&self, def: DefId) -> Option<Mode> {
         self.functions.get(&def).copied()
     }
@@ -123,6 +145,15 @@ impl<'tcx> ModeContext<'tcx> for DeclarationModes<'tcx> {
 
     fn declaration_attrs(&self, def: LocalDefId) -> ItemAttrs {
         self.constants.item_attrs(self.tcx, def)
+    }
+
+    fn declaration_attrs_with_work(
+        &self,
+        def: LocalDefId,
+        remaining: &mut usize,
+    ) -> Result<ItemAttrs, String> {
+        self.constants
+            .item_attrs_with_work(self.tcx, def, remaining)
     }
 
     fn verus_item(&self, def: DefId) -> Option<VerusItem> {

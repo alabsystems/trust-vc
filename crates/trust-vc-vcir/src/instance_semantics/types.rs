@@ -15,7 +15,7 @@ pub(super) fn type_work(ty: &Ty, budget: &mut usize, depth: u32) -> bool {
     *budget = left;
     match ty {
         Ty::Ref { inner, .. } | Ty::MutRef(inner) => type_work(inner, budget, depth + 1),
-        Ty::Adt(_, args) | Ty::Tuple(args) => {
+        Ty::Adt(_, args) | Ty::Tuple(args) | Ty::Projection(_, args) => {
             args.len() <= *budget && args.iter().all(|ty| type_work(ty, budget, depth + 1))
         }
         _ => true,
@@ -29,6 +29,7 @@ pub(super) fn substituted(formal: &Ty, arguments: &[Ty], actual: &Ty) -> bool {
         (Ty::Param(index), _) => arguments.get(*index as usize) == Some(actual),
         (Ty::Tuple(a), Ty::Tuple(b)) => group(a, arguments, b),
         (Ty::Adt(a, x), Ty::Adt(b, y)) => a == b && group(x, arguments, y),
+        (Ty::Projection(a, x), Ty::Projection(b, y)) => a == b && group(x, arguments, y),
         (
             Ty::Ref {
                 mutable: a,

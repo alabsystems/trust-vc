@@ -54,3 +54,56 @@ fn or_file_never_overwrites_an_attached_file() {
         "b.rs:7:3"
     );
 }
+
+#[test]
+fn untyped_obligation_location_setters_keep_both_channels_consistent() {
+    use crate::vc::ProofObligation;
+
+    let source = SourceLocation::new(2, 3).with_file("source:unit.rs");
+    let rendered = source.render();
+    let same = ProofObligation::ensures("post", "true")
+        .with_source_location(source.clone())
+        .with_location(rendered.clone());
+    assert_eq!(same.location(), Some(rendered.as_str()));
+    assert_eq!(same.source_location(), Some(&source));
+
+    let replaced = same
+        .with_location("other:unit.rs:99:1")
+        .or_source_location(SourceLocation::new(7, 8));
+    assert_eq!(replaced.location(), Some("other:unit.rs:99:1"));
+    assert_eq!(replaced.source_location(), None);
+
+    let restored = replaced.with_source_location(source.clone());
+    assert_eq!(restored.location(), Some(rendered.as_str()));
+    assert_eq!(restored.source_location(), Some(&source));
+}
+
+#[test]
+fn typed_obligation_location_overrides_survive_conversion() {
+    use crate::ir::TrustVcExpr;
+    use crate::vc::TypedProofObligation;
+
+    let source = SourceLocation::new(2, 3).with_file("source:unit.rs");
+    let rendered = source.render();
+    let same = TypedProofObligation::ensures("post", TrustVcExpr::BoolLit(true))
+        .with_source_location(source.clone())
+        .with_location(rendered.clone())
+        .into_proof_obligation();
+    assert_eq!(same.location(), Some(rendered.as_str()));
+    assert_eq!(same.source_location(), Some(&source));
+
+    let replaced = TypedProofObligation::ensures("post", TrustVcExpr::BoolLit(true))
+        .with_source_location(source.clone())
+        .with_location("other:unit.rs:99:1");
+    assert_eq!(replaced.location(), Some("other:unit.rs:99:1"));
+    let replaced = replaced.into_proof_obligation();
+    assert_eq!(replaced.location(), Some("other:unit.rs:99:1"));
+    assert_eq!(replaced.source_location(), None);
+
+    let restored = TypedProofObligation::ensures("post", TrustVcExpr::BoolLit(true))
+        .with_location("other:unit.rs:99:1")
+        .with_source_location(source.clone())
+        .into_proof_obligation();
+    assert_eq!(restored.location(), Some(rendered.as_str()));
+    assert_eq!(restored.source_location(), Some(&source));
+}

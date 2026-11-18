@@ -20,6 +20,7 @@ pub(crate) struct FormalValue<'a> {
     pub(crate) caller: &'a TypeEnv,
     pub(crate) callee: &'a TypeEnv,
     pub(crate) span: SpanId,
+    pub(crate) work: Option<&'a std::cell::Cell<usize>>,
 }
 
 struct Layout {
@@ -34,6 +35,7 @@ struct Codec<'a, 'ctx> {
     callee: &'a TypeEnv,
     span: SpanId,
     left: usize,
+    work: Option<&'a std::cell::Cell<usize>>,
 }
 
 impl Codec<'_, '_> {
@@ -49,12 +51,15 @@ impl Codec<'_, '_> {
     }
 
     fn actual_type(&mut self, ty: &Ty) -> Result<TypeArgument, VcRefusal> {
+        if let Some(work) = self.work {
+            return self.ctx.type_argument_with_work(ty, self.caller, self.span, work);
+        }
         let recipe = TypeRecipe::registered_with_work(
             ty,
             self.caller.owner(),
             &|id| self.ctx.recipe_adt(id),
-            &mut self.left,
-        )
+            &|id| self.ctx.recipe_projection(id),
+            &mut self.left)
         .ok_or_else(|| {
             refusal(
                 "generic-product",
@@ -139,8 +144,8 @@ impl Codec<'_, '_> {
                                 &field.ty,
                                 family,
                                 &|id| self.ctx.recipe_adt(id),
-                                &mut self.left,
-                            )
+            &|id| self.ctx.recipe_projection(id),
+                                &mut self.left)
                             .ok_or_else(|| {
                                 refusal(
                                     "generic-product",
@@ -150,7 +155,10 @@ impl Codec<'_, '_> {
                             })?,
                         );
                     }
-                    children.push(field.ty.subst(args));
+                    children.push(match self.work {
+                        Some(work) => self.ctx.substitute_type(&field.ty, args, work, self.span)?,
+                        None => field.ty.subst(args),
+                    });
                 }
                 (family, args.clone(), children, fields)
             }
@@ -163,10 +171,11 @@ impl Codec<'_, '_> {
             }
         };
         if register {
-            self.ctx
-                .types
-                .borrow_mut()
-                .register_product(family, arguments.len(), fields)
+            let registered = match self.work {
+                Some(work) if !self.ctx.source.projections.is_empty() => self.ctx.types.borrow_mut().register_product_with_work(family, arguments.len(), fields, work, self.span)?,
+                _ => self.ctx.types.borrow_mut().register_product(family, arguments.len(), fields),
+            };
+            registered
                 .ok_or_else(|| {
                     refusal(
                         "generic-product",
@@ -229,10 +238,11 @@ impl Codec<'_, '_> {
                 for ((child, shape), value) in layout.children.iter().zip(shapes).zip(values) {
                     fields.push(self.box_whole(child, shape, value)?);
                 }
-                self.ctx
-                    .types
-                    .borrow_mut()
-                    .pack_product(layout.family, &args, fields)
+                let packed = match self.work {
+                    Some(work) if !self.ctx.source.projections.is_empty() => self.ctx.types.borrow_mut().pack_product_with_work(layout.family, &args, fields, work, self.span)?,
+                    _ => self.ctx.types.borrow_mut().pack_product(layout.family, &args, fields),
+                };
+                packed
                     .ok_or_else(|| {
                         refusal(
                             "generic-product",
@@ -290,11 +300,10 @@ impl Codec<'_, '_> {
                     ));
                 }
                 let args = self.arguments(&layout)?;
-                let fields = self
-                    .ctx
-                    .types
-                    .borrow_mut()
-                    .project_product(layout.family, &args, value)
+                let fields = match self.work {
+                    Some(work) if !self.ctx.source.projections.is_empty() => self.ctx.types.borrow_mut().project_product_with_work(layout.family, &args, value, work, self.span)?,
+                    _ => self.ctx.types.borrow_mut().project_product(layout.family, &args, value),
+                }
                     .ok_or_else(|| {
                         refusal(
                             "generic-product",
@@ -330,13 +339,21 @@ impl Codec<'_, '_> {
                         self.span,
                     )
                 })?;
-                vocabulary.argument(&recipe, self.callee).ok_or_else(|| {
+                let argument = match self.work {
+                    Some(work) => vocabulary.argument_with_allocation_work(&recipe, self.callee, work, self.span)?,
+                    None => vocabulary.argument(&recipe, self.callee),
+                }.ok_or_else(|| {
                     refusal(
                         "generic-product",
                         "a formal product type outside its callee scope",
                         self.span,
                     )
-                })?
+                })?;
+                drop(vocabulary);
+                match self.work {
+                    Some(work) => self.ctx.canonical_argument(argument, work, self.span)?,
+                    None => argument,
+                }
             };
             if self.actual_type(ty)? != expected {
                 return Err(refusal(
@@ -399,13 +416,21 @@ impl Ctx<'_> {
         value: Val,
         span: SpanId,
     ) -> Result<Term, VcRefusal> {
-        let shape = self.shape(ty, env.owner(), span)?;
+        self.box_native_value_with_work(ty, env, value, span, env.projection_work().map(|work| work.as_ref()))
+    }
+
+    pub(super) fn box_native_value_with_work(
+        &self, ty: &Ty, env: &TypeEnv, value: Val, span: SpanId,
+        work: Option<&std::cell::Cell<usize>>,
+    ) -> Result<Term, VcRefusal> {
+        let shape = match work { Some(work) => self.shape_with_work(ty, env.owner(), span, work)?, None => self.shape(ty, env.owner(), span)? };
         let mut codec = Codec {
             ctx: self,
             caller: env,
             callee: env,
             span,
             left: 1024,
+            work,
         };
         codec.box_whole(ty, &shape, value)
     }
@@ -417,13 +442,21 @@ impl Ctx<'_> {
         value: Term,
         span: SpanId,
     ) -> Result<Val, VcRefusal> {
-        let shape = self.shape(ty, env.owner(), span)?;
+        self.unbox_native_value_with_work(ty, env, value, span, env.projection_work().map(|work| work.as_ref()))
+    }
+
+    pub(super) fn unbox_native_value_with_work(
+        &self, ty: &Ty, env: &TypeEnv, value: Term, span: SpanId,
+        work: Option<&std::cell::Cell<usize>>,
+    ) -> Result<Val, VcRefusal> {
+        let shape = match work { Some(work) => self.shape_with_work(ty, env.owner(), span, work)?, None => self.shape(ty, env.owner(), span)? };
         let mut codec = Codec {
             ctx: self,
             caller: env,
             callee: env,
             span,
             left: 1024,
+            work,
         };
         codec.unbox_whole(ty, &shape, value)
     }
@@ -434,6 +467,7 @@ impl Ctx<'_> {
         shape: &Shape,
         value: Val,
     ) -> Result<Val, VcRefusal> {
+        if let Some(work) = view.work { self.ensure_projection_rules(work, view.span)?; }
         let boxing = !matches!(view.position, FormalPosition::Result);
         let callee = view
             .callee
@@ -461,9 +495,13 @@ impl Ctx<'_> {
                 view.span,
             )
         })?;
+        let actual = match view.work {
+            Some(work) => self.substitute_type(formal_ty, view.type_args, work, view.span)?,
+            None => formal_ty.subst(view.type_args),
+        };
         if callee.type_params.len() != view.type_args.len()
             || view.callee.len() != view.type_args.len()
-            || formal_ty.subst(view.type_args) != *view.actual_ty
+            || actual != *view.actual_ty
         {
             return Err(refusal(
                 "generic-product",
@@ -473,9 +511,9 @@ impl Ctx<'_> {
         }
         let expected = match view.position {
             FormalPosition::SpecParameter(_) if !callee.type_params.is_empty() => {
-                self.poly_shape(formal_ty, Some(callee.id), view.span)?
+                match view.work { Some(work) => self.poly_shape_with_work(formal_ty, Some(callee.id), view.span, work)?, None => self.poly_shape(formal_ty, Some(callee.id), view.span)? }
             }
-            _ => self.shape(formal_ty, Some(callee.id), view.span)?,
+            _ => match view.work { Some(work) => self.shape_with_work(formal_ty, Some(callee.id), view.span, work)?, None => self.shape(formal_ty, Some(callee.id), view.span)? },
         };
         if *shape != expected {
             return Err(refusal(
@@ -484,13 +522,14 @@ impl Ctx<'_> {
                 view.span,
             ));
         }
-        let native = self.shape(view.actual_ty, view.caller.owner(), view.span)?;
+        let native = match view.work { Some(work) => self.shape_with_work(view.actual_ty, view.caller.owner(), view.span, work)?, None => self.shape(view.actual_ty, view.caller.owner(), view.span)? };
         let mut codec = Codec {
             ctx: self,
             caller: view.caller,
             callee: view.callee,
             span: view.span,
             left: 1024,
+            work: view.work,
         };
         for (index, ty) in view.type_args.iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| {

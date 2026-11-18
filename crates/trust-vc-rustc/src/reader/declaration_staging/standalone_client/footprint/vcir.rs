@@ -106,6 +106,9 @@ pub(super) fn ty(ty: &Ty, budget: &mut Budget, depth: usize) -> Result<Value, St
         }
         Ty::Adt(adt, args) => json!({"kind": "Nominal", "id": id(FnId(adt.0)),
             "arguments": types(args, budget, depth + 1)?}),
+        Ty::Projection(..) => return Err(
+            "client footprint has no live associated-type declaration inventory".into()
+        ),
     })
 }
 
@@ -368,8 +371,14 @@ impl<'a> Walk<'a> {
             }
             StmtKind::Let { local, init } => json!({"kind": "Let", "local": local.0,
                 "initial": init.as_ref().map(|expr| self.expr(expr, budget, depth + 1)).transpose()?}),
+            StmtKind::LetChecked { local, init } => json!({"kind": "LetChecked", "local": local.0,
+                "initial": self.expr(init, budget, depth + 1)?}),
             StmtKind::Assign { place, value } => {
                 json!({"kind": "Assign", "place": self.place(place, budget)?,
+                "value": self.expr(value, budget, depth + 1)?})
+            }
+            StmtKind::AssignSpec { place, value } => {
+                json!({"kind": "AssignSpec", "place": self.place(place, budget)?,
                 "value": self.expr(value, budget, depth + 1)?})
             }
             StmtKind::BorrowMut { dest, place } => {
@@ -396,6 +405,14 @@ impl<'a> Walk<'a> {
                 then_block,
                 else_block,
             } => json!({"kind": "If",
+                "condition": self.expr(cond, budget, depth + 1)?,
+                "then": self.block(then_block, budget, depth + 1)?,
+                "else": self.block(else_block, budget, depth + 1)?}),
+            StmtKind::IfSpec {
+                cond,
+                then_block,
+                else_block,
+            } => json!({"kind": "IfSpec",
                 "condition": self.expr(cond, budget, depth + 1)?,
                 "then": self.block(then_block, budget, depth + 1)?,
                 "else": self.block(else_block, budget, depth + 1)?}),

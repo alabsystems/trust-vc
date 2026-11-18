@@ -9,6 +9,9 @@ use trust_vc_vcir::*;
 #[path = "generic_origins/concrete_inline.rs"]
 mod concrete_inline;
 
+#[path = "generic_origins/copy_premises.rs"]
+mod copy_premises;
+
 fn id(value: u64) -> FnId {
     FnId(DefHash::new(4, value))
 }
@@ -33,6 +36,7 @@ fn original() -> FnDecl {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         locals: vec![
             local(Ty::Param(0), LocalKind::Return),

@@ -52,6 +52,7 @@ fn function(number: u64) -> FnDecl {
         mode: Mode::Exec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             local(Ty::Unit, LocalKind::Return),

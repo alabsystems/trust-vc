@@ -47,6 +47,7 @@ fn function(id: FnId, role: FnRole, params: usize, output: Ty) -> FnDecl {
         role,
         kind: FnKind::Function,
         type_params: vec!["T".into()],
+        copy_premises: Vec::new(),
         locals,
         params: (0..params as u32).map(LocalId).collect(),
         ret: LocalId(params as u32),

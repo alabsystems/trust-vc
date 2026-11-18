@@ -22,10 +22,15 @@ const PROXY_PREFIX: &str = "VERUS_UNERASED_PROXY__";
 const PROXY: &str = "verus::internal(unerased_proxy)";
 const REAL: &str = "verus::internal(uses_unerased_proxy)";
 const CONSTANT: &str = "verus::internal(encoded_const)";
+const STATIC: &str = "verus::internal(encoded_static)";
+
+mod pairs;
+pub(super) use pairs::Use;
 
 /// Exact local definitions; displayed names are never call identities.
 #[derive(Default)]
-pub(super) struct Registry {
+pub(super) struct Registry<'tcx> {
+    pairs: pairs::Pairs<'tcx>,
     proxy_to_real: HashMap<LocalDefId, LocalDefId>,
     real_to_proxy: HashMap<LocalDefId, LocalDefId>,
     modes: HashMap<LocalDefId, ConstMode>,
@@ -38,8 +43,8 @@ fn marker_count(tcx: TyCtxt<'_>, def: LocalDefId, keyword: &str) -> usize {
         .count()
 }
 
-impl Registry {
-    pub(super) fn collect(tcx: TyCtxt<'_>) -> Self {
+impl<'tcx> Registry<'tcx> {
+    pub(super) fn collect(tcx: TyCtxt<'tcx>) -> Self {
         let owners: Vec<_> = tcx
             .hir_crate_items(())
             .owners()
@@ -168,6 +173,19 @@ impl Registry {
             registry.real_to_proxy.insert(real, proxy);
             registry.modes.insert(proxy, mode);
         }
+        registry.pairs = pairs::Pairs::collect(tcx, &owners);
+        for (proxy, real, kind) in registry.pairs.items() {
+            if registry.proxy_to_real.contains_key(&proxy)
+                || registry.real_to_proxy.contains_key(&real)
+            {
+                continue;
+            }
+            registry.proxy_to_real.insert(proxy, real);
+            registry.real_to_proxy.insert(real, proxy);
+            if let FnKind::Constant(mode) = kind {
+                registry.modes.insert(proxy, mode);
+            }
+        }
         // Trait constants have native HIR initializers instead of generated
         // functions. Only original verus-owned non-external declarations are
         // indexed. No spelling, evaluated host value or caller bit grants a
@@ -212,7 +230,9 @@ impl Registry {
     }
 
     pub(super) fn kind(&self, proxy: LocalDefId) -> FnKind {
-        self.mode(proxy).map_or(FnKind::Function, FnKind::Constant)
+        self.pairs
+            .kind(proxy)
+            .unwrap_or_else(|| self.mode(proxy).map_or(FnKind::Function, FnKind::Constant))
     }
 
     pub(super) fn mode(&self, declaration: LocalDefId) -> Option<ConstMode> {
@@ -226,8 +246,68 @@ impl Registry {
 
     pub(super) fn accepts_attribute(&self, def: LocalDefId, attr: &VerusAttr) -> bool {
         matches!(attr, VerusAttr::Unknown(name) if
-            self.real(def).is_some() && (name == PROXY || name == CONSTANT)
+            self.real(def).is_some() && (name == PROXY || name == CONSTANT || name == STATIC && self.kind(def) == FnKind::Static)
             || self.proxy(def).is_some() && name == REAL)
+    }
+
+    /// Only diagnostic ownership of an actual macro-copied request. The
+    /// canonical declaration must still be visited by the whole autospec
+    /// validator; this supplies no target, signature, mode or body permission.
+    pub(super) fn copied_autospec_owner(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        real: LocalDefId,
+        attribute: &VerusAttr,
+        span: rustc_span::Span,
+    ) -> Option<LocalDefId> {
+        if !matches!(attribute, VerusAttr::WhenUsedAsSpec(_)) {
+            return None;
+        }
+        let proxy = self.proxy(real)?;
+        if self.real(proxy) != Some(real)
+            || self.kind(proxy) != FnKind::ConstFunction
+            || !self.current_pair(tcx, proxy)
+        {
+            return None;
+        }
+        let requests = |owner| {
+            attrs::verus_attrs(tcx.hir_attrs(tcx.local_def_id_to_hir_id(owner)))
+                .into_iter()
+                .filter(|(attr, _)| matches!(attr, VerusAttr::WhenUsedAsSpec(_)))
+                .collect::<Vec<_>>()
+        };
+        let original = requests(real);
+        let canonical = requests(proxy);
+        // Preserve every request's identity and order, including A40's
+        // existing last-request semantics. A target need not be valid here.
+        (!original.is_empty()
+            && original == canonical
+            && original
+                .iter()
+                .any(|(attr, actual_span)| attr == attribute && *actual_span == span))
+        .then_some(proxy)
+    }
+
+    pub(super) fn select(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        caller: LocalDefId,
+        typeck: &'tcx ty::TypeckResults<'tcx>,
+        expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<Use<'tcx>>, String> {
+        self.pairs.select(tcx, caller, typeck, expression)
+    }
+
+    pub(super) fn current_pair(&self, tcx: TyCtxt<'tcx>, proxy: LocalDefId) -> bool {
+        self.pairs.current(tcx, proxy)
+    }
+
+    pub(super) fn value_kind(&self, native: LocalDefId) -> Option<FnKind> {
+        let declaration = self.proxy(native).unwrap_or(native);
+        match self.kind(declaration) {
+            kind @ (FnKind::Constant(_) | FnKind::Static) => Some(kind),
+            _ => None,
+        }
     }
 
     pub(super) fn item_attrs(&self, tcx: TyCtxt<'_>, def: LocalDefId) -> ItemAttrs {
@@ -236,5 +316,27 @@ impl Registry {
             .unsupported
             .retain(|(name, _)| !self.accepts_attribute(def, &VerusAttr::Unknown(name.clone())));
         result
+    }
+
+    pub(super) fn item_attrs_with_work(
+        &self,
+        tcx: TyCtxt<'_>,
+        def: LocalDefId,
+        remaining: &mut usize,
+    ) -> Result<ItemAttrs, String> {
+        let mut result =
+            attrs::item_attrs_with_work(tcx.hir_attrs(tcx.local_def_id_to_hir_id(def)), remaining)?;
+        // Retain the exact proxy/role filtering, including its owned Unknown
+        // name copy. No attr spelling can establish a constant role.
+        for (name, _) in &result.unsupported {
+            *remaining = remaining
+                .checked_sub(1)
+                .and_then(|left| left.checked_sub(name.len()))
+                .ok_or("constant attribute filtering exceeds the caller's shared work bound")?;
+        }
+        result
+            .unsupported
+            .retain(|(name, _)| !self.accepts_attribute(def, &VerusAttr::Unknown(name.clone())));
+        Ok(result)
     }
 }

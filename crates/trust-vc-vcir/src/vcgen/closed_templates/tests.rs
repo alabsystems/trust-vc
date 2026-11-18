@@ -20,6 +20,7 @@ pub(in crate::vcgen) fn source() -> VcCrate {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: if generic { vec!["A".into()] } else { vec![] },
         locals: vec![
             LocalDecl {

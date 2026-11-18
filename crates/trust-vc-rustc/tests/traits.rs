@@ -269,3 +269,269 @@ fn substituted_projection_bounds_keep_their_cycle_dependencies() {
     assert_eq!(messages, vec![CYCLE.to_owned()]);
     assert!(bad.raw.is_empty());
 }
+
+#[test]
+fn associated_call_type_arguments_keep_exact_member_identity() {
+    let positive = "verus! {
+        trait Left { type Item; }
+        trait Right { type Item; }
+        trait Observe { spec fn value() -> bool; }
+        proof fn same<A: Left + Right>()
+            where <A as Left>::Item: Observe, <A as Right>::Item: Observe
+        {
+            assert(<<A as Left>::Item as Observe>::value()
+                == <<A as Left>::Item as Observe>::value());
+        }
+    }";
+    let good = common::run("projection_member_identity_same", positive, &[]);
+    assert_eq!(good.outcome(), "checked", "{good:?}");
+    assert_eq!(good.exit, 0);
+    assert!(good.errors().is_empty());
+    assert!(good.raw.is_empty());
+    assert!(good.record["functions"].as_array().unwrap().iter()
+        .any(|function| function["verdict"] == "verified"
+            && function["sites_proved"].as_u64().unwrap_or(0) > 0));
+    let negative = positive.replace(
+        "== <<A as Left>::Item as Observe>::value()",
+        "== <<A as Right>::Item as Observe>::value()",
+    );
+    assert_ne!(positive, negative);
+    let bad = common::run("projection_member_identity_distinct", &negative, &[]);
+    assert_eq!(bad.outcome(), "verification-failed", "{bad:?}");
+    assert_ne!(bad.exit, 0);
+    assert!(bad.errors().iter().any(|error| error.message.starts_with(ASSERT)));
+    assert!(bad.record["functions"].as_array().unwrap().iter()
+        .any(|function| function["verdict"] == "failed"
+            && function["sites_failed"].as_u64().unwrap_or(0) > 0));
+    assert!(bad.raw.is_empty());
+}
+
+#[test]
+fn associated_constructor_declarations_do_not_admit_gats_or_defaults() {
+    for (name, program) in [
+        ("projection_gat_boundary", "verus! {
+            trait Source { type Item<T>; }
+            trait Observe { proof fn use_it(); }
+            proof fn use_projection<A: Source>() where <A as Source>::Item<bool>: Observe {
+                <<A as Source>::Item<bool> as Observe>::use_it();
+            }
+        }"),
+        ("projection_default_boundary", "verus! {
+            trait Source { type Item = bool; }
+            trait Observe { proof fn use_it(); }
+            proof fn use_projection<A: Source>() where <A as Source>::Item: Observe {
+                <<A as Source>::Item as Observe>::use_it();
+            }
+        }"),
+    ] {
+        let result = common::run(name, program, &[]);
+        assert_ne!(result.exit, 0, "{result:?}");
+        assert_ne!(result.outcome(), "checked", "{result:?}");
+        assert!(result.record["functions"].as_array().unwrap().iter()
+            .all(|function| function["verdict"] != "verified"));
+    }
+}
+
+#[test]
+fn projected_value_membership_and_closed_instances_retain_false_assertions() {
+    let program = "verus! {
+        trait Source { type Item; }
+        impl Source for u8 { type Item = u16; }
+        spec fn identity<A: Source>(value: A::Item) -> A::Item { value }
+        proof fn generic_identity<A: Source>(left: A::Item, right: A::Item) {
+            assert(identity::<A>(left) == left);
+        }
+        proof fn closed_identity() {
+            assert(identity::<u8>(7u16) == 7u16);
+        }
+    }";
+    let good = common::run("projected_value_membership", program, &[]);
+    assert_eq!(good.outcome(), "checked", "{good:?}");
+    assert_eq!(good.exit, 0);
+    assert!(good.errors().is_empty());
+    assert!(good.raw.is_empty());
+    assert!(good.record["functions"].as_array().unwrap().iter().filter(|f|
+        f["verdict"] == "verified" && f["sites_proved"].as_u64().unwrap_or(0) > 0).count() >= 2);
+    for (name, old, new) in [
+        ("projected_value_distinct_inputs", "identity::<A>(left) == left", "identity::<A>(left) == right"),
+        ("projected_value_closed_false", "identity::<u8>(7u16) == 7u16", "identity::<u8>(7u16) == 8u16"),
+    ] {
+        let false_program = program.replace(old, new);
+        assert_ne!(false_program, program);
+        let bad = common::run(name, &false_program, &[]);
+        assert_eq!(bad.outcome(), "verification-failed", "{bad:?}");
+        assert_ne!(bad.exit, 0);
+        assert!(bad.errors().iter().any(|error| error.message.starts_with(ASSERT)));
+        assert!(bad.record["functions"].as_array().unwrap().iter().any(|f|
+            f["verdict"] == "failed" && f["sites_failed"].as_u64().unwrap_or(0) > 0));
+        assert!(bad.raw.is_empty());
+    }
+}
+
+#[test]
+fn projected_fields_use_completed_raw_dependencies_and_actual_closed_layouts() {
+    let program = "verus! {
+        trait Source { type Item; }
+        impl Source for u8 { type Item = u16; }
+        struct Carrier<A: Source> { value: A::Item }
+        spec fn get<A: Source>(value: Carrier<A>) -> A::Item { value.value }
+        spec fn identity<T>(value: T) -> T { value }
+        proof fn generic_field<A: Source>(value: Carrier<A>) {
+            assert(get::<A>(value) == value.value);
+        }
+        proof fn closed_field() {
+            let value = Carrier::<u8> { value: 7u16 };
+            assert(get::<u8>(value) == 7u16);
+            assert(identity(value).value == 7u16);
+        }
+    }";
+    let good = common::run("projection_fields_generic_and_closed", program, &[]);
+    assert_eq!(good.outcome(), "checked", "{good:?}");
+    assert_eq!(good.exit, 0);
+    assert!(good.errors().is_empty());
+    assert!(good.raw.is_empty());
+    assert!(good.record["functions"].as_array().unwrap().iter().filter(|function|
+        function["verdict"] == "verified" && function["sites_proved"].as_u64().unwrap_or(0) > 0).count() >= 2);
+    for (name, from, to) in [
+        ("projection_field_get_false", "get::<u8>(value) == 7u16", "get::<u8>(value) == 8u16"),
+        ("projection_field_product_false", "identity(value).value == 7u16", "identity(value).value == 8u16"),
+    ] {
+        let negative = program.replace(from, to);
+        assert_ne!(negative, program);
+        let bad = common::run(name, &negative, &[]);
+        assert_eq!(bad.outcome(), "verification-failed", "{bad:?}");
+        assert_ne!(bad.exit, 0);
+        assert!(bad.errors().iter().any(|error| error.message.starts_with(ASSERT)));
+        assert!(bad.record["functions"].as_array().unwrap().iter().any(|function|
+            function["verdict"] == "failed" && function["sites_failed"].as_u64().unwrap_or(0) > 0));
+        assert!(bad.raw.is_empty());
+    }
+}
+
+#[test]
+fn projected_field_observations_do_not_refill_their_native_reader_ledger() {
+    let mut program = String::from("verus! {
+        trait Source { type Item; }
+        impl Source for u8 { type Item = u16; }
+        struct Carrier<A: Source> { value: A::Item }
+        proof fn field_budget(value: &Carrier<u8>) {");
+    // This exceeds the existing 10,000-step type-dependency allowance by
+    // repeated genuine native field observations, not a synthetic mode or
+    // ownership marker. All assertions remain ordinary true assertions.
+    for _ in 0..10_001 { program.push_str("assert(value.value == value.value);\n"); }
+    program.push_str("} }");
+    let result = common::run("projection_field_work_exhaustion", &program, &[]);
+    assert_eq!(result.outcome(), "refused", "{result:?}");
+    assert_ne!(result.exit, 0);
+    assert!(result.record.to_string().contains("projection-field"));
+    assert!(result.record.to_string().contains("traversal grant was exhausted"));
+    assert!(result.record["functions"].as_array().unwrap().iter().all(|function| function["verdict"] != "verified"));
+}
+
+#[test]
+fn associated_value_identity_does_not_supply_native_copy_or_erase_borrowck() {
+    let source = "verus! {
+        trait Source { type Item; }
+        fn duplicate<A: Source>(value: A::Item) -> (A::Item, A::Item) {
+            (value, value)
+        }
+    }";
+    let result = common::run("projected_value_not_copy", source, &[]);
+    assert_ne!(result.exit, 0, "{result:?}");
+    assert_ne!(result.outcome(), "checked", "{result:?}");
+    assert!(result.record["functions"].as_array().unwrap().iter().all(|f| f["verdict"] != "verified"));
+    // The source program, not an IR permission bit, must still face the
+    // original native type/ownership check for a second consuming use.
+    assert!(result.raw.iter().any(|raw| raw.contains("moved")) || result.errors().iter().any(|e| e.message.contains("move")), "{result:?}");
+}
+
+#[test]
+fn empty_trait_headers_do_not_supply_body_or_contract_permissions() {
+    // Keep this control independent of associated-type support. Every trait
+    // has a real method, and the inherited header contains no expressions.
+    let positive = "verus! {
+        struct S<A>(A);
+        trait T1 { proof fn f1(); }
+        trait T3 { proof fn f3(); }
+        impl T1 for bool { proof fn f1() { } }
+        impl<A: T1> T3 for S<A> { proof fn f3() { A::f1(); } }
+        proof fn test() { <S<bool> as T3>::f3(); }
+    }";
+    let result = common::run("empty_trait_header_generic", positive, &[]);
+    assert_eq!(result.outcome(), "checked", "{result:?}");
+    assert_eq!(result.exit, 0);
+    assert!(result.errors().is_empty());
+    assert!(result.raw.is_empty());
+
+    let false_body = positive.replace("A::f1();", "A::f1(); assert(false);");
+    assert_ne!(false_body, positive);
+    let result = common::run("empty_trait_header_false_body", &false_body, &[]);
+    assert_eq!(result.outcome(), "verification-failed", "{result:?}");
+    assert_ne!(result.exit, 0);
+    assert!(result.errors().iter().any(|error| error.message.starts_with(ASSERT)));
+    assert!(result.record["functions"].as_array().unwrap().iter().any(|f|
+        f["verdict"] == "failed" && f["sites_failed"].as_u64().unwrap_or(0) > 0));
+    assert!(result.raw.is_empty());
+
+    let cycle = positive.replace(
+        "impl T1 for bool { proof fn f1() { } }",
+        "impl T1 for bool { proof fn f1() { <S<bool> as T3>::f3(); } }",
+    );
+    assert_ne!(cycle, positive);
+    let result = common::run("empty_trait_header_generic_cycle", &cycle, &[]);
+    assert_eq!(result.outcome(), "verus-rejected", "{result:?}");
+    assert_ne!(result.exit, 0);
+    assert!(result.errors().iter().any(|error| error.message == CYCLE));
+    assert!(result.raw.is_empty());
+
+    let result = common::run(
+        "nonempty_trait_header_false_ensures",
+        "verus! {
+            trait T { proof fn f() ensures false; }
+            struct S { }
+            impl T for S { proof fn f() { } }
+        }",
+        &[],
+    );
+    assert_eq!(result.outcome(), "verification-failed", "{result:?}");
+    assert_ne!(result.exit, 0);
+    assert!(result.errors().iter().any(|error| error.message.starts_with(POST)));
+    assert!(result.record["functions"].as_array().unwrap().iter().any(|f|
+        f["verdict"] == "failed" && f["sites_failed"].as_u64().unwrap_or(0) > 0));
+    assert!(result.raw.is_empty());
+}
+
+#[test]
+fn projected_enum_fields_keep_variant_identity_and_false_claims() {
+    let program = "verus! {
+        trait Source { type Item; }
+        impl Source for u8 { type Item = u16; }
+        enum Carrier<A: Source> { Empty, Value(A::Item) }
+        spec fn get<A: Source>(value: Carrier<A>, otherwise: A::Item) -> A::Item {
+            match value { Carrier::Empty => otherwise, Carrier::Value(field) => field }
+        }
+        proof fn closed_enum_field() {
+            assert(get::<u8>(Carrier::Value(7u16), 9u16) == 7u16);
+            assert(get::<u8>(Carrier::Empty, 9u16) == 9u16);
+        }
+    }";
+    let good = common::run("projection_enum_fields", program, &[]);
+    assert_eq!(good.outcome(), "checked", "{good:?}");
+    assert_eq!(good.exit, 0);
+    assert!(good.errors().is_empty());
+    assert!(good.raw.is_empty());
+    for (name, from, to) in [
+        ("projection_enum_value_false", "Carrier::Value(7u16), 9u16) == 7u16", "Carrier::Value(7u16), 9u16) == 8u16"),
+        ("projection_enum_inactive_false", "Carrier::Empty, 9u16) == 9u16", "Carrier::Empty, 9u16) == 7u16"),
+    ] {
+        let negative = program.replace(from, to);
+        assert_ne!(negative, program);
+        let bad = common::run(name, &negative, &[]);
+        assert_eq!(bad.outcome(), "verification-failed", "{bad:?}");
+        assert_ne!(bad.exit, 0);
+        assert!(bad.errors().iter().any(|error| error.message.starts_with(ASSERT)));
+        assert!(bad.record["functions"].as_array().unwrap().iter().any(|function|
+            function["verdict"] == "failed" && function["sites_failed"].as_u64().unwrap_or(0) > 0));
+        assert!(bad.raw.is_empty());
+    }
+}

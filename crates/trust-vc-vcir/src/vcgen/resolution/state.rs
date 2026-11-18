@@ -62,7 +62,7 @@ impl Work {
             ));
         }
         match ty {
-            Ty::Tuple(fields) | Ty::Adt(_, fields) => {
+            Ty::Tuple(fields) | Ty::Adt(_, fields) | Ty::Projection(_, fields) => {
                 for field in fields {
                     self.ty(field, span, depth + 1)?;
                 }
@@ -126,8 +126,9 @@ pub(in crate::vcgen) struct Plan {
     pub(in crate::vcgen) exits: HashMap<LoopId, OwnershipState>,
     pub(in crate::vcgen) after: HashMap<usize, OwnershipState>,
     pub(in crate::vcgen) places: Vec<Place>,
+    pub(super) value_targets: Vec<ValueTarget>,
     blocks: HashMap<usize, Vec<Place>>,
-    work: Option<Work>,
+    pub(super) work: Option<Work>,
 }
 
 impl Plan {
@@ -145,6 +146,11 @@ impl Plan {
     }
     pub(in crate::vcgen) fn remaining(&self) -> Option<&Cell<usize>> {
         self.work.as_ref().map(|work| work.0.as_ref())
+    }
+    /// Share this analysis's original debit cell with auxiliary translation.
+    /// Absence cannot be replaced with a fresh grant.
+    pub(in crate::vcgen) fn shared_work(&self) -> Option<Rc<Cell<usize>>> {
+        self.work.as_ref().map(|work| work.0.clone())
     }
     fn copy(&self, state: Option<&OwnershipState>, span: SpanId) -> R<Option<OwnershipState>> {
         match (state, &self.work) {

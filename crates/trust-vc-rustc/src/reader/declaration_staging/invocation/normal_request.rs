@@ -442,3 +442,10 @@ mod working_directory_tests {
         );
     }
 }
+
+pub(super) fn check_exact_untracked(
+    expected: &rustc_session::config::Options,
+    actual: &rustc_session::config::Options,
+) -> Result<(), String> {
+    untracked::check(expected, actual)
+}

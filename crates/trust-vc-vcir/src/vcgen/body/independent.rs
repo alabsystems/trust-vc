@@ -119,6 +119,11 @@ impl<'a> Queries<'a> {
                 then_block,
                 else_block,
                 ..
+            }
+            | StmtKind::IfSpec {
+                then_block,
+                else_block,
+                ..
             } => {
                 let a = self.block(then_block, later);
                 let b = self.block(else_block, later);
@@ -149,7 +154,11 @@ impl<'a> Queries<'a> {
         out.needed |= later
             && matches!(
                 &stmt.kind,
-                StmtKind::Let { .. } | StmtKind::Assign { .. } | StmtKind::Call { .. }
+                StmtKind::Let { .. }
+                    | StmtKind::LetChecked { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::AssignSpec { .. }
+                    | StmtKind::Call { .. }
             );
         if !matches!(stmt.kind, StmtKind::GhostTail { .. }) {
             for expr in super::super::stmt_exprs(stmt) {

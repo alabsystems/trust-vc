@@ -64,6 +64,7 @@ fn nonowned_dag(depth: u32) -> VcCrate {
         mode: Mode::Exec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             LocalDecl {

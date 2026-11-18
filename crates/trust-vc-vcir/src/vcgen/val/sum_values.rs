@@ -21,28 +21,29 @@ fn enum_type(mut ty: &Ty) -> Option<(AdtId, &[Ty])> {
 }
 
 impl Ctx<'_> {
-    fn finite_sum_type(&self, ty: &Ty, stack: &mut Vec<AdtId>, left: &mut usize) -> Option<()> {
+    fn finite_sum_type(&self, ty: &Ty, stack: &mut Vec<AdtId>, left: &mut usize, work: Option<&std::cell::Cell<usize>>, span: SpanId) -> Option<()> {
         *left = left.checked_sub(1)?;
+        if let Some(work) = work { super::super::inline_work::items(work, 1, span).ok()?; }
         match ty {
             Ty::Bool | Ty::Unit | Ty::Param(_) => Some(()),
             Ty::Int(range) => supported_range(*range).ok(),
             Ty::Tuple(fields) => {
                 for field in fields {
-                    self.finite_sum_type(field, stack, left)?;
+                    self.finite_sum_type(field, stack, left, work, span)?;
                 }
                 Some(())
             }
             Ty::Ref {
                 mutable: false,
                 inner,
-            } => self.finite_sum_type(inner, stack, left),
+            } => self.finite_sum_type(inner, stack, left, work, span),
             Ty::Adt(id, args) => {
                 let adt = self.adts.get(id)?;
                 if args.len() != adt.type_params.len() {
                     return None;
                 }
                 for arg in args {
-                    self.finite_sum_type(arg, stack, left)?;
+                    self.finite_sum_type(arg, stack, left, work, span)?;
                 }
                 match adt.kind {
                     AdtKind::Opaque if adt.variants.is_empty() => return Some(()),
@@ -57,10 +58,18 @@ impl Ctx<'_> {
                 for variant in &adt.variants {
                     *left = left.checked_sub(1)?;
                     for field in &variant.fields {
-                        self.finite_sum_type(&field.ty.subst(args), stack, left)?;
+                        let actual = self.field_type(&field.ty, args, work, span).ok()?;
+                        self.finite_sum_type(&actual, stack, left, work, span)?;
                     }
                 }
                 stack.pop();
+                Some(())
+            }
+            // This is a boxed field recipe, like an actual type parameter;
+            // it proves no datatype foundedness or concrete layout. Core WF
+            // independently checks the raw dependency graph and definitions.
+            Ty::Projection(id, args) if work.is_some() && self.recipe_projection(*id) == Some(args.len()) => {
+                for argument in args { self.finite_sum_type(argument, stack, left, work, span)?; }
                 Some(())
             }
             _ => None,
@@ -68,6 +77,11 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn register_enum(&self, id: AdtId, span: SpanId) -> Result<(), VcRefusal> {
+        self.register_enum_with_work(id, span, None)
+    }
+
+    pub(crate) fn register_enum_with_work(&self, id: AdtId, span: SpanId, work: Option<&std::cell::Cell<usize>>) -> Result<(), VcRefusal> {
+        if let Some(work) = work { self.ensure_projection_rules(work, span)?; }
         let adt = self.adts.get(&id).ok_or_else(|| {
             refusal(
                 "enum-layout",
@@ -99,7 +113,7 @@ impl Ctx<'_> {
         let args: Vec<_> = (0..adt.type_params.len())
             .map(|i| Ty::Param(i as u32))
             .collect();
-        self.finite_sum_type(&Ty::Adt(id, args), &mut Vec::new(), &mut 64)
+        self.finite_sum_type(&Ty::Adt(id, args), &mut Vec::new(), &mut 64, work, span)
             .ok_or_else(|| {
                 refusal(
                     "enum-layout",
@@ -118,8 +132,8 @@ impl Ctx<'_> {
                         &field.ty,
                         family,
                         &|id| self.recipe_adt(id),
-                        &mut left,
-                    )
+            &|id| self.recipe_projection(id),
+                        &mut left)
                     .ok_or_else(|| {
                         refusal(
                             "enum-layout",
@@ -131,10 +145,11 @@ impl Ctx<'_> {
             }
             variants.push(fields);
         }
-        self.types
-            .borrow_mut()
-            .register_sum(id, adt.type_params.len(), variants)
-            .ok_or_else(|| {
+        let registered = match work {
+            Some(work) if !self.source.projections.is_empty() => self.types.borrow_mut().register_sum_with_work(id, adt.type_params.len(), variants, work, span)?,
+            _ => self.types.borrow_mut().register_sum(id, adt.type_params.len(), variants),
+        };
+        registered.ok_or_else(|| {
                 refusal(
                     "enum-layout",
                     "a conflicting or unsupported sum schema",
@@ -156,12 +171,17 @@ impl Ctx<'_> {
                 span,
             )
         })?;
-        self.register_enum(id, span)?;
-        let arguments = args
-            .iter()
-            .map(|ty| self.type_argument(ty, env, span))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((id, args.to_vec(), arguments))
+        let work = env.projection_work().map(|work| work.as_ref());
+        self.register_enum_with_work(id, span, work)?;
+        let arguments = args.iter().map(|ty| match work {
+            Some(work) => self.type_argument_with_work(ty, env, span, work),
+            None => self.type_argument(ty, env, span),
+        }).collect::<Result<Vec<_>, _>>()?;
+        let actual = match work {
+            Some(work) => args.iter().map(|ty| self.normalize_type(ty, work, span)).collect::<Result<Vec<_>, _>>()?,
+            None => args.to_vec(),
+        };
+        Ok((id, actual, arguments))
     }
 
     pub(crate) fn construct_enum(
@@ -190,12 +210,14 @@ impl Ctx<'_> {
         }
         let mut boxed = Vec::new();
         for (field, value) in actual.fields.iter().zip(fields) {
-            boxed.push(self.box_native_value(&field.ty.subst(&args), env, value, span)?);
+            let ty = self.field_type(&field.ty, &args, env.projection_work().map(|work| work.as_ref()), span)?;
+            boxed.push(self.box_native_value(&ty, env, value, span)?);
         }
-        self.types
-            .borrow_mut()
-            .construct_sum(id, &types, variant, boxed)
-            .map(Val::Leaf)
+        let constructed = match env.projection_work() {
+            Some(work) => self.types.borrow_mut().construct_sum_with_work(id, &types, variant, boxed, work, span)?,
+            None => self.types.borrow_mut().construct_sum(id, &types, variant, boxed),
+        };
+        constructed.map(Val::Leaf)
             .ok_or_else(|| refusal("enum-layout", "an incompatible typed sum constructor", span))
     }
 
@@ -215,10 +237,11 @@ impl Ctx<'_> {
                 span,
             ));
         };
-        self.types
-            .borrow_mut()
-            .test_sum(id, &args, variant, value)
-            .map(Val::Leaf)
+        let tested = match env.projection_work() {
+            Some(work) => self.types.borrow_mut().test_sum_with_work(id, &args, variant, value, work, span)?,
+            None => self.types.borrow_mut().test_sum(id, &args, variant, value),
+        };
+        tested.map(Val::Leaf)
             .ok_or_else(|| refusal("enum-layout", "an incompatible typed variant test", span))
     }
 
@@ -232,15 +255,15 @@ impl Ctx<'_> {
         span: SpanId,
     ) -> Result<Val, VcRefusal> {
         let (id, args, types) = self.enum_arguments(ty, env, span)?;
-        let field_type = self.adts[&id]
-            .field_ty(variant, field, &args)
-            .ok_or_else(|| {
+        let declared = self.adts[&id].variants.get(variant as usize)
+            .and_then(|variant| variant.fields.get(field as usize)).ok_or_else(|| {
                 refusal(
                     "enum-layout",
                     "a field outside its actual instantiated variant",
                     span,
                 )
             })?;
+        let field_type = self.field_type(&declared.ty, &args, env.projection_work().map(|work| work.as_ref()), span)?;
         let Val::Leaf(value) = value else {
             return Err(refusal(
                 "enum-layout",
@@ -248,11 +271,10 @@ impl Ctx<'_> {
                 span,
             ));
         };
-        let projected = self
-            .types
-            .borrow_mut()
-            .project_sum(id, &types, variant, field, value)
-            .ok_or_else(|| refusal("enum-layout", "an incompatible typed sum projection", span))?;
+        let projected = match env.projection_work() {
+            Some(work) => self.types.borrow_mut().project_sum_with_work(id, &types, variant, field, value, work, span)?,
+            None => self.types.borrow_mut().project_sum(id, &types, variant, field, value),
+        }.ok_or_else(|| refusal("enum-layout", "an incompatible typed sum projection", span))?;
         self.unbox_native_value(&field_type, env, projected, span)
     }
 }

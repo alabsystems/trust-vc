@@ -115,32 +115,44 @@ impl Walk<'_, '_> {
             }
         }
     }
+    fn declare(
+        &mut self,
+        stmt: &Stmt,
+        local: LocalId,
+        init: Option<&Expr>,
+        bindings: &mut Vec<(usize, Origin)>,
+    ) {
+        if self.decl.local(local).is_none() {
+            return;
+        }
+        let mode = init.map(|expr| self.producer_mode(local, expr));
+        if self.transport_temp(local) {
+            bindings.push((local.index(), self.origins[local.index()]));
+            self.origins[local.index()] = if self.origins[local.index()] == Origin::Absent {
+                Origin::Declared {
+                    site: stmt as *const Stmt as usize,
+                    mode: None,
+                }
+            } else {
+                Origin::Invalid
+            };
+            if let (Some(mode), Some(value)) = (mode, init) {
+                self.save_origin(local, mode, &value.ty);
+            }
+        }
+    }
+
     fn statements(&mut self, block: &Block) -> Vec<(usize, Origin)> {
         let mut bindings = Vec::new();
         for stmt in &block.stmts {
             match &stmt.kind {
                 StmtKind::Let { local, init } => {
-                    if self.decl.local(*local).is_none() {
-                        continue;
-                    }
-                    let mode = init.as_ref().map(|expr| self.producer_mode(*local, expr));
-                    if self.transport_temp(*local) {
-                        bindings.push((local.index(), self.origins[local.index()]));
-                        self.origins[local.index()] =
-                            if self.origins[local.index()] == Origin::Absent {
-                                Origin::Declared {
-                                    site: stmt as *const Stmt as usize,
-                                    mode: None,
-                                }
-                            } else {
-                                Origin::Invalid
-                            };
-                        if let (Some(mode), Some(value)) = (mode, init) {
-                            self.save_origin(*local, mode, &value.ty);
-                        }
-                    }
+                    self.declare(stmt, *local, init.as_ref(), &mut bindings);
                 }
-                StmtKind::Assign { place, value } => {
+                StmtKind::LetChecked { local, init } => {
+                    self.declare(stmt, *local, Some(init), &mut bindings);
+                }
+                StmtKind::Assign { place, value } | StmtKind::AssignSpec { place, value } => {
                     if let Some(target) = place_mode(self.decl, &self.index.adts, place) {
                         let actual =
                             if place.projections.is_empty() && self.transport_temp(place.local) {
@@ -215,6 +227,23 @@ impl Walk<'_, '_> {
                     self.scoped(else_block);
                     let no = self.origins.clone();
                     self.merge(&yes, &no);
+                }
+                StmtKind::IfSpec {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
+                    self.value_has_mode(cond, Mode::Spec);
+                    let ambient = self.ambient;
+                    self.ambient = Mode::Proof;
+                    let before = self.origins.clone();
+                    self.scoped(then_block);
+                    let yes = self.origins.clone();
+                    self.origins = before;
+                    self.scoped(else_block);
+                    let no = self.origins.clone();
+                    self.merge(&yes, &no);
+                    self.ambient = ambient;
                 }
                 StmtKind::Block(block) => self.scoped(block),
                 StmtKind::Ghost(block) | StmtKind::GhostTail { block, .. } => {

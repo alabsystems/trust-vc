@@ -243,6 +243,7 @@ pub(crate) struct SpecRecommendations {
 pub(crate) struct Ctx<'a> {
     pub(crate) bitvector_policy: super::BitvectorPolicy,
     pub(crate) source: &'a VcCrate,
+    pub(super) generation_identity: std::rc::Rc<()>,
     pub(crate) pointer_width: u32,
     pub(crate) architecture: crate::bitvector::Architecture,
     pub(crate) fns: HashMap<FnId, &'a FnDecl>,
@@ -250,6 +251,9 @@ pub(crate) struct Ctx<'a> {
     checked_inline_forwarders: HashMap<FnId, FnDecl>,
     validated_instances: std::collections::HashSet<FnId>,
     pub(crate) adts: HashMap<AdtId, &'a AdtDecl>,
+    projections: HashMap<crate::ProjectionId, &'a crate::ProjectionDecl>,
+    projection_definitions: Option<crate::projection_types::Definitions<'a>>,
+    projection_rules_ready: std::cell::Cell<bool>,
     def_order: BTreeMap<FnId, BTreeMap<FnId, DefOrder>>,
     /// The group of recursive functions of each member.
     groups: HashMap<FnId, &'a RecGroup>,
@@ -269,7 +273,8 @@ impl<'a> Ctx<'a> {
 
     pub(crate) fn for_width(krate: &'a VcCrate, pointer_width: u32) -> Self {
         let fns: HashMap<_, _> = krate.fns.iter().map(|decl| (decl.id, decl)).collect();
-        let validated_instances = crate::instance_semantics::validated_origins(&fns);
+        let projection_definitions = crate::projection_types::Definitions::checked(krate, &mut crate::copy_context::WF_WORK);
+        let validated_instances = crate::instance_semantics::validated_origins_with_definitions(&fns, projection_definitions.as_ref());
         let mut groups = HashMap::new();
         for group in &krate.rec_groups {
             for (id, _) in &group.members {
@@ -301,6 +306,7 @@ impl<'a> Ctx<'a> {
         Self {
             bitvector_policy: super::BitvectorPolicy::default(),
             source: krate,
+            generation_identity: std::rc::Rc::new(()),
             pointer_width,
             architecture: krate.architecture,
             fns,
@@ -308,6 +314,9 @@ impl<'a> Ctx<'a> {
             checked_inline_forwarders: HashMap::new(),
             validated_instances,
             adts: krate.adts.iter().map(|adt| (adt.id, adt)).collect(),
+            projections: krate.projections.iter().map(|decl| (decl.id, decl)).collect(),
+            projection_definitions,
+            projection_rules_ready: std::cell::Cell::new(false),
             def_order,
             groups,
             quants: std::cell::RefCell::default(),
@@ -380,6 +389,16 @@ impl<'a> Ctx<'a> {
         self.def_order.get(&function)
     }
 
+    /// Read-only association already established by the existing Spec body
+    /// matcher. Executable contract correspondence never joins this set.
+    pub(super) fn checked_spec_original(&self, callee: FnId) -> Option<&'a FnDecl> {
+        if !self.validated_instances.contains(&callee) {
+            return None;
+        }
+        let origin = self.fns.get(&callee)?.attrs.instance.as_ref()?;
+        self.fns.get(&origin.declaration).copied()
+    }
+
     pub(crate) fn call_origin(
         &self,
         callee: FnId,
@@ -426,7 +445,14 @@ impl<'a> Ctx<'a> {
         owner: Option<FnId>,
         span: SpanId,
     ) -> Result<Shape, VcRefusal> {
-        self.shape_inner(ty, owner, span, 0)
+        self.shape_inner(ty, owner, span, 0, None)
+    }
+
+    pub(crate) fn shape_with_work(&self, ty: &Ty, owner: Option<FnId>, span: SpanId, work: &std::cell::Cell<usize>) -> Result<Shape, VcRefusal> {
+        if self.source.projections.is_empty() { return self.shape(ty, owner, span); }
+        self.ensure_projection_rules(work, span)?;
+        let ty = self.normalize_type(ty, work, span)?;
+        self.shape_inner(&ty, owner, span, 0, Some(work))
     }
 
     fn type_recipe(
@@ -435,7 +461,9 @@ impl<'a> Ctx<'a> {
         owner: Option<FnId>,
         span: SpanId,
     ) -> Result<TypeRecipe, VcRefusal> {
-        TypeRecipe::registered(ty, owner, &|id| self.recipe_adt(id))
+        TypeRecipe::registered(
+            ty, owner, &|id| self.recipe_adt(id), &|id| self.recipe_projection(id),
+        )
             .ok_or_else(|| refusal("generic-type", "an unsupported type-argument recipe", span))
     }
 
@@ -453,6 +481,11 @@ impl<'a> Ctx<'a> {
             }
             _ => None,
         }
+    }
+
+    pub(in crate::vcgen) fn recipe_projection(&self, id: crate::ProjectionId) -> Option<usize> {
+        let declaration = self.projections.get(&id)?;
+        (declaration.arity != 0).then_some(declaration.arity)
     }
 
     pub(crate) fn type_argument(
@@ -474,13 +507,125 @@ impl<'a> Ctx<'a> {
             })
     }
 
+    pub(crate) fn type_argument_with_work(
+        &self,
+        ty: &Ty,
+        env: &TypeEnv,
+        span: SpanId,
+        work: &std::cell::Cell<usize>,
+    ) -> Result<TypeArgument, VcRefusal> {
+        let work = env.projection_work().map_or(work, |original| original.as_ref());
+        self.ensure_projection_rules(work, span)?;
+        let mut recipe = self.type_recipe(ty, env.owner(), span)?;
+        if recipe.has_projection() {
+            let normalized = self.normalize_type(ty, work, span)?;
+            recipe = self.type_recipe(&normalized, env.owner(), span)?;
+        }
+        let argument = if self.source.projections.is_empty() {
+            self.types.borrow_mut().argument_with_work(&recipe, env, work, span)?
+        } else {
+            self.types.borrow_mut().argument_with_allocation_work(&recipe, env, work, span)?
+        }
+            .ok_or_else(|| refusal(
+                "generic-type", "a type argument outside its binder scope or constructor declaration", span,
+            ))?;
+        self.canonical_argument(argument, work, span)
+    }
+
+    fn ensure_projection_rules(&self, work: &std::cell::Cell<usize>, span: SpanId) -> Result<(), VcRefusal> {
+        if self.projection_rules_ready.get() { return Ok(()); }
+        if self.projection_definitions.is_none() { return Err(refusal("projection-definition", "invalid associated implementation semantics", span)); }
+        for declaration in &self.source.projections {
+            super::inline_work::items(work, 1, span)?;
+            self.types.borrow_mut().register_projection_declaration(declaration.id, declaration.arity)
+                .ok_or_else(|| refusal("projection-definition", "invalid associated declaration arity", span))?;
+        }
+        for implementation in &self.source.projection_impls {
+            let env = TypeEnv::default();
+            let arguments = implementation.arguments.iter().map(|ty| {
+                super::aux_work::type_recipe(work, ty, span)?;
+                let recipe = self.type_recipe(ty, None, span)?;
+                self.types.borrow_mut().argument_with_allocation_work(&recipe, &env, work, span)?.ok_or_else(|| refusal("projection-definition", "an implementation argument is not a canonical closed type", span))
+            }).collect::<Result<Vec<_>, _>>()?;
+            for value in &implementation.values {
+                super::aux_work::type_recipe(work, &value.ty, span)?;
+                let recipe = self.type_recipe(&value.ty, None, span)?;
+                let result = self.types.borrow_mut().argument_with_allocation_work(&recipe, &env, work, span)?.ok_or_else(|| refusal("projection-definition", "an associated member has no canonical closed value", span))?;
+                self.types.borrow_mut().register_projection_definition(value.declaration, &arguments, &result, work, span)?;
+            }
+        }
+        self.projection_rules_ready.set(true);
+        Ok(())
+    }
+
+    pub(crate) fn canonical_type_terms(&self, term: Term, budget: &mut usize) -> Option<Term> {
+        self.types.borrow().canonical_type_terms(term, budget)
+    }
+
+    fn canonical_argument(&self, argument: TypeArgument, work: &std::cell::Cell<usize>, span: SpanId) -> Result<TypeArgument, VcRefusal> {
+        let mut remaining = work.get();
+        let result = self.types.borrow().canonical_argument(argument, &mut remaining);
+        work.set(remaining);
+        result.ok_or_else(|| refusal("projection-definition", "type argument normalization exhausted its caller work", span))
+    }
+
+    pub(crate) fn normalize_type(&self, ty: &Ty, work: &std::cell::Cell<usize>, span: SpanId) -> Result<Ty, VcRefusal> {
+        let definitions = self.projection_definitions.as_ref().ok_or_else(||
+            refusal("projection-definition", "the program has invalid associated implementations", span))?;
+        let mut remaining = work.get();
+        let result = definitions.normalize(ty, &mut remaining);
+        work.set(remaining);
+        result.ok_or_else(|| refusal("projection-definition", "associated type normalization exhausted its caller work or declaration", span))
+    }
+
+    pub(crate) fn substitute_type(&self, ty: &Ty, arguments: &[Ty], work: &std::cell::Cell<usize>, span: SpanId) -> Result<Ty, VcRefusal> {
+        // Programs without associated constructors retain their existing
+        // substitution path. New semantic copies borrow the caller's ledger.
+        if self.source.projections.is_empty() { return Ok(ty.subst(arguments)); }
+        let definitions = self.projection_definitions.as_ref().ok_or_else(||
+            refusal("projection-definition", "the program has invalid associated implementations", span))?;
+        let mut remaining = work.get();
+        let result = definitions.substitute(ty, arguments, &mut remaining);
+        work.set(remaining);
+        result.ok_or_else(|| refusal("projection-definition", "associated type substitution exhausted its caller work or declaration", span))
+    }
+
+    pub(crate) fn type_environment(
+        &self,
+        owner: FnId,
+        arguments: Vec<TypeArgument>,
+        work: &std::rc::Rc<std::cell::Cell<usize>>,
+    ) -> TypeEnv {
+        let mut environment = self.types.borrow().environment(owner, arguments, work);
+        // Closed reduction can remove the constructor spelling while leaving
+        // a large type term. Its forwarded copies still use this exact cell.
+        if !self.source.projections.is_empty() { environment.retain_work(work); }
+        environment
+    }
+
     pub(crate) fn poly_shape(
         &self,
         ty: &Ty,
         owner: Option<FnId>,
         span: SpanId,
     ) -> Result<Shape, VcRefusal> {
-        self.poly_shape_inner(ty, owner, span, &mut 64)
+        self.poly_shape_inner(ty, owner, span, &mut 64, None)
+    }
+
+    pub(crate) fn poly_shape_with_work(&self, ty: &Ty, owner: Option<FnId>, span: SpanId, work: &std::cell::Cell<usize>) -> Result<Shape, VcRefusal> {
+        if self.source.projections.is_empty() { return self.poly_shape(ty, owner, span); }
+        self.ensure_projection_rules(work, span)?;
+        let ty = self.normalize_type(ty, work, span)?;
+        self.poly_shape_inner(&ty, owner, span, &mut 64, Some(work))
+    }
+
+    fn field_type(&self, ty: &Ty, args: &[Ty], work: Option<&std::cell::Cell<usize>>, span: SpanId) -> Result<Ty, VcRefusal> {
+        match work {
+            Some(work) => self.substitute_type(ty, args, work, span),
+            None if ty.has_projection() || args.iter().any(Ty::has_projection) =>
+                Err(refusal("projection-layout", "a projected field layout has no original caller work", span)),
+            None => Ok(ty.subst(args)),
+        }
     }
 
     fn poly_shape_inner(
@@ -489,6 +634,7 @@ impl<'a> Ctx<'a> {
         owner: Option<FnId>,
         span: SpanId,
         left: &mut usize,
+        work: Option<&std::cell::Cell<usize>>,
     ) -> Result<Shape, VcRefusal> {
         *left = left.checked_sub(1).ok_or_else(|| {
             refusal(
@@ -503,7 +649,7 @@ impl<'a> Ctx<'a> {
                 .get(id)
                 .is_some_and(|adt| adt.kind == AdtKind::Enum)
             {
-                self.register_enum(*id, span)?;
+                self.register_enum_with_work(*id, span, work)?;
             }
         }
         let children = match ty {
@@ -516,7 +662,10 @@ impl<'a> Ctx<'a> {
                         span,
                     ));
                 }
-                Some(types.clone())
+                Some(match work {
+                    Some(work) => types.iter().map(|ty| self.normalize_type(ty, work, span)).collect::<Result<Vec<_>, _>>()?,
+                    None => types.clone(),
+                })
             }
             Ty::Adt(id, args)
                 if self
@@ -540,8 +689,8 @@ impl<'a> Ctx<'a> {
                     variant
                         .fields
                         .iter()
-                        .map(|field| field.ty.subst(args))
-                        .collect(),
+                        .map(|field| self.field_type(&field.ty, args, work, span))
+                        .collect::<Result<Vec<_>, _>>()?,
                 )
             }
             Ty::Ref {
@@ -550,7 +699,7 @@ impl<'a> Ctx<'a> {
             } if matches!(inner.as_ref(), Ty::Tuple(_) | Ty::Unit)
                 || matches!(inner.as_ref(), Ty::Adt(id, _) if self.adts.get(id).is_some_and(|adt| adt.kind == AdtKind::Struct)) =>
             {
-                return self.poly_shape_inner(inner, owner, span, left);
+                return self.poly_shape_inner(inner, owner, span, left, work);
             }
             _ => None,
         };
@@ -564,7 +713,7 @@ impl<'a> Ctx<'a> {
             }
             return children
                 .iter()
-                .map(|ty| self.poly_shape_inner(ty, owner, span, left))
+                .map(|ty| self.poly_shape_inner(ty, owner, span, left, work))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Shape::Node);
         }
@@ -584,6 +733,21 @@ impl<'a> Ctx<'a> {
         term: &Term,
         span: SpanId,
     ) -> Result<Term, VcRefusal> {
+        self.type_fact_inner(leaf, env, term, span, None)
+    }
+
+    pub(crate) fn type_fact_with_work(
+        &self, leaf: LeafTy, env: &TypeEnv, term: &Term, span: SpanId,
+        work: &std::cell::Cell<usize>,
+    ) -> Result<Term, VcRefusal> {
+        self.type_fact_inner(leaf, env, term, span, Some(work))
+    }
+
+    fn type_fact_inner(
+        &self, leaf: LeafTy, env: &TypeEnv, term: &Term, span: SpanId,
+        work: Option<&std::cell::Cell<usize>>,
+    ) -> Result<Term, VcRefusal> {
+        if let Some(work) = work { self.ensure_projection_rules(work, span)?; }
         let LeafTy::Poly(index) = leaf else {
             return Ok(leaf.fact(term));
         };
@@ -592,13 +756,22 @@ impl<'a> Ctx<'a> {
             .recipe(index)
             .cloned()
             .ok_or_else(|| refusal("generic-type", "an unknown boxed type recipe", span))?;
-        let argument = types.argument(&recipe, env).ok_or_else(|| {
+        let argument = match work {
+            Some(work) => types.argument_with_work(&recipe, env, work, span)?,
+            None => types.argument(&recipe, env),
+        }.ok_or_else(|| {
             refusal(
                 "generic-type",
                 "a boxed value outside its binder scope",
                 span,
             )
         })?;
+        if types.requires_projection_work(&recipe, env) || env.projection_work().is_some() {
+            let work = env.projection_work().map(|work| work.as_ref()).or(work)
+                .ok_or_else(|| refusal("generic-type", "a projected type fact has no caller work", span))?;
+            super::inline_work::term(work, term, 1, span)?;
+            super::inline_work::term(work, argument.identity(), 1, span)?;
+        }
         types
             .membership(term.clone(), argument.identity().clone())
             .ok_or_else(|| {
@@ -648,13 +821,19 @@ impl<'a> Ctx<'a> {
         value: Val,
         span: SpanId,
     ) -> Result<Val, VcRefusal> {
-        let native = self.shape(ty, env.owner(), span)?;
+        let native = match env.projection_work() {
+            Some(work) => self.shape_with_work(ty, env.owner(), span, work)?,
+            None => self.shape(ty, env.owner(), span)?,
+        };
         if value.matches(&native) {
             return Ok(value);
         }
         self.coerce_value(
             &native,
-            &self.poly_shape(ty, env.owner(), span)?,
+            &match env.projection_work() {
+                Some(work) => self.poly_shape_with_work(ty, env.owner(), span, work)?,
+                None => self.poly_shape(ty, env.owner(), span)?,
+            },
             env,
             value,
             false,
@@ -681,13 +860,20 @@ impl<'a> Ctx<'a> {
                     .recipe(*index)
                     .cloned()
                     .ok_or_else(|| refusal("generic-box", "an unknown coercion recipe", span))?;
-                let identity = types
-                    .argument(&recipe, env)
-                    .ok_or_else(|| {
-                        refusal("generic-box", "a coercion outside its binder scope", span)
-                    })?
-                    .identity()
-                    .clone();
+                let argument = match env.projection_work() {
+                    Some(work) => types.argument_with_allocation_work(&recipe, env, work, span)?,
+                    None => types.argument(&recipe, env),
+                }.ok_or_else(|| refusal("generic-box", "a coercion outside its binder scope", span))?;
+                let argument = match env.projection_work() {
+                    Some(work) => {
+                        let mut remaining = work.get();
+                        let actual = types.canonical_argument(argument, &mut remaining);
+                        work.set(remaining);
+                        actual.ok_or_else(|| refusal("generic-box", "coercion normalization exhausted original work", span))?
+                    }
+                    None => argument,
+                };
+                let identity = argument.identity().clone();
                 let result = if boxing {
                     types.box_value(leaf.sort(), identity, leaf.bounds(), value)
                 } else {
@@ -758,6 +944,7 @@ impl<'a> Ctx<'a> {
         owner: Option<FnId>,
         span: SpanId,
         depth: u32,
+        work: Option<&std::cell::Cell<usize>>,
     ) -> Result<Shape, VcRefusal> {
         // Struct nesting is finite in well-formed VcIR (there is no
         // indirection); the bound only stops a malformed cycle.
@@ -777,7 +964,7 @@ impl<'a> Ctx<'a> {
             Ty::Tuple(elems) => {
                 let mut children = Vec::new();
                 for elem in elems {
-                    children.push(self.shape_inner(elem, owner, span, depth + 1)?);
+                    children.push(self.shape_inner(elem, owner, span, depth + 1, work)?);
                 }
                 Ok(Shape::Node(children))
             }
@@ -794,13 +981,13 @@ impl<'a> Ctx<'a> {
                         ));
                     }
                     if ty.has_param() {
-                        return self.poly_shape(ty, owner, span);
+                        return self.poly_shape_inner(ty, owner, span, &mut 64, work);
                     }
                     return self.nominal_leaf(ty, span);
                 }
                 if adt.kind == AdtKind::Enum {
-                    self.register_enum(*id, span)?;
-                    return self.poly_shape(ty, owner, span);
+                    self.register_enum_with_work(*id, span, work)?;
+                    return self.poly_shape_inner(ty, owner, span, &mut 64, work);
                 }
                 let Some(variant) = adt.variants.first() else {
                     return Err(refusal(
@@ -812,16 +999,17 @@ impl<'a> Ctx<'a> {
                 let mut children = Vec::new();
                 for field in &variant.fields {
                     children.push(self.shape_inner(
-                        &field.ty.subst(args),
+                        &self.field_type(&field.ty, args, work, span)?,
                         owner,
                         span,
                         depth + 1,
+                        work,
                     )?);
                 }
                 Ok(Shape::Node(children))
             }
-            Ty::Ref { inner, .. } => self.shape_inner(inner, owner, span, depth + 1),
-            Ty::Param(_) | Ty::MutRef(_) => self.poly_shape(ty, owner, span),
+            Ty::Ref { inner, .. } => self.shape_inner(inner, owner, span, depth + 1, work),
+            Ty::Param(_) | Ty::Projection(..) | Ty::MutRef(_) => self.poly_shape_inner(ty, owner, span, &mut 64, work),
         }
     }
 }

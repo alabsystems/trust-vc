@@ -35,6 +35,11 @@ pub struct FnId(pub DefHash);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AdtId(pub DefHash);
 
+/// Identity of one associated-type declaration. Its parent trait and arity
+/// are recorded separately in [`crate::ProjectionDecl`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProjectionId(pub DefHash);
+
 /// Index of a local in its function's [`crate::FnDecl::locals`] table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalId(pub u32);

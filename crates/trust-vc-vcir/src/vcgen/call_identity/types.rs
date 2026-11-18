@@ -5,7 +5,7 @@
 //! Charged fixed-layout slots and iterative single-level type substitution.
 use super::{charge, refusal, R};
 use crate::vcgen::val::Ctx;
-use crate::{AdtId, AdtKind, Projection, SpanId, Ty};
+use crate::{AdtId, AdtKind, Projection, ProjectionId, SpanId, Ty};
 use std::cell::Cell;
 
 pub(super) fn price_type(work: &Cell<usize>, ty: &Ty, span: SpanId) -> R<()> {
@@ -13,7 +13,7 @@ pub(super) fn price_type(work: &Cell<usize>, ty: &Ty, span: SpanId) -> R<()> {
     while let Some(ty) = pending.pop() {
         charge(work, 1, span)?;
         match ty {
-            Ty::Tuple(fields) | Ty::Adt(_, fields) => {
+            Ty::Tuple(fields) | Ty::Adt(_, fields) | Ty::Projection(_, fields) => {
                 charge(work, fields.len(), span)?;
                 pending.extend(fields);
             }
@@ -86,6 +86,12 @@ pub(in crate::vcgen) fn price_layout(
                     ..view
                 });
             }
+            Ty::Projection(_, arguments) => {
+                charge(work, arguments.len(), span)?;
+                for ty in arguments {
+                    pending.push(View { ty, recipe_only: true, ..view });
+                }
+            }
             Ty::Adt(id, args) => {
                 charge(work, 1 + args.len(), span)?;
                 let arguments: Vec<_> = args.iter().map(|ty| View { ty, ..view }).collect();
@@ -126,6 +132,7 @@ pub(in crate::vcgen) fn price_layout(
 enum TypeFrame<'a> {
     Visit(&'a Ty, bool),
     Group(Option<AdtId>, usize),
+    Projection(ProjectionId, usize),
     Ref(bool),
     MutRef,
 }
@@ -159,6 +166,13 @@ fn rebuild_type<'a>(
                     pending.push(TypeFrame::Group(adt, fields.len()));
                     for field in fields.iter().rev() {
                         pending.push(TypeFrame::Visit(field, substitute));
+                    }
+                }
+                Ty::Projection(id, arguments) => {
+                    charge(work, 1 + arguments.len(), span)?;
+                    pending.push(TypeFrame::Projection(*id, arguments.len()));
+                    for argument in arguments.iter().rev() {
+                        pending.push(TypeFrame::Visit(argument, substitute));
                     }
                 }
                 Ty::Ref { mutable, inner } => {
@@ -203,6 +217,14 @@ fn rebuild_type<'a>(
                     mutable,
                     inner: Box::new(inner),
                 });
+            }
+            TypeFrame::Projection(id, count) => {
+                charge(work, count, span)?;
+                let Some(start) = values.len().checked_sub(count) else {
+                    return Err(refusal("resolution-type", "invalid associated-type reconstruction", span));
+                };
+                let arguments = values.split_off(start);
+                values.push(Ty::Projection(id, arguments));
             }
             TypeFrame::MutRef => {
                 let Some(inner) = values.pop() else {

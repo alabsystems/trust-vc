@@ -42,6 +42,7 @@ fn function(number: u64, parameters: Vec<Ty>, result: Ty) -> FnDecl {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         locals,
         params: (1..=parameters.len()).map(|n| LocalId(n as u32)).collect(),

@@ -42,6 +42,7 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -113,6 +114,7 @@ const ERASE_IMPLS_MESSAGE: &str = "trust-vc-erase-impls";
 
 /// First argument of the child process that performs the erase run.
 pub const ERASE_RUN_FLAG: &str = "--trust-vc-erase-run";
+pub const ORDINARY_WORKER_FLAG: &str = "--trust-vc-ordinary-worker";
 const ERASE_INPUTS_PREFIX: &str = "--trust-vc-erase-cargo-state=";
 const ERASE_COMPILER_ENVIRONMENT_FLAG: &str = "--trust-vc-erase-compiler-environment";
 const ERASE_ENVIRONMENT_REFUSAL_MESSAGE: &str = "trust-vc-erase-environment-refusal";
@@ -304,6 +306,13 @@ fn argument_error(split: &SplitArgs) -> Option<String> {
 
 /// A Verus option or rustc argument whose effect this binary cannot produce;
 /// the case is refused before compiling.
+pub(crate) fn ordinary_request_problem(
+    split: &SplitArgs,
+    via_cargo: bool,
+) -> Option<(&'static str, String)> {
+    unsupported_request(split, via_cargo)
+}
+
 fn unsupported_request(split: &SplitArgs, via_cargo: bool) -> Option<(&'static str, String)> {
     if let Some(problem) = argument_error(split) {
         return Some(("bad-arguments", problem));
@@ -391,6 +400,22 @@ struct VerifyRun {
     /// A failure the compiler's own status does not show (the erase run
     /// reported errors in another process).
     failed_elsewhere: bool,
+    ordinary_binding: Option<ordinary_worker::Binding>,
+    // Ordinary verification does not retain its solver outcome map. Only the
+    // producer callback requests the private completion result.
+    native_capture: NativeVerificationCapture,
+}
+
+enum NativeVerificationCapture {
+    Disabled,
+    Requested,
+    Complete(NativeVerificationComplete),
+}
+
+// Produced only at the successful end of the actual native/erase/AY run.
+// Records, requests and observations cannot reconstruct this linear result.
+struct NativeVerificationComplete {
+    outcomes: std::collections::HashMap<FnId, verify::FnOutcome>,
 }
 
 impl Callbacks for VerifyRun {
@@ -406,14 +431,37 @@ impl Callbacks for VerifyRun {
         if let Some(directory) = &self.opts.private_output {
             crate::cargo_native::configure(config, directory);
         }
+        if let Some(binding) = &mut self.ordinary_binding {
+            binding.configure(config);
+        }
     }
 
     fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        // Identity/environment gates precede type checking too: an unknown
+        // request env! dependency must remain unsupported rather than turn an
+        // accidental child value/absence into a native rejection credit.
+        if let Some(binding) = &self.ordinary_binding {
+            if let Err(reason) = binding.check(tcx) {
+                self.refuse(tcx, rustc_span::DUMMY_SP, "ordinary-cohort", &reason);
+                self.outcome = Some(Outcome::Refused);
+                self.reading = false;
+                return Compilation::Stop;
+            }
+        }
         if !self.prepare_read(tcx) {
             return Compilation::Stop;
         }
+        // This branch deliberately has no ClientImports or owner capability.
         let read = reader::read_crate(tcx, self.opts.read);
         self.decide(tcx, &read);
+        if let Some(binding) = &self.ordinary_binding {
+            if let Err(reason) = binding.check(tcx) {
+                self.functions.clear();
+                self.refuse(tcx, rustc_span::DUMMY_SP, "ordinary-cohort", &reason);
+                self.outcome = Some(Outcome::Refused);
+                self.record_functions(tcx, &read, Verdict::Skipped, Some(TAG_CRATE_REFUSED));
+            }
+        }
         self.reading = false;
         Compilation::Stop
     }
@@ -506,6 +554,8 @@ impl VerifyRun {
             outcome: None,
             erase_exit: None,
             failed_elsewhere: false,
+            ordinary_binding: None,
+            native_capture: NativeVerificationCapture::Disabled,
         }
     }
 
@@ -518,13 +568,23 @@ impl VerifyRun {
             .iter()
             .map(|f| format!("{}: {:?}", f.def_path, f.status))
             .collect();
-        let text = format!(
+        let mut text = format!(
             "{}-- statuses --\n{}\n",
             trust_vc_vcir::pretty::crate_to_string(&read.krate),
             statuses.join("\n")
         );
+        if !read.constant_mode_observations().is_empty() {
+            text.push_str(&format!(
+                "-- constant mode observations (diagnostic data only) --\n{}\n",
+                read.constant_mode_observations().join("\n")
+            ));
+        }
         // A dump that cannot be written only loses the dump.
-        let _ = self.outputs.write_vcir(&text);
+        if let Some(binding) = &self.ordinary_binding {
+            binding.capture_vcir(text);
+        } else {
+            let _ = self.outputs.write_vcir(&text);
+        }
     }
 
     /// Record every function; `read_verdict` (with `read_tag`) is the
@@ -579,6 +639,9 @@ impl VerifyRun {
         read: &CrateRead,
         owner: Option<&reader::declaration_staging::LiveNormalClientRead<'_, '_, '_, 'tcx>>,
     ) {
+        if matches!(self.native_capture, NativeVerificationCapture::Complete(_)) {
+            self.native_capture = NativeVerificationCapture::Requested;
+        }
         self.dump_vcir(read);
         let refusals: Vec<&Refusal> = read.refusals().collect();
         let first_phase: Vec<&UserError> = read
@@ -1025,6 +1088,16 @@ impl VerifyRun {
             self.record_functions(tcx, read, Verdict::Rejected, None);
         } else {
             self.outcome = Some(Outcome::Checked);
+            if matches!(self.native_capture, NativeVerificationCapture::Requested)
+                && self.opts.lifetime_check
+                && self.opts.erase_compile
+                && self.erase_exit == Some(0)
+            {
+                self.native_capture =
+                    NativeVerificationCapture::Complete(NativeVerificationComplete {
+                        outcomes: verification.fns,
+                    });
+            }
         }
     }
 
@@ -1114,6 +1187,7 @@ impl VerifyRun {
             &self.opts.cargo_inputs,
             private_output.as_deref(),
             self.opts.compiler_environment.as_ref(),
+            self.ordinary_binding.as_ref(),
         ) {
             Ok(child) => child,
             Err(problem) => {
@@ -1203,9 +1277,18 @@ enum OwnedBoundary {
 }
 
 mod normal_invocation;
+pub(crate) mod ordinary_protocol;
+mod ordinary_worker;
 mod owned;
 pub(crate) use normal_invocation::NormalInvocation;
+pub use ordinary_worker::main as ordinary_worker_main;
+pub(crate) use ordinary_worker::{
+    ErasePlan as OrdinaryErasePlan, NativeInput as OrdinaryNativeInput,
+    WorkerInput as OrdinaryWorkerInput,
+};
 pub(crate) use owned::{NormalReadBinding, NormalReadScope, OwnedNormalVerifier};
+
+pub(crate) mod producer;
 
 pub(crate) fn normal_client_lints(verify: &mut Vec<String>, erase: &mut Vec<String>) {
     for allow in VERIFY_RUN_ALLOWS {
@@ -1541,7 +1624,23 @@ fn run_erase_child(
     inputs: &CargoInputs,
     private_output: Option<&std::path::Path>,
     compiler_environment: Option<&CompilerEnvironment>,
+    ordinary_binding: Option<&ordinary_worker::Binding>,
 ) -> Result<EraseChild, String> {
+    if let Some(binding) = ordinary_binding {
+        if compiler_environment.is_some() {
+            return Err("ordinary erase has unexpected imported environment".into());
+        }
+        return binding.remote_erase(args, inputs, private_output);
+    }
+    #[cfg(test)]
+    if producer::tests::native_erase_dispatch() {
+        return producer::tests::run_native_erase(
+            args,
+            inputs,
+            private_output,
+            compiler_environment,
+        );
+    }
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this binary: {e}"))?;
     let mut command = Command::new(exe);
     command.arg(ERASE_RUN_FLAG);
@@ -1566,10 +1665,17 @@ fn run_erase_child(
     let output = child
         .wait_with_output()
         .map_err(|e| format!("cannot read the erase run's output: {e}"))?;
+    Ok(erase_child_result(
+        output.status.code().unwrap_or(101),
+        &output.stderr,
+    ))
+}
+
+fn erase_child_result(code: i32, stderr: &[u8]) -> EraseChild {
     let mut lines = Vec::new();
     let mut impls = None;
     let mut environment_refusal = None;
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
+    for line in String::from_utf8_lossy(stderr).lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
             if value["$message_type"] == ERASE_ENVIRONMENT_REFUSAL_MESSAGE {
                 environment_refusal = Some("the erase compiler read an unrepresented or mismatched request environment dependency".to_owned());
@@ -1582,12 +1688,48 @@ fn run_erase_child(
         }
         lines.push(line.to_string());
     }
-    Ok(EraseChild {
-        code: output.status.code().unwrap_or(101),
+    EraseChild {
+        code,
         lines,
         impls,
         environment_refusal,
-    })
+    }
+}
+
+pub(crate) fn ordinary_erase_arguments(
+    input: &OrdinaryWorkerInput,
+    public: bool,
+) -> Result<Vec<String>, String> {
+    let plan = &input.erase_plan;
+    let output = if public {
+        None
+    } else {
+        Some(plan.erase_output.clone())
+    };
+    let mut args = vec![
+        ERASE_RUN_FLAG.to_string(),
+        ordinary_worker::ERASE_BINDING.to_string(),
+    ];
+    if !plan.cargo_inputs.is_empty() || output.is_some() {
+        let encoded =
+            serde_json::to_string(&(&plan.cargo_inputs, output)).map_err(|e| e.to_string())?;
+        args.push(format!("{ERASE_INPUTS_PREFIX}{encoded}"));
+    }
+    args.extend(plan.args.iter().skip(1).cloned());
+    Ok(args)
+}
+pub(crate) fn ordinary_erase_diagnostics(code: i32, stderr: &[u8]) -> (Vec<String>, bool) {
+    let result = erase_child_result(code, stderr);
+    (result.lines, result.environment_refusal.is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn empty_erase_response_for_data_control() -> Vec<u8> {
+    format!(
+        "{}\n",
+        serde_json::json!({"$message_type":ERASE_IMPLS_MESSAGE,"impls":[]})
+    )
+    .into_bytes()
 }
 
 fn check_environment_dependencies(
@@ -1606,6 +1748,7 @@ fn check_environment_dependencies(
 /// Callbacks of the erase run: a plain compile that lists its crate's
 /// impls on stderr once macros are expanded.
 struct EraseRun {
+    ordinary_binding: Option<ordinary_worker::Binding>,
     cargo_inputs: CargoInputs,
     private_output: Option<PathBuf>,
     compiler_environment: Option<CompilerEnvironment>,
@@ -1618,9 +1761,24 @@ impl Callbacks for EraseRun {
         if let Some(directory) = &self.private_output {
             crate::cargo_native::configure(config, directory);
         }
+        if let Some(binding) = &mut self.ordinary_binding {
+            binding.configure(config);
+        }
     }
 
     fn after_expansion<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if let Some(binding) = &self.ordinary_binding {
+            if let Err(reason) = binding.check(tcx) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"$message_type": ERASE_ENVIRONMENT_REFUSAL_MESSAGE, "permission_from_report": false})
+                );
+                tcx.dcx()
+                    .struct_err(format!("ordinary erase cohort refused: {reason}"))
+                    .emit();
+                return Compilation::Stop;
+            }
+        }
         if let Some(environment) = &self.compiler_environment {
             if let Err(error) = check_environment_dependencies(environment, tcx.sess) {
                 eprintln!(
@@ -1645,6 +1803,18 @@ impl Callbacks for EraseRun {
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if let Some(binding) = &self.ordinary_binding {
+            if let Err(reason) = binding.check(tcx) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"$message_type": ERASE_ENVIRONMENT_REFUSAL_MESSAGE, "permission_from_report": false})
+                );
+                tcx.dcx()
+                    .struct_err(format!("ordinary erase cohort refused: {reason}"))
+                    .emit();
+                return Compilation::Stop;
+            }
+        }
         if let Some(environment) = &self.compiler_environment {
             if let Err(error) = check_environment_dependencies(environment, tcx.sess) {
                 eprintln!(
@@ -1784,11 +1954,32 @@ fn impl_difference(verified: &[(ImplKey, Span)], erased: &[String]) -> Option<(S
 
 /// The child process's entry: compile `argv[2..]` as rustc arguments.
 fn erase_child_main(argv: &[String]) -> ExitCode {
+    ExitCode::from(erase_child_code(argv))
+}
+
+fn erase_child_code(argv: &[String]) -> u8 {
     let mut rustc_args = vec![argv
         .first()
         .cloned()
         .unwrap_or_else(|| "rust_verify".to_string())];
     let mut remaining = argv.get(2..).unwrap_or(&[]);
+    let ordinary_binding =
+        if remaining.first().map(String::as_str) == Some(ordinary_worker::ERASE_BINDING) {
+            let binding = match ordinary_worker::Binding::read_input() {
+                Ok(binding) => binding,
+                Err(reason) => {
+                    eprintln!(
+                        "{}",
+                        verdict::crate_refusal_json("ordinary-cohort", &reason)
+                    );
+                    return 1;
+                }
+            };
+            remaining = &remaining[1..];
+            Some(binding)
+        } else {
+            None
+        };
     let compiler_environment =
         if remaining.first().map(String::as_str) == Some(ERASE_COMPILER_ENVIRONMENT_FLAG) {
             remaining = &remaining[1..];
@@ -1815,7 +2006,7 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
                         "{}",
                         verdict::crate_refusal_json("request-environment", &error.to_string())
                     );
-                    return ExitCode::from(1);
+                    return 1;
                 }
             }
         } else {
@@ -1840,7 +2031,7 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
                         &format!("invalid erase Cargo inputs: {error}")
                     )
                 );
-                return ExitCode::from(1);
+                return 1;
             }
         }
         remaining = &remaining[1..];
@@ -1851,6 +2042,7 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
             rustc_driver::run_compiler(
                 &rustc_args,
                 &mut EraseRun {
+                    ordinary_binding,
                     cargo_inputs,
                     private_output,
                     compiler_environment,
@@ -1859,9 +2051,9 @@ fn erase_child_main(argv: &[String]) -> ExitCode {
         })
     }));
     match outcome {
-        Ok(Ok(())) => ExitCode::SUCCESS,
-        Ok(Err(_)) => ExitCode::from(1),
-        Err(_) => ExitCode::from(101),
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => 1,
+        Err(_) => 101,
     }
 }
 
@@ -1918,6 +2110,15 @@ fn run_with_context(
     outputs: OutputSinks,
     environment: impl FnMut(&str) -> Result<Option<String>, String>,
 ) -> u8 {
+    run_with_binding(argv, outputs, environment, None)
+}
+
+fn run_with_binding(
+    argv: Vec<String>,
+    outputs: OutputSinks,
+    environment: impl FnMut(&str) -> Result<Option<String>, String>,
+    ordinary_binding: Option<ordinary_worker::Binding>,
+) -> u8 {
     let mut record = Record {
         argv: argv.clone(),
         ..Record::default()
@@ -1942,14 +2143,14 @@ fn run_with_context(
         Err(problem) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &problem);
             record.outcome = Some(Outcome::Refused);
-            return finish(record, 1, &outputs);
+            return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
         }
     };
     let mut split = match args::split(&arguments) {
         Ok(s) => s,
         Err(e) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &e.to_string());
-            return finish(record, 1, &outputs);
+            return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
         }
     };
     record.entry_file = split.entry_file().map(PathBuf::from);
@@ -1960,7 +2161,7 @@ fn run_with_context(
             Err(problem) => {
                 refuse_crate(&mut record, "cargo-import", &problem);
                 record.outcome = Some(Outcome::Refused);
-                return finish(record, 1, &outputs);
+                return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
             }
         };
         for (name, path) in imports {
@@ -1982,7 +2183,7 @@ fn run_with_context(
     if let Some((tag, detail)) = unsupported_request(&split, cargo_options.is_some()) {
         refuse_crate(&mut record, tag, &detail);
         record.outcome = Some(Outcome::Refused);
-        return finish(record, 1, &outputs);
+        return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
     }
 
     let program = argv
@@ -1997,7 +2198,7 @@ fn run_with_context(
         Err(reason) => {
             refuse_crate(&mut record, TAG_BAD_ARGUMENTS, &reason);
             record.outcome = Some(Outcome::Refused);
-            return finish(record, 1, &outputs);
+            return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
         }
     };
     let mut opts = invocation.options();
@@ -2007,23 +2208,28 @@ fn run_with_context(
         opts.cargo_inputs = cargo_inputs.clone();
         opts.erase_compile = cargo_compile;
         {
-            let private = match cargo::Scratch::new() {
-                Ok(private) => private,
-                Err(error) => {
-                    refuse_crate(
-                        &mut record,
-                        TAG_ERASE_RUN,
-                        &format!("cannot create private Cargo outputs: {error}"),
-                    );
-                    record.outcome = Some(Outcome::Refused);
-                    return finish(record, 1, &outputs);
-                }
-            };
-            opts.private_output = Some(private.path().join("verify"));
-            scratch = Some(private);
+            if let Some(binding) = &ordinary_binding {
+                opts.private_output = binding.private_output().map(std::path::Path::to_path_buf);
+            } else {
+                let private = match cargo::Scratch::new() {
+                    Ok(private) => private,
+                    Err(error) => {
+                        refuse_crate(
+                            &mut record,
+                            TAG_ERASE_RUN,
+                            &format!("cannot create private Cargo outputs: {error}"),
+                        );
+                        record.outcome = Some(Outcome::Refused);
+                        return finish_binding(record, 1, &outputs, ordinary_binding.as_ref());
+                    }
+                };
+                opts.private_output = Some(private.path().join("verify"));
+                scratch = Some(private);
+            }
         }
     }
     let mut callbacks = VerifyRun::new(opts, outputs.clone());
+    callbacks.ordinary_binding = ordinary_binding.clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rustc_driver::catch_fatal_errors(|| {
             rustc_driver::run_compiler(invocation.verify(), &mut callbacks)
@@ -2092,11 +2298,14 @@ fn run_with_context(
             }
         }
     };
-    if code == 0 && cargo_compile {
+    if code == 0 && cargo_compile && ordinary_binding.is_some() {
+        ordinary_binding.as_ref().unwrap().defer_public_compile();
+    }
+    if code == 0 && cargo_compile && ordinary_binding.is_none() {
         // The earlier erase compile was speculative and private. Only a
         // completed verification (or explicit recorded --no-verify skip)
         // can now emit Cargo's requested public artifacts.
-        match run_erase_child(invocation.erase(), &cargo_inputs, None, None) {
+        match run_erase_child(invocation.erase(), &cargo_inputs, None, None, None) {
             Ok(child) => {
                 print_lines(&child.lines);
                 if child.code != 0 {
@@ -2119,7 +2328,7 @@ fn run_with_context(
         }
     }
     drop(scratch);
-    finish(record, code, &outputs)
+    finish_binding(record, code, &outputs, ordinary_binding.as_ref())
 }
 
 /// Called at the single-threaded binary entry, before starting rustc's worker
@@ -2160,6 +2369,18 @@ fn direct_cargo_compile(
         Ok(Ok(())) => 0,
         Ok(Err(_)) => 1,
         Err(_) => 101,
+    }
+}
+
+fn finish_binding(
+    record: Record,
+    code: u8,
+    outputs: &OutputSinks,
+    binding: Option<&ordinary_worker::Binding>,
+) -> u8 {
+    match binding {
+        Some(binding) => binding.capture_record(record, code),
+        None => finish(record, code, outputs),
     }
 }
 

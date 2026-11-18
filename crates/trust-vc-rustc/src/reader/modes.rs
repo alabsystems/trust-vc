@@ -47,12 +47,15 @@ use crate::verus_items::VerusItem;
 mod availability;
 mod availability_walk;
 mod bindings;
+mod expressions;
 mod ghost_tails;
 mod implicit_reborrow;
+mod language;
+mod matches;
 mod variant_fields;
 pub(crate) use availability::{
-    AccessKind, AdjustmentKind, AvailabilityFacts, PlaceUse, ReborrowDisposition, ReborrowPhase,
-    ReborrowUse, VarErasure,
+    AccessKind, AdjustmentKind, AdjustmentUse, ArgumentUse, AvailabilityFacts, Operation, PlaceUse,
+    ReborrowDisposition, ReborrowPhase, ReborrowUse, VarErasure,
 };
 use bindings::BindingFacts;
 pub(super) use ghost_tails::{ExpectedGhostTail, GhostTailFacts};
@@ -79,7 +82,21 @@ pub(super) trait ModeContext<'tcx> {
     fn function_mode(&self, def: DefId) -> Option<Mode>;
     fn body_owner(&self, def: LocalDefId) -> Option<LocalDefId>;
     fn declaration_attrs(&self, def: LocalDefId) -> attrs::ItemAttrs;
+    /// A context with custom attribute meaning must provide its own exact
+    /// metered mapping. The default refuses; it cannot add an allowance.
+    fn declaration_attrs_with_work(
+        &self,
+        _def: LocalDefId,
+        _remaining: &mut usize,
+    ) -> Result<attrs::ItemAttrs, String> {
+        Err("this mode context has no metered native attribute mapping".into())
+    }
     fn verus_item(&self, def: DefId) -> Option<VerusItem>;
+    /// This is declaration classification only. A completed native walk and
+    /// a separate real ownership producer are still required.
+    fn legacy_function(&self, _definition: LocalDefId) -> bool {
+        false
+    }
     fn new_mut_ref(&self) -> bool {
         false
     }
@@ -87,6 +104,17 @@ pub(super) trait ModeContext<'tcx> {
     /// Native-owned declaration semantics; no value/body authority is conveyed.
     fn constant_mode(&self, _def: LocalDefId) -> Option<trust_vc_vcir::ConstMode> {
         None
+    }
+    fn value_kind(&self, def: LocalDefId) -> Option<trust_vc_vcir::FnKind> {
+        self.constant_mode(def).map(trust_vc_vcir::FnKind::Constant)
+    }
+    fn constant_use(
+        &self,
+        _owner: LocalDefId,
+        _typeck: &'tcx TypeckResults<'tcx>,
+        _expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::constants::Use<'tcx>>, Refusal> {
+        Ok(None)
     }
     fn friendly_fn_path(&self, def: DefId) -> String;
     fn read_adt_field_modes(&self) -> bool;
@@ -111,6 +139,26 @@ pub(super) trait ModeContext<'tcx> {
     fn imported_call_modes(&self, _def: DefId) -> Option<CallModes> {
         None
     }
+    /// Native selection only; non-product declaration contexts gain no call
+    /// eligibility from an observed derive or an external trait name.
+    fn derived_clone_call(
+        &self,
+        _owner: LocalDefId,
+        _typeck: &'tcx TypeckResults<'tcx>,
+        _expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::derived_clones::Call<'tcx>>, Refusal> {
+        Ok(None)
+    }
+    /// Only the product's checked local declaration registry can redirect a
+    /// native ghost call; declaration-only contexts retain no such mapping.
+    fn autospec_call(
+        &self,
+        _owner: LocalDefId,
+        _typeck: &'tcx TypeckResults<'tcx>,
+        _expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::autospec::Call<'tcx>>, Refusal> {
+        Ok(None)
+    }
 }
 
 impl<'tcx> ModeContext<'tcx> for Cx<'tcx> {
@@ -132,10 +180,22 @@ impl<'tcx> ModeContext<'tcx> for Cx<'tcx> {
         Cx::declaration_attrs(self, def)
     }
 
+    fn declaration_attrs_with_work(
+        &self,
+        def: LocalDefId,
+        remaining: &mut usize,
+    ) -> Result<attrs::ItemAttrs, String> {
+        self.constants
+            .item_attrs_with_work(self.tcx, def, remaining)
+    }
+
     fn verus_item(&self, def: DefId) -> Option<VerusItem> {
         Cx::verus_item(self, def)
     }
 
+    fn legacy_function(&self, definition: LocalDefId) -> bool {
+        self.legacy_functions.contains(&definition)
+    }
     fn new_mut_ref(&self) -> bool {
         self.opts.new_mut_ref
     }
@@ -150,6 +210,19 @@ impl<'tcx> ModeContext<'tcx> for Cx<'tcx> {
             .and_then(|d| self.constants.mode(d))
     }
 
+    fn value_kind(&self, def: LocalDefId) -> Option<trust_vc_vcir::FnKind> {
+        self.constants.value_kind(def)
+    }
+    fn constant_use(
+        &self,
+        owner: LocalDefId,
+        typeck: &'tcx TypeckResults<'tcx>,
+        expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::constants::Use<'tcx>>, Refusal> {
+        self.constants
+            .select(self.tcx, owner, typeck, expression)
+            .map_err(|reason| Refusal::new("constant-use", reason, expression.span))
+    }
     fn friendly_fn_path(&self, def: DefId) -> String {
         Cx::friendly_fn_path(self, def)
     }
@@ -179,6 +252,24 @@ impl<'tcx> ModeContext<'tcx> for Cx<'tcx> {
 
     fn imported_call_modes(&self, definition: DefId) -> Option<CallModes> {
         self.imports.as_ref()?.call_modes(self.tcx, definition)
+    }
+
+    fn derived_clone_call(
+        &self,
+        owner: LocalDefId,
+        typeck: &'tcx TypeckResults<'tcx>,
+        expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::derived_clones::Call<'tcx>>, Refusal> {
+        self.derived_clones.call(self, owner, typeck, expression)
+    }
+
+    fn autospec_call(
+        &self,
+        owner: LocalDefId,
+        typeck: &'tcx TypeckResults<'tcx>,
+        expression: &'tcx hir::Expr<'tcx>,
+    ) -> Result<Option<super::autospec::Call<'tcx>>, Refusal> {
+        self.autospec.call(self, owner, typeck, expression)
     }
 }
 
@@ -212,8 +303,14 @@ pub(super) fn check_with_context<'tcx>(
         return match elaborate_signature_modes(cx, def_id.to_def_id(), tcx.def_span(def_id)) {
             Ok(signature) => ModeCheck::Clean(CheckedModes {
                 signature,
+                language: None,
                 local_declarations: HashMap::new(),
                 bindings: BindingFacts::new(tcx, def_id, owner),
+                matches: matches::MatchFacts::new(tcx, def_id, owner),
+                expressions: expressions::ExpressionFacts::new(tcx, def_id, owner),
+                derived_clone_calls: HashMap::new(),
+                constant_uses: HashMap::new(),
+                autospec_calls: HashMap::new(),
                 ghost_tails: GhostTailFacts::new(tcx, def_id, owner),
                 availability: AvailabilityFacts::new(tcx, def_id, owner, cx.new_mut_ref()),
             }),
@@ -227,13 +324,25 @@ pub(super) fn check_with_context<'tcx>(
             tcx.def_span(def_id),
         ));
     }
-    let mut checker = Checker::new(cx, def_id, owner);
+    let language = match language::LanguageFacts::capture(cx, def_id, owner) {
+        Ok(language) => language,
+        Err(reason) => {
+            return ModeCheck::Unknown(Refusal::new(
+                TAG_MODES_UNKNOWN,
+                reason,
+                tcx.def_span(def_id),
+            ))
+        }
+    };
+    let mut checker = Checker::new(cx, def_id, owner, language);
     match checker.function() {
         Ok(()) => match checker.signature {
             Some(signature) => match checker
                 .availability
                 .checked(tcx, def_id, owner)
                 .and_then(|_| checker.bindings.checked(tcx, def_id, owner))
+                .and_then(|_| checker.matches.checked(tcx, def_id, owner))
+                .and_then(|_| checker.language.checked(cx, def_id, owner))
             {
                 Err(reason) => ModeCheck::Unknown(Refusal::new(
                     TAG_MODES_UNKNOWN,
@@ -242,8 +351,14 @@ pub(super) fn check_with_context<'tcx>(
                 )),
                 Ok(_) => ModeCheck::Clean(CheckedModes {
                     signature,
+                    language: Some(checker.language),
                     local_declarations: checker.local_declarations,
                     bindings: checker.bindings,
+                    matches: checker.matches,
+                    expressions: checker.expressions,
+                    derived_clone_calls: checker.derived_clone_calls,
+                    constant_uses: checker.constant_uses,
+                    autospec_calls: checker.autospec_calls,
                     ghost_tails: checker.ghost_tails,
                     availability: checker.availability,
                 }),
@@ -461,9 +576,15 @@ pub(crate) struct CheckedLocal {
 #[derive(Debug, Clone)]
 pub(crate) struct CheckedModes<'tcx> {
     pub(crate) signature: SignatureModes,
+    pub(super) language: Option<language::LanguageFacts<'tcx>>,
     /// Initialized and uninitialized plain declarations, excluding inference.
     pub(crate) local_declarations: HashMap<HirId, CheckedLocal>,
     pub(crate) bindings: BindingFacts<'tcx>,
+    pub(crate) matches: matches::MatchFacts<'tcx>,
+    pub(crate) expressions: expressions::ExpressionFacts<'tcx>,
+    pub(super) derived_clone_calls: HashMap<HirId, super::derived_clones::Call<'tcx>>,
+    pub(super) constant_uses: HashMap<HirId, super::constants::Use<'tcx>>,
+    pub(super) autospec_calls: HashMap<HirId, super::autospec::Call<'tcx>>,
     pub(super) ghost_tails: GhostTailFacts<'tcx>,
     pub(crate) availability: AvailabilityFacts<'tcx>,
 }
@@ -657,10 +778,17 @@ struct Checker<'a, 'tcx> {
     def_id: LocalDefId,
     body_owner: LocalDefId,
     fun_mode: Mode,
+    language: language::LanguageFacts<'tcx>,
     vars: HashMap<HirId, VarMode>,
     signature: Option<SignatureModes>,
     local_declarations: HashMap<HirId, CheckedLocal>,
     bindings: BindingFacts<'tcx>,
+    matches: matches::MatchFacts<'tcx>,
+    expressions: expressions::ExpressionFacts<'tcx>,
+    derived_clone_calls: HashMap<HirId, super::derived_clones::Call<'tcx>>,
+    constant_uses: HashMap<HirId, super::constants::Use<'tcx>>,
+    in_value_ensures: bool,
+    autospec_calls: HashMap<HirId, super::autospec::Call<'tcx>>,
     ghost_tails: GhostTailFacts<'tcx>,
     availability: AvailabilityFacts<'tcx>,
     /// Clauses, assertions and spec function bodies: every read is spec and
@@ -678,9 +806,14 @@ struct Checker<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Checker<'a, 'tcx> {
-    fn new(cx: &'a dyn ModeContext<'tcx>, def_id: LocalDefId, body_owner: LocalDefId) -> Self {
+    fn new(
+        cx: &'a dyn ModeContext<'tcx>,
+        def_id: LocalDefId,
+        body_owner: LocalDefId,
+        language: language::LanguageFacts<'tcx>,
+    ) -> Self {
         let tcx = cx.tcx();
-        let fun_mode = cx.function_mode(def_id.to_def_id()).unwrap_or(Mode::Exec);
+        let fun_mode = language.function_mode();
         Self {
             cx,
             tcx,
@@ -688,10 +821,17 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             def_id,
             body_owner,
             fun_mode,
+            language,
             vars: HashMap::new(),
             signature: None,
             local_declarations: HashMap::new(),
             bindings: BindingFacts::new(tcx, def_id, body_owner),
+            matches: matches::MatchFacts::new(tcx, def_id, body_owner),
+            expressions: expressions::ExpressionFacts::new(tcx, def_id, body_owner),
+            derived_clone_calls: HashMap::new(),
+            constant_uses: HashMap::new(),
+            in_value_ensures: false,
+            autospec_calls: HashMap::new(),
             ghost_tails: GhostTailFacts::new(tcx, def_id, body_owner),
             availability: AvailabilityFacts::new(tcx, def_id, body_owner, cx.new_mut_ref()),
             in_pure: false,
@@ -719,6 +859,10 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     /// The type of `e` as Verus sees it (after adjustments) is `()`.
     fn is_unit(&self, e: &hir::Expr<'_>) -> bool {
         self.typeck.expr_ty_adjusted(e).is_unit()
+    }
+
+    fn uses_ghost_blocks(&self) -> bool {
+        !self.language.legacy()
     }
 
     /// The expected mode of an expression statement or an `if` condition:
@@ -1017,6 +1161,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             Ghostness::Ghost
         };
         self.in_pure = self.fun_mode == Mode::Spec;
+        let context = self.expression_context(self.fun_mode, sig.ret.mode);
         let mode = self.block_stmts(
             &block.stmts[header_len..],
             block.expr,
@@ -1029,6 +1174,17 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 msg::expr_mode(mode.name(), sig.ret.mode.name()),
             );
         }
+        // The top-level block is checked here to exclude the already checked
+        // contract header, so it does not go through expr's usual recording.
+        let native = self.typeck.expr_ty(body.value);
+        if matches!(self.typeck.expr_adjustments(body.value), [adjustment]
+            if matches!(adjustment.kind, Adjust::NeverToAny)
+                && native.is_never()
+                && adjustment.target == native)
+        {
+            self.record_adjustment(body.value, false)?;
+        }
+        self.record_expression_mode(body.value, context, mode)?;
         Ok(())
     }
 
@@ -1109,14 +1265,18 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
 
     /// Check every retained clause as pure Spec code.
     fn clause_list(&mut self, arr: &'tcx hir::Expr<'tcx>, header: VerusItem) -> M<()> {
-        let saved = (self.block, self.in_pure);
+        let saved = (self.block, self.in_pure, self.in_value_ensures);
         self.block = Ghostness::Ghost;
         self.in_pure = true;
-        for elem in self.clause_elements(arr, header) {
-            self.has_mode(elem, Mode::Spec, Mode::Spec)?;
-        }
-        (self.block, self.in_pure) = saved;
-        Ok(())
+        self.in_value_ensures = header == VerusItem::Ensures;
+        let result = (|| {
+            for elem in self.clause_elements(arr, header) {
+                self.has_mode(elem, Mode::Spec, Mode::Spec)?;
+            }
+            Ok(())
+        })();
+        (self.block, self.in_pure, self.in_value_ensures) = saved;
+        result
     }
 
     // ------------------------------------------------------------------
@@ -1220,7 +1380,11 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         if self.block == Ghostness::Ghost && mode == Mode::Exec {
             mode = Mode::Spec;
         }
-        if self.block == Ghostness::Exec && mode != Mode::Exec && local.init.is_some() {
+        if self.uses_ghost_blocks()
+            && self.block == Ghostness::Exec
+            && mode != Mode::Exec
+            && local.init.is_some()
+        {
             return self.error(pat_span, msg::EXEC_INITIALIZES_NON_EXEC);
         }
         if !le(outer, mode) {
@@ -1465,7 +1629,11 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         }
         if !self.is_place(e) {
             let mode = self.expr_value(e, outer, expect)?;
-            if self.block == Ghostness::Exec && mode != Mode::Exec && !self.is_unit(e) {
+            if self.uses_ghost_blocks()
+                && self.block == Ghostness::Exec
+                && mode != Mode::Exec
+                && !self.is_unit(e)
+            {
                 return self.error(e.span, msg::temporary_in_exec(mode.name()));
             }
             return Ok(mode);
@@ -1518,7 +1686,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             }
             _ => return self.unknown("a place of an unexpected kind", e.span),
         };
-        if self.block == Ghostness::Exec && mode != Mode::Exec {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Exec && mode != Mode::Exec {
             return self.error(e.span, msg::place_in_exec(mode.name()));
         }
         Ok(mode)
@@ -1527,18 +1695,34 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     /// A read of the place `e` (`check_place` with `PlaceAccess::Read`): the
     /// place's mode raised to the expected mode; spec in pure code.
     fn place_read(&mut self, e: &'tcx hir::Expr<'tcx>, outer: Mode, expect: Mode) -> M<Mode> {
+        let context = self.expression_context(outer, expect);
         let mode = self.place_rec(e, outer, expect)?;
-        let result = self.read_mode(mode, expect);
+        let result = self.read_mode(mode, outer, expect);
         self.record_place(e, mode, result, AccessKind::Read)?;
-        Ok(result)
+        // Let initializers call place_read directly. Record actual places
+        // as expr callers already do. Non-places were recorded by expr_value
+        // with their raw result; a raised temporary-read mode is not a
+        // second value observation under that same context.
+        if self.is_place(e) {
+            self.record_expression_mode(e, context, result)
+        } else {
+            Ok(result)
+        }
     }
 
     /// The mode of a read of a place of mode `mode`.
-    fn read_mode(&self, mode: Mode, expect: Mode) -> Mode {
+    fn read_mode(&self, mode: Mode, outer: Mode, expect: Mode) -> Mode {
         if self.in_pure || self.in_proof_in_spec || self.in_assert_by {
             Mode::Spec
         } else {
-            join(mode, expect)
+            join(
+                mode,
+                if self.uses_ghost_blocks() {
+                    expect
+                } else {
+                    outer
+                },
+            )
         }
     }
 
@@ -1562,7 +1746,10 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             hir::ExprKind::Path(ref qpath) => match self.typeck.qpath_res(qpath, e.hir_id) {
                 Res::Local(hir_id) => {
                     let mode = self.var_mode(hir_id, e.span)?;
-                    if self.block == Ghostness::Exec && mode != Mode::Exec {
+                    if self.uses_ghost_blocks()
+                        && self.block == Ghostness::Exec
+                        && mode != Mode::Exec
+                    {
                         return self.error(e.span, msg::EXEC_MUTATES_NON_EXEC);
                     }
                     Ok(mode)
@@ -1597,18 +1784,26 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     /// The mode of `e` used as a value: a read of a place, or the value of
     /// any other expression.
     fn expr(&mut self, e: &'tcx hir::Expr<'tcx>, outer: Mode, expect: Mode) -> M<Mode> {
-        if let hir::ExprKind::DropTemps(inner) = e.kind {
-            return self.expr(inner, outer, expect);
-        }
-        if self.is_place(e) {
-            return self.place_read(e, outer, expect);
-        }
-        self.expr_value(e, outer, expect)
+        let context = self.expression_context(outer, expect);
+        let result = if let hir::ExprKind::DropTemps(inner) = e.kind {
+            self.expr(inner, outer, expect)?
+        } else if self.is_place(e) {
+            self.place_read(e, outer, expect)?
+        } else {
+            self.expr_value(e, outer, expect)?
+        };
+        self.record_expression_mode(e, context, result)
     }
 
     /// An expression that is not a place: its Verus attributes, then its
     /// adjustments, then the expression itself.
     fn expr_value(&mut self, e: &'tcx hir::Expr<'tcx>, outer: Mode, expect: Mode) -> M<Mode> {
+        let context = self.expression_context(outer, expect);
+        let result = self.expr_value_inner(e, outer, expect)?;
+        self.record_expression_mode(e, context, result)
+    }
+
+    fn expr_value_inner(&mut self, e: &'tcx hir::Expr<'tcx>, outer: Mode, expect: Mode) -> M<Mode> {
         let mut notes = 0;
         for (attr, span) in attrs::verus_attrs(self.tcx.hir_attrs(e.hir_id)) {
             match attr {
@@ -1665,7 +1860,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // (`strip_vir_ref_decoration`).
             if self.is_place_unadjusted(e) {
                 let mode = self.place_shape(e, outer, expect)?;
-                let result = self.read_mode(mode, expect);
+                let result = self.read_mode(mode, outer, expect);
                 self.record_place(e, mode, result, AccessKind::Read)?;
                 return Ok(result);
             }
@@ -1704,7 +1899,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 // A variable with attributes (a proof note): read as a place.
                 Res::Local(_) => {
                     let mode = self.place_shape(e, outer, expect)?;
-                    let result = self.read_mode(mode, expect);
+                    let result = self.read_mode(mode, outer, expect);
                     self.record_place(e, mode, result, AccessKind::Read)?;
                     Ok(result)
                 }
@@ -1728,6 +1923,52 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                         _ => self.unknown("a constructor of an unexpected type", span),
                     }
                 }
+                Res::Def(DefKind::Const | DefKind::AssocConst | DefKind::Static { .. }, def)
+                    if def.as_local().is_some_and(|local| {
+                        matches!(
+                            self.cx.value_kind(local),
+                            Some(
+                                trust_vc_vcir::FnKind::Constant(trust_vc_vcir::ConstMode::Exec)
+                                    | trust_vc_vcir::FnKind::Static
+                            )
+                        )
+                    }) =>
+                {
+                    let selected = self
+                        .cx
+                        .constant_use(self.body_owner, self.typeck, e)
+                        .map_err(Stop::Unknown)?
+                        .ok_or_else(|| {
+                            Stop::Unknown(Refusal::new(
+                                "constant-use",
+                                "the value lacks its native pair selection",
+                                span,
+                            ))
+                        })?;
+                    if selected.original != def {
+                        return self.unknown("the constant use changed definition", span);
+                    }
+                    if self.in_value_ensures && selected.declaration == self.def_id {
+                        self.constant_uses.insert(e.hir_id, selected);
+                        return Ok(Mode::Spec);
+                    }
+                    if (self.uses_ghost_blocks() && self.block != Ghostness::Exec)
+                        || outer != Mode::Exec
+                        || self.cx.constant_mode(self.def_id)
+                            == Some(trust_vc_vcir::ConstMode::Dual)
+                    {
+                        return self.error(
+                            span,
+                            if selected.kind == trust_vc_vcir::FnKind::Static {
+                                "cannot read static with mode exec"
+                            } else {
+                                "cannot read const with mode exec"
+                            },
+                        );
+                    }
+                    self.constant_uses.insert(e.hir_id, selected);
+                    Ok(Mode::Exec)
+                }
                 Res::Def(DefKind::Const | DefKind::AssocConst, def)
                     if def
                         .as_local()
@@ -1736,7 +1977,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                     match self.cx.constant_mode(def.expect_local()) {
                         Some(trust_vc_vcir::ConstMode::Dual) => Ok(Mode::Exec),
                         Some(trust_vc_vcir::ConstMode::Spec) => {
-                            if self.block == Ghostness::Exec {
+                            if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                                 // Dual constant initializers are checked as
                                 // Exec values, outside ordinary block ghostness.
                                 if self.cx.constant_mode(self.def_id)
@@ -1814,6 +2055,9 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             hir::ExprKind::If(cond, then_expr, else_expr) => {
                 self.if_expr(e, cond, then_expr, else_expr, outer, expect)
             }
+            hir::ExprKind::Match(scrutinee, arms, source) => {
+                self.ordinary_match(e, scrutinee, arms, source, outer, expect)
+            }
             hir::ExprKind::Struct(_, fields, tail) => {
                 self.struct_ctor(e, fields, tail, outer, expect)
             }
@@ -1850,7 +2094,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             }
             hir::ExprKind::Field(..) => {
                 let mode = self.place_shape(e, outer, expect)?;
-                let result = self.read_mode(mode, expect);
+                let result = self.read_mode(mode, outer, expect);
                 self.record_place(e, mode, result, AccessKind::Read)?;
                 Ok(result)
             }
@@ -2019,7 +2263,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 if self.in_pure {
                     return Ok(Mode::Spec);
                 }
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(inner.span, msg::OLD_IN_EXEC);
                 }
                 return Ok(Mode::Spec);
@@ -2109,7 +2353,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         }
         let cond_expect = self.stmt_expect();
         let cond_mode = self.expr(cond, outer, cond_expect)?;
-        if self.block == Ghostness::Exec && cond_mode != Mode::Exec {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Exec && cond_mode != Mode::Exec {
             return self.error(e.span, msg::CONDITION_NOT_EXEC);
         }
         let branch = if outer == Mode::Exec && cond_mode == Mode::Spec {
@@ -2138,7 +2382,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         header: Span,
         outer: Mode,
     ) -> M<Mode> {
-        if self.block == Ghostness::Ghost {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Ghost {
             return self.error(header, msg::LOOP_IN_GHOST);
         }
         let (cond, body) = match source {
@@ -2283,7 +2527,13 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         value: Option<&'tcx hir::Expr<'tcx>>,
         outer: Mode,
     ) -> M<Mode> {
-        if self.fun_mode == Mode::Exec && self.block == Ghostness::Ghost {
+        if self.fun_mode == Mode::Exec
+            && if self.uses_ghost_blocks() {
+                self.block == Ghostness::Ghost
+            } else {
+                outer != Mode::Exec
+            }
+        {
             return self.error(e.span, msg::RETURN_FROM_NON_EXEC);
         }
         if self.in_assert_by {
@@ -2332,8 +2582,70 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
         outer: Mode,
     ) -> M<Mode> {
         let span = e.span;
+        let constant = self
+            .cx
+            .constant_use(self.body_owner, self.typeck, e)
+            .map_err(Stop::Unknown)?;
+        // A40 resolves autospec before Modes. The original native call is
+        // retained as an observation; executable calls never enter this path.
+        let autospec = if self.block != Ghostness::Exec {
+            self.cx
+                .autospec_call(self.body_owner, self.typeck, e)
+                .map_err(Stop::Unknown)?
+        } else {
+            None
+        };
+        let selected = self
+            .cx
+            .derived_clone_call(self.body_owner, self.typeck, e)
+            .map_err(Stop::Unknown)?;
+        // Each registry observes the original native call. A declaration can
+        // contribute one logical selection, never a chain of rewrites. A
+        // genuine const-function autospec source joins both observations of
+        // the SAME original native occurrence before selecting its Spec target.
+        let callee = match (&constant, &autospec, &selected) {
+            (Some(constant), Some(call), None)
+                if call.original == callee && call.matches_constant(Some(constant)) =>
+            {
+                call.target.to_def_id()
+            }
+            (Some(call), None, None)
+                if call.kind == trust_vc_vcir::FnKind::ConstFunction && call.original == callee =>
+            {
+                call.declaration.to_def_id()
+            }
+            (Some(_), _, _) => {
+                return self.unknown(
+                    "the constant call changed or overlaps another native selection",
+                    span,
+                )
+            }
+            (None, Some(call), None) if call.original == callee && call.matches_constant(None) => {
+                call.target.to_def_id()
+            }
+            (None, Some(_), _) => {
+                return self.unknown(
+                    "the autospec call changed or overlaps another native selection",
+                    span,
+                )
+            }
+            (None, None, Some(call)) if call.original == callee => call.method.to_def_id(),
+            (None, None, Some(_)) => {
+                return self.unknown("the derived call changed its native declaration", span)
+            }
+            (None, None, None) => callee,
+        };
         let sig = call_modes_with_context(self.cx, callee, span).map_err(Stop::Unknown)?;
-        if (sig.mode == Mode::Exec) != (self.block == Ghostness::Exec) || !le(outer, sig.mode) {
+        // A dual initializer is executable arithmetic with a Spec declaration,
+        // not an ordinary Exec call context (A40 has no dual-mode functions).
+        if self.cx.constant_mode(self.def_id) == Some(trust_vc_vcir::ConstMode::Dual) {
+            let name = self.cx.friendly_fn_path(callee);
+            return self.error(span, msg::call_mode(&name, sig.mode.name()));
+        }
+
+        if (self.uses_ghost_blocks() && (sig.mode == Mode::Exec) != (self.block == Ghostness::Exec))
+            || !le(outer, sig.mode)
+        {
             let name = self.cx.friendly_fn_path(callee);
             return self.error(span, msg::call_mode(&name, sig.mode.name()));
         }
@@ -2347,6 +2659,15 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             let param_mode = facts.mode;
             self.has_mode(arg, join(outer, param_mode), param_mode)?;
             self.record_argument(e, arg, position, param_mode)?;
+        }
+        if let Some(call) = selected {
+            self.derived_clone_calls.insert(e.hir_id, call);
+        }
+        if let Some(call) = constant {
+            self.constant_uses.insert(e.hir_id, call);
+        }
+        if let Some(call) = autospec {
+            self.autospec_calls.insert(e.hir_id, call);
         }
         Ok(sig.ret)
     }
@@ -2379,7 +2700,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                         span,
                     );
                 }
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(
                         span,
                         msg::call_mode(&self.cx.friendly_fn_path(callee), Mode::Spec.name()),
@@ -2399,7 +2720,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                         span,
                     );
                 }
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(
                         span,
                         msg::call_mode(&self.cx.friendly_fn_path(callee), Mode::Spec.name()),
@@ -2421,7 +2742,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 Ok(Mode::Spec)
             }
             (VerusItem::Old, [arg]) if self.cx.new_mut_ref() => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::OLD_IN_EXEC);
                 }
                 let saved = self.in_old;
@@ -2436,7 +2757,9 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // It is external, so no local/imported signature receipt exists.
             // Outside ensures it is retained: check BOTH real arguments.
             (VerusItem::ConstrainType, [first, second]) => {
-                if self.block == Ghostness::Exec || !le(outer, Mode::Spec) {
+                if (self.uses_ghost_blocks() && self.block == Ghostness::Exec)
+                    || !le(outer, Mode::Spec)
+                {
                     let name = self.cx.friendly_fn_path(callee);
                     return self.error(span, msg::call_mode(&name, Mode::Spec.name()));
                 }
@@ -2457,7 +2780,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             (VerusItem::ClosureToFnSpec, [closure]) => self.spec_closure(closure),
             // `ExprX::AssertAssume`: ghost code only; the argument is pure.
             (VerusItem::Assert | VerusItem::Assume, [arg]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::ASSERT_IN_EXEC);
                 }
                 let saved = self.in_pure;
@@ -2465,10 +2788,13 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 let result = self.has_mode(arg, Mode::Spec, Mode::Spec);
                 self.in_pure = saved;
                 result?;
+                if self.language.legacy() {
+                    self.record_argument(e, arg, 0, Mode::Spec)?;
+                }
                 Ok(outer)
             }
             (VerusItem::Admit, []) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::ASSERT_IN_EXEC);
                 }
                 Ok(outer)
@@ -2476,7 +2802,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // `ExprX::AssertBy`: ghost code only; the condition is pure and
             // the proof is proof code.
             (VerusItem::AssertBy, [cond, proof]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     let mut error = UserError::new(Phase::Modes, span, msg::ASSERT_BY_IN_EXEC);
                     error.help = Some(msg::ASSERT_BY_IN_EXEC_HELP.to_string());
                     return Err(Stop::Error(error));
@@ -2495,7 +2821,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 Ok(Mode::Proof)
             }
             (VerusItem::AssertBitvectorBy, [proof]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::ASSERT_IN_EXEC);
                 }
                 self.assert_bitvector_body(proof)?;
@@ -2554,14 +2880,16 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // spec.
             // A chained comparison is spec code (`record_spec_fn`), with
             // spec operands.
-            (VerusItem::Chained(_), operands) if self.block == Ghostness::Ghost => {
+            (VerusItem::Chained(_), operands)
+                if !self.uses_ghost_blocks() || self.block == Ghostness::Ghost =>
+            {
                 for operand in operands {
                     self.expr(operand, Mode::Spec, Mode::Spec)?;
                 }
                 Ok(Mode::Spec)
             }
             (VerusItem::IsSmallerThan | VerusItem::IsSmallerThanLexicographic, [lhs, rhs])
-                if self.block == Ghostness::Ghost =>
+                if !self.uses_ghost_blocks() || self.block == Ghostness::Ghost =>
             {
                 self.expr(lhs, Mode::Spec, Mode::Spec)?;
                 self.expr(rhs, Mode::Spec, Mode::Spec)?;
@@ -2570,7 +2898,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // `ExprX::Quant` and `ExprX::Choose`: ghost code only; the
             // variables are spec and the body is pure spec code.
             (VerusItem::Forall | VerusItem::Exists, [arg]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::QUANT_IN_EXEC);
                 }
                 self.binder(arg, &mut |this, body| {
@@ -2579,7 +2907,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 Ok(Mode::Spec)
             }
             (VerusItem::Choose | VerusItem::ChooseTuple, [arg]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     return self.error(span, msg::CHOOSE_IN_EXEC);
                 }
                 self.binder(arg, &mut |this, body| {
@@ -2608,7 +2936,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
             // and the proof proof code in which proof variables read as
             // spec.
             (VerusItem::AssertForallBy, [arg]) => {
-                if self.block == Ghostness::Exec {
+                if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
                     let mut error = UserError::new(Phase::Modes, span, msg::ASSERT_BY_IN_EXEC);
                     error.help = Some(msg::ASSERT_BY_IN_EXEC_HELP.to_string());
                     return Err(Stop::Error(error));
@@ -2624,7 +2952,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
     /// Captured values retain their existing modes; only this closure's actual
     /// parameter bindings are introduced as Spec in the fresh variable scope.
     fn spec_closure(&mut self, expr: &'tcx hir::Expr<'tcx>) -> M<Mode> {
-        if self.block == Ghostness::Exec {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
             // Verus rejects this while building VIR. Keep that earlier-phase
             // error outside a successful mode receipt rather than relabeling
             // it as a later mode error.

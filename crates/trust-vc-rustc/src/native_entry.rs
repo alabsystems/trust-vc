@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 mod builtin_builder;
 pub(crate) use builtin_builder::configure_child as configure_builtin_builder;
+pub(crate) use builtin_builder::configure_ordinary_child;
 
 /// Enter the native role before file opens, workers, argument sidecars or user
 /// callbacks. Ordinary compiler entry captures its actual GNU/SDK descriptors;
@@ -49,6 +50,9 @@ pub(crate) fn test_main(tests: &[&test::TestDescAndFn]) {
     // this call. Capture precedes libtest argument handling and worker threads.
     if let Err(exit) = unsafe { capture_inherited_resources() } {
         exit.exit_process();
+    }
+    if std::env::args().nth(1).as_deref() == Some(crate::shim::ORDINARY_WORKER_FLAG) {
+        crate::shim::ordinary_worker_main().exit_process();
     }
     // The normal pipeline invokes this same executable for its real erase
     // compiler. Enter that existing role before libtest parses its arguments.

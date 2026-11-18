@@ -10,17 +10,25 @@ use std::collections::HashMap;
 
 pub(super) enum Event {
     Move(Place),
+    /// Resolution-only consumption of a possible abstract owned value.
+    /// It invalidates initialization, never concrete reference availability.
+    ValueMove(Place),
     Mutate(Place),
     Overwrite(Place),
 }
 
 pub(super) enum Action<'a> {
+    /// Global storage reads never use the ordinary callee-owned result ABI.
+    StaticRead(Option<Place>),
     None,
     Declare(LocalId, Option<&'a Expr>),
     Assign(Place, &'a Expr),
     Borrow(LocalId, Place),
     Call(FnId, &'a [Expr]),
-    Result { call: usize, dest: Option<Place> },
+    Result {
+        call: usize,
+        dest: Option<Place>,
+    },
     Drop(Vec<LocalId>),
     Return(Option<&'a Expr>),
 }
@@ -100,12 +108,45 @@ impl<'a, 'ctx> Builder<'a, 'ctx> {
         let remaining = self.work.remaining().get();
         super::super::aux_work::expression(self.work.remaining(), expr, expr.span)?;
         let size = remaining - self.work.remaining().get();
-        self.charge(size.saturating_mul(size))?;
+        self.charge(size.saturating_mul(size).saturating_mul(2))?;
         let mut places = Vec::new();
-        moves(self.ctx, expr, &mut places);
+        resolution_moves(self.ctx, expr, &mut places);
         self.work.places(&places, expr.span)?;
         let mut events = Vec::new();
         for place in places {
+            if !self.kept_place(&place)? {
+                continue;
+            }
+            let Some(ty) = self.typed_place(&place)? else {
+                continue;
+            };
+            // This changes the resolution effect analysis only. Abstract
+            // values never become concrete reference slots or release loans.
+            if self.classifier.contains_abstract(&ty, expr.span)? {
+                if !self.decl.copy_premises.is_empty()
+                    && crate::copy_context::is_copy_with(
+                        &self.ctx.adts,
+                        &self.decl.copy_premises,
+                        &ty,
+                        None,
+                        |amount| self.work.charge(amount, expr.span),
+                    )?
+                {
+                    // A checked Copy transfer preserves its source's forward
+                    // initialization. It adds no concrete loan/move effect.
+                    continue;
+                }
+                self.charge(1 + place.projections.len())?;
+                events.push(Event::ValueMove(place.clone()));
+            }
+        }
+        // Retain the original concrete reference-move inventory. Precise
+        // nested generic projections above affect abstract fact licensing,
+        // never the established concrete ownership/loan masks.
+        let mut concrete = Vec::new();
+        moves(self.ctx, expr, &mut concrete);
+        self.work.places(&concrete, expr.span)?;
+        for place in concrete {
             if !self.kept_place(&place)? {
                 continue;
             }
@@ -144,7 +185,7 @@ impl<'a, 'ctx> Builder<'a, 'ctx> {
             .stmts
             .iter()
             .filter_map(|stmt| match stmt.kind {
-                StmtKind::Let { local, .. } => Some(local),
+                StmtKind::Let { local, .. } | StmtKind::LetChecked { local, .. } => Some(local),
                 _ => None,
             })
             .collect())
@@ -183,6 +224,11 @@ impl<'a, 'ctx> Builder<'a, 'ctx> {
         self.after.insert(statement, after);
         match &stmt.kind {
             StmtKind::If {
+                then_block,
+                else_block,
+                ..
+            }
+            | StmtKind::IfSpec {
                 then_block,
                 else_block,
                 ..
@@ -282,7 +328,27 @@ impl<'a, 'ctx> Builder<'a, 'ctx> {
                     vec![after],
                 )
             }
-            StmtKind::Assign { place, value } => {
+            StmtKind::LetChecked { local, init } => {
+                // WF requires Spec storage. Keep the ordinary declaration's
+                // mode-dependent transfer rule even on diagnostic IR.
+                let owned = self
+                    .decl
+                    .local(*local)
+                    .is_some_and(|local| local.mode != Mode::Spec);
+                let mut events = if owned {
+                    self.value_moves(init)?
+                } else {
+                    Vec::new()
+                };
+                events.push(Event::Overwrite(Place::local(*local)));
+                self.node(
+                    key,
+                    events,
+                    Action::Declare(*local, Some(init)),
+                    vec![after],
+                )
+            }
+            StmtKind::Assign { place, value } | StmtKind::AssignSpec { place, value } => {
                 let mut events = if self.kept_place(place)? {
                     self.value_moves(value)?
                 } else {

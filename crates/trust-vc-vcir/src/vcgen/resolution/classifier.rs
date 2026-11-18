@@ -18,6 +18,7 @@ pub(in crate::vcgen) struct Classifier<'a, 'ctx> {
     decl: &'a FnDecl,
     work: state::Work,
     memo: RefCell<HashMap<Ty, bool>>,
+    abstract_memo: RefCell<HashMap<Ty, bool>>,
 }
 
 impl<'a, 'ctx> Classifier<'a, 'ctx> {
@@ -27,6 +28,7 @@ impl<'a, 'ctx> Classifier<'a, 'ctx> {
             decl,
             work: state::Work::new(),
             memo: RefCell::new(HashMap::new()),
+            abstract_memo: RefCell::new(HashMap::new()),
         }
     }
 
@@ -67,12 +69,15 @@ impl<'a, 'ctx> Classifier<'a, 'ctx> {
         }
         let size = before - self.work.remaining().get();
         self.work.charge(size.saturating_mul(size), span)?;
-        Ok(ty.subst(args))
+        if ty.has_projection() || args.iter().any(Ty::has_projection) {
+            self.ctx.substitute_type(ty, args, self.work.remaining(), span)
+        } else { Ok(ty.subst(args)) }
     }
 
-    fn children(&self, ty: &Ty, span: crate::SpanId) -> R<Option<Vec<Ty>>> {
+    fn children(&self, ty: &Ty, span: crate::SpanId, abstract_values: bool) -> R<Option<Vec<Ty>>> {
         match ty {
-            Ty::MutRef(_) => Ok(None),
+            Ty::MutRef(_) if !abstract_values => Ok(None),
+            Ty::Param(_) | Ty::Projection(..) if abstract_values => Ok(None),
             Ty::Tuple(fields) => {
                 self.work.charge(fields.len(), span)?;
                 let mut children = Vec::new();
@@ -109,14 +114,32 @@ impl<'a, 'ctx> Classifier<'a, 'ctx> {
             }
             // A shared/legacy carrier or bare type parameter is not a known
             // locally-owned opaque mutable reference. This is no Copy claim.
-            Ty::Ref { .. } | Ty::Param(_) | Ty::Unit | Ty::Bool | Ty::Int(_) => {
+            Ty::Ref { .. } | Ty::MutRef(_) | Ty::Param(_) | Ty::Projection(..) | Ty::Unit | Ty::Bool | Ty::Int(_) => {
                 Ok(Some(Vec::new()))
             }
         }
     }
 
     pub(in crate::vcgen) fn contains(&self, ty: &Ty, span: crate::SpanId) -> R<bool> {
-        let mut memo = self.memo.borrow_mut();
+        self.classify(ty, span, false)
+    }
+
+    /// Abstract owned values need resolution analysis without acquiring a
+    /// concrete loan identity, a Copy classification, or pointee ownership.
+    pub(in crate::vcgen) fn contains_abstract(&self, ty: &Ty, span: crate::SpanId) -> R<bool> {
+        self.classify(ty, span, true)
+    }
+
+    fn classify(&self, ty: &Ty, span: crate::SpanId, abstract_values: bool) -> R<bool> {
+        let normalized = if ty.has_projection() {
+            Some(self.ctx.normalize_type(ty, self.work.remaining(), span)?)
+        } else { None };
+        let ty = normalized.as_ref().unwrap_or(ty);
+        let mut memo = if abstract_values {
+            self.abstract_memo.borrow_mut()
+        } else {
+            self.memo.borrow_mut()
+        };
         self.work.charge(1, span)?;
         let mut pending = vec![Frame::Visit(self.copied(ty, span)?)];
         let mut active = HashSet::new();
@@ -143,7 +166,7 @@ impl<'a, 'ctx> Classifier<'a, 'ctx> {
                             span,
                         ));
                     }
-                    let Some(children) = self.children(&key, span)? else {
+                    let Some(children) = self.children(&key, span, abstract_values)? else {
                         self.price(&key, 2, span)?;
                         memo.insert(key, true);
                         continue;

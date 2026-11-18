@@ -61,8 +61,9 @@ impl Gen<'_> {
                     result_type,
                     &place,
                     span,
+                    Some(work),
                 )?;
-                self.ctx.has_resolved(&ty, &self.types, value, span)?
+                self.ctx.has_resolved_with_work(&ty, &self.types, value, span, work)?
             };
             // Receipt has completed the argument moves. The unused outer
             // result is initialized and has no future move or mutation.

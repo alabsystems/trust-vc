@@ -57,6 +57,7 @@ impl FnDecl {
             return Some("an imported declaration requires an ordinary bodyless spec function");
         }
         if !self.requires.is_empty()
+            || !self.copy_premises.is_empty()
             || self.unwind.is_some()
             || !self.ensures.is_empty()
             || !self.recommends.is_empty()

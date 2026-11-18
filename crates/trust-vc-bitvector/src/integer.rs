@@ -5,6 +5,7 @@
 //! mathematical result. Explicit finite casts then clip/reinterpret it.
 
 use crate::{IntLit, Op, Term, MAX_WIDTH};
+use std::sync::Arc;
 
 /// A BV expression together with its mathematical integer interpretation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,37 @@ pub struct Integer {
     /// The elaborated root is an unsigned addition/multiplication. The
     /// pinned translator admits an explicit nat clip at exactly this root.
     nat_arithmetic: bool,
+}
+
+/// A guarded construction of exact Euclidean arithmetic. The ordinary BV
+/// expansion, including its caller-supplied zero arm, defines its semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Euclidean {
+    numerator: Integer,
+    denominator: Integer,
+    remainder: bool,
+    width: u32,
+    signed: bool,
+    expanded: Term,
+}
+
+impl Euclidean {
+    /// Encode the same guarded finite expression as for any other BV term.
+    pub fn expanded(&self) -> &Term {
+        &self.expanded
+    }
+
+    pub(crate) fn operands(&self) -> [(&Term, u32, bool); 2] {
+        [&self.numerator, &self.denominator].map(|value| (&value.term, value.width, value.signed))
+    }
+
+    pub(crate) fn result(&self) -> (u32, bool) {
+        (self.width, self.signed)
+    }
+
+    pub(crate) fn is_remainder(&self) -> bool {
+        self.remainder
+    }
 }
 
 /// Mathematical arithmetic, including Euclidean division/remainder.
@@ -36,7 +68,7 @@ pub enum Comparison {
 }
 
 fn shared(term: Term) -> Term {
-    if matches!(&term, Term::Shared(_)) {
+    if matches!(&term, Term::Shared(_) | Term::Euclidean(_)) {
         term
     } else {
         Term::Shared(std::sync::Arc::new(term))
@@ -319,6 +351,8 @@ impl Integer {
         remainder: bool,
         arbitrary: Term,
     ) -> Result<Self, &'static str> {
+        let numerator = self.clone();
+        let denominator = other.clone();
         let (left, right) = self.align(other)?;
         let bits = left.width;
         let signed = left.signed;
@@ -365,7 +399,18 @@ impl Integer {
             (condition(negative_remainder, corrected, quotient), bits)
         };
         Ok(Self {
-            term: condition(denominator_zero, arbitrary, term),
+            term: Term::Euclidean(Arc::new(Euclidean {
+                numerator,
+                denominator,
+                remainder,
+                width: output_bits,
+                signed,
+                expanded: Term::If {
+                    condition: Box::new(denominator_zero),
+                    then_term: Box::new(arbitrary),
+                    else_term: Box::new(term),
+                },
+            })),
             width: output_bits,
             signed,
             nat_arithmetic: false,

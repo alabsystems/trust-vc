@@ -23,7 +23,7 @@ pub(super) fn annotated_constant_calls_taint_bodies_and_both_generation_entries_
         .fns
         .iter()
         .all(|f| matches!(generated.get(f.id), Some(FnVcs::Refused(_)))));
-    assert!(vcgen::Recommendations::new(&krate).is_err());
+    assert!(vcgen::GenerationSession::new(&krate).is_err());
     assert_eq!(
         krate, before,
         "effect checking must not rewrite source classifications"

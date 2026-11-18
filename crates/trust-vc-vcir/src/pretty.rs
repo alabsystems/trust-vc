@@ -81,6 +81,9 @@ pub fn fn_to_string(krate: &VcCrate, decl: &FnDecl) -> String {
     if decl.kind != crate::item::FnKind::Function {
         let _ = writeln!(out, "  #[declaration-kind={:?}]", decl.kind);
     }
+    if !decl.copy_premises.is_empty() {
+        let _ = writeln!(out, "  #[copy-premises={:?}]", decl.copy_premises);
+    }
     let attrs = &decl.attrs;
     if attrs.prophetic {
         out.push_str("  #[prophetic]\n");
@@ -410,6 +413,14 @@ impl Printer<'_> {
                 }
                 out.push('\n');
             }
+            StmtKind::LetChecked { local, init } => {
+                let _ = writeln!(
+                    out,
+                    "{pad}let-checked {} = {}",
+                    self.local_decl(local.index()),
+                    self.expr(init)
+                );
+            }
             StmtKind::BorrowMut { dest, place } => {
                 let _ = writeln!(
                     out,
@@ -420,6 +431,14 @@ impl Printer<'_> {
             }
             StmtKind::Assign { place, value } => {
                 let _ = writeln!(out, "{pad}{} := {}", self.place(place), self.expr(value));
+            }
+            StmtKind::AssignSpec { place, value } => {
+                let _ = writeln!(
+                    out,
+                    "{pad}assign-spec {} := {}",
+                    self.place(place),
+                    self.expr(value)
+                );
             }
             StmtKind::Call {
                 callee,
@@ -488,8 +507,18 @@ impl Printer<'_> {
                 cond,
                 then_block,
                 else_block,
+            }
+            | StmtKind::IfSpec {
+                cond,
+                then_block,
+                else_block,
             } => {
-                let _ = writeln!(out, "{pad}if {} {{", self.expr(cond));
+                let keyword = if matches!(&stmt.kind, StmtKind::IfSpec { .. }) {
+                    "if-spec"
+                } else {
+                    "if"
+                };
+                let _ = writeln!(out, "{pad}{keyword} {} {{", self.expr(cond));
                 self.block(then_block, depth + 1, out);
                 let _ = writeln!(out, "{pad}}} else {{");
                 self.block(else_block, depth + 1, out);
@@ -647,6 +676,12 @@ pub fn ty_name(krate: &VcCrate, ty: &Ty) -> String {
                 format!("{name}<{}>", args.join(", "))
             }
         }
+        Ty::Projection(id, arguments) => {
+            let name = krate.projections.iter().find(|decl| decl.id == *id)
+                .map_or_else(|| format!("{id:?}"), |decl| decl.name.clone());
+            let arguments: Vec<_> = arguments.iter().map(|ty| ty_name(krate, ty)).collect();
+            format!("projection[{name}]<{}>", arguments.join(", "))
+        }
         Ty::MutRef(inner) => format!("mut_ref<{}>", ty_name(krate, inner)),
         Ty::Ref { mutable, inner } => format!(
             "&{}{}",
@@ -690,6 +725,7 @@ mod tests {
             mode: Mode::Exec,
             role: FnRole::Item,
             kind: Default::default(),
+            copy_premises: Vec::new(),
             type_params: Vec::new(),
             locals: vec![
                 local("z", Ty::uint(64), LocalKind::Return),

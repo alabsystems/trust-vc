@@ -495,6 +495,7 @@ mod tests {
             role: FnRole::Item,
             kind: FnKind::Function,
             type_params: vec!["A".into()],
+            copy_premises: Vec::new(),
             // Deliberately differs from the client's canonical argument/return
             // ordering. Expressions must retain these actual local indices.
             locals: vec![

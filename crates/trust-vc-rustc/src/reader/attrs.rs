@@ -21,6 +21,28 @@ use rustc_span::Span;
 
 use trust_vc_vcir::{DeclProphecy, Mode, Rlimit};
 
+mod work;
+pub(crate) use work::comparison as charge_comparison;
+pub(crate) use work::formatting as charge_format;
+
+/// Structural work over precisely the syntax the existing parser reads.
+/// This prices its copies before calling the unchanged semantic parser.
+pub(crate) fn verus_attrs_with_work(
+    attrs: &[Attribute],
+    remaining: &mut usize,
+) -> Result<Vec<(VerusAttr, Span)>, String> {
+    work::parsing(attrs, remaining)?;
+    Ok(verus_attrs(attrs))
+}
+
+pub(crate) fn item_attrs_with_work(
+    attrs: &[Attribute],
+    remaining: &mut usize,
+) -> Result<ItemAttrs, String> {
+    work::parsing(attrs, remaining)?;
+    Ok(item_attrs(attrs))
+}
+
 /// One recognized Verus attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerusAttr {
@@ -58,6 +80,8 @@ pub enum VerusAttr {
     /// `#[verifier::inline]`, with no arguments. Body/mode/visibility rules
     /// are checked by the function reader before its IR is usable.
     Inline,
+    /// Ghost calls use the separately checked native sibling declaration.
+    WhenUsedAsSpec(String),
     /// The macro's external, deliberately uncallable ambiguous-field stub.
     /// Admission requires the separate original local-enum checker.
     GetFieldManyVariants,
@@ -617,6 +641,9 @@ fn verifier_attr(keyword: &str, args: Option<&[Tree]>) -> VerusAttr {
         },
         ("opaque", None) => VerusAttr::Opaque,
         ("inline", None) => VerusAttr::Inline,
+        ("when_used_as_spec", Some([Tree::Fun(name, None)])) => {
+            VerusAttr::WhenUsedAsSpec(name.clone())
+        }
         ("prophetic", None) => VerusAttr::Prophetic,
         ("external_body", None) => VerusAttr::ExternalBody,
         ("external", None) => VerusAttr::External,
@@ -737,6 +764,8 @@ fn token_trees(stream: &TokenStream) -> Option<Vec<Tree>> {
 /// The item-level facts the reader needs, gathered from an item's attributes.
 #[derive(Debug, Clone, Default)]
 pub struct ItemAttrs {
+    /// The last source redirection request; it is not call/body authority.
+    pub autospec: Option<(String, Span)>,
     /// The unique directive's effect; full attribute syntax is still parsed.
     pub inline: bool,
     /// `prophetic`: the function result may depend on prophecy.
@@ -809,6 +838,7 @@ pub fn item_attrs(attrs: &[Attribute]) -> ItemAttrs {
             VerusAttr::External => out.external = true,
             VerusAttr::Opaque => out.opaque = true,
             VerusAttr::Inline => out.inline = true,
+            VerusAttr::WhenUsedAsSpec(name) => out.autospec = Some((name, span)),
             VerusAttr::Prophetic => out.prophetic = true,
             VerusAttr::Rlimit(r) => out.rlimit = Some(r),
             VerusAttr::RevealFn => out.reveal_fn = true,

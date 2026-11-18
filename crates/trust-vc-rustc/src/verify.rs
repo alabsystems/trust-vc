@@ -144,11 +144,26 @@ pub fn verify(read: &CrateRead, opts: VerifyOptions) -> Verification {
     } else {
         vcgen::BitvectorPolicy::VerusSyntactic
     };
-    let vcs = vcgen::generate_with_spec_definitions_and_bv_policy(
+    let session = vcgen::GenerationSession::with_spec_definitions_and_bv_policy(
         &read.krate,
         &read.spec_definitions,
         policy,
     );
+    let failed_admission;
+    let vcs = match &session {
+        Ok(session) => session.vcs(),
+        Err(problem) => {
+            failed_admission = vcgen::CrateVcs {
+                fns: read
+                    .krate
+                    .fns
+                    .iter()
+                    .map(|decl| (decl.id, FnVcs::Refused(problem.clone())))
+                    .collect(),
+            };
+            &failed_admission
+        }
+    };
     let span = |id: SpanId| read.span(id).unwrap_or(rustc_span::DUMMY_SP);
     let mut out = Verification::default();
 
@@ -176,9 +191,8 @@ pub fn verify(read: &CrateRead, opts: VerifyOptions) -> Verification {
         }
     };
 
-    // The auxiliary tables/indexes are built at most once per immutable
-    // crate/width, and only after an actual failure requests the followup.
-    let mut recommendation_queries = None;
+    // Optional diagnostics borrow the same live width contexts and completed
+    // normal generation. No compiler/context or generation is repeated.
     for (id, fn_vcs) in &vcs.fns {
         let Some(decl) = read.krate.fn_decl(*id) else {
             continue;
@@ -222,17 +236,10 @@ pub fn verify(read: &CrateRead, opts: VerifyOptions) -> Verification {
         // A timeout/refusal is not an actual invalid proof query. Preserve
         // the already demonstrated failure before optional diagnostics.
         if outcome.verdict == Verdict::Failed && opts.auto_recommends {
-            let queries = recommendation_queries.get_or_insert_with(|| {
-                vcgen::Recommendations::new_with_spec_definitions_and_bv_policy(
-                    &read.krate,
-                    &read.spec_definitions,
-                    policy,
-                )
-            });
-            let checks = queries
+            let checks = session
                 .as_ref()
                 .map_err(Clone::clone)
-                .and_then(|queries| queries.function(decl.id));
+                .and_then(|session| session.recommendations(decl.id));
             check_recommendations(
                 read,
                 decl,

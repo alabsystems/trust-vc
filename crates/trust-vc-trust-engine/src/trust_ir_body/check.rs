@@ -1260,6 +1260,43 @@ fn check_node(
 mod tests {
     use super::*;
 
+    #[test]
+    fn box_validity_premises_never_become_a_scalar_cast() {
+        use trust_ir::box_validity::{
+            BoxDerefSite, BoxFactSession, BoxPointee, BoxValidityFact, PremiseRoot,
+        };
+
+        let scalar = one_instruction_module(admitted_const());
+        assert!(check_function(&scalar, &scalar.functions[0]).is_ok());
+        let premise = BoxValidityFact::premise(
+            BoxDerefSite {
+                item: [7; 16],
+                ordinal: 0,
+            },
+            BoxFactSession::PROOF_SNAPSHOT,
+            PremiseRoot::ParamByValue,
+        );
+        let mut missing_evidence = premise.clone();
+        missing_evidence.evidence.clear();
+        for fact in [premise, missing_evidence] {
+            let inst = Inst::BoxDeref {
+                ptr_ty: Ty::Ptr,
+                pointee: BoxPointee::Sized { ty: Ty::U8 },
+                operand: ValueId::new(0),
+                fact: Box::new(fact),
+            };
+            assert_eq!(inst_name(&inst), "BoxDeref");
+            let module =
+                one_instruction_module(InstrNode::new(inst).with_results(vec![ValueId::new(2)]));
+            assert!(matches!(
+                check_function(&module, &module.functions[0]),
+                Err(TrustIrBodyRefusal::UnsupportedInstruction {
+                    block, inst_index: 0, inst: "BoxDeref", ..
+                }) if block == BlockId::new(0)
+            ));
+        }
+    }
+
     /// `lower.rs` mints a `ScalarTy` at DOUBLE width to encode the overflow
     /// flag, so 64-bit operands produce `bits == 128`. That value is only ever
     /// handed to `lower::scalar_type`; if a future caller passes it here

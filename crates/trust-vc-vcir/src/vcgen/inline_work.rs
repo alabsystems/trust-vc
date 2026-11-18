@@ -68,7 +68,7 @@ pub(super) fn expression(work: &Cell<usize>, expression: &crate::Expr, span: Spa
                 return Err(refusal("inline-size", "inline type depth exhausted", span));
             }
             match value {
-                crate::Ty::Tuple(children) | crate::Ty::Adt(_, children) => {
+                crate::Ty::Tuple(children) | crate::Ty::Adt(_, children) | crate::Ty::Projection(_, children) => {
                     for child in children {
                         ty(work, child, span, depth + 1)?;
                     }

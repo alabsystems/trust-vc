@@ -6,7 +6,7 @@
 
 /// Exact signed magnitude; no machine truncation occurs until the literal is
 /// encoded at its explicitly declared bit width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IntLit {
     pub negative: bool,
     pub magnitude: u128,
@@ -14,6 +14,7 @@ pub struct IntLit {
 
 use std::collections::{HashMap, HashSet};
 
+pub mod congruence;
 pub mod integer;
 
 /// Which architecture cases an isolated assertion must establish.
@@ -46,7 +47,7 @@ pub enum Sort {
 
 /// Exact native bit-vector operations. Shift operands have equal widths here;
 /// the pinned translation's extension/truncation occurs before this node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
     Not,
     And,
@@ -84,6 +85,7 @@ pub enum Term {
     /// Immutable sharing prevents nested arithmetic construction from copying
     /// whole operand trees. Admission still charges EVERY traversed edge.
     Shared(std::sync::Arc<Term>),
+    Euclidean(std::sync::Arc<integer::Euclidean>),
     Bool(bool),
     Bits {
         value: IntLit,
@@ -200,6 +202,7 @@ fn term_sort<'a>(
     let next = depth + 1;
     match term {
         Term::Shared(term) => term_sort(term, scope, work, next),
+        Term::Euclidean(operation) => term_sort(operation.expanded(), scope, work, next),
         Term::Bool(_) => Ok(Sort::Bool),
         Term::Bits { width, .. } => {
             let s = Sort::Bits(*width);
@@ -387,6 +390,7 @@ fn trigger_application(term: &Term, work: &mut usize, depth: usize) -> Result<()
     }
     match term {
         Term::Shared(inner) => trigger_application(inner, work, depth + 1),
+        Term::Euclidean(operation) => trigger_application(operation.expanded(), work, depth + 1),
         Term::App { .. } => Ok(()),
         _ => Err("a bit-vector trigger that is not a typed application"),
     }
@@ -404,6 +408,9 @@ fn trigger_variables<'a>(
     }
     match term {
         Term::Shared(inner) => trigger_variables(inner, found, work, depth + 1),
+        Term::Euclidean(operation) => {
+            trigger_variables(operation.expanded(), found, work, depth + 1)
+        }
         Term::Bool(_) | Term::Bits { .. } => Ok(()),
         Term::Var(name) => {
             charge(work, name.len().saturating_add(1))?;

@@ -21,6 +21,40 @@ impl<'a> Builder<'a, '_> {
             .get(&callee)
             .copied()
             .ok_or_else(|| refusal("resolution-call", "unknown call", statement.span))?;
+        if target.kind == crate::FnKind::Static {
+            if !target.type_params.is_empty()
+                || !target.params.is_empty()
+                || !args.is_empty()
+                || target.ret_ty().is_none_or(|ty| {
+                    !crate::static_values::storage_type_budgeted(
+                        ty,
+                        &self.ctx.adts,
+                        self.work.remaining(),
+                    )
+                })
+            {
+                return Err(refusal(
+                    "static-read",
+                    "static cannot supply owned call-result carriers",
+                    statement.span,
+                ));
+            }
+            let mut events = Vec::new();
+            let dest = match dest {
+                Some(dest) => {
+                    self.charge(2 * (1 + dest.projections.len()))?;
+                    events.push(Event::Overwrite(dest.clone()));
+                    Some(dest.clone())
+                }
+                None => None,
+            };
+            return self.node(
+                Some(statement as *const Stmt as usize),
+                events,
+                Action::StaticRead(dest),
+                vec![after],
+            );
+        }
         let mut events = Vec::new();
         for (argument, parameter) in args.iter().zip(&target.params) {
             if target

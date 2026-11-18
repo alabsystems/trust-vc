@@ -17,6 +17,8 @@ use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod cargo_context;
+pub(crate) use cargo_context::CargoContext;
 mod control;
 mod forwarding;
 mod inherit;
@@ -74,6 +76,20 @@ pub(crate) struct Request {
     pub(crate) outputs: OutputContext,
     /// Original optional macro documentation mode; distinct from output paths.
     pub(crate) verusdoc: Option<OsString>,
+    /// Exactly the keys actually consulted by the ordinary Cargo protocol.
+    pub(crate) cargo: CargoContext,
+    /// Independently read by the genuine macro before its cfg fallback.
+    pub(crate) macro_package_name: Option<OsString>,
+}
+
+impl Request {
+    /// Private worker payload data; decoding never creates a native owner.
+    pub(crate) fn encode_data(&self) -> io::Result<Vec<u8>> {
+        wire::encode_request(self)
+    }
+    pub(crate) fn decode_data(bytes: &[u8]) -> io::Result<Self> {
+        wire::decode_request(bytes)
+    }
 }
 
 /// The only shared descendant endpoint. Replies never use this socket.

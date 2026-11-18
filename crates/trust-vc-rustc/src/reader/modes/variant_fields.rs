@@ -72,7 +72,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 expression.span,
             );
         }
-        if self.block == Ghostness::Exec {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
             return self.error(expression.span, msg::TEST_VARIANT_IN_EXEC);
         }
         self.expr(receiver, outer, expect)?;
@@ -181,7 +181,7 @@ impl<'a, 'tcx> Checker<'a, 'tcx> {
                 expression.span,
             );
         }
-        if self.block == Ghostness::Exec {
+        if self.uses_ghost_blocks() && self.block == Ghostness::Exec {
             return self.error(expression.span, msg::GET_VARIANT_IN_EXEC);
         }
         self.expr(receiver, outer, expect)?;

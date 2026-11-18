@@ -219,8 +219,13 @@ impl TypedProofObligation {
     }
 
     /// Attaches a source location string (file:line:col) for diagnostics.
+    /// A different rendering retires any previously structured location.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
-        self.location = Some(location.into());
+        let location = location.into();
+        self.source_location = self
+            .source_location
+            .filter(|source| source.render() == location);
+        self.location = Some(location);
         self
     }
 
@@ -589,8 +594,13 @@ impl ProofObligation {
     /// The UNSTRUCTURED channel, kept for callers that already hold a rendered
     /// string (the trust-engine adapter, the proc-macro lane). Prefer
     /// [`Self::with_source_location`], whose line is readable back as a number.
+    /// A different rendering retires any previously structured location.
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
-        self.location = Some(location.into());
+        let location = location.into();
+        self.source_location = self
+            .source_location
+            .filter(|source| source.render() == location);
+        self.location = Some(location);
         self
     }
     /// Attaches a STRUCTURED source location, and the string rendering with it.

@@ -59,6 +59,8 @@ mod query;
 mod relevance;
 mod resolution;
 mod spec;
+mod static_schedule;
+mod substitution;
 pub mod term;
 mod trigger_pattern;
 mod type_encoding;
@@ -120,85 +122,176 @@ pub fn generate_with_spec_definitions_and_bv_policy(
     definitions: &CheckedSpecDefinitions,
     bitvector_policy: BitvectorPolicy,
 ) -> CrateVcs {
-    // Effect-invalid bodies cannot enter the shared logical tables, even for
-    // direct callers that omitted the ordinary WF precondition.
+    match GenerationSession::with_spec_definitions_and_bv_policy(
+        krate,
+        definitions,
+        bitvector_policy,
+    ) {
+        Ok(session) => session.into_vcs(),
+        Err(problem) => refused_crate(krate, problem),
+    }
+}
+
+fn refused_crate(krate: &VcCrate, problem: VcRefusal) -> CrateVcs {
+    CrateVcs {
+        fns: krate
+            .fns
+            .iter()
+            .map(|decl| (decl.id, FnVcs::Refused(problem.clone())))
+            .collect(),
+    }
+}
+
+fn admission(krate: &VcCrate, definitions: &CheckedSpecDefinitions) -> Result<Vec<u32>, VcRefusal> {
+    if crate::projection_types::Definitions::checked(krate, &mut crate::copy_context::WF_WORK).is_none() {
+        return Err(val::refusal("projection-definition", "invalid closed associated implementation semantics", crate::SpanId(0)));
+    }
     if let Some(problem) = crate::prophecy::check_crate(krate).first() {
-        return CrateVcs {
-            fns: krate
-                .fns
-                .iter()
-                .map(|decl| {
-                    (
-                        decl.id,
-                        FnVcs::Refused(val::refusal("prophecy", &problem.message, problem.span)),
-                    )
-                })
-                .collect(),
-        };
+        return Err(val::refusal("prophecy", &problem.message, problem.span));
     }
     if let Err(errors) = definitions.validate_for_crate(krate) {
         let problem = &errors[0];
-        return CrateVcs {
-            fns: krate
-                .fns
-                .iter()
-                .map(|declaration| {
-                    (
-                        declaration.id,
-                        FnVcs::Refused(val::refusal(
-                            "imported-definition",
-                            &problem.message,
-                            problem.span,
-                        )),
-                    )
-                })
-                .collect(),
-        };
+        return Err(val::refusal(
+            "imported-definition",
+            &problem.message,
+            problem.span,
+        ));
     }
-    let widths = match krate.architecture.cases() {
-        Ok(widths) => widths,
-        Err(detail) => {
-            return CrateVcs {
-                fns: krate
-                    .fns
-                    .iter()
-                    .map(|decl| {
-                        (
-                            decl.id,
-                            FnVcs::Refused(val::refusal("architecture", detail, decl.span)),
-                        )
-                    })
-                    .collect(),
-            }
-        }
-    };
-    // Incomplete construction is intrinsically non-executable, independently
-    // of a producer's diagnostic list. Scan before translation or folding,
-    // including unreachable statements and embedded proof blocks. This does
-    // not replace ordinary WF or change existing malformed-IR refusal tags.
+    let widths = krate
+        .architecture
+        .cases()
+        .map_err(|detail| val::refusal("architecture", detail, crate::SpanId(0)))?;
     if let Some(span) = krate.fns.iter().find_map(incomplete_source_binder) {
-        return CrateVcs {
-            fns: krate
-                .fns
-                .iter()
-                .map(|decl| {
-                    (
-                        decl.id,
-                        FnVcs::Refused(val::refusal(
-                            "source-construction",
-                            "a binder without successfully inferred triggers",
-                            span,
-                        )),
-                    )
-                })
-                .collect(),
+        return Err(val::refusal(
+            "source-construction",
+            "a binder without successfully inferred triggers",
+            span,
+        ));
+    }
+    Ok(widths.to_vec())
+}
+
+/// A live generation of exactly one immutable source crate. Normal results,
+/// width contexts, tables and completed Static admission stay together through
+/// optional diagnostics; none is reconstructed from a result report.
+pub struct GenerationSession<'a> {
+    krate: &'a VcCrate,
+    widths: Vec<(
+        val::Ctx<'a>,
+        spec::Tables,
+        Option<static_schedule::Plan<'a>>,
+    )>,
+    normal: CrateVcs,
+}
+
+impl<'a> GenerationSession<'a> {
+    /// Generate each declaration once per width using the ordinary policy.
+    pub fn new(krate: &'a VcCrate) -> Result<Self, VcRefusal> {
+        Self::with_spec_definitions(krate, &CheckedSpecDefinitions::default())
+    }
+
+    /// Retain the separately checked definition join in this same live context.
+    pub fn with_spec_definitions(
+        krate: &'a VcCrate,
+        definitions: &CheckedSpecDefinitions,
+    ) -> Result<Self, VcRefusal> {
+        Self::with_spec_definitions_and_bv_policy(krate, definitions, BitvectorPolicy::default())
+    }
+
+    /// Individual backend refusals remain normal per-function results. Only
+    /// the preexisting global source/definition/architecture gates return Err.
+    pub fn with_spec_definitions_and_bv_policy(
+        krate: &'a VcCrate,
+        definitions: &CheckedSpecDefinitions,
+        policy: BitvectorPolicy,
+    ) -> Result<Self, VcRefusal> {
+        let cases = admission(krate, definitions)?;
+        let mut widths = Vec::new();
+        let mut generated = Vec::new();
+        for width in cases {
+            let mut ctx = val::Ctx::for_width_with_checked_spec(krate, width, definitions);
+            ctx.bitvector_policy = policy;
+            let tables = spec::Tables::build_with_spec_definitions(&ctx, krate, definitions);
+            let (normal, plan) = generate_width(&ctx, &tables, krate);
+            generated.push(normal);
+            widths.push((ctx, tables, plan));
+        }
+        let mut generated = generated.into_iter();
+        let first = generated.next().expect("admitted architecture has a width");
+        let normal = match generated.next() {
+            None => first,
+            Some(second) => merge_widths(first, second),
         };
+        Ok(Self {
+            krate,
+            widths,
+            normal,
+        })
     }
-    let first = generate_width(krate, widths[0], definitions, bitvector_policy);
-    if widths.len() == 1 {
-        return first;
+
+    /// The actual normal results, in original declaration/check order.
+    pub fn vcs(&self) -> &CrateVcs {
+        &self.normal
     }
-    let second = generate_width(krate, widths[1], definitions, bitvector_policy);
+
+    /// Consume the session without generating anything again.
+    pub fn into_vcs(self) -> CrateVcs {
+        self.normal
+    }
+
+    /// Optional body diagnostics in the actual retained width contexts. A
+    /// diagnostic never changes the original normal results or proof verdict.
+    pub fn recommendations(&self, function: FnId) -> Result<Vec<Check>, VcRefusal> {
+        let decl = self.krate.fn_decl(function).ok_or_else(|| {
+            val::refusal(
+                "vcgen-internal",
+                "unknown recommendation owner",
+                crate::SpanId(0),
+            )
+        })?;
+        if matches!(decl.role, FnRole::Imported | FnRole::Instance) || decl.attrs.external_body {
+            return Err(val::refusal(
+                "recommends-owner",
+                "no checked source body",
+                decl.span,
+            ));
+        }
+        let generate =
+            |ctx: &val::Ctx<'_>,
+             tables: &spec::Tables,
+             plan: Option<&static_schedule::Plan<'_>>| match &decl.body {
+                Body::Stmts(block) => {
+                    refused_anywhere(ctx, block)?;
+                    body::Gen::new(ctx, tables, decl)
+                        .with_static_plan(plan)
+                        .for_recommendations()
+                        .run()
+                }
+                Body::Constant(_) => body::Gen::new(ctx, tables, decl)
+                    .with_static_plan(plan)
+                    .for_recommendations()
+                    .run_constant(),
+                Body::Spec(_) => body::Gen::new(ctx, tables, decl)
+                    .with_static_plan(plan)
+                    .for_recommendations()
+                    .run_spec_recommendations(),
+                _ => Err(val::refusal(
+                    "recommends-owner",
+                    "no checked diagnostic body",
+                    decl.span,
+                )),
+            };
+        let (ctx, tables, plan) = &self.widths[0];
+        let first = generate(ctx, tables, plan.as_ref())?;
+        if self.widths.len() == 1 {
+            return Ok(first);
+        }
+        let (ctx, tables, plan) = &self.widths[1];
+        merge_architectures(first, generate(ctx, tables, plan.as_ref())?)
+    }
+}
+
+fn merge_widths(first: CrateVcs, second: CrateVcs) -> CrateVcs {
     let fns = first
         .fns
         .into_iter()
@@ -230,122 +323,6 @@ pub fn generate_with_spec_definitions_and_bv_policy(
         })
         .collect();
     CrateVcs { fns }
-}
-
-/// Derived auxiliary tables for exactly one immutable VcIR crate. Created
-/// lazily after a real failure and reused across functions; this is not a
-/// proof/import capability or a decoded authority registry.
-pub struct Recommendations<'a> {
-    krate: &'a VcCrate,
-    widths: Vec<(val::Ctx<'a>, spec::Tables)>,
-}
-
-impl<'a> Recommendations<'a> {
-    /// Same complete/WF source preconditions as generate. No normal proof
-    /// equation, obligation, verdict or assumed fact is changed.
-    pub fn new(krate: &'a VcCrate) -> Result<Self, VcRefusal> {
-        Self::new_with_spec_definitions(krate, &CheckedSpecDefinitions::default())
-    }
-
-    /// Use the same separate definition collection and exact client join as
-    /// normal generation. Recommendations remain diagnostics, never authority.
-    pub fn new_with_spec_definitions(
-        krate: &'a VcCrate,
-        definitions: &CheckedSpecDefinitions,
-    ) -> Result<Self, VcRefusal> {
-        Self::new_with_spec_definitions_and_bv_policy(
-            krate,
-            definitions,
-            BitvectorPolicy::default(),
-        )
-    }
-
-    /// Retain the same source preprocessing policy for optional diagnostics.
-    /// This never changes the already established main proof result.
-    pub fn new_with_spec_definitions_and_bv_policy(
-        krate: &'a VcCrate,
-        definitions: &CheckedSpecDefinitions,
-        bitvector_policy: BitvectorPolicy,
-    ) -> Result<Self, VcRefusal> {
-        if let Some(problem) = crate::prophecy::check_crate(krate).first() {
-            return Err(val::refusal("prophecy", &problem.message, problem.span));
-        }
-        if let Err(errors) = definitions.validate_for_crate(krate) {
-            let problem = &errors[0];
-            return Err(val::refusal(
-                "imported-definition",
-                &problem.message,
-                problem.span,
-            ));
-        }
-        if let Some(span) = krate.fns.iter().find_map(incomplete_source_binder) {
-            return Err(val::refusal(
-                "source-construction",
-                "an incomplete source binder",
-                span,
-            ));
-        }
-        let widths = krate
-            .architecture
-            .cases()
-            .map_err(|detail| val::refusal("architecture", detail, crate::SpanId(0)))?;
-        let widths = widths
-            .iter()
-            .copied()
-            .map(|width| {
-                let mut ctx = val::Ctx::for_width_with_checked_spec(krate, width, definitions);
-                ctx.bitvector_policy = bitvector_policy;
-                let tables = spec::Tables::build_with_spec_definitions(&ctx, krate, definitions);
-                (ctx, tables)
-            })
-            .collect();
-        Ok(Self { krate, widths })
-    }
-
-    /// Optional body diagnostics only. Unsupported forms stay explicit; a
-    /// successful domain query never supplies a function verification verdict.
-    pub fn function(&self, function: FnId) -> Result<Vec<Check>, VcRefusal> {
-        let decl = self.krate.fn_decl(function).ok_or_else(|| {
-            val::refusal(
-                "vcgen-internal",
-                "unknown recommendation owner",
-                crate::SpanId(0),
-            )
-        })?;
-        if matches!(decl.role, FnRole::Imported | FnRole::Instance) || decl.attrs.external_body {
-            return Err(val::refusal(
-                "recommends-owner",
-                "no checked source body",
-                decl.span,
-            ));
-        }
-        let generate = |ctx: &val::Ctx<'_>, tables: &spec::Tables| match &decl.body {
-            Body::Stmts(block) => {
-                refused_anywhere(ctx, block)?;
-                body::Gen::new(ctx, tables, decl)
-                    .for_recommendations()
-                    .run()
-            }
-            Body::Constant(_) => body::Gen::new(ctx, tables, decl)
-                .for_recommendations()
-                .run_constant(),
-            Body::Spec(_) => body::Gen::new(ctx, tables, decl)
-                .for_recommendations()
-                .run_spec_recommendations(),
-            _ => Err(val::refusal(
-                "recommends-owner",
-                "no checked diagnostic body",
-                decl.span,
-            )),
-        };
-        let (ctx, tables) = &self.widths[0];
-        let first = generate(ctx, tables)?;
-        if self.widths.len() == 1 {
-            return Ok(first);
-        }
-        let (ctx, tables) = &self.widths[1];
-        merge_architectures(first, generate(ctx, tables)?)
-    }
 }
 
 /// Find an intrinsic diagnostic node in every source position, without
@@ -397,81 +374,89 @@ fn incomplete_source_binder(decl: &FnDecl) -> Option<crate::SpanId> {
 
 /// Two complete contexts keep source nominal/type-argument identity unchanged;
 /// only their mathematical bounds, clips and native BV widths differ.
-fn generate_width(
-    krate: &VcCrate,
-    width: u32,
-    definitions: &CheckedSpecDefinitions,
-    bitvector_policy: BitvectorPolicy,
-) -> CrateVcs {
-    let mut ctx = val::Ctx::for_width_with_checked_spec(krate, width, definitions);
-    ctx.bitvector_policy = bitvector_policy;
-    let tables = spec::Tables::build_with_spec_definitions(&ctx, krate, definitions);
-    let uncovered = uncovered_cycles(&ctx, krate);
-    let mut fns = Vec::new();
-    for decl in &krate.fns {
-        let vcs = match decl.mode {
-            _ if decl.role == FnRole::Imported => {
-                let problem = decl
-                    .imported_problem()
-                    .map(|detail| val::refusal("imported-declaration", detail, decl.span))
-                    .or_else(|| {
-                        ctx.group(decl.id).map(|_| {
-                            val::refusal(
-                                "imported-declaration",
-                                "an imported recursive declaration",
-                                decl.span,
-                            )
-                        })
+fn generate_width<'a>(
+    ctx: &val::Ctx<'a>,
+    tables: &spec::Tables,
+    krate: &'a VcCrate,
+) -> (CrateVcs, Option<static_schedule::Plan<'a>>) {
+    static_schedule::generate(ctx, tables, krate)
+}
+
+fn generate_declaration(
+    ctx: &val::Ctx<'_>,
+    tables: &spec::Tables,
+    decl: &FnDecl,
+    uncovered: &HashMap<FnId, VcRefusal>,
+    plan: Option<&static_schedule::Plan<'_>>,
+) -> FnVcs {
+    if let Some(problem) = plan.and_then(static_schedule::Plan::problem) {
+        return FnVcs::Refused(val::refusal("static-schedule", problem, decl.span));
+    }
+    match decl.mode {
+        _ if decl.role == FnRole::Imported => {
+            let problem = decl
+                .imported_problem()
+                .map(|detail| val::refusal("imported-declaration", detail, decl.span))
+                .or_else(|| {
+                    ctx.group(decl.id).map(|_| {
+                        val::refusal(
+                            "imported-declaration",
+                            "an imported recursive declaration",
+                            decl.span,
+                        )
                     })
-                    .or_else(|| {
-                        tables
-                            .sigs
-                            .get(&decl.id)
-                            .and_then(|sig| sig.problem.clone())
-                    });
-                problem.map_or(FnVcs::Declared, FnVcs::Refused)
+                })
+                .or_else(|| {
+                    tables
+                        .sigs
+                        .get(&decl.id)
+                        .and_then(|sig| sig.problem.clone())
+                });
+            problem.map_or(FnVcs::Declared, FnVcs::Refused)
+        }
+        _ if decl.role == FnRole::Instance => FnVcs::Instance,
+        _ if decl.role == FnRole::TraitDecl && decl.body == Body::None => FnVcs::Declared,
+        _ if uncovered.contains_key(&decl.id) => FnVcs::Refused(uncovered[&decl.id].clone()),
+        _ if matches!(decl.body, Body::Constant(_)) => {
+            match body::Gen::new(ctx, tables, decl)
+                .with_static_plan(plan)
+                .run_constant()
+            {
+                Ok(checks) => FnVcs::Checks(checks),
+                Err(problem) => FnVcs::Refused(problem),
             }
-            _ if decl.role == FnRole::Instance => FnVcs::Instance,
-            _ if decl.role == FnRole::TraitDecl && decl.body == Body::None => FnVcs::Declared,
-            _ if uncovered.contains_key(&decl.id) => FnVcs::Refused(uncovered[&decl.id].clone()),
-            _ if matches!(decl.body, Body::Constant(_)) => {
-                match body::Gen::new(&ctx, &tables, decl).run_constant() {
+        }
+        Mode::Spec => match tables
+            .sigs
+            .get(&decl.id)
+            .and_then(|sig| sig.problem.clone())
+        {
+            Some(problem) => FnVcs::Refused(problem),
+            None if ctx.group(decl.id).is_some() && matches!(decl.body, Body::Spec(_)) => {
+                spec_termination(ctx, tables, decl, plan)
+            }
+            None => FnVcs::Spec,
+        },
+        Mode::Exec | Mode::Proof if decl.attrs.external_body => FnVcs::Trusted,
+        Mode::Proof if decl.attrs.is_decreases_by => FnVcs::Inlined,
+        Mode::Exec | Mode::Proof => match &decl.body {
+            Body::Stmts(block) => {
+                match refused_anywhere(&ctx, block).and_then(|()| {
+                    body::Gen::new(ctx, tables, decl)
+                        .with_static_plan(plan)
+                        .run()
+                }) {
                     Ok(checks) => FnVcs::Checks(checks),
                     Err(problem) => FnVcs::Refused(problem),
                 }
             }
-            Mode::Spec => match tables
-                .sigs
-                .get(&decl.id)
-                .and_then(|sig| sig.problem.clone())
-            {
-                Some(problem) => FnVcs::Refused(problem),
-                None if ctx.group(decl.id).is_some() && matches!(decl.body, Body::Spec(_)) => {
-                    spec_termination(&ctx, &tables, decl)
-                }
-                None => FnVcs::Spec,
-            },
-            Mode::Exec | Mode::Proof if decl.attrs.external_body => FnVcs::Trusted,
-            Mode::Proof if decl.attrs.is_decreases_by => FnVcs::Inlined,
-            Mode::Exec | Mode::Proof => match &decl.body {
-                Body::Stmts(block) => {
-                    match refused_anywhere(&ctx, block)
-                        .and_then(|()| body::Gen::new(&ctx, &tables, decl).run())
-                    {
-                        Ok(checks) => FnVcs::Checks(checks),
-                        Err(problem) => FnVcs::Refused(problem),
-                    }
-                }
-                _ => FnVcs::Refused(val::refusal(
-                    "no-body",
-                    format!("`{}` has no body to check", decl.name),
-                    decl.span,
-                )),
-            },
-        };
-        fns.push((decl.id, vcs));
+            _ => FnVcs::Refused(val::refusal(
+                "no-body",
+                format!("`{}` has no body to check", decl.name),
+                decl.span,
+            )),
+        },
     }
-    CrateVcs { fns }
 }
 
 /// Stable source event identity, without hashing user diagnostic strings or
@@ -598,7 +583,12 @@ fn merge_architectures(left: Vec<Check>, right: Vec<Check>) -> Result<Vec<Check>
 }
 
 /// The termination check of a recursive spec function.
-fn spec_termination(ctx: &val::Ctx<'_>, tables: &spec::Tables, decl: &FnDecl) -> FnVcs {
+fn spec_termination(
+    ctx: &val::Ctx<'_>,
+    tables: &spec::Tables,
+    decl: &FnDecl,
+    plan: Option<&static_schedule::Plan<'_>>,
+) -> FnVcs {
     let walked = match decl.decreases_by {
         Some(via) => match ctx.fns.get(&via) {
             Some(via) => *via,
@@ -612,7 +602,10 @@ fn spec_termination(ctx: &val::Ctx<'_>, tables: &spec::Tables, decl: &FnDecl) ->
         },
         None => decl,
     };
-    match body::Gen::new(ctx, tables, walked).run_termination(decl) {
+    match body::Gen::new(ctx, tables, walked)
+        .with_static_plan(plan)
+        .run_termination(decl)
+    {
         Ok(checks) => FnVcs::Checks(checks),
         Err(problem) => FnVcs::Refused(problem),
     }
@@ -628,8 +621,16 @@ fn uncovered_cycles(ctx: &val::Ctx<'_>, krate: &VcCrate) -> HashMap<FnId, VcRefu
         .iter()
         .map(|decl| (decl.id, all_callees(decl)))
         .collect();
+    uncovered_cycles_components(ctx, &graph, &strongly_connected(&graph))
+}
+
+fn uncovered_cycles_components(
+    ctx: &val::Ctx<'_>,
+    graph: &HashMap<FnId, BTreeSet<FnId>>,
+    components: &[Vec<FnId>],
+) -> HashMap<FnId, VcRefusal> {
     let mut out = HashMap::new();
-    for component in strongly_connected(&graph) {
+    for component in components {
         let cyclic = component.len() > 1
             || graph
                 .get(&component[0])
@@ -642,7 +643,7 @@ fn uncovered_cycles(ctx: &val::Ctx<'_>, krate: &VcCrate) -> HashMap<FnId, VcRefu
                 .get(id)
                 .is_some_and(|decl| decl.attrs.broadcast_triggers.is_some())
         }) {
-            for id in &component {
+            for id in component {
                 let span = ctx
                     .fns
                     .get(id)
@@ -669,7 +670,7 @@ fn uncovered_cycles(ctx: &val::Ctx<'_>, krate: &VcCrate) -> HashMap<FnId, VcRefu
             .iter()
             .map(|id| format!("`{}`", ctx.fns.get(id).map_or("?", |f| f.name.as_str())))
             .collect();
-        for id in &component {
+        for id in component {
             let span = ctx.fns.get(id).map_or(crate::ids::SpanId(0), |f| f.span);
             out.insert(
                 *id,
@@ -753,7 +754,7 @@ fn collect_calls(e: &Expr, out: &mut BTreeSet<FnId>) {
 
 /// The strongly connected components of `graph` (Tarjan), each listed
 /// once; nodes without entries have no edges.
-fn strongly_connected(graph: &HashMap<FnId, BTreeSet<FnId>>) -> Vec<Vec<FnId>> {
+pub(crate) fn strongly_connected(graph: &HashMap<FnId, BTreeSet<FnId>>) -> Vec<Vec<FnId>> {
     struct State<'g> {
         graph: &'g HashMap<FnId, BTreeSet<FnId>>,
         index: HashMap<FnId, usize>,
@@ -863,6 +864,11 @@ fn visit_stmts<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
                 then_block,
                 else_block,
                 ..
+            }
+            | StmtKind::IfSpec {
+                then_block,
+                else_block,
+                ..
             } => {
                 visit_stmts(then_block, f);
                 visit_stmts(else_block, f);
@@ -883,7 +889,8 @@ fn visit_stmts<'b>(block: &'b Block, f: &mut dyn FnMut(&'b Stmt)) {
 fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     match &stmt.kind {
         StmtKind::Let { init, .. } => init.iter().collect(),
-        StmtKind::Assign { value, .. } => vec![value],
+        StmtKind::LetChecked { init, .. } => vec![init],
+        StmtKind::Assign { value, .. } | StmtKind::AssignSpec { value, .. } => vec![value],
         StmtKind::Call { args, .. } => args.iter().collect(),
         StmtKind::Assert { expr, .. } | StmtKind::Assume { expr, .. } => vec![expr],
         StmtKind::AssertBitVector {
@@ -893,7 +900,7 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .chain(ensures)
             .map(|clause| &clause.expr)
             .collect(),
-        StmtKind::If { cond, .. } => vec![cond],
+        StmtKind::If { cond, .. } | StmtKind::IfSpec { cond, .. } => vec![cond],
         StmtKind::GhostTail { tail, .. } => vec![tail],
         StmtKind::Return { value, .. } => value.iter().collect(),
         StmtKind::Loop(lp) => lp

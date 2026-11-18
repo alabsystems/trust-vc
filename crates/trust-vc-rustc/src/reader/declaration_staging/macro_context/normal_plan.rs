@@ -87,6 +87,17 @@ impl<'owner> NormalClientPlan<'owner> {
         Self::finish(owner, sdk, source, invocation)
     }
 
+    /// Argument checking for the distinct ordinary worker; this constructs no
+    /// NormalClientPlan and can never produce an imported registry.
+    pub(in crate::reader::declaration_staging) fn ordinary_operands(
+        owner: &'owner standalone_client::StandaloneImported<'owner>,
+        sdk: &'owner PreparedSdk<'owner>,
+        split: &crate::args::SplitArgs,
+        source: &ClientSource,
+    ) -> Result<(), String> {
+        represented_operands_for(owner, Some(sdk), split, source, false)
+    }
+
     fn finish(
         owner: &'owner standalone_client::StandaloneImported<'owner>,
         sdk: Option<&'owner PreparedSdk<'owner>>,
@@ -232,6 +243,16 @@ fn represented_operands(
     split: &crate::args::SplitArgs,
     source: &ClientSource,
 ) -> Result<(), String> {
+    represented_operands_for(owner, sdk, split, source, true)
+}
+
+fn represented_operands_for(
+    owner: &standalone_client::StandaloneImported<'_>,
+    sdk: Option<&PreparedSdk<'_>>,
+    split: &crate::args::SplitArgs,
+    source: &ClientSource,
+    require_library: bool,
+) -> Result<(), String> {
     let library = owner.library();
     // Aliases are request operands, never authority. Bind the actual files;
     // the following compiler's CStore supplies their real native identities.
@@ -363,7 +384,8 @@ fn represented_operands(
                     .native_images()
                     .into_iter()
                     .any(|image| image.path == path);
-                if name.is_empty()
+                if (library_image && !require_library)
+                    || name.is_empty()
                     || !seen.insert(name.to_string())
                     || (!expected.contains(path) && !library_image)
                     || !selected.insert(path.to_path_buf())
@@ -432,9 +454,13 @@ fn represented_operands(
         }
         at += consumed;
     }
-    let library_image =
-        selected_library.ok_or("the CLI request lacks its live producer library image")?;
-    expected.insert(library_image);
+    if require_library {
+        let library_image =
+            selected_library.ok_or("the CLI request lacks its live producer library image")?;
+        expected.insert(library_image);
+    } else if selected_library.is_some() {
+        return Err("ordinary request selects the paired SDK library".into());
+    }
     if selected != expected {
         return Err(
             "the CLI request does not select the complete exact native owner inventory".into(),

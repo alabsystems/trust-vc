@@ -6,6 +6,8 @@
 use super::*;
 use crate::vcgen::resolution;
 
+mod abstract_origins;
+
 impl Gen<'_> {
     fn owned_places(&self, ty: &Ty, place: Place, out: &mut Vec<Place>, depth: usize) -> R<()> {
         if !self.classifier.contains(ty, self.decl.span)? {
@@ -144,6 +146,7 @@ impl Gen<'_> {
     }
 
     pub(super) fn consume(&self, path: &mut Path, expression: &Expr) -> R<()> {
+        self.abstract_owned_origin(path, expression, 0)?;
         // A scalar result can still move owned storage in a nested let value.
         self.owned_origin(expression)?;
         let mut moves = Vec::new();
@@ -152,7 +155,7 @@ impl Gen<'_> {
             if !self.kept_place(&place, expression.span)? {
                 continue;
             }
-            let Some(ty) = resolution::place_ty(self.ctx, self.decl, &place) else {
+            let Some(ty) = resolution::place_ty(self.ctx, self.decl, &place, self.resolution.remaining().unwrap_or(&self.static_work), expression.span)? else {
                 continue;
             };
             let mut owned = Vec::new();

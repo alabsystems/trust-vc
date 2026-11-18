@@ -62,6 +62,7 @@ fn source(goal: Expr, left: Ty, right: Ty) -> VcCrate {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![
             LocalDecl {

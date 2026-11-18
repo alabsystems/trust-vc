@@ -60,6 +60,27 @@ use trust_vc_vcir::{
 use super::{Cx, Refusal, UserError};
 use crate::messages::{self, Phase};
 
+mod associated_types;
+
+/// Rebuild the actual raw declaration/selected-implementation graph before
+/// datatype base-case reasoning. This exposes diagnostics, never a reusable
+/// success certificate or an imported/native ownership capability.
+pub(super) fn associated_datatypes(
+    cx: &Cx<'_>,
+    adts: &[(LocalDefId, &trust_vc_vcir::AdtDecl)],
+    items: &[LocalDefId],
+) -> Result<Option<UserError>, Refusal> {
+    let mut work = cx.projection_type_work.get();
+    let result = associated_types::find_with_work(cx, adts, items, &mut work);
+    cx.projection_type_work.set(work);
+    result
+}
+
+/// Preserve the existing trait-dependency traversal grant for both graphs.
+const MAX_BOUND_DEPENDENCIES: usize = 10_000;
+
+pub(super) fn type_dependency_work() -> usize { MAX_BOUND_DEPENDENCIES }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Node {
     Fun(FnId),
@@ -145,6 +166,21 @@ pub(crate) fn find<'tcx>(
     items: &[LocalDefId],
     order: &HashMap<LocalDefId, usize>,
 ) -> Cycles {
+    match associated_types::find(cx, krate, items) {
+        Ok(Some(error)) => {
+            return Cycles {
+                errors: vec![error],
+                ..Cycles::default()
+            };
+        }
+        Err(problem) => {
+            return Cycles {
+                refusals: vec![problem],
+                ..Cycles::default()
+            };
+        }
+        Ok(None) => {}
+    }
     let tcx = cx.tcx;
     let loose = cx.opts.no_external_by_default;
     // Every edge, and the edges Verus's graph has as well (`exact`): the
@@ -1712,7 +1748,8 @@ fn stmt_calls(stmt: &Stmt, f: &mut dyn FnMut(FnId, &[Ty], SpanId)) {
                 expr_calls(init, f);
             }
         }
-        StmtKind::Assign { value, .. } => expr_calls(value, f),
+        StmtKind::LetChecked { init, .. } => expr_calls(init, f),
+        StmtKind::Assign { value, .. } | StmtKind::AssignSpec { value, .. } => expr_calls(value, f),
         StmtKind::Call {
             callee,
             type_args,
@@ -1733,6 +1770,11 @@ fn stmt_calls(stmt: &Stmt, f: &mut dyn FnMut(FnId, &[Ty], SpanId)) {
             }
         }
         StmtKind::If {
+            cond,
+            then_block,
+            else_block,
+        }
+        | StmtKind::IfSpec {
             cond,
             then_block,
             else_block,
@@ -1852,7 +1894,7 @@ pub(crate) fn bound_impls<'tcx>(
         .collect();
     let mut out: Vec<(LocalDefId, bool)> = Vec::new();
     let mut index = 0;
-    while index < work.len() && index < 10_000 {
+    while index < work.len() && index < MAX_BOUND_DEPENDENCIES {
         let (clause, top) = work[index];
         index += 1;
         let mty::ClauseKind::Trait(pred) = clause.kind().skip_binder() else {
@@ -2477,20 +2519,22 @@ fn reachable(edges: &BTreeMap<Node, BTreeSet<Node>>, start: Node) -> BTreeSet<No
 
 /// Tarjan's strongly connected components of `edges`, each a list of
 /// nodes.
-fn strongly_connected(edges: &BTreeMap<Node, BTreeSet<Node>>) -> Vec<Vec<Node>> {
-    struct State<'e> {
-        edges: &'e BTreeMap<Node, BTreeSet<Node>>,
-        index: HashMap<Node, usize>,
-        low: HashMap<Node, usize>,
-        on_stack: BTreeSet<Node>,
-        stack: Vec<Node>,
+fn strongly_connected<N: Copy + Ord + std::hash::Hash>(
+    edges: &BTreeMap<N, BTreeSet<N>>,
+) -> Vec<Vec<N>> {
+    struct State<'e, N> {
+        edges: &'e BTreeMap<N, BTreeSet<N>>,
+        index: HashMap<N, usize>,
+        low: HashMap<N, usize>,
+        on_stack: BTreeSet<N>,
+        stack: Vec<N>,
         next: usize,
-        out: Vec<Vec<Node>>,
+        out: Vec<Vec<N>>,
     }
     // Iterative to keep deep graphs off the call stack.
-    fn visit(state: &mut State<'_>, root: Node) {
-        let mut frames: Vec<(Node, Vec<Node>)> = Vec::new();
-        let enter = |state: &mut State<'_>, node: Node| -> Vec<Node> {
+    fn visit<N: Copy + Ord + std::hash::Hash>(state: &mut State<'_, N>, root: N) {
+        let mut frames: Vec<(N, Vec<N>)> = Vec::new();
+        let enter = |state: &mut State<'_, N>, node: N| -> Vec<N> {
             state.index.insert(node, state.next);
             state.low.insert(node, state.next);
             state.next += 1;
@@ -2543,7 +2587,7 @@ fn strongly_connected(edges: &BTreeMap<Node, BTreeSet<Node>>) -> Vec<Vec<Node>> 
         next: 0,
         out: Vec::new(),
     };
-    let nodes: Vec<Node> = edges
+    let nodes: Vec<N> = edges
         .iter()
         .flat_map(|(from, to)| std::iter::once(*from).chain(to.iter().copied()))
         .collect();

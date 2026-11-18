@@ -13,10 +13,38 @@ fn expression<'tcx>(tcx: TyCtxt<'tcx>, id: hir::HirId) -> &'tcx hir::Expr<'tcx> 
     expression
 }
 
-pub(super) fn check(tcx: TyCtxt<'_>, facts: &AvailabilityFacts<'_>) {
+pub(super) fn check<'tcx>(tcx: TyCtxt<'tcx>, facts: &AvailabilityFacts<'tcx>) {
     assert!(facts.new_mut_ref());
     let live = usage(tcx, facts, "record.live", AccessKind::Read);
     let original = expression(tcx, live.place);
+    let owner = original.hir_id.owner.def_id;
+    // Exercise the same real native facts with a caller-owned allowance.
+    // Budget accounting must not replace any source/context identity check.
+    let allowance = 1_000_000;
+    let mut remaining = allowance;
+    facts
+        .checked_with_work(tcx, owner, owner, &mut remaining)
+        .unwrap();
+    let used = allowance - remaining;
+    assert!(used > 0);
+    let mut exact = used;
+    facts
+        .checked_with_work(tcx, owner, owner, &mut exact)
+        .unwrap();
+    assert_eq!(exact, 0);
+    let mut short = used - 1;
+    assert!(facts
+        .checked_with_work(tcx, owner, owner, &mut short)
+        .is_err());
+    let mut empty = 0;
+    assert!(facts
+        .checked_with_work(tcx, owner, owner, &mut empty)
+        .is_err());
+    let mut wrong_context = allowance;
+    assert!(facts
+        .checked_with_work(tcx, tcx.local_parent(owner), owner, &mut wrong_context)
+        .is_err());
+    assert!(facts.checked(tcx, owner, owner).is_ok());
     assert_eq!(facts.use_for(original, AccessKind::Read).unwrap(), live);
     assert!(facts.use_for(original, AccessKind::Assign).is_err());
     assert!(facts.operation_for(original).is_err());

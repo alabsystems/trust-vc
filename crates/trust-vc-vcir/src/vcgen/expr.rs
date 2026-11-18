@@ -278,7 +278,8 @@ impl<'a> Tr<'a> {
             called: BTreeSet::new(),
             rec_calls: None,
             holes: Vec::new(),
-            inline_work: std::rc::Rc::new(std::cell::Cell::new(200_000)),
+            inline_work: reads.types.projection_work().cloned()
+                .unwrap_or_else(|| std::rc::Rc::new(std::cell::Cell::new(200_000))),
             inline_stack: Vec::new(),
             recommendations: false,
             auxiliary_work: false,
@@ -292,12 +293,22 @@ impl<'a> Tr<'a> {
         self
     }
 
+    /// Resource retention only: no auxiliary syntax/mode admission is enabled.
+    pub(crate) fn with_type_work(mut self, work: std::rc::Rc<std::cell::Cell<usize>>) -> Self {
+        self.inline_work = self.reads.types.projection_work().cloned().unwrap_or(work);
+        self
+    }
+
+    pub(crate) fn type_work(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
+        self.inline_work.clone()
+    }
+
     pub(crate) fn with_recommendation_work(
         mut self,
         work: std::rc::Rc<std::cell::Cell<usize>>,
     ) -> Self {
         if self.recommendations {
-            self.inline_work = work;
+            self.inline_work = self.reads.types.projection_work().cloned().unwrap_or(work);
         }
         self
     }
@@ -306,7 +317,7 @@ impl<'a> Tr<'a> {
     /// enabling caller-side traversal of another declaration's domains.
     pub(crate) fn with_auxiliary_work(mut self, work: std::rc::Rc<std::cell::Cell<usize>>) -> Self {
         self.auxiliary_work = true;
-        self.inline_work = work;
+        self.inline_work = self.reads.types.projection_work().cloned().unwrap_or(work);
         self
     }
 
@@ -538,7 +549,7 @@ impl<'a> Tr<'a> {
                             e.span,
                         )
                     })?;
-                project(self.ctx, &self.reads.types, root, ty, place, e.span)
+                project(self.ctx, &self.reads.types, root, ty, place, e.span, Some(&self.inline_work))
             }
             ExprKind::Old(place) => {
                 let root = self.reads.old.get(&place.local).ok_or_else(|| {
@@ -576,7 +587,7 @@ impl<'a> Tr<'a> {
                             e.span,
                         )
                     })?;
-                project(self.ctx, &self.reads.types, root, ty, place, e.span)
+                project(self.ctx, &self.reads.types, root, ty, place, e.span, Some(&self.inline_work))
             }
             ExprKind::Unary { op, arg, check } => self.unary(e, *op, arg, *check),
             ExprKind::Binary {
@@ -620,7 +631,9 @@ impl<'a> Tr<'a> {
             } => {
                 let (origin, type_args) = self.ctx.call_origin(*callee, type_args, e.span)?;
                 self.called.insert(origin);
-                let types = type_terms(self.ctx, origin, &type_args, &self.reads.types, e.span)?;
+                let types = type_terms(
+                    self.ctx, origin, &type_args, &self.reads.types, e.span, &self.inline_work,
+                )?;
                 self.spec_call(e, origin, &type_args, types, args)
             }
             ExprKind::Cast { arg, kind } => {
@@ -650,7 +663,7 @@ impl<'a> Tr<'a> {
                     .get(adt)
                     .is_some_and(|decl| decl.kind == AdtKind::Enum)
                 {
-                    self.ctx.register_enum(*adt, e.span)?;
+                    self.ctx.register_enum_with_work(*adt, e.span, Some(&self.inline_work))?;
                     let values = fields
                         .iter()
                         .map(|field| self.expr(field))
@@ -745,24 +758,25 @@ impl<'a> Tr<'a> {
                         self.available(&place, e.span)?;
                     }
                 }
-                self.ctx.mut_ref_projection(
+                self.ctx.mut_ref_projection_with_work(
                     &reference.ty,
                     &self.reads.types,
                     value,
                     matches!(e.kind, ExprKind::MutRefFuture(_)),
                     e.span,
+                    Some(&self.inline_work),
                 )
             }
             ExprKind::MutRefUpdate { reference, value } => {
                 let before = self.expr(reference)?;
                 let value = self.expr(value)?;
                 self.ctx
-                    .mut_ref_update(&reference.ty, &self.reads.types, before, value, e.span)
+                    .mut_ref_update_with_work(&reference.ty, &self.reads.types, before, value, e.span, Some(&self.inline_work))
             }
             ExprKind::HasResolved(value) => {
                 let translated = self.expr(value)?;
                 self.ctx
-                    .has_resolved(&value.ty, &self.reads.types, translated, e.span)
+                    .has_resolved_with_work(&value.ty, &self.reads.types, translated, e.span, &self.inline_work)
                     .map(Val::Leaf)
             }
             // Proof code does not change a spec value; a termination check
@@ -886,7 +900,7 @@ impl<'a> Tr<'a> {
     fn bind(&mut self, vars: &[(LocalId, Ty)], span: SpanId) -> R<Vec<(String, LeafTy)>> {
         let mut leaves = Vec::new();
         for (local, ty) in vars {
-            let shape = self.ctx.shape(ty, self.reads.types.owner(), span)?;
+            let shape = self.ctx.shape_with_work(ty, self.reads.types.owner(), span, &self.inline_work)?;
             let val = self
                 .ctx
                 .quants
@@ -1238,7 +1252,7 @@ impl<'a> Tr<'a> {
         for hole in &holes {
             let shape = self
                 .ctx
-                .shape(&hole.ty, self.reads.types.owner(), hole.span)?;
+                .shape_with_work(&hole.ty, self.reads.types.owner(), hole.span, &self.inline_work)?;
             let val = self
                 .ctx
                 .quants
@@ -1287,7 +1301,7 @@ impl<'a> Tr<'a> {
             .iter()
             .map(|(name, leaf)| leaf.fact(&Term::var(name.clone(), leaf.sort())));
         let cond = Term::and(facts.chain([cond]));
-        let shape = self.ctx.shape(&e.ty, self.reads.types.owner(), e.span)?;
+        let shape = self.ctx.shape_with_work(&e.ty, self.reads.types.owner(), e.span, &self.inline_work)?;
         let mut leaf_tys = Vec::new();
         shape.leaves(&mut leaf_tys);
         let mut values = Vec::new();
@@ -1515,7 +1529,7 @@ impl<'a> Tr<'a> {
                     arg.span,
                 )?
             } else {
-                formal.ty.subst(type_args)
+                self.ctx.substitute_type(&formal.ty, type_args, &self.inline_work, arg.span)?
             };
             if actual != arg.ty {
                 return Err(refusal(
@@ -1532,7 +1546,7 @@ impl<'a> Tr<'a> {
             if declaration.attrs.inline && declaration.role != crate::FnRole::TraitDecl {
                 super::inline_body::ty(self.ctx, result_ty, type_args, &self.inline_work, e.span)?
             } else {
-                result_ty.subst(type_args)
+                self.ctx.substitute_type(result_ty, type_args, &self.inline_work, e.span)?
             };
         if actual_result != e.ty {
             return Err(refusal(
@@ -1555,7 +1569,7 @@ impl<'a> Tr<'a> {
         {
             return self.inline_spec_call(e, callee, type_args, types, args);
         }
-        if self.auxiliary_work || !self.inline_stack.is_empty() {
+        if self.auxiliary_work || !self.inline_stack.is_empty() || types.projection_work().is_some() {
             for index in 0..types.len() {
                 let argument = types
                     .get(u32::try_from(index).map_err(|_| {
@@ -1598,7 +1612,7 @@ impl<'a> Tr<'a> {
                         arg.span,
                     )
                 })?;
-                let native_shape = self.ctx.shape(&formal.ty, Some(callee), arg.span)?;
+                let native_shape = self.ctx.shape_with_work(&formal.ty, Some(callee), arg.span, &self.inline_work)?;
                 // The predicate is source IR, not the generic UF ABI. Adapt
                 // this same evaluated argument to its declared native layout
                 // before the separate UF conversion boxes every parameter.
@@ -1611,6 +1625,7 @@ impl<'a> Tr<'a> {
                         caller: &self.reads.types,
                         callee: &types,
                         span: arg.span,
+                        work: Some(&self.inline_work),
                     },
                     &native_shape,
                     value.clone(),
@@ -1627,6 +1642,7 @@ impl<'a> Tr<'a> {
                     caller: &self.reads.types,
                     callee: &types,
                     span: arg.span,
+                    work: Some(&self.inline_work),
                 },
                 shape,
                 value,
@@ -1655,7 +1671,7 @@ impl<'a> Tr<'a> {
             self.recommendation_checks(e, callee, &reads, None, &declaration.params)?;
         }
         self.called.insert(callee);
-        if self.auxiliary_work || !self.inline_stack.is_empty() {
+        if self.auxiliary_work || !self.inline_stack.is_empty() || types.projection_work().is_some() {
             for term in &leaves {
                 super::inline_work::term(&self.inline_work, term, sig.outputs.len(), e.span)?;
             }
@@ -1682,12 +1698,13 @@ impl<'a> Tr<'a> {
                 caller: &self.reads.types,
                 callee: &types,
                 span: e.span,
+                work: Some(&self.inline_work),
             },
             &sig.result,
             result,
         )?;
         if index != sig.outputs.len()
-            || !result.matches(&self.ctx.shape(&e.ty, self.reads.types.owner(), e.span)?)
+            || !result.matches(&self.ctx.shape_with_work(&e.ty, self.reads.types.owner(), e.span, &self.inline_work)?)
         {
             return Err(refusal(
                 "spec-fn-layout",
@@ -1756,7 +1773,7 @@ impl<'a> Tr<'a> {
                 expression.span,
             )
         })?;
-        let result_shape = self.ctx.shape(result_ty, Some(callee), expression.span)?;
+        let result_shape = self.ctx.shape_with_work(result_ty, Some(callee), expression.span, &self.inline_work)?;
         // Verus elaborates an explicitly inline body after substituting its
         // actual closed source types. This is a body expression, not an
         // instance definition or a new generic-function ABI. An open caller
@@ -1801,7 +1818,7 @@ impl<'a> Tr<'a> {
             let formal = declaration.local(*local).ok_or_else(|| {
                 refusal("inline-body", "a missing inline parameter", expression.span)
             })?;
-            let shape = self.ctx.shape(&formal.ty, Some(callee), arg.span)?;
+            let shape = self.ctx.shape_with_work(&formal.ty, Some(callee), arg.span, &self.inline_work)?;
             let value = self.expr(arg)?;
             super::inline_work::value(&self.inline_work, &value, 1, arg.span)?;
             let value = if specialized.is_some() {
@@ -1813,7 +1830,7 @@ impl<'a> Tr<'a> {
                     arg.span,
                 )?;
                 if actual != arg.ty
-                    || !value.matches(&self.ctx.shape(&actual, Some(callee), arg.span)?)
+                    || !value.matches(&self.ctx.shape_with_work(&actual, Some(callee), arg.span, &self.inline_work)?)
                 {
                     return Err(refusal(
                         "inline-body",
@@ -1831,6 +1848,7 @@ impl<'a> Tr<'a> {
                         caller: &self.reads.types,
                         callee: &types,
                         span: arg.span,
+                        work: Some(&self.inline_work),
                     },
                     &shape,
                     value,
@@ -1904,15 +1922,16 @@ impl<'a> Tr<'a> {
                     caller: &self.reads.types,
                     callee: &types,
                     span: expression.span,
+                    work: Some(&self.inline_work),
                 },
                 &result_shape,
                 value,
             )?
         };
-        if !value.matches(&self.ctx.shape(
+        if !value.matches(&self.ctx.shape_with_work(
             &expression.ty,
             self.reads.types.owner(),
-            expression.span,
+            expression.span, &self.inline_work
         )?) {
             return Err(refusal(
                 "inline-body",
@@ -1954,7 +1973,7 @@ impl<'a> Tr<'a> {
                 .ty;
             // The termination reader uses the callee's native source layout,
             // keeping primitive decreases native while adapting a formal A.
-            let shape = self.ctx.shape(formal_ty, Some(callee), arg.span)?;
+            let shape = self.ctx.shape_with_work(formal_ty, Some(callee), arg.span, &self.inline_work)?;
             values.push(self.ctx.formal_value(
                 FormalValue {
                     position: FormalPosition::NativeParameter(parameter),
@@ -1963,6 +1982,7 @@ impl<'a> Tr<'a> {
                     caller: &self.reads.types,
                     callee: &types,
                     span: arg.span,
+                    work: Some(&self.inline_work),
                 },
                 &shape,
                 value,
@@ -1989,7 +2009,7 @@ impl<'a> Tr<'a> {
         }
         self.called.insert(callee);
         let index = self.rec_calls.as_ref().map_or(0, |rec| rec.found.len());
-        let shape = self.ctx.shape(&e.ty, self.reads.types.owner(), e.span)?;
+        let shape = self.ctx.shape_with_work(&e.ty, self.reads.types.owner(), e.span, &self.inline_work)?;
         let mut result = Vec::new();
         let value = fresh_val(&shape, &format!("rc{index}"), &mut result);
         if let Some(rec) = self.rec_calls.as_mut() {
@@ -2348,13 +2368,14 @@ pub(crate) fn project(
     root_ty: &Ty,
     place: &Place,
     span: SpanId,
+    work: Option<&std::cell::Cell<usize>>,
 ) -> R<Val> {
     let mut value = root.clone();
     let mut ty = root_ty.clone();
     for projection in &place.projections {
         match (projection, &ty) {
             (Projection::Deref, Ty::MutRef(inner)) => {
-                value = ctx.mut_ref_projection(&ty, env, value, false, span)?;
+                value = ctx.mut_ref_projection_with_work(&ty, env, value, false, span, work)?;
                 ty = (**inner).clone();
             }
             (Projection::Deref, Ty::Ref { inner, .. }) => ty = (**inner).clone(),
@@ -2370,24 +2391,40 @@ pub(crate) fn project(
                     )
                 })?;
             }
-            (Projection::Field { variant: 0, field }, Ty::Adt(id, args)) => {
+            (Projection::Field { variant, field }, Ty::Adt(id, args)) => {
                 let declaration = ctx
                     .adts
                     .get(id)
-                    .filter(|decl| decl.kind == AdtKind::Struct)
-                    .ok_or_else(|| refusal("enum", "a projected non-struct field", span))?;
-                let field_ty = declaration.variants[0]
+                    .filter(|decl| {
+                        decl.kind != AdtKind::Opaque && args.len() == decl.type_params.len()
+                    })
+                    .ok_or_else(|| refusal("enum", "a projected unrepresented field", span))?;
+                let declared_ty = &declaration
+                    .variants
+                    .get(*variant as usize)
+                    .ok_or_else(|| {
+                        refusal("vcgen-internal", "a variant projection out of range", span)
+                    })?
                     .fields
                     .get(*field as usize)
                     .ok_or_else(|| {
                         refusal("vcgen-internal", "a struct projection out of range", span)
                     })?
-                    .ty
-                    .subst(args);
-                value = value
-                    .child(*field)
-                    .cloned()
-                    .ok_or_else(|| refusal("vcgen-internal", "a field value out of range", span))?;
+                    .ty;
+                let field_ty = match work {
+                    Some(work) => ctx.substitute_type(declared_ty, args, work, span)?,
+                    None => declared_ty.subst(args),
+                };
+                value = if declaration.kind == AdtKind::Enum {
+                    // The selector is total and supplies no variant or
+                    // resolution fact. Storage availability is checked by
+                    // the caller; resolution adds its own complete guards.
+                    ctx.project_enum(&ty, env, *variant, *field, value, span)?
+                } else {
+                    value.child(*field).cloned().ok_or_else(|| {
+                        refusal("vcgen-internal", "a field value out of range", span)
+                    })?
+                };
                 ty = field_ty;
             }
             _ => {
@@ -2474,12 +2511,16 @@ pub(crate) fn type_terms(
     type_args: &[Ty],
     types: &TypeEnv,
     span: SpanId,
+    work: &std::rc::Rc<std::cell::Cell<usize>>,
 ) -> R<TypeEnv> {
+    // A projected argument forwarded through a contract translator retains
+    // the original caller cell. Re-entry cannot allocate a fresh allowance.
+    let work = types.projection_work().unwrap_or(work);
     let arguments = type_args
         .iter()
-        .map(|ty| ctx.type_argument(ty, types, span))
+        .map(|ty| ctx.type_argument_with_work(ty, types, span, work))
         .collect::<R<_>>()?;
-    Ok(TypeEnv::new(callee, arguments))
+    Ok(ctx.type_environment(callee, arguments, work))
 }
 
 #[cfg(test)]

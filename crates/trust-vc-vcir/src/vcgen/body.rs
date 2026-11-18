@@ -71,6 +71,7 @@ use super::quant::instantiate;
 mod call_result;
 mod loan_state;
 mod loop_state;
+mod static_values;
 mod unwind;
 use super::query::{Check, CheckKind, Hypothesis, InvariantAt, Query, QueryGroup, Source, Symbol};
 use super::relevance::{instance_gate, Analysis, CallRole, Position};
@@ -116,6 +117,7 @@ struct Path {
 /// Generation state for one function.
 pub(crate) struct Gen<'a> {
     ctx: &'a Ctx<'a>,
+    static_plan: Option<&'a super::static_schedule::Plan<'a>>,
     tables: &'a Tables,
     decl: &'a FnDecl,
     symbols: Vec<Symbol>,
@@ -127,6 +129,11 @@ pub(crate) struct Gen<'a> {
     checks: Vec<Check>,
     /// Entry value of every parameter.
     entry: HashMap<LocalId, Val>,
+    /// Global storage survives branches and loop cuts; it is never a local
+    /// or an owned/fresh call result. Per-use type/contract facts are scoped.
+    statics: HashMap<FnId, Val>,
+    /// One original budget for all stable reads and their auxiliary contracts.
+    static_work: std::rc::Rc<std::cell::Cell<usize>>,
     /// The term standing for each type parameter.
     types: super::type_encoding::TypeEnv,
     /// Spec functions whose definition is revealed, with their fuel (1
@@ -223,8 +230,12 @@ impl<'a> Gen<'a> {
             .filter(|id| ctx.fns.get(id).is_some_and(|f| !f.attrs.opaque))
             .map(|id| (id, 1))
             .collect();
+        let static_work = std::rc::Rc::new(std::cell::Cell::new(INLINE_BUDGET));
+        let mut types = super::type_encoding::TypeEnv::default();
+        if !ctx.source.projections.is_empty() { types.retain_work(&static_work); }
         Self {
             ctx,
+            static_plan: None,
             tables,
             decl,
             symbols: Vec::new(),
@@ -232,7 +243,9 @@ impl<'a> Gen<'a> {
             split: false,
             checks: Vec::new(),
             entry: HashMap::new(),
-            types: super::type_encoding::TypeEnv::default(),
+            statics: HashMap::new(),
+            static_work,
+            types,
             visible,
             owner: decl.id,
             measure: None,
@@ -259,6 +272,14 @@ impl<'a> Gen<'a> {
             reference_aliases: HashMap::new(),
             ownership_modes: std::cell::RefCell::new(HashMap::new()),
         }
+    }
+
+    pub(super) fn with_static_plan(
+        mut self,
+        plan: Option<&'a super::static_schedule::Plan<'a>>,
+    ) -> Self {
+        self.static_plan = plan;
+        self
     }
 
     pub(crate) fn for_recommendations(mut self) -> Self {
@@ -314,7 +335,7 @@ impl<'a> Gen<'a> {
         for (output, term) in signature.outputs.iter().zip(leaves) {
             let predicate = self
                 .ctx
-                .type_fact(output.leaf, &self.types, &term, expression.span)?;
+                .type_fact_with_work(output.leaf, &self.types, &term, expression.span, &self.static_work)?;
             if predicate != Term::Bool(true) {
                 let site = SiteId(self.next_spec_site);
                 self.next_spec_site = self.next_spec_site.checked_sub(1).ok_or_else(|| {
@@ -349,6 +370,17 @@ impl<'a> Gen<'a> {
                 decl.span,
             ));
         };
+        if decl.kind == crate::FnKind::Static {
+            let plan = self.static_plan.ok_or_else(|| {
+                refusal(
+                    "static-schedule",
+                    "Static initialization has no live generation plan",
+                    decl.span,
+                )
+            })?;
+            plan.admit(self.ctx, decl.id, true, &self.static_work)
+                .map_err(|problem| refusal("static-read-dependency", problem, decl.span))?;
+        }
         // A `&mut` is only modelled as the whole type of a parameter: its
         // referent has an entry value and a current value. Anywhere else
         // (inside a tuple, in a local) it is not.
@@ -378,7 +410,7 @@ impl<'a> Gen<'a> {
             let local = decl
                 .local(*param)
                 .ok_or_else(|| refusal("vcgen-internal", "a missing parameter", decl.span))?;
-            let shape = self.ctx.shape(&local.ty, self.types.owner(), local.span)?;
+            let shape = self.ctx.shape_with_work(&local.ty, self.types.owner(), local.span, &self.static_work)?;
             let value = self.fresh(&shape, &local.name)?;
             self.entry.insert(*param, value);
         }
@@ -479,7 +511,7 @@ impl<'a> Gen<'a> {
 
     fn fresh_types(&mut self, declaration: &FnDecl) -> R<super::type_encoding::TypeEnv> {
         use super::term::Sort;
-        use super::type_encoding::{TypeArgument, TypeEnv};
+        use super::type_encoding::TypeArgument;
         let mut arguments = Vec::new();
         for name in &declaration.type_params {
             let decoration = self.fresh_symbol(Sort::Decoration, &format!("decoration {name}"));
@@ -492,7 +524,7 @@ impl<'a> Gen<'a> {
                 )
             })?);
         }
-        Ok(TypeEnv::new(declaration.id, arguments))
+        Ok(self.ctx.type_environment(declaration.id, arguments, &self.static_work))
     }
 
     /// A fresh value with the predicate licensed by its actual binder scope.
@@ -500,7 +532,7 @@ impl<'a> Gen<'a> {
         let term = self.fresh_symbol(leaf.sort(), display);
         let fact = self
             .ctx
-            .type_fact(leaf, &self.types, &term, self.decl.span)?;
+            .type_fact_with_work(leaf, &self.types, &term, self.decl.span, &self.static_work)?;
         if fact != Term::Bool(true) {
             self.fact(
                 if matches!(leaf, LeafTy::Poly(_)) {
@@ -746,9 +778,13 @@ impl<'a> Gen<'a> {
             .collect();
         let written_goal = (goal.clone(), Position { late, gate: None });
         for hypothesis in &mut hypotheses {
-            hypothesis.term = inline(&hypothesis.term, &defs, &mut budget).ok_or_else(too_big)?;
+            hypothesis.term = self.ctx.canonical_type_terms(
+                inline(&hypothesis.term, &defs, &mut budget).ok_or_else(too_big)?, &mut budget,
+            ).ok_or_else(too_big)?;
         }
-        let goal = inline(&goal, &defs, &mut budget).ok_or_else(too_big)?;
+        let mut goal = self.ctx.canonical_type_terms(
+            inline(&goal, &defs, &mut budget).ok_or_else(too_big)?, &mut budget,
+        ).ok_or_else(too_big)?;
         let mut symbols = self.symbols.clone();
         // Quantifiers and choices: their facts and instances, as Z3 makes
         // them (`super::quant`).
@@ -767,6 +803,7 @@ impl<'a> Gen<'a> {
                 &defs,
                 self.tables,
             );
+            if found.typing_exhausted { return Err(too_big()); }
             symbols.extend(found.symbols);
             for (fact, position) in found.facts {
                 let label = self.label("qi");
@@ -839,8 +876,10 @@ impl<'a> Gen<'a> {
         let mut instances: Vec<Term> = Vec::new();
         let mut approximate = false;
         let mut order_unknown = false;
+        let mut typing_exhausted = false;
         for term in hypotheses.iter().map(|h| &h.term).chain([&goal]) {
             term.for_each_call(&mut |name, args| {
+                if typing_exhausted { return; }
                 order_unknown |= unknown.contains(name);
                 if let Some(fact) = super::bitwise::range_fact(name, args) {
                     if !instances.contains(&fact) {
@@ -854,11 +893,13 @@ impl<'a> Gen<'a> {
                     .get(name)
                     .copied()
                     .or_else(|| registry.range(name));
-                let typed = self
-                    .tables
-                    .typings
-                    .get(name)
-                    .and_then(|schema| schema.instantiate(args));
+                let typed = match self.tables.typings.get(name) {
+                    Some(schema) => match schema.instantiate(args, &mut budget, Some(self.ctx)) {
+                        Ok(fact) => fact,
+                        Err(()) => { typing_exhausted = true; return; }
+                    },
+                    None => None,
+                };
                 let fact = if let Some(fact) = typed {
                     Some(fact)
                 } else if let Some((lo, hi)) = range {
@@ -874,12 +915,21 @@ impl<'a> Gen<'a> {
                 }
             });
         }
+        if typing_exhausted { return Err(too_big()); }
+        // Recursive/quantified facts can become ground only after their own
+        // substitution. Canonicalize before any bridge or solver query reads
+        // them, without asserting a separate type-equality axiom.
+        for hypothesis in &mut hypotheses {
+            let term = std::mem::replace(&mut hypothesis.term, Term::Bool(true));
+            hypothesis.term = self.ctx.canonical_type_terms(term, &mut budget).ok_or_else(too_big)?;
+        }
+        goal = self.ctx.canonical_type_terms(goal, &mut budget).ok_or_else(too_big)?;
         for fact in instances {
             let label = self.label("ax");
             hypotheses.push(Hypothesis {
                 label,
                 source: Source::Axiom,
-                term: fact,
+                term: self.ctx.canonical_type_terms(fact, &mut budget).ok_or_else(too_big)?,
             });
         }
         let roots: Vec<&Term> = hypotheses
@@ -1323,9 +1373,42 @@ impl<'a> Gen<'a> {
             .local(local)
             .ok_or_else(|| refusal("vcgen-internal", "a missing local", span))?;
         Ok((
-            self.ctx.shape(&decl.ty, self.types.owner(), span)?,
+            self.ctx.shape_with_work(&decl.ty, self.types.owner(), span, &self.static_work)?,
             decl.name.clone(),
         ))
+    }
+
+    fn declare_local(
+        &mut self,
+        path: &mut Path,
+        local: LocalId,
+        init: Option<&Expr>,
+        span: SpanId,
+    ) -> R<()> {
+        let (shape, name) = self.local_shape(local, span)?;
+        if init.is_none() && shape.has_poly() {
+            path.declared.insert(local);
+            path.env.remove(&local);
+            return Ok(());
+        }
+        let value = match init {
+            Some(init) => {
+                let value = self.body_expr(path, init)?;
+                if self
+                    .decl
+                    .local(local)
+                    .is_some_and(|local| local.mode != Mode::Spec)
+                {
+                    self.consume(path, init)?;
+                }
+                self.name_value(path, value, &shape, &name)?
+            }
+            None => self.fresh(&shape, &name)?,
+        };
+        path.declared.insert(local);
+        path.moved.retain(|moved| moved.local != local);
+        path.env.insert(local, value);
+        Ok(())
     }
 
     fn stmt(&mut self, path: &mut Path, stmt: &'a Stmt) -> R<()> {
@@ -1339,32 +1422,12 @@ impl<'a> Gen<'a> {
         }
         match &stmt.kind {
             StmtKind::Let { local, init } => {
-                let (shape, name) = self.local_shape(*local, stmt.span)?;
-                if init.is_none() && shape.has_poly() {
-                    path.declared.insert(*local);
-                    path.env.remove(local);
-                    return Ok(());
-                }
-                let value = match init {
-                    Some(init) => {
-                        let value = self.body_expr(path, init)?;
-                        if self
-                            .decl
-                            .local(*local)
-                            .is_some_and(|local| local.mode != Mode::Spec)
-                        {
-                            self.consume(path, init)?;
-                        }
-                        self.name_value(path, value, &shape, &name)?
-                    }
-                    None => self.fresh(&shape, &name)?,
-                };
-                path.declared.insert(*local);
-                path.moved.retain(|moved| moved.local != *local);
-                path.env.insert(*local, value);
-                Ok(())
+                self.declare_local(path, *local, init.as_ref(), stmt.span)
             }
-            StmtKind::Assign { place, value } => {
+            StmtKind::LetChecked { local, init } => {
+                self.declare_local(path, *local, Some(init), stmt.span)
+            }
+            StmtKind::Assign { place, value } | StmtKind::AssignSpec { place, value } => {
                 let translated = self.body_expr(path, value)?;
                 if self.kept_place(place, stmt.span)? {
                     self.consume(path, value)?;
@@ -1435,6 +1498,11 @@ impl<'a> Gen<'a> {
                 Ok(())
             }
             StmtKind::If {
+                cond,
+                then_block,
+                else_block,
+            }
+            | StmtKind::IfSpec {
                 cond,
                 then_block,
                 else_block,
@@ -1671,33 +1739,18 @@ impl<'a> Gen<'a> {
                 span,
             ));
         }
-        if type_args.iter().any(|ty| !matches!(ty, Ty::Param(_))) {
-            return Err(refusal(
-                "generic-clause",
-                "a concrete generic contract without a native instance",
-                span,
-            ));
+        // Static read is a separate, kind-aware call meaning. It does not
+        // execute the initializer again or acquire the ordinary owned-result
+        // ABI; the initializer is independently checked in its own query.
+        if target.kind == crate::FnKind::Static {
+            return self.read_static(path, target, type_args, args, dest, span);
         }
-        for param in &target.params {
-            if let Some(local) = target.local(*param) {
-                if matches!(local.ty, Ty::Ref { mutable: true, .. }) {
-                    return Err(refusal(
-                        "call-mut-ref",
-                        format!(
-                            "a call of `{}`, which takes a `&mut` parameter",
-                            target.name
-                        ),
-                        span,
-                    ));
-                }
-            }
-        }
-        if args.len() != target.params.len() {
-            return Err(refusal(
-                "vcgen-internal",
-                "a call with the wrong arity",
-                span,
-            ));
+
+        if let Some(problem) =
+            crate::executable_calls::representation(target, type_args, args.len())
+        {
+            let (tag, detail) = problem.diagnostic(target);
+            return Err(refusal(tag, detail, span));
         }
 
         // Arguments, left to right, with their exec checks.
@@ -1719,9 +1772,8 @@ impl<'a> Gen<'a> {
             let local = target
                 .local(*param)
                 .ok_or_else(|| refusal("vcgen-internal", "a missing parameter", span))?;
-            let shape = self
-                .ctx
-                .shape(&local.ty.subst(type_args), self.types.owner(), span)?;
+            let actual_ty = self.ctx.substitute_type(&local.ty, type_args, &self.static_work, span)?;
+            let shape = self.ctx.shape_with_work(&actual_ty, self.types.owner(), span, &self.static_work)?;
             let named = self.name_value(path, value, &shape, &local.name)?;
             arg_vals.insert(*param, named);
         }
@@ -1729,7 +1781,7 @@ impl<'a> Gen<'a> {
         let callee_reads = Reads {
             read: arg_vals.clone(),
             old: arg_vals.clone(),
-            types: type_terms(self.ctx, callee, type_args, &self.types, span)?,
+            types: type_terms(self.ctx, callee, type_args, &self.types, span, &self.static_work)?,
             ..Reads::default()
         };
         // A recursive call terminates: checked before the call
@@ -1772,12 +1824,8 @@ impl<'a> Gen<'a> {
         self.check_unwind_call(path, target, &callee_reads, (span, site), earlier)?;
 
         // The result and the postconditions.
-        let ret_ty = target
-            .ret_ty()
-            .cloned()
-            .unwrap_or(Ty::Unit)
-            .subst(type_args);
-        let ret_shape = self.ctx.shape(&ret_ty, self.types.owner(), span)?;
+        let ret_ty = self.ctx.substitute_type(target.ret_ty().unwrap_or(&Ty::Unit), type_args, &self.static_work, span)?;
+        let ret_shape = self.ctx.shape_with_work(&ret_ty, self.types.owner(), span, &self.static_work)?;
         let result = self.fresh_at(
             &ret_shape,
             &format!("{}(..)", short_name(&target.name)),
@@ -2276,11 +2324,12 @@ impl<'a> Gen<'a> {
             sort: leaf.sort(),
             display: display.to_string(),
         });
-        let range = self.ctx.type_fact(
+        let range = self.ctx.type_fact_with_work(
             leaf,
             &self.types,
             &Term::var(name, leaf.sort()),
             self.decl.span,
+            &self.static_work,
         )?;
         if range != Term::Bool(true) {
             self.fact(
@@ -2354,7 +2403,7 @@ impl<'a> Gen<'a> {
             let local = spec
                 .local(*param)
                 .ok_or_else(|| refusal("vcgen-internal", "a missing parameter", spec.span))?;
-            let shape = self.ctx.shape(&local.ty, self.types.owner(), local.span)?;
+            let shape = self.ctx.shape_with_work(&local.ty, self.types.owner(), local.span, &self.static_work)?;
             let value = self.fresh(&shape, &local.name)?;
             if let Some(via) = via {
                 let theirs = via.params.get(index).ok_or_else(|| {
@@ -2925,10 +2974,12 @@ fn needed_when_dead(stmt: &Stmt, rest: &[Stmt]) -> bool {
             kind,
             StmtKind::Loop(_) | StmtKind::Break { .. } | StmtKind::Continue { .. }
         )
-    }) || (matches!(stmt.kind, StmtKind::Let { .. })
-        && rest
-            .iter()
-            .any(|later| holds(later, &|kind| matches!(kind, StmtKind::Loop(_)))))
+    }) || (matches!(
+        stmt.kind,
+        StmtKind::Let { .. } | StmtKind::LetChecked { .. }
+    ) && rest
+        .iter()
+        .any(|later| holds(later, &|kind| matches!(kind, StmtKind::Loop(_)))))
 }
 
 /// Does `pred` hold for `stmt` or a statement nested in it?
@@ -2939,6 +2990,11 @@ fn holds(stmt: &Stmt, pred: &dyn Fn(&StmtKind) -> bool) -> bool {
     let inner = |block: &Block| block.stmts.iter().any(|s| holds(s, pred));
     match &stmt.kind {
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..
@@ -3017,7 +3073,7 @@ fn any_expr(e: &Expr, pred: &dyn Fn(&Expr) -> bool) -> bool {
 fn contains_mut_ref(ty: &Ty) -> bool {
     match ty {
         Ty::Bool | Ty::Int(_) | Ty::Unit => false,
-        Ty::Tuple(elems) | Ty::Adt(_, elems) => elems.iter().any(contains_mut_ref),
+        Ty::Tuple(elems) | Ty::Adt(_, elems) | Ty::Projection(_, elems) => elems.iter().any(contains_mut_ref),
         Ty::Ref { mutable, inner } => *mutable || contains_mut_ref(inner),
         Ty::Param(_) | Ty::MutRef(_) => false,
     }

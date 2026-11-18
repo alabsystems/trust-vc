@@ -194,3 +194,12 @@ mod tests {
         assert!(normalized_library_args(&erase, false).is_none());
     }
 }
+
+/// Compare the actual worker's retained native Config with its own Session.
+/// No producer observation/serialized option fingerprint constructs this view.
+pub(super) fn check_ordinary_options(expected: &Options, actual: &Options) -> Result<(), String> {
+    if expected.dep_tracking_hash(false) != actual.dep_tracking_hash(false) {
+        return Err("ordinary native tracked options changed after preparation".into());
+    }
+    normal_request::check_exact_untracked(expected, actual)
+}

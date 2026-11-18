@@ -47,6 +47,8 @@
 //! of an existing node bumps it.
 
 pub mod bitvector;
+mod copy_context;
+mod executable_calls;
 mod expr;
 mod ids;
 mod instance_semantics;
@@ -67,11 +69,11 @@ pub use expr::{
     BinOp, CastKind, Expr, ExprKind, IntLit, IntegerConstant, Lit, Place, Projection, QuantKind,
     UnOp,
 };
-pub use ids::{AdtId, DefHash, FnId, LocalId, LoopId, SiteId, SpanId};
+pub use ids::{AdtId, DefHash, FnId, LocalId, LoopId, ProjectionId, SiteId, SpanId};
 pub use item::{
     AdtDecl, AdtKind, Body, Clause, ConstMode, DeclProphecy, DefOrder, FieldDecl, FnAttrs, FnDecl,
     FnKind, FnRole, GenericInstance, LocalDecl, LocalKind, Mode, RecGroup, Rlimit, UnwindSpec,
-    VariantDecl, VcCrate,
+    ProjectionDecl, ProjectionImpl, ProjectionValue, VariantDecl, VcCrate,
 };
 pub use spec_definitions::CheckedSpecDefinitions;
 pub use stmt::{
@@ -82,4 +84,7 @@ pub use wf::{check_crate, check_crate_for_diagnostics, DiagnosticWf, WfClass, Wf
 
 /// Schema name of this format, as trust-ir's `ProofFormula.schema` would
 /// reference it.
-pub const SCHEMA: &str = "trust-vc.vcir@11";
+pub const SCHEMA: &str = "trust-vc.vcir@16";
+
+mod static_values;
+mod projection_types;

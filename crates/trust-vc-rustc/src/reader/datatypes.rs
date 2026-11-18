@@ -15,6 +15,36 @@ pub(super) fn field_mode(
     field: &mty::FieldDef,
     span: Span,
 ) -> Result<Mode, Refusal> {
+    field_mode_using(tcx, field, span, None)
+}
+
+/// Same native field rules, borrowing the graph's actual caller allowance.
+/// A work error never substitutes a field mode or a partial parsed result.
+pub(super) fn field_mode_with_work(
+    tcx: TyCtxt<'_>,
+    field: &mty::FieldDef,
+    span: Span,
+    remaining: &mut usize,
+) -> Result<Mode, Refusal> {
+    field_mode_using(tcx, field, span, Some(remaining))
+}
+
+fn field_mode_using(
+    tcx: TyCtxt<'_>,
+    field: &mty::FieldDef,
+    span: Span,
+    mut remaining: Option<&mut usize>,
+) -> Result<Mode, Refusal> {
+    let work_error = || {
+        Refusal::new(
+            "field-mode-work",
+            "native field attribute work exhausted the caller's shared bound",
+            span,
+        )
+    };
+    if let Some(work) = remaining.as_deref_mut() {
+        *work = work.checked_sub(1).ok_or_else(|| work_error())?;
+    }
     let Some(local) = field.did.as_local() else {
         return Err(Refusal::new(
             "field-mode",
@@ -23,18 +53,27 @@ pub(super) fn field_mode(
         ));
     };
     let mut mode = None;
-    for (attribute, at) in attrs::verus_attrs(tcx.hir_attrs(tcx.local_def_id_to_hir_id(local))) {
+    let attributes = tcx.hir_attrs(tcx.local_def_id_to_hir_id(local));
+    let parsed = match remaining.as_deref_mut() {
+        Some(work) => attrs::verus_attrs_with_work(attributes, work).map_err(|_| work_error())?,
+        None => attrs::verus_attrs(attributes),
+    };
+    for (attribute, at) in parsed {
         match attribute {
             VerusAttr::Mode(value) => {
                 mode.get_or_insert(value);
             }
             VerusAttr::VerusMacro => {}
             other => {
+                if let Some(work) = remaining.as_deref_mut() {
+                    attrs::charge_format(format_args!("{other:?} on field `{}`", field.name), work)
+                        .map_err(|_| work_error())?;
+                }
                 return Err(Refusal::new(
                     "attribute",
                     format!("{other:?} on field `{}`", field.name),
                     at,
-                ))
+                ));
             }
         }
     }

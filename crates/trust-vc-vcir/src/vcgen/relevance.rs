@@ -388,6 +388,7 @@ pub(crate) struct Analysis<'a> {
     /// from a formula, gated or not, under the inlined facts or not.
     instances: HashMap<(Option<usize>, Term, bool, bool), Conds>,
     budget: usize,
+    typing_exhausted: bool,
     /// The query's top-level formulas, each with its index. Z3 substitutes
     /// the equations and literals among them, after its rewriting, into the
     /// others; whatever it substitutes follows from the formula it comes
@@ -488,6 +489,7 @@ impl<'a> Analysis<'a> {
             named: HashMap::new(),
             instances: HashMap::new(),
             budget,
+            typing_exhausted: false,
             facts: Vec::new(),
             every: None,
             inlined: false,
@@ -611,29 +613,52 @@ impl<'a> Analysis<'a> {
     /// s(1)` and fold with its terms. The applications found in the body
     /// are relevant only where this holds; `false` where the body has more
     /// pairs than are worth writing out.
-    pub(crate) fn gate(&mut self, def: &SpecDef, args: &[Term]) -> Term {
+    pub(crate) fn gate(&mut self, def: &SpecDef, args: &[Term]) -> R<Term> {
         let pairs = self
             .collisions
             .entry(def.function.clone())
             .or_insert_with(|| collisions(def))
             .clone();
         let Some(pairs) = pairs else {
-            return Term::Bool(false);
+            return Ok(Term::Bool(false));
         };
-        let map: HashMap<&str, Term> = def
-            .params
-            .iter()
-            .map(|(param, _)| param.as_str())
-            .zip(args.iter().cloned())
-            .collect();
+        let map =
+            super::substitution::bindings(&def.params, args, &mut self.budget).ok_or(TooBig)?;
         let mut apart = Vec::with_capacity(pairs.len());
         for positions in pairs {
-            let same = positions
-                .iter()
-                .map(|(a, b)| Term::eq(a.substitute(&map), b.substitute(&map)));
-            apart.push(Term::and(same.collect::<Vec<_>>()).not());
+            let mut same = Vec::new();
+            for (a, b) in positions {
+                same.push(Term::eq(
+                    super::substitution::apply(&a, &map, &mut self.budget).ok_or(TooBig)?,
+                    super::substitution::apply(&b, &map, &mut self.budget).ok_or(TooBig)?,
+                ));
+            }
+            apart.push(Term::and(same).not());
         }
-        Term::and(apart)
+        Ok(Term::and(apart))
+    }
+
+    pub(crate) fn typing_exhausted(&self) -> bool {
+        self.typing_exhausted
+    }
+
+    fn instantiated(&mut self, definition: &SpecDef, args: &[Term]) -> R<(Term, Term)> {
+        let result = instantiate(definition, args, &mut self.budget).and_then(|(guard, body)| {
+            match self.type_context {
+                Some(context) => Some((
+                    context.canonical_type_terms(guard, &mut self.budget)?,
+                    context.canonical_type_terms(body, &mut self.budget)?,
+                )),
+                None => Some((guard, body)),
+            }
+        });
+        match result {
+            Some(result) => Ok(result),
+            None => {
+                self.typing_exhausted = true;
+                Err(TooBig)
+            }
+        }
     }
 
     pub(super) fn charge(&mut self, cost: usize) -> R<()> {
@@ -754,6 +779,9 @@ impl<'a> Analysis<'a> {
             }
             out.merge(found);
         }
+        if self.typing_exhausted {
+            return Err(TooBig);
+        }
         Ok(out)
     }
 
@@ -795,7 +823,11 @@ impl<'a> Analysis<'a> {
         self.clip_origin_sites = origins;
         self.depth -= 1;
         self.current = current;
-        found
+        if self.typing_exhausted {
+            Err(TooBig)
+        } else {
+            found
+        }
     }
 
     /// A term for the truth of `formula` in the query: a fresh symbol
@@ -1001,7 +1033,10 @@ impl<'a> Analysis<'a> {
             Term::Not(inner) => members.contains(&**inner),
             other => members.contains(other),
         };
-        let list = self.fact_list();
+        let list = match &self.every {
+            Some(every) if self.inlined || self.current == Some(EVERY) => every,
+            _ => &self.facts,
+        };
         let mut chosen: Vec<&Term> = facts
             .iter()
             .map(|&k| &list[k].1)
@@ -1011,7 +1046,21 @@ impl<'a> Analysis<'a> {
         // and keeps every bounded application within its bounds.
         let exact = self.inlined;
         let bounds = if exact {
-            bounds_of(node, &chosen, self.ranged, self.typings)
+            match bounds_of(
+                node,
+                &chosen,
+                self.ranged,
+                self.typings,
+                self.type_context,
+                &mut self.budget,
+            ) {
+                Ok(bounds) => bounds,
+                Err(TooBig) => {
+                    self.budget = 0;
+                    self.typing_exhausted = true;
+                    return false;
+                }
+            }
         } else {
             Vec::new()
         };
@@ -1098,7 +1147,21 @@ impl<'a> Analysis<'a> {
             return false;
         }
         let bounds = if exact {
-            bounds_of(node, &chosen, self.ranged, None)
+            match bounds_of(
+                node,
+                &chosen,
+                self.ranged,
+                None,
+                self.type_context,
+                &mut bridge_budget,
+            ) {
+                Ok(bounds) => bounds,
+                Err(TooBig) => {
+                    self.budget = 0;
+                    self.typing_exhausted = true;
+                    return false;
+                }
+            }
         } else {
             Vec::new()
         };
@@ -1573,7 +1636,7 @@ impl<'a> Analysis<'a> {
         }
         self.charge(def.body.size().saturating_add(def.guard.size()))?;
         let (guard, body) = if gated {
-            instantiate(def, args)
+            self.instantiated(def, args)?
         } else {
             // The instances of the definitions applied in the arguments
             // may come first and merge them with their values.
@@ -1583,7 +1646,7 @@ impl<'a> Analysis<'a> {
                 .map(|arg| inline(arg, self.defs, &mut budget))
                 .collect();
             self.budget = budget;
-            instantiate(def, &inlined.ok_or(TooBig)?)
+            self.instantiated(def, &inlined.ok_or(TooBig)?)?
         };
         let outer = std::mem::replace(&mut self.inlined, inlined);
         let found = self.body(&body);
@@ -1591,7 +1654,7 @@ impl<'a> Analysis<'a> {
         let mut out = found?;
         if !out.is_empty() {
             let gate = if gated {
-                self.gate(def, args)
+                self.gate(def, args)?
             } else {
                 Term::Bool(true)
             };
@@ -1613,28 +1676,36 @@ fn bounds_of(
     facts: &[&Term],
     ranged: Option<&Ranged>,
     typings: Option<&HashMap<String, super::spec::TypingSchema>>,
-) -> Vec<Term> {
+    context: Option<&super::val::Ctx<'_>>,
+    budget: &mut usize,
+) -> R<Vec<Term>> {
     let mut seen: HashSet<&Term> = HashSet::new();
     subterms(node, &mut seen);
     for fact in facts {
         subterms(fact, &mut seen);
     }
-    let mut out: Vec<Term> = seen
-        .into_iter()
-        .filter_map(|t| match t {
+    let mut out = Vec::new();
+    for t in seen {
+        let fact = match t {
             Term::Call { name, args, .. } => {
                 if let Some(schema) = typings.and_then(|schemas| schemas.get(name)) {
-                    return schema.instantiate(args);
+                    schema
+                        .instantiate(args, budget, context)
+                        .map_err(|_| TooBig)?
+                } else if let Some(&(lo, hi)) = ranged.and_then(|ranges| ranges.get(name)) {
+                    Some(t.within_type_bounds(lo, hi))
+                } else {
+                    None
                 }
-                let &(lo, hi) = ranged?.get(name)?;
-                Some(t.within_type_bounds(lo, hi))
             }
             _ => None,
-        })
-        .filter(|bound| *bound != Term::Bool(true))
-        .collect();
+        };
+        if let Some(fact) = fact.filter(|fact| *fact != Term::Bool(true)) {
+            out.push(fact);
+        }
+    }
     out.sort_by_key(order_key);
-    out
+    Ok(out)
 }
 
 /// Add to `out` the applications of non-recursive spec functions in `t`
@@ -2755,11 +2826,15 @@ mod tests {
         let mut analysis = Analysis::new(&collect, &defs, 100_000);
         // `s(a0) == s(1)` is `s(1) == s(1)` in an instance at 1.
         let body = Term::eq(call(a0.clone()), s(1));
-        let gate = analysis.gate(&def("rf1", body), &[x(), Term::Int(0)]);
+        let gate = analysis
+            .gate(&def("rf1", body), &[x(), Term::Int(0)])
+            .unwrap();
         assert_eq!(gate.to_string(), "(not (= x 1))");
         // Two parameters are one representative where they are equal.
         let body = Term::le(call(a0.clone()), call(a1.clone()));
-        let gate = analysis.gate(&def("rf2", body), &[x(), Term::var("y", Sort::Int)]);
+        let gate = analysis
+            .gate(&def("rf2", body), &[x(), Term::var("y", Sort::Int)])
+            .unwrap();
         assert_eq!(gate.to_string(), "(not (= x y))");
         // `s(a0 - 1)` and `s(a0 - 2)` never meet, and an unboxed parameter
         // is never a numeral.
@@ -2770,11 +2845,11 @@ mod tests {
             Term::eq(Term::Int(1), Term::Int(2)).not(),
             Term::le(call(a0.clone()), Term::Int(3)),
         ]);
-        let gate = analysis.gate(&def("rf3", body), &[x(), x()]);
+        let gate = analysis.gate(&def("rf3", body), &[x(), x()]).unwrap();
         assert_eq!(gate, Term::Bool(true));
         // `a0 == 1` and `!(a1 == 1)` are `p && !p` where the two are equal.
         let body = Term::and([Term::eq(a0, Term::Int(1)), Term::eq(a1, Term::Int(1)).not()]);
-        let gate = analysis.gate(&def("rf4", body), &[x(), x()]);
+        let gate = analysis.gate(&def("rf4", body), &[x(), x()]).unwrap();
         assert_eq!(gate, Term::Bool(false));
     }
 

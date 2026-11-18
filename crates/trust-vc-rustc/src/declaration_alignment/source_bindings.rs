@@ -461,6 +461,23 @@ impl Metadata {
         Ok(file.file.sha256)
     }
 
+    /// Retained native selection observations for an isolated ordinary worker.
+    /// These are input identity data, never a declaration/import constructor.
+    #[cfg(feature = "rustc")]
+    pub(crate) fn native_input_observations(&self) -> Vec<MetadataInput> {
+        self.files
+            .iter()
+            .map(|(id, file)| MetadataInput {
+                stable_crate_id: *id,
+                svh: file.svh,
+                file: PinnedFile {
+                    path: file.canonical_path.clone(),
+                    sha256: file.file.sha256,
+                },
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn digests(&self) -> BTreeSet<Digest> {
         self.files.values().map(|file| file.file.sha256).collect()

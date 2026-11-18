@@ -36,6 +36,7 @@ fn signature(n: u64, ty: Ty) -> FnDecl {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         locals: vec![
             local("result", LocalKind::Return),
@@ -110,6 +111,7 @@ fn view<'a>(
         caller,
         callee,
         span: SpanId(0),
+        work: None,
     }
 }
 
@@ -432,6 +434,7 @@ fn nested_and_zero_child_values_use_the_same_bounded_codec() {
         callee: &callee,
         span: SpanId(0),
         left: 0,
+        work: None,
     };
     assert!(codec
         .box_whole(&Ty::Unit, &Shape::Node(vec![]), Val::Node(vec![]))

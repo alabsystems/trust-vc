@@ -15,13 +15,14 @@
 //!
 //! The VC generator only accepts a crate with no problems of either class.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::{HashMap, HashSet};
 
 use crate::expr::{BinOp, CastKind, Expr, ExprKind, Lit, Place, Projection, UnOp};
-use crate::ids::{AdtId, FnId, LocalId, LoopId, SiteId, SpanId};
+use crate::ids::{AdtId, FnId, LocalId, LoopId, ProjectionId, SiteId, SpanId};
 use crate::item::{
-    AdtDecl, AdtKind, Body, Clause, ConstMode, FnDecl, FnKind, FnRole, LocalKind, Mode, VcCrate,
+    AdtDecl, AdtKind, Body, Clause, ConstMode, FnDecl, FnKind, FnRole, LocalKind, Mode,
+    ProjectionDecl, VcCrate,
 };
 use crate::stmt::{Block, ClauseAttrs, InvariantKind, Loop, Stmt, StmtKind};
 use crate::ty::{IntRange, Ty};
@@ -176,10 +177,29 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
             });
         }
     }
+    let mut projections = HashMap::new();
+    for declaration in &krate.projections {
+        if declaration.arity == 0
+            || projections.insert(declaration.id, declaration).is_some()
+        {
+            errors.push(WfError {
+                class: WfClass::Malformed,
+                function: None,
+                span: declaration.span,
+                message: "an associated-type constructor has zero arguments or a duplicate identity"
+                    .into(),
+            });
+        }
+    }
+    let projection_definitions = crate::projection_types::Definitions::checked(krate, &mut crate::copy_context::WF_WORK);
+    let invalid_projection_definitions = projection_definitions.is_none();
     let index = Index {
         fns,
         adts,
+        projections,
+        projection_definitions,
         validated_instance_origins: OnceCell::new(),
+        source: krate,
         recursive: krate
             .rec_groups
             .iter()
@@ -187,6 +207,11 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
             .collect(),
         architecture: krate.architecture,
     };
+    if invalid_projection_definitions {
+        errors.push(WfError { class: WfClass::Malformed, function: None,
+            span: krate.projection_impls.first().map_or(SpanId(0), |definition| definition.span),
+            message: "invalid, ambiguous, cyclic or unrepresented closed associated implementation".into() });
+    }
     if krate.architecture.cases().is_err() {
         errors.push(WfError {
             class: WfClass::Malformed,
@@ -221,6 +246,7 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
             diagnostics,
             incomplete_binders: &mut incomplete_binders,
             transport_locals: &transport_locals,
+            copy_work: Cell::new(crate::copy_context::WF_WORK),
         };
         checker.check();
         // Value modes are a separate obligation from type checking and the
@@ -253,7 +279,10 @@ fn check_crate_impl(krate: &VcCrate, diagnostics: bool) -> DiagnosticWf {
 struct Index<'a> {
     fns: HashMap<FnId, &'a FnDecl>,
     adts: HashMap<AdtId, &'a AdtDecl>,
+    projections: HashMap<ProjectionId, &'a ProjectionDecl>,
+    projection_definitions: Option<crate::projection_types::Definitions<'a>>,
     validated_instance_origins: OnceCell<HashSet<FnId>>,
+    source: &'a VcCrate,
     recursive: HashSet<FnId>,
     architecture: crate::bitvector::Architecture,
 }
@@ -286,6 +315,14 @@ impl Index<'_> {
                 Some(_) => args.iter().find_map(|arg| self.ty_problem(arg, n_params)),
             },
             Ty::Ref { inner, .. } | Ty::MutRef(inner) => self.ty_problem(inner, n_params),
+            Ty::Projection(id, args) => match self.projections.get(id) {
+                None => Some(format!("unknown associated-type constructor {id:?}")),
+                Some(declaration) if declaration.arity != args.len() => Some(format!(
+                    "associated-type constructor `{}` takes {} arguments, not {}",
+                    declaration.name, declaration.arity, args.len()
+                )),
+                Some(_) => args.iter().find_map(|arg| self.ty_problem(arg, n_params)),
+            },
             Ty::Param(n) => {
                 ((*n as usize) >= n_params).then(|| format!("type parameter {n} is not in scope"))
             }
@@ -382,13 +419,34 @@ enum Context {
     Exec,
     /// Proof code: a proof function body or a ghost block.
     Proof,
+    /// Physical Exec syntax under a Spec condition: logical Proof effects,
+    /// but body-code checks may be evaluated by explicit checked declarations.
+    ExecProof,
+    /// Explicit ghost code nested under Spec-controlled physical Exec.
+    SpecProof,
 }
 
 impl Context {
+    const fn physical_exec(self) -> bool {
+        matches!(self, Self::Exec | Self::ExecProof)
+    }
+
+    const fn spec_controlled(self) -> bool {
+        matches!(self, Self::ExecProof | Self::SpecProof)
+    }
+
+    const fn ghost(self) -> Self {
+        if self.spec_controlled() {
+            Self::SpecProof
+        } else {
+            Self::Proof
+        }
+    }
+
     const fn mode(self) -> Mode {
         match self {
             Self::Exec => Mode::Exec,
-            Self::Proof => Mode::Proof,
+            Self::Proof | Self::ExecProof | Self::SpecProof => Mode::Proof,
         }
     }
 }
@@ -408,9 +466,131 @@ struct FnChecker<'a, 'e> {
     diagnostics: bool,
     incomplete_binders: &'e mut Vec<(FnId, SpanId)>,
     transport_locals: &'e [bool],
+    copy_work: Cell<usize>,
 }
 
 impl FnChecker<'_, '_> {
+    fn substituted_type_matches(&self, formal: &Ty, arguments: Option<&[Ty]>, actual: &Ty) -> bool {
+        let Some(definitions) = &self.index.projection_definitions else { return false; };
+        if definitions.is_empty() {
+            return match arguments {
+                Some(arguments) => crate::copy_context::matches_substitution_with(formal, arguments, actual,
+                    |amount| self.copy_charge(amount)) == Ok(true),
+                None => formal == actual,
+            };
+        }
+        let mut remaining = self.copy_work.get();
+        let result = definitions.equal_substitution(formal, arguments, actual, &mut remaining).unwrap_or(false);
+        self.copy_work.set(remaining);
+        result
+    }
+
+    fn copy_charge(&self, amount: usize) -> Result<(), ()> {
+        match self.copy_work.get().checked_sub(amount) {
+            Some(left) => {
+                self.copy_work.set(left);
+                Ok(())
+            }
+            None => {
+                self.copy_work.set(0);
+                Err(())
+            }
+        }
+    }
+
+    fn normalized_copy_type(&self, ty: &Ty, arguments: Option<&[Ty]>) -> Result<Ty, ()> {
+        let definitions = self.index.projection_definitions.as_ref().ok_or(())?;
+        let mut remaining = self.copy_work.get();
+        let result = match arguments {
+            Some(arguments) => definitions.substitute(ty, arguments, &mut remaining),
+            None => definitions.normalize(ty, &mut remaining),
+        };
+        self.copy_work.set(remaining);
+        result.ok_or(())
+    }
+
+    fn check_copy_premises(&mut self) {
+        let declaration = self.decl;
+        for premise in &declaration.copy_premises {
+            match crate::copy_context::wellformed_with(
+                &self.index.adts,
+                &|id| self.index.projections.get(&id).map(|decl| decl.arity),
+                premise,
+                declaration.type_params.len(),
+                |n| self.copy_charge(n),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.malformed(
+                        declaration.span,
+                        "an invalid Copy premise type or parameter scope",
+                    );
+                    continue;
+                }
+                Err(()) => {
+                    self.malformed(declaration.span, "Copy typing work exhausted");
+                    continue;
+                }
+            }
+            let normalized = if self.index.projection_definitions.as_ref().is_some_and(|definitions| !definitions.is_empty()) {
+                match self.normalized_copy_type(premise, None) {
+                    Ok(ty) => Some(ty),
+                    Err(()) => { self.malformed(declaration.span, "Copy normalization work or declaration exhausted"); continue; }
+                }
+            } else { None };
+            match crate::copy_context::admissible_with(&self.index.adts, normalized.as_ref().unwrap_or(premise), |n| self.copy_charge(n)) {
+                Ok(true) => {}
+                Ok(false) => self.malformed(self.decl.span, "a Copy premise has a mutable-reference, unknown, opaque or recursive rigid layout"),
+                Err(()) => self.malformed(self.decl.span, "Copy typing work exhausted"),
+            }
+        }
+    }
+
+    fn discharge_copy(&mut self, target: &FnDecl, arguments: &[Ty], span: SpanId, closed: bool) {
+        // A concrete instance may not authorize its own ground assumptions.
+        let declaration = self.decl;
+        let premises = if closed {
+            &[][..]
+        } else {
+            declaration.copy_premises.as_slice()
+        };
+        if self.index.projection_definitions.as_ref().is_some_and(|definitions| !definitions.is_empty()) {
+            if self.copy_charge(premises.len()).is_err() {
+                self.malformed(span, "Copy typing work exhausted"); return;
+            }
+            let normalized = premises.iter().map(|ty| self.normalized_copy_type(ty, None)).collect::<Result<Vec<_>, _>>();
+            let Ok(normalized) = normalized else {
+                self.malformed(span, "Copy normalization work or declaration exhausted"); return;
+            };
+            for premise in &target.copy_premises {
+                let Ok(actual) = self.normalized_copy_type(premise, Some(arguments)) else {
+                    self.malformed(span, "Copy normalization work or declaration exhausted"); return;
+                };
+                match crate::copy_context::is_copy_with(&self.index.adts, &normalized, &actual, None, |n| self.copy_charge(n)) {
+                    Ok(true) => {}
+                    Ok(false) => self.malformed(span, "a target Copy premise is not discharged by the caller typing context"),
+                    Err(()) => self.malformed(span, "Copy typing work exhausted"),
+                }
+            }
+            return;
+        }
+        for premise in &target.copy_premises {
+            match crate::copy_context::is_copy_with(
+                &self.index.adts,
+                premises,
+                premise,
+                Some(arguments),
+                |n| self.copy_charge(n),
+            ) {
+                Ok(true) => {}
+                Ok(false) => self.malformed(
+                    span,
+                    "a target Copy premise is not discharged by the caller typing context",
+                ),
+                Err(()) => self.malformed(span, "Copy typing work exhausted"),
+            }
+        }
+    }
     fn report(&mut self, class: WfClass, span: SpanId, message: impl Into<String>) {
         self.errors.push(WfError {
             class,
@@ -464,6 +644,17 @@ impl FnChecker<'_, '_> {
                 return;
             }
         }
+        self.discharge_copy(original, &origin.type_args, decl.span, true);
+        let mut premises_match = decl.copy_premises.len() == original.copy_premises.len();
+        for (formal, actual) in original.copy_premises.iter().zip(&decl.copy_premises) {
+            premises_match &= self.substituted_type_matches(formal, Some(&origin.type_args), actual);
+        }
+        if !premises_match {
+            self.malformed(
+                decl.span,
+                "an instance Copy context disagrees with its native origin",
+            );
+        }
         let parameters_match = decl.params.len() == original.params.len()
             && decl
                 .params
@@ -472,7 +663,7 @@ impl FnChecker<'_, '_> {
                 .all(
                     |(actual, formal)| match (decl.local(*actual), original.local(*formal)) {
                         (Some(actual), Some(formal)) => {
-                            actual.ty == formal.ty.subst(&origin.type_args)
+                            self.substituted_type_matches(&formal.ty, Some(&origin.type_args), &actual.ty)
                                 && actual.mode == formal.mode
                                 && actual.mutable == formal.mutable
                                 && actual.prophecy == formal.prophecy
@@ -482,7 +673,7 @@ impl FnChecker<'_, '_> {
                 );
         let result_matches = match (decl.local(decl.ret), original.local(original.ret)) {
             (Some(actual), Some(formal)) => {
-                actual.ty == formal.ty.subst(&origin.type_args)
+                self.substituted_type_matches(&formal.ty, Some(&origin.type_args), &actual.ty)
                     && actual.mode == formal.mode
                     && actual.prophecy == formal.prophecy
             }
@@ -499,6 +690,7 @@ impl FnChecker<'_, '_> {
                 original,
                 decl,
                 &self.index.validated_instance_origins,
+                self.index.projection_definitions.as_ref(),
             )
         {
             self.malformed(
@@ -510,6 +702,7 @@ impl FnChecker<'_, '_> {
 
     fn check(&mut self) {
         let decl = self.decl;
+        self.check_copy_premises();
         self.check_instance_origin();
         if decl.attrs.inline {
             if decl.mode != Mode::Spec {
@@ -601,17 +794,57 @@ impl FnChecker<'_, '_> {
                     self.malformed(decl.span, "a dual constant without its initializer");
                 }
             }
-            FnKind::Constant(ConstMode::Exec) => {
-                self.malformed(
-                    decl.span,
-                    "an executable constant requires an explicit initializer/read representation",
-                );
-            }
-            FnKind::Static => {
-                self.malformed(
-                    decl.span,
-                    "a static requires an explicit stable-storage representation",
-                );
+            FnKind::Constant(ConstMode::Exec) | FnKind::Static => {
+                if decl.mode != Mode::Exec
+                    || decl
+                        .local(decl.ret)
+                        .is_none_or(|ret| ret.mode != Mode::Exec)
+                    || !decl.params.is_empty()
+                    || matches!(decl.role, FnRole::TraitDecl | FnRole::Imported)
+                    || !matches!(decl.body, Body::Stmts(_) | Body::None)
+                    || !decl.requires.is_empty()
+                    || !decl.recommends.is_empty()
+                    || !decl.decreases.is_empty()
+                    || decl.decreases_when.is_some()
+                    || decl.decreases_by.is_some()
+                    || decl.attrs.inline
+                    || decl.body == Body::None && !decl.attrs.external_body
+                {
+                    self.malformed(decl.span, "an executable value needs a parameter-free checked initializer, exec result and no function preconditions");
+                }
+                if decl.kind == FnKind::Static {
+                    // One original Static WF allowance: storage and complete
+                    // dependency admission share it, including failed work.
+                    let static_work = Cell::new(100_000);
+                    if !decl.type_params.is_empty()
+                        || decl.role != FnRole::Item
+                        || !decl.copy_premises.is_empty()
+                        || decl.ret_ty().is_none_or(|ty| {
+                            !crate::static_values::storage_type_budgeted(
+                                ty,
+                                &self.index.adts,
+                                &static_work,
+                            )
+                        })
+                    {
+                        self.malformed(decl.span, "static storage must be monomorphic represented data without owned abstract or mutable-reference slots");
+                    }
+                    if self.index.recursive.contains(&decl.id) {
+                        self.malformed(
+                            decl.span,
+                            "static initializer contracts cannot belong to a recursive group",
+                        );
+                    }
+                    if let Err(problem) = crate::static_values::dependency_problem(
+                        self.index.source,
+                        &self.index.fns,
+                        &self.index.adts,
+                        decl.id,
+                        &static_work,
+                    ) {
+                        self.malformed(decl.span, problem);
+                    }
+                }
             }
         }
         match decl.role {
@@ -877,39 +1110,81 @@ impl FnChecker<'_, '_> {
         }
     }
 
+    /// A declaration's check placement never changes its stored value mode.
+    fn check_let(
+        &mut self,
+        local: LocalId,
+        init: Option<&Expr>,
+        span: SpanId,
+        cx: Context,
+        checked: bool,
+    ) {
+        let Some(decl) = self.local(local).cloned() else {
+            self.malformed(span, format!("let of missing local {}", local.0));
+            return;
+        };
+        if !matches!(decl.kind, LocalKind::Let | LocalKind::Temp) {
+            self.malformed(
+                span,
+                format!("let of `{}`, which is not a let local", decl.name),
+            );
+        }
+        if cx.mode() == Mode::Proof && decl.mode == Mode::Exec {
+            self.malformed(
+                span,
+                format!("exec local `{}` declared in proof code", decl.name),
+            );
+        }
+        if checked && (!cx.physical_exec() || decl.mode != Mode::Spec) {
+            self.malformed(
+                span,
+                "a checked initializer requires Exec context and Spec storage",
+            );
+        }
+        if let Some(init) = init {
+            self.check_expr(
+                init,
+                cx.physical_exec() && (checked || (cx == Context::Exec && decl.mode == Mode::Exec)),
+            );
+            if init.ty != decl.ty {
+                self.malformed(
+                    init.span,
+                    format!("initialiser of `{}` has the wrong type", decl.name),
+                );
+            }
+        }
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt, cx: Context) {
         let exec = cx == Context::Exec;
         match &stmt.kind {
             StmtKind::Let { local, init } => {
-                let Some(decl) = self.local(*local).cloned() else {
-                    self.malformed(stmt.span, format!("let of missing local {}", local.0));
-                    return;
-                };
-                if !matches!(decl.kind, LocalKind::Let | LocalKind::Temp) {
-                    self.malformed(
-                        stmt.span,
-                        format!("let of `{}`, which is not a let local", decl.name),
-                    );
-                }
-                if cx == Context::Proof && decl.mode == Mode::Exec {
-                    self.malformed(
-                        stmt.span,
-                        format!("exec local `{}` declared in proof code", decl.name),
-                    );
-                }
-                if let Some(init) = init {
-                    self.check_expr(init, exec && decl.mode == Mode::Exec);
-                    if init.ty != decl.ty {
-                        self.malformed(
-                            init.span,
-                            format!("initialiser of `{}` has the wrong type", decl.name),
-                        );
-                    }
-                }
+                self.check_let(*local, init.as_ref(), stmt.span, cx, false);
+            }
+            StmtKind::LetChecked { local, init } => {
+                self.check_let(*local, Some(init), stmt.span, cx, true);
             }
             StmtKind::Assign { place, value } => {
                 let target_mode = self.check_assignable(place, stmt.span, cx);
                 self.check_expr(value, exec && target_mode == Some(Mode::Exec));
+                if let Some(place_ty) = self.place_ty(place, stmt.span) {
+                    if place_ty != value.ty {
+                        self.malformed(value.span, "assigned value has the wrong type");
+                    }
+                }
+            }
+            StmtKind::AssignSpec { place, value } => {
+                if !cx.physical_exec() {
+                    self.malformed(
+                        stmt.span,
+                        "a checked Spec assignment outside physical Exec code",
+                    );
+                }
+                let target_mode = self.check_assignable(place, stmt.span, cx.ghost());
+                if target_mode != Some(Mode::Spec) {
+                    self.malformed(stmt.span, "a checked Spec assignment requires Spec storage");
+                }
+                self.check_expr(value, cx.physical_exec());
                 if let Some(place_ty) = self.place_ty(place, stmt.span) {
                     if place_ty != value.ty {
                         self.malformed(value.span, "assigned value has the wrong type");
@@ -943,7 +1218,7 @@ impl FnChecker<'_, '_> {
                 site,
             } => {
                 self.use_site(*site, stmt.span);
-                if cx != Context::Proof {
+                if cx.mode() != Mode::Proof {
                     self.malformed(stmt.span, "an isolated BV assertion outside proof code");
                 }
                 if architecture.cases().is_err() {
@@ -1002,12 +1277,39 @@ impl FnChecker<'_, '_> {
                 then_block,
                 else_block,
             } => {
-                self.check_bool(cond, exec);
+                self.check_bool(cond, cx.physical_exec());
                 self.check_block(then_block, cx);
                 self.check_block(else_block, cx);
             }
+            StmtKind::IfSpec {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                if !cx.physical_exec() {
+                    self.malformed(
+                        stmt.span,
+                        "a Spec-controlled conditional outside physical Exec code",
+                    );
+                }
+                self.check_bool(cond, cx.physical_exec());
+                let branch = if cx.physical_exec() {
+                    Context::ExecProof
+                } else {
+                    Context::Proof
+                };
+                self.check_block(then_block, branch);
+                self.check_block(else_block, branch);
+            }
             StmtKind::Return { value, site } => {
                 self.use_site(*site, stmt.span);
+                if cx.spec_controlled() && self.decl.mode == Mode::Exec {
+                    self.report(
+                        WfClass::User,
+                        stmt.span,
+                        "cannot return from exec function in spec-controlled code",
+                    );
+                }
                 let ret_ty = self.decl.ret_ty().cloned().unwrap_or(Ty::Unit);
                 match value {
                     Some(value) => {
@@ -1049,12 +1351,12 @@ impl FnChecker<'_, '_> {
                     "broadcast use of an unsupported or unknown local broadcast proof",
                 ),
             },
-            StmtKind::Ghost(block) => self.check_block(block, Context::Proof),
+            StmtKind::Ghost(block) => self.check_block(block, cx.ghost()),
             StmtKind::GhostTail { block, tail } => {
-                if cx != Context::Exec {
+                if !cx.physical_exec() {
                     self.malformed(stmt.span, "a proof block tail outside executable code");
                 }
-                self.check_block(block, Context::Proof);
+                self.check_block(block, cx.ghost());
                 self.check_expr(tail, false);
                 self.expect_ty(tail, &Ty::Unit, "proof block tail");
             }
@@ -1062,6 +1364,13 @@ impl FnChecker<'_, '_> {
             StmtKind::Loop(lp) => self.check_loop(lp, stmt.span, cx),
             StmtKind::Break { target, site } | StmtKind::Continue { target, site } => {
                 self.use_site(*site, stmt.span);
+                if cx.spec_controlled() {
+                    self.report(
+                        WfClass::User,
+                        stmt.span,
+                        "cannot leave an exec loop from spec-controlled code",
+                    );
+                }
                 if !self.loops.contains(target) {
                     self.malformed(
                         stmt.span,
@@ -1201,7 +1510,14 @@ impl FnChecker<'_, '_> {
                 "cannot access non-exec place in executable code",
             );
         }
-        if !borrow && cx == Context::Proof && authority.mode == Mode::Exec {
+        if borrow && cx.spec_controlled() && authority.mode == Mode::Exec {
+            self.report(
+                WfClass::User,
+                span,
+                "cannot mutably borrow exec storage from spec-controlled code",
+            );
+        }
+        if !borrow && cx.mode() == Mode::Proof && authority.mode == Mode::Exec {
             self.report(
                 WfClass::User,
                 span,
@@ -1245,7 +1561,7 @@ impl FnChecker<'_, '_> {
                 }
             }
             Mode::Exec => {
-                if cx == Context::Proof {
+                if cx.mode() == Mode::Proof {
                     let message = format!("cannot call function `{}` with mode exec", target.name);
                     self.report(WfClass::User, span, message);
                 }
@@ -1256,7 +1572,7 @@ impl FnChecker<'_, '_> {
         if let Some(dest) = dest {
             self.check_assignable(dest, span, cx);
             if let (Some(dest_ty), Some(ret_ty)) = (self.place_ty(dest, span), target.ret_ty()) {
-                if dest_ty != ret_ty.subst(type_args) {
+                if !self.substituted_type_matches(ret_ty, Some(type_args), &dest_ty) {
                     self.malformed(span, "call destination has the wrong type");
                 }
             }
@@ -1287,6 +1603,7 @@ impl FnChecker<'_, '_> {
                 self.malformed(span, format!("type argument: {problem}"));
             }
         }
+        self.discharge_copy(target, type_args, span, false);
         if args.len() != target.params.len() {
             self.malformed(
                 span,
@@ -1302,7 +1619,7 @@ impl FnChecker<'_, '_> {
             let param_mode = target.local(*param).map(|param| param.mode);
             self.check_expr(arg, checks_allowed && param_mode == Some(Mode::Exec));
             if let Some(param_decl) = target.local(*param) {
-                if param_decl.ty.subst(type_args) != arg.ty {
+                if !self.substituted_type_matches(&param_decl.ty, Some(type_args), &arg.ty) {
                     self.malformed(
                         arg.span,
                         format!(
@@ -1369,12 +1686,58 @@ impl FnChecker<'_, '_> {
         Some(ty)
     }
 
+    /// A read may select an actual enum field just like ExprKind::Field.
+    /// This supplies a type, never variant membership or writable storage.
+    fn read_place_ty(&mut self, place: &Place, span: SpanId) -> Option<Ty> {
+        let Some(root) = self.local(place.local) else {
+            self.malformed(
+                span,
+                format!("read rooted at missing local {}", place.local.0),
+            );
+            return None;
+        };
+        let mut ty = root.ty.clone();
+        for projection in &place.projections {
+            let read_enum = match (projection, &ty) {
+                (Projection::Field { variant, field }, Ty::Adt(id, args)) => self
+                    .index
+                    .adts
+                    .get(id)
+                    .filter(|adt| adt.kind == AdtKind::Enum)
+                    .map(|adt| {
+                        if args.len() != adt.type_params.len() {
+                            return None;
+                        }
+                        adt.field_ty(*variant, *field, args)
+                    }),
+                _ => None,
+            };
+            ty = match read_enum {
+                Some(Some(field)) => field,
+                Some(None) => {
+                    self.malformed(
+                        span,
+                        "read projection does not name an actual instantiated enum field",
+                    );
+                    return None;
+                }
+                None => self.project(&ty, *projection, span)?,
+            };
+        }
+        Some(ty)
+    }
+
     // ------------------------------------------------------------------
     // Expressions
     // ------------------------------------------------------------------
 
     fn expect_ty(&mut self, expr: &Expr, want: &Ty, what: &str) {
-        if expr.ty != *want {
+        // Normal forms are established from one checked program definition
+        // table before comparison; no arbitrary RHS is accepted as a match.
+        let matches = if self.index.projection_definitions.as_ref().is_some_and(|definitions| !definitions.is_empty()) {
+            self.substituted_type_matches(want, None, &expr.ty)
+        } else { expr.ty == *want };
+        if !matches {
             self.malformed(
                 expr.span,
                 format!("{what}: expected {want:?}, found {:?}", expr.ty),
@@ -1434,7 +1797,7 @@ impl FnChecker<'_, '_> {
                 }
             }
             ExprKind::Read(place) => {
-                if let Some(ty) = self.place_ty(place, expr.span) {
+                if let Some(ty) = self.read_place_ty(place, expr.span) {
                     self.expect_ty(expr, &ty, "read");
                 }
             }
@@ -1442,7 +1805,7 @@ impl FnChecker<'_, '_> {
                 if self.local(place.local).map(|local| local.kind) != Some(LocalKind::Param) {
                     self.malformed(expr.span, "old() of something other than a parameter");
                 }
-                if let Some(ty) = self.place_ty(place, expr.span) {
+                if let Some(ty) = self.read_place_ty(place, expr.span) {
                     self.expect_ty(expr, &ty, "old");
                 }
             }
@@ -1502,8 +1865,9 @@ impl FnChecker<'_, '_> {
                 }
                 self.check_args(expr.span, target, type_args, args, false);
                 if let Some(ret_ty) = target.ret_ty() {
-                    let ret_ty = ret_ty.subst(type_args);
-                    self.expect_ty(expr, &ret_ty, "call result");
+                    if !self.substituted_type_matches(ret_ty, Some(type_args), &expr.ty) {
+                        self.malformed(expr.span, "call result has the wrong type");
+                    }
                 }
             }
             ExprKind::Cast { arg, kind } => {
@@ -1938,8 +2302,13 @@ impl FnChecker<'_, '_> {
 /// The span of the first assignment anywhere in `block`, if any.
 fn first_assignment(block: &Block) -> Option<SpanId> {
     block.stmts.iter().find_map(|stmt| match &stmt.kind {
-        StmtKind::Assign { .. } => Some(stmt.span),
+        StmtKind::Assign { .. } | StmtKind::AssignSpec { .. } => Some(stmt.span),
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..
@@ -1975,6 +2344,11 @@ fn returns(block: &Block) -> bool {
     block.stmts.iter().any(|stmt| match &stmt.kind {
         StmtKind::Return { .. } => true,
         StmtKind::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | StmtKind::IfSpec {
             then_block,
             else_block,
             ..

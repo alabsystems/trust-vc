@@ -50,6 +50,7 @@ impl Fb {
             mode,
             role: FnRole::Item,
             kind: Default::default(),
+            copy_premises: Vec::new(),
             type_params: Vec::new(),
             locals: vec![LocalDecl {
                 name: "result".to_string(),
@@ -945,3 +946,9 @@ fn spec_constant_declaration_and_return_modes_must_agree() {
         "{errors:?}"
     );
 }
+
+#[path = "basic_shapes/checked_initializers.rs"]
+mod checked_initializers;
+
+#[path = "basic_shapes/if_spec.rs"]
+mod if_spec;

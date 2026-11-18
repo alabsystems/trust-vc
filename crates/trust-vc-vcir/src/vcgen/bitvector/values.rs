@@ -67,6 +67,16 @@ pub(super) fn substitute(
                 }
                 Ty::Adt(*id, result)
             }
+            Ty::Projection(id, children) => {
+                if ctx.recipe_projection(*id) != Some(children.len()) {
+                    return Err(refusal("bit-vector-type", "an unknown associated-type declaration or arity", span));
+                }
+                let mut result = Vec::new();
+                for child in children {
+                    result.push(copy(ctx, child, arguments, work, span, depth + 1)?);
+                }
+                Ty::Projection(*id, result)
+            }
             Ty::MutRef(inner) => Ty::MutRef(Box::new(copy(
                 ctx,
                 inner,

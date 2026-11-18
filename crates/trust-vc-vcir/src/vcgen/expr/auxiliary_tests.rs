@@ -224,6 +224,7 @@ fn generic_formal_source(actual: &Ty, allowed: bool, limit: i128) -> VcCrate {
         mode: Mode::Spec,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec!["A".into()],
         locals: vec![
             generic_formal_local("result", Ty::Param(0), LocalKind::Return),
@@ -272,6 +273,7 @@ fn generic_formal_source(actual: &Ty, allowed: bool, limit: i128) -> VcCrate {
         mode: Mode::Proof,
         role: FnRole::Item,
         kind: FnKind::Function,
+        copy_premises: Vec::new(),
         type_params: vec![],
         locals: vec![generic_formal_local("result", Ty::Unit, LocalKind::Return)],
         params: vec![],
@@ -364,9 +366,9 @@ fn generic_native_domain_queries_discharge_without_changing_the_primary_false_re
     for actual in [Ty::Bool, Ty::Int(crate::IntRange::U(8))] {
         for (allowed, limit) in [(true, 1), (false, 1), (true, 0)] {
             let krate = generic_formal_source(&actual, allowed, limit);
-            let diagnostics = crate::vcgen::Recommendations::new(&krate)
+            let diagnostics = crate::vcgen::GenerationSession::new(&krate)
                 .unwrap()
-                .function(generic_formal_id(2))
+                .recommendations(generic_formal_id(2))
                 .unwrap();
             assert_eq!(diagnostics.len(), 2);
             for (check, expected) in diagnostics.iter().zip([allowed, limit > 0]) {

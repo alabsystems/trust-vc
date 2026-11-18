@@ -178,7 +178,7 @@ impl TrustVcNativeTrustIrBundleReport {
         self.input_kind
     }
 
-    /// Return the source input digest when the bundle came from Rust MIR.
+    /// Return the MIR body digest or THIR source-artifact digest for a Rust input.
     pub fn input_digest(&self) -> Option<&str> {
         self.input_digest.as_deref()
     }
@@ -5114,6 +5114,28 @@ mod verdict_tests {
 #[cfg(test)]
 mod wire_shape_tests {
     use super::*;
+
+    #[test]
+    fn thir_source_identity_is_distinct_from_mir_body_identity() {
+        let digest = trust_ir::ProofDigest::sha256([0x5a; 32]);
+        let thir = native_input_parts(NativeAdapterInput::RustThir {
+            source_digest: digest,
+        });
+        let mir = native_input_parts(NativeAdapterInput::RustMir {
+            body_digest: digest,
+        });
+        assert_eq!(thir.1, Some(digest.to_string()));
+        assert_eq!(mir.1, thir.1);
+        assert_ne!(thir.0, mir.0);
+        assert_eq!(
+            serde_json::to_value(thir.0).expect("input kind"),
+            "rust_thir"
+        );
+        assert_eq!(
+            native_input_parts(NativeAdapterInput::TrustIrModule),
+            (TrustVcNativeTrustIrInputKind::TrustIrModule, None)
+        );
+    }
 
     /// The shape predicate the deserializer enforces, stated directly.
     ///

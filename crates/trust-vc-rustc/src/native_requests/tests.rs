@@ -21,6 +21,8 @@ fn request(label: &str) -> Request {
         ])
         .unwrap(),
         verusdoc: Some(OsString::from_vec(b"raw-doc-\xff".to_vec())),
+        cargo: CargoContext::default(),
+        macro_package_name: None,
     }
 }
 
@@ -354,4 +356,35 @@ fn failed_endpoint_adoption_releases_both_sender_copies() {
             "failed endpoint handoff retained an FD"
         );
     }
+}
+
+#[test]
+fn cargo_and_macro_input_data_are_distinct_and_legacy_wire_cannot_select_a_cohort() {
+    let mut raw = request("finite-context");
+    raw.macro_package_name = Some(OsString::from_vec(b"package-\xff".to_vec()));
+    let encoded = wire::encode_request(&raw).unwrap();
+    assert_eq!(wire::decode_request(&encoded).unwrap(), raw);
+    let mut legacy = encoded.clone();
+    legacy[..8].copy_from_slice(b"TVCARGV3");
+    assert!(wire::decode_request(&legacy).is_err());
+    let args = vec!["compiler".to_string(), "input.rs".to_string()];
+    assert!(raw
+        .cargo
+        .check_macro_package(raw.macro_package_name.as_deref())
+        .is_ok());
+    raw.cargo
+        .values
+        .insert("CARGO_PKG_NAME".into(), Some("different".into()));
+    assert!(raw
+        .cargo
+        .check_macro_package(raw.macro_package_name.as_deref())
+        .is_err());
+    assert!(raw.cargo.validate(&args).is_err()); // unused read is not omitted
+    raw.cargo.values.remove("CARGO_PKG_NAME");
+    raw.cargo
+        .values
+        .insert("VSTD_KIND".into(), Some("Imported".into()));
+    let decoded = wire::decode_request(&wire::encode_request(&raw).unwrap()).unwrap();
+    assert!(decoded.cargo.validate(&args).is_err());
+    assert!(decoded.cargo.read("VSTD_KIND").is_err());
 }

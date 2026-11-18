@@ -250,7 +250,7 @@ pub(crate) struct TypingSchema {
 }
 
 impl TypingSchema {
-    pub(crate) fn instantiate(&self, args: &[Term]) -> Option<Term> {
+    pub(crate) fn instantiate(&self, args: &[Term], budget: &mut usize, context: Option<&Ctx<'_>>) -> Result<Option<Term>, ()> {
         if args.len() != self.params.len()
             || self
                 .params
@@ -258,18 +258,16 @@ impl TypingSchema {
                 .zip(args)
                 .any(|((_, sort), arg)| *sort != arg.sort())
         {
-            return None;
+            return Ok(None);
         }
-        let substitutions = self
-            .params
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .zip(args.iter().cloned())
-            .collect();
-        Some(Term::implies(
-            self.guard.substitute(&substitutions),
-            self.predicate.substitute(&substitutions),
-        ))
+        let substitutions = super::substitution::bindings(&self.params, args, budget).ok_or(())?;
+        let mut guard = super::substitution::apply(&self.guard, &substitutions, budget).ok_or(())?;
+        let mut predicate = super::substitution::apply(&self.predicate, &substitutions, budget).ok_or(())?;
+        if let Some(context) = context {
+            guard = context.canonical_type_terms(guard, budget).ok_or(())?;
+            predicate = context.canonical_type_terms(predicate, budget).ok_or(())?;
+        }
+        Ok(Some(Term::implies(guard, predicate)))
     }
 }
 
@@ -336,8 +334,14 @@ impl Tables {
         let spec_fns: Vec<&FnDecl> = krate.fns.iter().filter(|d| d.mode == Mode::Spec).collect();
         let mut sigs = HashMap::new();
         let mut rec_names: HashMap<FnId, Vec<String>> = HashMap::new();
+        let mut declaration_work = HashMap::new();
         for (index, decl) in spec_fns.iter().enumerate() {
-            let sig = signature(ctx, decl, index);
+            let reads = Reads::default();
+            // Move the existing declaration translator's cell earlier so
+            // signature layouts, typing and the body all borrow it once.
+            let work = Tr::new(ctx, &sigs, &functions, &reads).type_work();
+            let sig = signature(ctx, decl, index, &work);
+            declaration_work.insert(decl.id, work);
             if sig.problem.is_none() {
                 let mut params: Vec<Sort> = (0..sig.n_types)
                     .flat_map(|_| [Sort::Decoration, Sort::TypeId])
@@ -391,8 +395,12 @@ impl Tables {
             else {
                 continue;
             };
-            let (types, values, params) = definition_params(&sig);
-            let guard = parameter_types(ctx, &sig, &types, &values);
+            let (mut types, values, params) = definition_params(&sig);
+            // This is the actual declaration translator's original cell,
+            // retained across its typing outputs and subsequent body walk.
+            let Some(work) = declaration_work.get(&decl.id) else { continue; };
+            if !ctx.source.projections.is_empty() { types.retain_work(work); }
+            let guard = parameter_types(ctx, &sig, &types, &values, &work);
             for output in &sig.outputs {
                 let app = Term::call(
                     output.name.clone(),
@@ -403,7 +411,7 @@ impl Tables {
                     output.leaf.sort(),
                 );
                 match guard.clone().and_then(|guard| {
-                    ctx.type_fact(output.leaf, &types, &app, decl.span)
+                    ctx.type_fact_with_work(output.leaf, &types, &app, decl.span, &work)
                         .map(|predicate| TypingSchema {
                             params: params.clone(),
                             guard,
@@ -451,8 +459,13 @@ impl Tables {
             }
             match &decl.body {
                 Body::Spec(expr) | Body::Constant(expr) => {
-                    let (types, param_vals, params) = definition_params(sig);
-                    let type_guard = match parameter_types(ctx, sig, &types, &param_vals) {
+                    let (mut types, param_vals, params) = definition_params(sig);
+                    let Some(work) = declaration_work.get(&decl.id) else {
+                        problems.insert(decl.id, refusal("generic-type", "a definition lost its declaration type work", decl.span));
+                        continue;
+                    };
+                    if !ctx.source.projections.is_empty() { types.retain_work(work); }
+                    let type_guard = match parameter_types(ctx, sig, &types, &param_vals, work) {
                         Ok(guard) => guard,
                         Err(problem) => {
                             problems.insert(decl.id, problem);
@@ -484,7 +497,7 @@ impl Tables {
                         types,
                         ..Reads::default()
                     };
-                    let mut tr = Tr::new(ctx, &sigs, &functions, &reads);
+                    let mut tr = Tr::new(ctx, &sigs, &functions, &reads).with_type_work(work.clone());
                     let value = match tr.expr(expr) {
                         Ok(value) => value,
                         Err(problem) => {
@@ -518,7 +531,7 @@ impl Tables {
                         let mut leaves = Vec::new();
                         value.leaves(&mut leaves);
                         for (output, term) in sig.outputs.iter().zip(&leaves) {
-                            match ctx.type_fact(output.leaf, &reads.types, term, expr.span) {
+                            match ctx.type_fact_with_work(output.leaf, &reads.types, term, expr.span, work) {
                                 Ok(predicate) => validity.push(predicate),
                                 Err(problem) => {
                                     problems.insert(decl.id, problem);
@@ -581,7 +594,7 @@ impl Tables {
                                     // Trait implementations inherit public
                                     // typing, but do not emit `pre_post_rec`.
                                     return_predicate: if decl.attrs.is_trait_method_impl || !matches!(output.leaf, LeafTy::Poly(_)) { None } else {
-                                        match ctx.type_fact(output.leaf, &reads.types, &Term::var("result_value", output.leaf.sort()), decl.span) {
+                                        match ctx.type_fact_with_work(output.leaf, &reads.types, &Term::var("result_value", output.leaf.sort()), decl.span, work) {
                                             Ok(predicate) => Some(predicate),
                                             Err(problem) => { problems.insert(decl.id, problem); continue 'bodies; }
                                         }
@@ -705,7 +718,7 @@ impl Tables {
 }
 
 /// Parameter typing invariants over the flattened definition parameters.
-fn parameter_types(ctx: &Ctx<'_>, sig: &SpecSig, env: &TypeEnv, params: &[Val]) -> R<Term> {
+fn parameter_types(ctx: &Ctx<'_>, sig: &SpecSig, env: &TypeEnv, params: &[Val], work: &std::cell::Cell<usize>) -> R<Term> {
     let mut facts = Vec::new();
     for (shape, value) in sig.params.iter().zip(params) {
         let mut leaves = Vec::new();
@@ -713,7 +726,7 @@ fn parameter_types(ctx: &Ctx<'_>, sig: &SpecSig, env: &TypeEnv, params: &[Val]) 
         let mut terms = Vec::new();
         value.leaves(&mut terms);
         for (leaf, term) in leaves.iter().zip(&terms) {
-            facts.push(ctx.type_fact(*leaf, env, term, crate::SpanId(0))?);
+            facts.push(ctx.type_fact_with_work(*leaf, env, term, crate::SpanId(0), work)?);
         }
     }
     Ok(Term::and(facts))
@@ -745,7 +758,7 @@ fn rename_calls(term: &Term, names: &HashMap<&str, &str>) -> Term {
 }
 
 /// The signature and complete result layout of spec function number `index`.
-fn signature(ctx: &Ctx<'_>, decl: &FnDecl, index: usize) -> SpecSig {
+fn signature(ctx: &Ctx<'_>, decl: &FnDecl, index: usize, work: &std::cell::Cell<usize>) -> SpecSig {
     let mut sig = SpecSig {
         owner: decl.id,
         boxed_params: !decl.type_params.is_empty(),
@@ -773,9 +786,9 @@ fn signature(ctx: &Ctx<'_>, decl: &FnDecl, index: usize) -> SpecSig {
             return sig;
         };
         match if sig.boxed_params {
-            ctx.poly_shape(&local.ty, Some(decl.id), local.span)
+            ctx.poly_shape_with_work(&local.ty, Some(decl.id), local.span, work)
         } else {
-            ctx.shape(&local.ty, Some(decl.id), local.span)
+            ctx.shape_with_work(&local.ty, Some(decl.id), local.span, work)
         } {
             Ok(shape) => sig.params.push(shape),
             Err(problem) => {
@@ -785,7 +798,7 @@ fn signature(ctx: &Ctx<'_>, decl: &FnDecl, index: usize) -> SpecSig {
         }
     }
     let ret_ty = decl.ret_ty().cloned().unwrap_or(crate::Ty::Unit);
-    match ctx.shape(&ret_ty, Some(decl.id), decl.span) {
+    match ctx.shape_with_work(&ret_ty, Some(decl.id), decl.span, work) {
         Ok(result) => {
             let mut leaves = Vec::new();
             result.leaves(&mut leaves);
@@ -869,7 +882,7 @@ pub(crate) fn inline(
         };
         let cost = def.body.size().saturating_add(def.guard.size());
         *budget = budget.checked_sub(cost).ok_or(())?;
-        let (guard, body) = instantiate(def, &args);
+        let (guard, body) = instantiate(def, &args, budget).ok_or(())?;
         let body = inline(&body, defs, budget).ok_or(())?;
         if guard == Term::Bool(true) {
             return Ok(body);
@@ -881,14 +894,11 @@ pub(crate) fn inline(
 }
 
 /// The guard and body of `def` at the arguments `args`.
-pub(crate) fn instantiate(def: &SpecDef, args: &[Term]) -> (Term, Term) {
-    let map = def
-        .params
-        .iter()
-        .map(|(param, _)| param.as_str())
-        .zip(args.iter().cloned())
-        .collect();
-    (def.guard.substitute(&map), def.body.substitute(&map))
+pub(crate) fn instantiate(def: &SpecDef, args: &[Term], budget: &mut usize) -> Option<(Term, Term)> {
+    let map = super::substitution::bindings(&def.params, args, budget)?;
+    let guard = super::substitution::apply(&def.guard, &map, budget)?;
+    let body = super::substitution::apply(&def.body, &map, budget)?;
+    Some((guard, body))
 }
 
 /// The recursive spec functions a query may unfold: each revealed member
@@ -976,7 +986,7 @@ pub(crate) fn unfold(
                 let family = tables.rec_defs.get(&id)?;
                 let first = family.first()?;
                 let (_, depth) = *unfoldable.get(first.spec_name.as_str())?;
-                let (guard, _) = instantiate(&first.def, &args);
+                let (guard, _) = instantiate(&first.def, &args, budget)?;
                 let guard = inline(&guard, defs, budget)?;
                 for rec in family {
                     *budget = budget.checked_sub(rec.def.guard.size().saturating_add(1))?;
@@ -1008,36 +1018,30 @@ pub(crate) fn unfold(
                 for rec in tables.rec_defs.get(&id)? {
                     let name = &rec.def.function;
                     if let Some(predicate) = &rec.return_predicate {
-                        let mut params: HashMap<&str, Term> = rec
-                            .def
-                            .params
-                            .iter()
-                            .map(|(name, _)| name.as_str())
-                            .zip(args.iter().cloned())
-                            .collect();
+                        let mut params = super::substitution::bindings(&rec.def.params, &args, budget)?;
+                        // Price the new application's actual type/value prefix
+                        // before the owned copy. The map itself borrows it.
+                        let empty = HashMap::new();
+                        let application = Term::call(name.clone(), args.iter()
+                            .map(|argument| super::substitution::apply(argument, &empty, budget))
+                            .collect::<Option<Vec<_>>>()?, rec.sort);
                         params.insert(
                             "result_value",
-                            Term::call(name.clone(), args.clone(), rec.sort),
+                            &application,
                         );
                         let fact = Term::implies(
                             symbol.clone(),
                             Term::implies(
-                                rec.type_guard.substitute(&params),
-                                predicate.substitute(&params),
+                                super::substitution::apply(&rec.type_guard, &params, budget)?,
+                                super::substitution::apply(predicate, &params, budget)?,
                             ),
                         );
                         *budget = budget.checked_sub(fact.size())?;
                         facts.push(fact);
                     }
                     if let Some((lo, hi)) = rec.return_bounds {
-                        let params = rec
-                            .def
-                            .params
-                            .iter()
-                            .map(|(name, _)| name.as_str())
-                            .zip(args.iter().cloned())
-                            .collect();
-                        let guard = rec.type_guard.substitute(&params);
+                        let params = super::substitution::bindings(&rec.def.params, &args, budget)?;
+                        let guard = super::substitution::apply(&rec.type_guard, &params, budget)?;
                         let app = Term::call(name.clone(), args.clone(), rec.sort);
                         // `pre_post_rec` is independent of the body/fuel axiom:
                         // it needs typed arguments, not `decreases_when` or
@@ -1054,7 +1058,7 @@ pub(crate) fn unfold(
                     }
                     let cost = rec.def.body.size().saturating_add(rec.def.guard.size());
                     *budget = budget.checked_sub(cost)?;
-                    let (guard, body) = instantiate(&rec.def, &args);
+                    let (guard, body) = instantiate(&rec.def, &args, budget)?;
                     let guard = inline(&guard, defs, budget)?;
                     let instance_key = (name.clone(), args.clone());
                     if let Some(&i) = instance_index.get(&instance_key) {
@@ -1070,7 +1074,7 @@ pub(crate) fn unfold(
                     let gate = if calls.is_empty() {
                         Term::Bool(true)
                     } else {
-                        analysis.gate(&rec.def, &args)
+                        analysis.gate(&rec.def, &args).ok()?
                     };
                     for (call, cond) in calls.into_items() {
                         let Term::Call {
@@ -1107,6 +1111,28 @@ pub(crate) fn unfold(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_instantiation_uses_the_actual_allowance_and_discards_exhausted_facts() {
+        let schema = TypingSchema {
+            params: vec![("t".into(), Sort::TypeId)],
+            guard: Term::Bool(true),
+            predicate: Term::call("members", vec![Term::var("t", Sort::TypeId); 12], Sort::Bool),
+        };
+        let argument = Term::call("nested", vec![Term::var("t", Sort::TypeId); 20], Sort::TypeId);
+        let mut work = 100_000;
+        let fact = schema.instantiate(&[argument.clone()], &mut work, None).unwrap().unwrap();
+        assert_eq!(fact, Term::call("members", vec![argument; 12], Sort::Bool));
+        let cost = 100_000 - work;
+        let mut one_short = cost - 1;
+        let arguments = [Term::call("nested", vec![Term::var("t", Sort::TypeId); 20], Sort::TypeId)];
+        assert!(schema.instantiate(&arguments, &mut one_short, None).is_err());
+        assert_eq!(one_short, 0);
+        assert!(schema.instantiate(&arguments, &mut one_short, None).is_err());
+        let mut unchanged = 100;
+        assert_eq!(schema.instantiate(&[Term::Bool(true)], &mut unchanged, None), Ok(None));
+        assert_eq!(unchanged, 100);
+    }
 
     #[test]
     fn clip_keeps_values_in_range() {

@@ -239,7 +239,9 @@ pub enum FnKind {
     ConstFunction,
     /// A constant, whose initializer and reads follow its constant mode.
     Constant(ConstMode),
-    /// Stable storage, which requires explicit storage/read semantics.
+    /// Stable global storage. A zero-argument statement Call reads the same
+    /// typed value each time; its initializer is checked separately and never
+    /// supplies a body equation. It is not an owned ordinary-call result.
     Static,
 }
 
@@ -284,6 +286,11 @@ pub struct FnDecl {
     pub kind: FnKind,
     /// Names of the type parameters, which [`crate::Ty::Param`] indexes.
     pub type_params: Vec<String>,
+    /// Copy obligations assumed by this function's typing context. Every
+    /// ordinary/spec call and concrete instance must discharge their actual
+    /// substitution. A native producer separately authenticates these bounds.
+    /// They grant no value, pointee ownership or resolution fact.
+    pub copy_premises: Vec<Ty>,
     /// Every local of the function, indexed by [`LocalId`].
     pub locals: Vec<LocalDecl>,
     /// The parameters in order; each has kind [`LocalKind::Param`].
@@ -417,6 +424,51 @@ impl RecGroup {
     }
 }
 
+/// A declared associated-type constructor. Names are diagnostic only: uses
+/// carry the member identity and the complete ordered trait arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionDecl {
+    /// Actual associated-type declaration identity.
+    pub id: crate::ProjectionId,
+    /// Identity of the declaring trait, distinct from the member identity.
+    pub trait_id: crate::DefHash,
+    /// Number of type arguments, including `Self` first.
+    pub arity: usize,
+    /// Display name only.
+    pub name: String,
+    /// Source position supplied by the producer.
+    pub span: SpanId,
+}
+
+/// One member definition in a represented, closed associated implementation.
+/// This is program semantics, never a saved compiler selection/owner token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionValue {
+    /// The actual associated declaration, distinct from its implementation.
+    pub declaration: crate::ProjectionId,
+    /// Identity of the implementing associated item.
+    pub definition: crate::DefHash,
+    /// Its canonical closed represented type.
+    pub ty: Ty,
+}
+
+/// A closed implementation whose associated members have represented values.
+/// A native producer must authenticate the actual selected implementation,
+/// declaration/member correspondence and compiler normalization separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionImpl {
+    /// Identity of the implementation, not of a function or type parameter.
+    pub id: crate::DefHash,
+    /// Identity of the parent trait shared by every member definition.
+    pub trait_id: crate::DefHash,
+    /// Complete ordered, canonical ground trait arguments, Self first.
+    pub arguments: Vec<Ty>,
+    /// Actual associated members, never a naked arbitrary equality row.
+    pub values: Vec<ProjectionValue>,
+    /// Source position supplied by the producer.
+    pub span: SpanId,
+}
+
 /// Everything trust-vc verifies in one crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VcCrate {
@@ -431,6 +483,12 @@ pub struct VcCrate {
     pub architecture: crate::bitvector::Architecture,
     /// Data types.
     pub adts: Vec<AdtDecl>,
+    /// Associated-type constructors. These declare type identities only;
+    /// they do not assert projection equalities or provide value layouts.
+    pub projections: Vec<ProjectionDecl>,
+    /// Represented closed associated implementations. These reduce the type
+    /// language; they emit no solver equality axiom or native capability.
+    pub projection_impls: Vec<ProjectionImpl>,
     /// Functions.
     pub fns: Vec<FnDecl>,
     /// For a function with a body to check (an exec or proof function, or a
@@ -468,6 +526,8 @@ impl VcCrate {
             pointer_width: 64,
             architecture: crate::bitvector::Architecture::Exactly(64),
             adts: Vec::new(),
+            projections: Vec::new(),
+            projection_impls: Vec::new(),
             fns: Vec::new(),
             def_order: BTreeMap::new(),
             rec_groups: Vec::new(),

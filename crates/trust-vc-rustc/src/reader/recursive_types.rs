@@ -32,18 +32,33 @@ use rustc_middle::ty::{self as mty, TyCtxt, TypeSuperVisitable, TypeVisitable, T
 
 use trust_vc_vcir::{AdtDecl, AdtId, Ty};
 
-use super::Cx;
+use super::{Cx, Refusal, UserError};
+
+pub(super) enum DatatypeProblem {
+    Cycle(UserError),
+    Refused(Refusal),
+}
 
 /// The datatype Verus reports as having no non-recursive variant, if any.
 /// `adts` are the crate's datatypes with their definitions, in Verus's
 /// order.
-pub(super) fn first_unfounded(cx: &Cx<'_>, adts: &[(LocalDefId, &AdtDecl)]) -> Option<LocalDefId> {
+pub(super) fn first_unfounded(
+    cx: &Cx<'_>, adts: &[(LocalDefId, &AdtDecl)], all_adts: &[(LocalDefId, &AdtDecl)], items: &[LocalDefId],
+) -> Result<Option<LocalDefId>, DatatypeProblem> {
+    // Only this direct continuation uses A40's projection base-case rule.
+    // Any unavailable dependency, exhausted traversal or actual cycle exits
+    // before permissive foundedness; no summary flag is stored on Cx/IR.
+    match super::cycles::associated_datatypes(cx, all_adts, items) {
+        Ok(None) => {}
+        Ok(Some(error)) => return Err(DatatypeProblem::Cycle(error)),
+        Err(reason) => return Err(DatatypeProblem::Refused(reason)),
+    }
     let founded = well_founded(adts.iter().map(|(_, decl)| *decl));
     let unfounded = adts
         .iter()
         .filter_map(|(_, decl)| (!founded.contains(&decl.id)).then_some(decl.id))
         .collect();
-    first_unfounded_in(cx, adts, &unfounded)
+    Ok(first_unfounded_in(cx, adts, &unfounded))
 }
 
 /// Select a native primary from an independently validated failure set.
@@ -109,6 +124,10 @@ fn ty_founded(ty: &Ty, founded: &HashSet<AdtId>) -> bool {
         Ty::Tuple(elems) => elems.iter().all(|t| ty_founded(t, founded)),
         Ty::Ref { inner, .. } | Ty::MutRef(inner) => ty_founded(inner, founded),
         Ty::Adt(id, args) => founded.contains(id) && args.iter().all(|t| ty_founded(t, founded)),
+        // A40 recursive_types.rs120-124: Reject-recursive base case. This
+        // private traversal runs only after first_unfounded's actual raw
+        // associated/selected-implementation graph completed successfully.
+        Ty::Projection(..) => true,
     }
 }
 

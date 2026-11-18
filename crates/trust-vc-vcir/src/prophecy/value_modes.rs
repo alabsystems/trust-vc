@@ -59,6 +59,12 @@ fn instantiated_type_matches(formal: &Ty, type_args: &[Ty], actual: &Ty) -> bool
                     .zip(actual)
                     .all(|(formal, actual)| instantiated_type_matches(formal, type_args, actual))
         }
+        (Ty::Projection(formal_id, formal), Ty::Projection(actual_id, actual)) => {
+            formal_id == actual_id
+                && formal.len() == actual.len()
+                && formal.iter().zip(actual).all(|(formal, actual)|
+                    instantiated_type_matches(formal, type_args, actual))
+        }
         (
             Ty::Ref {
                 mutable: formal_mut,
@@ -240,34 +246,46 @@ impl Walk<'_> {
             *slot = merge(a, b);
         }
     }
+    fn declare(
+        &mut self,
+        stmt: &Stmt,
+        state: &mut Vec<Origin>,
+        local: LocalId,
+        init: Option<&Expr>,
+        saved: &mut Vec<(usize, Origin)>,
+    ) {
+        let mode = init.and_then(|value| self.expression(value, state));
+        if self.temporary(local) {
+            if let Some(origin) = state.get_mut(local.index()) {
+                saved.push((local.index(), *origin));
+                *origin = if *origin == Origin::Absent {
+                    Origin::Declared {
+                        site: stmt as *const Stmt as usize,
+                        mode: None,
+                        assigned: false,
+                    }
+                } else {
+                    Origin::Invalid
+                };
+            }
+            if let Some(value) = init {
+                let known = self.known_projection_input(value, state);
+                self.define(state, local, Some(&value.ty), mode, known);
+            }
+        }
+    }
+
     fn statements(&mut self, block: &Block, state: &mut Vec<Origin>) -> Vec<(usize, Origin)> {
         let mut saved = Vec::new();
         for stmt in &block.stmts {
             match &stmt.kind {
                 StmtKind::Let { local, init } => {
-                    let mode = init
-                        .as_ref()
-                        .and_then(|value| self.expression(value, state));
-                    if self.temporary(*local) {
-                        if let Some(origin) = state.get_mut(local.index()) {
-                            saved.push((local.index(), *origin));
-                            *origin = if *origin == Origin::Absent {
-                                Origin::Declared {
-                                    site: stmt as *const Stmt as usize,
-                                    mode: None,
-                                    assigned: false,
-                                }
-                            } else {
-                                Origin::Invalid
-                            };
-                        }
-                        if let Some(value) = init {
-                            let known = self.known_projection_input(value, state);
-                            self.define(state, *local, Some(&value.ty), mode, known);
-                        }
-                    }
+                    self.declare(stmt, state, *local, init.as_ref(), &mut saved);
                 }
-                StmtKind::Assign { place, value } => {
+                StmtKind::LetChecked { local, init } => {
+                    self.declare(stmt, state, *local, Some(init), &mut saved);
+                }
+                StmtKind::Assign { place, value } | StmtKind::AssignSpec { place, value } => {
                     let mode = self.expression(value, state);
                     if place.projections.is_empty() {
                         let known = self.known_projection_input(value, state);
@@ -322,6 +340,11 @@ impl Walk<'_> {
                     }
                 }
                 StmtKind::If {
+                    cond,
+                    then_block,
+                    else_block,
+                }
+                | StmtKind::IfSpec {
                     cond,
                     then_block,
                     else_block,

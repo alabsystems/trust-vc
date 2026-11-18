@@ -69,7 +69,7 @@ impl Drop for Saved {
 /// # Safety
 /// No other same-process thread may use cwd/stdio or spawn while they are
 /// redirected. The callback must finish and join all native child work.
-pub(super) unsafe fn run<T>(
+pub(crate) unsafe fn run<T>(
     root: &Path,
     phase: &str,
     cwd: &Path,
@@ -106,4 +106,12 @@ pub(super) unsafe fn run<T>(
     stdout.seek(SeekFrom::Start(0))?;
     stderr.seek(SeekFrom::Start(0))?;
     Ok((result, stdout, stderr))
+}
+
+// These are copies of the two actual standard DATA pipes, never caller FDs.
+pub(crate) fn standard_data_pipes() -> io::Result<(File, File)> {
+    Ok((
+        File::from(duplicate(libc::STDIN_FILENO)?),
+        File::from(duplicate(libc::STDOUT_FILENO)?),
+    ))
 }

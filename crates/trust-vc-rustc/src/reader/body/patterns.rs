@@ -124,7 +124,7 @@ impl<'tcx> FnReader<'_, 'tcx> {
         }
     }
 
-    fn pattern_positions(
+    pub(super) fn pattern_positions(
         &self,
         count: usize,
         written: usize,

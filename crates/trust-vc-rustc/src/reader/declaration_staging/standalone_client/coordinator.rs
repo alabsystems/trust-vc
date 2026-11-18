@@ -16,8 +16,9 @@ use crate::verdict::OutputSinks;
 use super::prepared_sdk::PreparedSdk;
 use super::*;
 
-mod capture;
+use crate::stdio_capture as capture;
 mod entry;
+mod ordinary;
 mod runner;
 pub use entry::main;
 
@@ -147,7 +148,48 @@ impl<'owner> Session<'owner> {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn private_ordinary_worker_controls(&self, request: Request) -> Result<(), String> {
+        ordinary::OrdinaryWorkerPlan::from_request(self.owner, self.sdk, request)?
+            .private_worker_controls()
+    }
+
     fn verify(&self, request: &Request, phase: &str, outputs: &OutputSinks) -> Result<u8, String> {
+        let native_argv = request
+            .argv
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(str::to_owned)
+                    .ok_or("the native compiler requires UTF-8 arguments".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        request.cargo.validate(&native_argv)?;
+        request
+            .cargo
+            .check_macro_package(request.macro_package_name.as_deref())?;
+        if !crate::args::split(native_argv.get(1..).unwrap_or(&[]))
+            .map_err(|e| e.to_string())?
+            .verus
+            .iter()
+            .any(|option| option.name == "import")
+        {
+            return ordinary::OrdinaryWorkerPlan::from_request(
+                self.owner,
+                self.sdk,
+                request.clone(),
+            )?
+            .execute(outputs);
+        }
+        if !matches!(
+            crate::cargo::prepare(&native_argv, |key| request.cargo.read(key))?,
+            crate::cargo::Invocation::Standalone
+        ) {
+            return Err(
+                "imported Cargo cohorts require their separate complete native invocation binding"
+                    .into(),
+            );
+        }
         let environment = crate::compiler_environment::CompilerEnvironment::from_raw(
             request
                 .outputs

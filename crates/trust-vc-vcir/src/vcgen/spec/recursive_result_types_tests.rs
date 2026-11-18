@@ -30,7 +30,9 @@ fn vocabulary(range: IntRange, when: Term) -> Tables {
     let (types, values, params) = definition_params(&sig);
     let krate = crate::VcCrate::new("native result bounds");
     let ctx = Ctx::new(&krate);
-    let type_guard = parameter_types(&ctx, &sig, &types, &values).expect("native parameter types");
+    let work = std::cell::Cell::new(200_000);
+    let type_guard =
+        parameter_types(&ctx, &sig, &types, &values, &work).expect("native parameter types");
     let parameter = Term::var("a0", Sort::Int);
     let child = rf(Term::arith(ArithOp::Sub, parameter, Term::Int(1)));
     let body = if range == IntRange::Nat {
@@ -225,8 +227,8 @@ fn compiler_provenance_distinguishes_public_and_helper_typing() {
         RecGroup, SpanId, Ty,
     };
 
-    // The schema records the newly required compiler provenance fact.
-    assert_eq!(crate::SCHEMA, "trust-vc.vcir@11");
+    // The current schema retains the required compiler provenance fact.
+    assert_eq!(crate::SCHEMA, "trust-vc.vcir@16");
     let id = FnId(DefHash::new(0, 1));
     let span = SpanId(0);
     let n = Expr::read(Place::local(LocalId(1)), Ty::nat(), span);
@@ -268,6 +270,7 @@ fn compiler_provenance_distinguishes_public_and_helper_typing() {
             mode: Mode::Spec,
             role: FnRole::Item,
             kind: Default::default(),
+            copy_premises: Vec::new(),
             type_params: vec![],
             locals: vec![
                 local("result", LocalKind::Return),

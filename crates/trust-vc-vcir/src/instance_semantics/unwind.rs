@@ -7,17 +7,19 @@ use super::*;
 use crate::{LocalId, UnwindSpec};
 use std::cell::OnceCell;
 
-pub(crate) fn matches(
-    functions: &Functions<'_>,
+pub(crate) fn matches<'a>(
+    functions: &Functions<'a>,
     original: &FnDecl,
     instance: &FnDecl,
     validated: &OnceCell<HashSet<FnId>>,
+    definitions: Option<&crate::projection_types::Definitions<'a>>,
 ) -> bool {
     let Some(origin) = &instance.attrs.instance else {
         return false;
     };
     let matcher = Matcher {
         functions,
+        definitions,
         arguments: &origin.type_args,
         checked_initializer: false,
         depth: Cell::new(0),
@@ -41,7 +43,7 @@ pub(crate) fn matches(
     // The immutable WF index shares this closure across header matches. Its
     // initializer checks Spec instance bodies directly through Matcher, never
     // this header entry point, so it cannot recursively initialize the cell.
-    let checked = validated.get_or_init(|| validated_origins(functions));
+    let checked = validated.get_or_init(|| validated_origins_with_definitions(functions, definitions));
     dependencies.iter().all(|id| checked.contains(id))
 }
 
